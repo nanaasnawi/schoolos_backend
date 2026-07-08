@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "school-core",
+    "api-server"
+]
+
+resolver = "2"
