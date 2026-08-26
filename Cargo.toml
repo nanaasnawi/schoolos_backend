@@ -1,7 +1,10 @@
 [workspace]
 members = [
     "school-core",
-    "api-server"
+    "api-server",
+    "local-bridge",
+    "hash-gen"
 ]
+default-members = ["school-core", "local-bridge"]
 
 resolver = "2"

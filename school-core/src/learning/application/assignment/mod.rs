@@ -1,0 +1,11 @@
+pub mod archive_assignment;
+pub mod close_assignment;
+pub mod create_assignment;
+pub mod delete_assignment;
+pub mod get_assignment;
+pub mod get_submissions;
+pub mod grade_submission;
+pub mod list_assignments;
+pub mod publish_assignment;
+pub mod submit_assignment;
+pub mod update_assignment;

@@ -1,0 +1,11 @@
+pub mod academic;
+pub mod analytics;
+pub mod auth;
+pub mod dapodik;
+pub mod health;
+pub mod learning;
+pub mod notifications;
+pub mod people;
+pub mod school;
+pub mod system;
+pub mod tenant;

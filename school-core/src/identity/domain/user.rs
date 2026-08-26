@@ -1,41 +1,40 @@
+use crate::common::domain::clock::Clock;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum Role {
-    SuperAdmin,
-    Principal,
-    Admin,
-    Teacher,
-    Student,
-    Parent,
-}
+use sqlx::FromRow;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, FromRow)]
 pub struct User {
     pub id: Uuid,
-    pub tenant_id: Uuid, // Belongs to a tenant (School)
+    pub tenant_id: Uuid,
     pub email: String,
     pub password_hash: String,
-    pub role: Role,
+    pub full_name: String,
+    pub is_active: bool,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 impl User {
     pub fn new(
         tenant_id: Uuid,
-        email: impl Into<String>,
-        role: Role,
-        password_hash: impl Into<String>,
+        email: String,
+        password_hash: String,
+        full_name: String,
+        clock: &dyn Clock,
     ) -> Self {
+        let now = clock.now();
         Self {
-            id: Uuid::new_v4(),
+            id: Uuid::now_v7(),
             tenant_id,
-            email: email.into(),
-            password_hash: password_hash.into(),
-            role,
-            created_at: Utc::now(),
+            email,
+            password_hash,
+            full_name,
+            is_active: true,
+            created_at: now,
+            updated_at: now,
         }
     }
 }

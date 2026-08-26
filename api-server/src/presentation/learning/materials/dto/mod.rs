@@ -1,0 +1,3 @@
+pub mod create_learning_material_request;
+pub mod learning_material_response;
+pub mod update_learning_material_request;

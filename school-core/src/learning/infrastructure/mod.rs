@@ -1,0 +1,12 @@
+pub mod pg_achievement_repository;
+pub mod pg_assessment_repository;
+pub mod pg_assignment_repository;
+pub mod pg_curriculum_repository;
+pub mod pg_feed_repository;
+pub mod pg_learning_material_repository;
+pub mod pg_lesson_repository;
+pub mod pg_progress_repository;
+pub mod pg_quiz_repository;
+pub mod pg_session_repository;
+pub mod pg_syllabus_repository;
+pub mod repository_traits;
