@@ -1,4 +1,4 @@
-﻿use serde::Deserialize;
+use serde::Deserialize;
 use serde_json;
 
 #[derive(Debug, Deserialize)]
@@ -17,8 +17,9 @@ pub struct DapodikRawGtk {
 }
 
 fn main() {
-    let json_str = include_str!("../../../gtk2.json");
+    let json_str = include_str!("../../../scripts/gtk2.json");
     let v: serde_json::Value = serde_json::from_str(json_str).unwrap();
+
     let rows = v.get("rows").unwrap().clone();
     let res: Result<Vec<DapodikRawGtk>, _> = serde_json::from_value(rows);
     match res {
