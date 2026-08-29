@@ -6,6 +6,7 @@ use axum::{
 
 use super::dto::{
     login_request::LoginRequest, login_response::LoginResponse,
+    qr_login_request::{GenerateQrBadgeRequest, QrLoginRequest},
     register_request::RegisterRequest, register_response::RegisterResponse,
 };
 use crate::{
@@ -14,6 +15,7 @@ use crate::{
 };
 use school_core::identity::application::auth::{
     authenticate_user::AuthenticateUserCommand,
+    generate_qr_token::GenerateQrTokenCommand,
     register_user::RegisterUserCommand,
 };
 
@@ -23,14 +25,18 @@ pub fn auth_routes(context: ApplicationContext) -> Router<ApplicationContext> {
 
     Router::new()
         .route("/login", post(login))
+        .route("/qr-login", post(qr_login))
         .route("/register", post(register))
         .merge(
             Router::new()
                 .route("/me", axum::routing::get(get_me))
                 .route("/users", axum::routing::get(list_users))
+                .route("/qr-tokens/generate", post(generate_qr_token_endpoint))
+                .route("/qr-tokens/my-badge", axum::routing::get(get_my_qr_badge))
                 .layer(middleware::from_fn_with_state(context, auth_middleware)),
         )
 }
+
 
 /// Authenticate a user and return a JWT access token.
 ///
@@ -99,7 +105,13 @@ async fn login(
         access_token: token,
         token_type: "Bearer".to_string(),
         expires_in: 86400,
+        user_id: None,
+        tenant_id: None,
+        name: None,
+        email: None,
+        role: None,
     };
+
 
     Ok(Json(ApiResponse::success(
         response_data,
@@ -302,3 +314,183 @@ async fn get_me(
 
     Ok(Json(ApiResponse::success(dto, req_ctx.request_id)))
 }
+
+/// Authenticate a user via Zero-Password QR Code / Badge Token
+#[utoipa::path(
+    post,
+    operation_id = "qrLogin",
+    path = "/api/v1/auth/qr-login",
+    request_body = QrLoginRequest,
+    responses(
+        (status = 200, description = "Login successful", body = inline(ApiResponse<LoginResponse>)),
+        (status = 401, description = "Invalid or expired QR token")
+    ),
+    security(()),
+    tag = "Auth"
+)]
+async fn qr_login(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Json(payload): Json<QrLoginRequest>,
+) -> Result<Json<ApiResponse<LoginResponse>>, ApiError> {
+    // 1. Check if Global Maintenance Mode is active
+    let maintenance_record = sqlx::query!(
+        "SELECT value FROM system_settings WHERE key = 'maintenance'"
+    )
+    .fetch_optional(&ctx.pool)
+    .await
+    .ok()
+    .flatten();
+
+    if let Some(rec) = maintenance_record {
+        if rec.value.get("maintenance_mode").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let msg = rec.value.get("maintenance_message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Sistem sedang dalam mode pemeliharaan oleh Super Admin.");
+            
+            return Err(ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::SystemMaintenance,
+                    format!("Mode Pemeliharaan Aktif: {}", msg),
+                ),
+                &req_ctx.request_id,
+            ));
+        }
+    }
+
+    let result = ctx
+        .authenticate_qr_token
+        .execute(&payload.token)
+        .await
+        .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
+
+    let response_data = LoginResponse {
+        access_token: result.token,
+        token_type: "Bearer".to_string(),
+        expires_in: result.expires_in,
+        user_id: Some(result.user_id.to_string()),
+        tenant_id: Some(result.tenant_id.to_string()),
+        name: Some(result.full_name),
+        email: Some(result.email),
+        role: Some(result.role),
+    };
+
+    Ok(Json(ApiResponse::success(
+        response_data,
+        req_ctx.request_id,
+    )))
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct QrBadgeDetailDto {
+    pub id: uuid::Uuid,
+    pub raw_token: String,
+    pub user_id: uuid::Uuid,
+    pub tenant_id: uuid::Uuid,
+    pub token_type: String,
+    pub label: String,
+    #[schema(value_type = Option<String>, format = DateTime)]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[schema(value_type = String, format = DateTime)]
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Generate a new QR Badge Token for a user (Admin/Operator)
+#[utoipa::path(
+    post,
+    operation_id = "generateQrToken",
+    path = "/api/v1/auth/qr-tokens/generate",
+    request_body = GenerateQrBadgeRequest,
+    responses(
+        (status = 200, description = "QR Badge generated successfully", body = inline(ApiResponse<QrBadgeDetailDto>)),
+    ),
+    security(("Bearer" = [])),
+    tag = "Auth"
+)]
+async fn generate_qr_token_endpoint(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Json(payload): Json<GenerateQrBadgeRequest>,
+) -> Result<Json<ApiResponse<QrBadgeDetailDto>>, ApiError> {
+    let command = GenerateQrTokenCommand {
+        tenant_id: req_ctx.tenant_id,
+        user_id: payload.user_id,
+        token_type: payload.token_type,
+        label: payload.label,
+        expires_in_days: payload.expires_in_days,
+    };
+
+    let generated = ctx
+        .generate_qr_token
+        .execute(command)
+        .await
+        .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
+
+    let dto = QrBadgeDetailDto {
+        id: generated.id,
+        raw_token: generated.raw_token,
+        user_id: generated.user_id,
+        tenant_id: generated.tenant_id,
+        token_type: generated.token_type,
+        label: generated.label,
+        expires_at: generated.expires_at,
+        created_at: generated.created_at,
+    };
+
+    Ok(Json(ApiResponse::success(dto, req_ctx.request_id)))
+}
+
+/// Get current authenticated user's active QR Badge
+#[utoipa::path(
+    get,
+    operation_id = "getMyQrBadge",
+    path = "/api/v1/auth/qr-tokens/my-badge",
+    responses(
+        (status = 200, description = "QR Badge retrieved successfully", body = inline(ApiResponse<QrBadgeDetailDto>)),
+    ),
+    security(("Bearer" = [])),
+    tag = "Auth"
+)]
+async fn get_my_qr_badge(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+) -> Result<Json<ApiResponse<QrBadgeDetailDto>>, ApiError> {
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
+    if actor_id.is_nil() {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthInvalidCredentials,
+                "Unauthorized actor".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
+    let command = GenerateQrTokenCommand {
+        tenant_id: req_ctx.tenant_id,
+        user_id: actor_id,
+        token_type: Some("BADGE".to_string()),
+        label: Some("Kartu Identitas Digital".to_string()),
+        expires_in_days: None,
+    };
+
+    let generated = ctx
+        .generate_qr_token
+        .execute(command)
+        .await
+        .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
+
+    let dto = QrBadgeDetailDto {
+        id: generated.id,
+        raw_token: generated.raw_token,
+        user_id: generated.user_id,
+        tenant_id: generated.tenant_id,
+        token_type: generated.token_type,
+        label: generated.label,
+        expires_at: generated.expires_at,
+        created_at: generated.created_at,
+    };
+
+    Ok(Json(ApiResponse::success(dto, req_ctx.request_id)))
+}
+

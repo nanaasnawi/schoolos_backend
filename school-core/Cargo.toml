@@ -29,3 +29,6 @@ argon2 = "0.5.3"
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["rust_crypto"] }
 config = "0.15.25"
 tracing = "0.1.44"
+sha2 = "0.10"
+hex = "0.4"
+

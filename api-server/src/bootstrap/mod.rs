@@ -45,7 +45,10 @@ use school_core::common::event_bus::{InMemoryEventBus, SharedEventBus};
 use school_core::common::infrastructure::pg_outbox_repository::PgOutboxRepository;
 use school_core::common::infrastructure::pg_uow::PgUnitOfWorkFactory;
 use school_core::identity::application::auth::authenticate_user::AuthenticateUserUseCase;
+use school_core::identity::application::auth::authenticate_qr_token::AuthenticateQrTokenUseCase;
+use school_core::identity::application::auth::generate_qr_token::GenerateQrTokenUseCase;
 use school_core::identity::application::auth::register_user::RegisterUserUseCase;
+
 use school_core::identity::application::tenant::provision_tenant::ProvisionTenantUseCase;
 use school_core::identity::infrastructure::{
     pg_tenant_repository::PgTenantRepository, pg_user_repository::PgUserRepository,
@@ -322,10 +325,17 @@ impl Bootstrap {
             clock: clock.clone(),
             authenticate_user: Arc::new(AuthenticateUserUseCase::new(
                 user_repo.clone(),
-                self.jwt_secret,
+                self.jwt_secret.clone(),
                 clock.clone(),
             )),
+            authenticate_qr_token: Arc::new(AuthenticateQrTokenUseCase::new(
+                pool.clone(),
+                self.jwt_secret.clone(),
+                clock.clone(),
+            )),
+            generate_qr_token: Arc::new(GenerateQrTokenUseCase::new(pool.clone(), clock.clone())),
             register_user: Arc::new(RegisterUserUseCase::new(user_repo.clone(), clock.clone())),
+
             provision_tenant: Arc::new(ProvisionTenantUseCase::new(pool.clone(), clock.clone())),
             role_repo: role_repo.clone(),
             create_student: Arc::new(CreateStudentUseCase::new(

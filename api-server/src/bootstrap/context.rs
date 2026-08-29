@@ -25,7 +25,10 @@ use school_core::academic::application::term::{
 use school_core::common::domain::clock::Clock;
 use school_core::common::event_bus::SharedEventBus;
 use school_core::identity::application::auth::authenticate_user::AuthenticateUserUseCase;
+use school_core::identity::application::auth::authenticate_qr_token::AuthenticateQrTokenUseCase;
+use school_core::identity::application::auth::generate_qr_token::GenerateQrTokenUseCase;
 use school_core::identity::application::auth::register_user::RegisterUserUseCase;
+
 use school_core::identity::application::tenant::provision_tenant::ProvisionTenantUseCase;
 use school_core::learning::application::achievement::{
     award_achievement::AwardAchievementUseCase, create_achievement::CreateAchievementUseCase,
@@ -121,7 +124,10 @@ pub struct ApplicationContext {
     pub clock: Arc<dyn Clock>,
 
     pub authenticate_user: Arc<AuthenticateUserUseCase>,
+    pub authenticate_qr_token: Arc<AuthenticateQrTokenUseCase>,
+    pub generate_qr_token: Arc<GenerateQrTokenUseCase>,
     pub register_user: Arc<RegisterUserUseCase>,
+
     pub provision_tenant: Arc<ProvisionTenantUseCase>,
 
     pub role_repo: Arc<dyn RoleRepository>,
