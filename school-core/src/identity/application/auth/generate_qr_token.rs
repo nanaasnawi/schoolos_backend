@@ -64,6 +64,21 @@ impl GenerateQrTokenUseCase {
 
         let now = self.clock.now();
 
+        // Deactivate previous active tokens for this user so old/lost cards are immediately revoked
+        sqlx::query!(
+            r#"
+            UPDATE user_qr_tokens
+            SET is_active = false, updated_at = $3
+            WHERE tenant_id = $1 AND user_id = $2 AND is_active = true
+            "#,
+            command.tenant_id,
+            command.user_id,
+            now
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ApplicationError::Infrastructure(crate::common::error::InfrastructureError::Database(e)))?;
+
         sqlx::query!(
             r#"
             INSERT INTO user_qr_tokens (
@@ -72,6 +87,7 @@ impl GenerateQrTokenUseCase {
                 $1, $2, $3, $4, $5, $6, true, $7, $8, $8
             )
             "#,
+
             token_id,
             command.tenant_id,
             command.user_id,
