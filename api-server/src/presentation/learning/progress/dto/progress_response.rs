@@ -20,6 +20,10 @@ pub struct ProgressResponse {
     pub session_attended: i32,
     pub session_total: i32,
     pub calculated_at: DateTime<Utc>,
+    pub teacher_notes: Option<String>,
+    pub teacher_name: Option<String>,
+    pub class_name: Option<String>,
+    pub academic_status: Option<String>,
 }
 
 impl From<StudentProgress> for ProgressResponse {
@@ -39,6 +43,10 @@ impl From<StudentProgress> for ProgressResponse {
             session_attended: p.session_attended,
             session_total: p.session_total,
             calculated_at: p.calculated_at,
+            teacher_notes: None,
+            teacher_name: None,
+            class_name: None,
+            academic_status: None,
         }
     }
 }

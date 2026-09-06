@@ -16,6 +16,10 @@ pub struct SessionResponse {
     pub ended_at: Option<DateTime<Utc>>,
     pub status: String,
     pub notes: Option<String>,
+    pub subject_name: Option<String>,
+    pub teacher_name: Option<String>,
+    pub class_name: Option<String>,
+    pub room: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -33,6 +37,10 @@ impl From<LearningSession> for SessionResponse {
             ended_at: s.ended_at,
             status: s.status,
             notes: s.notes,
+            subject_name: None,
+            teacher_name: None,
+            class_name: None,
+            room: None,
             created_at: s.created_at,
             updated_at: s.updated_at,
         }

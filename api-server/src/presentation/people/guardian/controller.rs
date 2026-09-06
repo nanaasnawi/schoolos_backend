@@ -306,7 +306,7 @@ async fn get_guardians_overview(
         GuardianOverviewDto {
             id: r.guardian_id.map(|u| u.to_string()).unwrap_or_else(|| r.student_id.to_string()),
             full_name: r.guardian_name.unwrap_or_else(|| "(Belum Ada Data Wali)".to_string()),
-            relationship: if has_guardian { "Orang Tua / Wali".to_string() } else { "Belum Diisi".to_string() },
+            relationship: if has_guardian { "Ibu Kandung / Wali".to_string() } else { "Belum Diisi".to_string() },
             student_id: r.student_id.to_string(),
             student_name: r.student_name,
             student_nisn: r.student_nisn,

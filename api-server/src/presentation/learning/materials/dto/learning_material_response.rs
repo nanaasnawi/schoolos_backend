@@ -19,6 +19,10 @@ pub struct LearningMaterialResponse {
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_completed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_count: Option<i64>,
 }
 
 impl From<LearningMaterial> for LearningMaterialResponse {
@@ -37,6 +41,8 @@ impl From<LearningMaterial> for LearningMaterialResponse {
             is_active: m.is_active,
             created_at: m.created_at,
             updated_at: m.updated_at,
+            is_completed: None,
+            completed_count: None,
         }
     }
 }

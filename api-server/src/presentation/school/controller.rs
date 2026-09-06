@@ -17,6 +17,7 @@ use school_core::common::error_code::ErrorCode;
 #[derive(Deserialize)]
 pub struct SchoolInfoQuery {
     pub npsn: Option<String>,
+    pub tenant_id: Option<Uuid>,
 }
 
 /// Public endpoint — returns basic school info (name, logo) without authentication.
@@ -25,16 +26,20 @@ pub async fn get_school_public_info(
     State(ctx): State<ApplicationContext>,
     Query(params): Query<SchoolInfoQuery>,
 ) -> Result<Json<ApiResponse<SchoolPublicInfo>>, ApiError> {
-    // Single query: filter by NPSN if provided, otherwise return first active school
     let row = sqlx::query!(
         r#"
         SELECT s.name, s.logo_url, s.npsn
         FROM schools s
         WHERE s.deleted_at IS NULL
           AND ($1::text IS NULL OR s.npsn = $1)
+          AND ($2::uuid IS NULL OR s.tenant_id = $2)
+        ORDER BY 
+          (SELECT count(*) FROM students st WHERE st.tenant_id = s.tenant_id) DESC,
+          s.updated_at DESC
         LIMIT 1
         "#,
-        params.npsn.as_deref()
+        params.npsn.as_deref(),
+        params.tenant_id
     )
     .fetch_optional(&ctx.pool)
     .await

@@ -29,3 +29,8 @@ reqwest = { version = "0.12", features = ["json"] }
 utoipa = { version = "5.5.0", features = ["axum_extras", "chrono", "uuid"] }
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 uuid = { version = "1.23.4", features = ["serde", "v7"] }
+tokio-stream = { version = "0.1.19", features = ["sync"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

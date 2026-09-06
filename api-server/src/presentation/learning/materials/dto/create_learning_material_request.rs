@@ -12,4 +12,5 @@ pub struct CreateLearningMaterialRequest {
     pub external_url: Option<String>,
     pub order_index: i32,
     pub visibility: String,
+    pub class_id: Option<String>,
 }

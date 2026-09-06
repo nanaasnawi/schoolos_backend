@@ -24,6 +24,7 @@ pub struct DapodikWsStudent {
     pub nomor_telepon_seluler: Option<String>,
     
     pub nama_ayah: Option<String>,
+    #[serde(alias = "nama_ibu_kandung", alias = "nama_ibu_kandung_str", alias = "ibu_kandung")]
     pub nama_ibu: Option<String>,
     pub nama_wali: Option<String>,
     

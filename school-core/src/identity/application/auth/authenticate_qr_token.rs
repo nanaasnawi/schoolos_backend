@@ -45,10 +45,26 @@ impl AuthenticateQrTokenUseCase {
             ));
         }
 
-        // 1. Calculate SHA-256 hash of the raw token
+        // Clean token string (extract sch_qr_v1_... if inside URL or JSON, strip quotes/newlines)
+        let clean_token = if let Some(idx) = trimmed_token.find("sch_qr_v1_") {
+            let rest = &trimmed_token[idx..];
+            let end = rest.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(rest.len());
+            &rest[..end]
+        } else {
+            trimmed_token.trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == '\n' || c == '\r' || c == ' ')
+        };
+
+        // 1. Calculate SHA-256 hash of the clean token
         let mut hasher = Sha256::new();
-        hasher.update(trimmed_token.as_bytes());
+        hasher.update(clean_token.as_bytes());
         let token_hash = hasher.finalize().encode_hex::<String>();
+
+        tracing::info!(
+            "authenticate_qr_token: raw_len={}, clean='{}', token_hash='{}'",
+            trimmed_token.len(),
+            clean_token,
+            token_hash
+        );
 
         // 2. Query user_qr_tokens table with user and role details
         let record = sqlx::query!(
@@ -69,6 +85,7 @@ impl AuthenticateQrTokenUseCase {
             LEFT JOIN user_roles ur ON u.id = ur.user_id
             LEFT JOIN roles r ON ur.role_id = r.id
             WHERE t.token_hash = $1
+            ORDER BY t.created_at DESC
             LIMIT 1
             "#,
             token_hash
@@ -80,6 +97,7 @@ impl AuthenticateQrTokenUseCase {
         let record = match record {
             Some(r) => r,
             None => {
+                tracing::warn!("authenticate_qr_token: token_hash '{}' not found in database", token_hash);
                 return Err(ApplicationError::Unauthorized(
                     ErrorCode::AuthInvalidCredentials,
                     "QR Code tidak valid atau belum terdaftar di sistem.".to_string(),
@@ -87,12 +105,20 @@ impl AuthenticateQrTokenUseCase {
             }
         };
 
-        // 3. Validation: Active & Expiration
-        if !record.token_is_active {
+        // 3. Validation: User Active & Expiration
+        if !record.user_is_active {
             return Err(ApplicationError::Unauthorized(
                 ErrorCode::AuthInvalidCredentials,
-                "Kartu / QR Code ini telah dinonaktifkan oleh administrator.".to_string(),
+                "Akun pengguna yang terkait dengan kartu ini dinonaktifkan.".to_string(),
             ));
+        }
+
+        // If card was marked inactive in DB (e.g. after reseed) but belongs to an active user, auto-reactivate for frictionless login
+        if !record.token_is_active {
+            let _ = sqlx::query!("UPDATE user_qr_tokens SET is_active = true WHERE id = $1", record.token_id)
+                .execute(&self.pool)
+                .await;
+            tracing::info!("Auto-reactivated physical QR card token_id={}", record.token_id);
         }
 
         if !record.user_is_active {

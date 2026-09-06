@@ -5,7 +5,8 @@ use uuid::Uuid;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateQuizRequest {
-    pub lesson_id: Uuid,
+    #[serde(default = "default_lesson_id")]
+    pub lesson_id: Option<Uuid>,
     pub title: String,
     pub description: Option<String>,
     pub duration_minutes: Option<i32>,
@@ -19,6 +20,11 @@ pub struct CreateQuizRequest {
     pub shuffle_choices: bool,
     pub start_at: Option<DateTime<Utc>>,
     pub end_at: Option<DateTime<Utc>>,
+    pub class_id: Option<String>,
+}
+
+fn default_lesson_id() -> Option<Uuid> {
+    Some(Uuid::new_v4())
 }
 
 fn default_passing_score() -> i32 {

@@ -29,6 +29,7 @@ pub fn auth_routes(context: ApplicationContext) -> Router<ApplicationContext> {
     Router::new()
         .route("/login", post(login))
         .route("/qr-login", post(qr_login))
+        .route("/refresh", post(refresh))
         .route("/register", post(register))
         .merge(
             Router::new()
@@ -97,27 +98,152 @@ async fn login(
 
     let command = AuthenticateUserCommand {
         tenant_id: req_ctx.tenant_id,
-        email: identifier,
+        email: identifier.clone(),
         password: payload.password,
     };
 
-    let token = ctx
+    let (token, auth_user) = ctx
         .authenticate_user
         .execute(command)
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
+    let user_row = sqlx::query!(
+        r#"
+        SELECT u.id, u.tenant_id, u.email, u.full_name,
+               COALESCE(
+                 (SELECT r.name FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = u.id LIMIT 1),
+                 'Siswa'
+               ) as role_name,
+               COALESCE(
+                 (SELECT s.nisn FROM students s WHERE s.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),
+                 (SELECT t.nip FROM teachers t WHERE t.user_id = u.id ORDER BY t.updated_at DESC LIMIT 1),
+                 (SELECT NULLIF(g.phone_number, '') FROM guardians g WHERE g.user_id = u.id ORDER BY g.updated_at DESC LIMIT 1),
+                 (SELECT CONCAT('WALI-', s.nisn) FROM guardians g JOIN students s ON s.guardian_id = g.id WHERE g.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),
+                 ''
+               ) as "identifier!",
+               COALESCE(
+                 (
+                   SELECT c.name 
+                   FROM students s 
+                   JOIN enrollments en ON en.student_id = s.id 
+                   JOIN classes c ON c.id = en.class_id 
+                   WHERE s.user_id = u.id AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                   ORDER BY en.enrolled_at DESC 
+                   LIMIT 1
+                 ),
+                 (
+                   SELECT c.name 
+                   FROM teachers t 
+                   JOIN classes c ON c.homeroom_teacher_id = t.id 
+                   WHERE t.user_id = u.id 
+                   ORDER BY c.name ASC 
+                   LIMIT 1
+                 ),
+                 (
+                   SELECT c.name 
+                   FROM guardians g 
+                   JOIN students s ON s.guardian_id = g.id
+                   JOIN enrollments en ON en.student_id = s.id 
+                   JOIN classes c ON c.id = en.class_id 
+                   WHERE g.user_id = u.id AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                   ORDER BY en.enrolled_at DESC 
+                   LIMIT 1
+                 )
+               ) as "class_name?",
+               (
+                 SELECT s.full_name 
+                 FROM guardians g 
+                 JOIN students s ON s.guardian_id = g.id
+                 WHERE g.user_id = u.id
+                 ORDER BY s.created_at ASC
+                 LIMIT 1
+               ) as "child_name?",
+               (
+                 SELECT s.id::text 
+                 FROM guardians g 
+                 JOIN students s ON s.guardian_id = g.id
+                 WHERE g.user_id = u.id
+                 ORDER BY s.created_at ASC
+                 LIMIT 1
+               ) as "child_id?"
+        FROM users u
+        WHERE u.id = $1
+        LIMIT 1
+        "#,
+        auth_user.id
+    )
+    .fetch_optional(&ctx.pool)
+    .await
+    .ok()
+    .flatten();
+
+    let (user_id, tenant_id, name, email, role, user_identifier, class_name, child_name, child_id) = if let Some(u) = &user_row {
+        (
+            Some(u.id.to_string()),
+            u.tenant_id,
+            Some(u.full_name.clone()),
+            Some(u.email.clone()),
+            Some(u.role_name.clone().unwrap_or_else(|| "Siswa".to_string())),
+            if u.identifier.is_empty() { None } else { Some(u.identifier.clone()) },
+            u.class_name.clone(),
+            u.child_name.clone(),
+            u.child_id.clone(),
+        )
+    } else {
+        (
+            Some(auth_user.id.to_string()),
+            auth_user.tenant_id,
+            Some(auth_user.full_name.clone()),
+            Some(auth_user.email.clone()),
+            Some("Siswa".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
+    };
+
+    let school_info = sqlx::query!(
+        "SELECT name, logo_url FROM schools WHERE tenant_id = $1 AND deleted_at IS NULL LIMIT 1",
+        tenant_id
+    )
+    .fetch_optional(&ctx.pool)
+    .await
+    .ok()
+    .flatten();
+
+    let refresh_claims = school_core::identity::application::auth::authenticate_user::Claims {
+        sub: auth_user.id.to_string(),
+        tenant_id: tenant_id.to_string(),
+        email: Some(auth_user.email.clone()),
+        full_name: Some(auth_user.full_name.clone()),
+        role: role.clone(),
+        exp: (chrono::Utc::now() + chrono::Duration::days(30)).timestamp() as usize,
+    };
+    let refresh_token = jsonwebtoken::encode(
+        &jsonwebtoken::Header::default(),
+        &refresh_claims,
+        &jsonwebtoken::EncodingKey::from_secret("super_secret_jwt_key_123".as_ref()),
+    ).ok();
+
     let response_data = LoginResponse {
         access_token: token,
         token_type: "Bearer".to_string(),
         expires_in: 86400,
-        user_id: None,
-        tenant_id: None,
-        name: None,
-        email: None,
-        role: None,
+        refresh_token,
+        user_id,
+        tenant_id: Some(tenant_id.to_string()),
+        name,
+        email,
+        role,
+        school_name: school_info.as_ref().map(|s| s.name.clone()),
+        school_logo_url: school_info.and_then(|s| s.logo_url),
+        identifier: user_identifier,
+        class_name,
+        child_name,
+        child_id,
     };
-
 
     Ok(Json(ApiResponse::success(
         response_data,
@@ -204,6 +330,18 @@ pub struct AuthUserDto {
     pub is_active: bool,
     #[schema(value_type = String, format = DateTime)]
     pub created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub school_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub school_logo_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identifier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_id: Option<String>,
 }
 
 #[utoipa::path(
@@ -245,6 +383,12 @@ async fn list_users(
         role: r.role_name.unwrap_or_default(),
         is_active: r.is_active,
         created_at: r.created_at,
+        school_name: None,
+        school_logo_url: None,
+        identifier: None,
+        class_name: None,
+        child_name: None,
+        child_id: None,
     }).collect();
 
     Ok(Json(ApiResponse::success(dtos, req_ctx.request_id)))
@@ -269,6 +413,15 @@ async fn get_me(
 ) -> Result<Json<ApiResponse<AuthUserDto>>, ApiError> {
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
 
+    let school_info = sqlx::query!(
+        "SELECT name, logo_url FROM schools WHERE tenant_id = $1 AND deleted_at IS NULL LIMIT 1",
+        req_ctx.tenant_id
+    )
+    .fetch_optional(&ctx.pool)
+    .await
+    .ok()
+    .flatten();
+
     if actor_id.is_nil() {
         return Ok(Json(ApiResponse::success(
             AuthUserDto {
@@ -278,6 +431,12 @@ async fn get_me(
                 role: "System Administrator".to_string(),
                 is_active: true,
                 created_at: chrono::Utc::now(),
+                school_name: school_info.as_ref().map(|s| s.name.clone()),
+                school_logo_url: school_info.and_then(|s| s.logo_url),
+                identifier: None,
+                class_name: None,
+                child_name: None,
+                child_id: None,
             },
             req_ctx.request_id,
         )));
@@ -286,7 +445,59 @@ async fn get_me(
     let record = sqlx::query!(
         r#"
         SELECT u.id, u.email, u.full_name, u.is_active, u.created_at,
-               COALESCE(r.name, 'Administrator') as role_name
+               COALESCE(r.name, 'Administrator') as role_name,
+               COALESCE(
+                 (SELECT s.nisn FROM students s WHERE s.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),
+                 (SELECT t.nip FROM teachers t WHERE t.user_id = u.id ORDER BY t.updated_at DESC LIMIT 1),
+                 (SELECT NULLIF(g.phone_number, '') FROM guardians g WHERE g.user_id = u.id ORDER BY g.updated_at DESC LIMIT 1),
+                 (SELECT CONCAT('WALI-', s.nisn) FROM guardians g JOIN students s ON s.guardian_id = g.id WHERE g.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),
+                 ''
+               ) as "identifier!",
+               COALESCE(
+                 (
+                   SELECT c.name 
+                   FROM students s 
+                   JOIN enrollments en ON en.student_id = s.id 
+                   JOIN classes c ON c.id = en.class_id 
+                   WHERE s.user_id = u.id AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                   ORDER BY en.enrolled_at DESC 
+                   LIMIT 1
+                 ),
+                 (
+                   SELECT c.name 
+                   FROM teachers t 
+                   JOIN classes c ON c.homeroom_teacher_id = t.id 
+                   WHERE t.user_id = u.id 
+                   ORDER BY c.name ASC 
+                   LIMIT 1
+                 ),
+                 (
+                   SELECT c.name 
+                   FROM guardians g 
+                   JOIN students s ON s.guardian_id = g.id
+                   JOIN enrollments en ON en.student_id = s.id 
+                   JOIN classes c ON c.id = en.class_id 
+                   WHERE g.user_id = u.id AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                   ORDER BY en.enrolled_at DESC 
+                   LIMIT 1
+                 )
+               ) as "class_name?",
+               (
+                 SELECT s.full_name 
+                 FROM guardians g 
+                 JOIN students s ON s.guardian_id = g.id
+                 WHERE g.user_id = u.id
+                 ORDER BY s.created_at ASC
+                 LIMIT 1
+               ) as "child_name?",
+               (
+                 SELECT s.id::text 
+                 FROM guardians g 
+                 JOIN students s ON s.guardian_id = g.id
+                 WHERE g.user_id = u.id
+                 ORDER BY s.created_at ASC
+                 LIMIT 1
+               ) as "child_id?"
         FROM users u
         LEFT JOIN user_roles ur ON u.id = ur.user_id
         LEFT JOIN roles r ON ur.role_id = r.id
@@ -307,6 +518,12 @@ async fn get_me(
             role: r.role_name.unwrap_or_else(|| "Administrator".to_string()),
             is_active: r.is_active,
             created_at: r.created_at,
+            school_name: school_info.as_ref().map(|s| s.name.clone()),
+            school_logo_url: school_info.and_then(|s| s.logo_url),
+            identifier: if r.identifier.is_empty() { None } else { Some(r.identifier) },
+            class_name: r.class_name,
+            child_name: r.child_name,
+            child_id: r.child_id,
         },
         None => AuthUserDto {
             id: actor_id,
@@ -315,6 +532,12 @@ async fn get_me(
             role: "Administrator".to_string(),
             is_active: true,
             created_at: chrono::Utc::now(),
+            school_name: school_info.as_ref().map(|s| s.name.clone()),
+            school_logo_url: school_info.and_then(|s| s.logo_url),
+            identifier: None,
+            class_name: None,
+            child_name: None,
+            child_id: None,
         },
     };
 
@@ -339,6 +562,7 @@ async fn qr_login(
     req_ctx: RequestContext,
     Json(payload): Json<QrLoginRequest>,
 ) -> Result<Json<ApiResponse<LoginResponse>>, ApiError> {
+    tracing::info!("qr_login incoming request: token_len={}", payload.token.len());
     // 1. Check if Global Maintenance Mode is active
     let maintenance_record = sqlx::query!(
         "SELECT value FROM system_settings WHERE key = 'maintenance'"
@@ -370,15 +594,119 @@ async fn qr_login(
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
+    let school_info = sqlx::query!(
+        "SELECT name, logo_url FROM schools WHERE tenant_id = $1 AND deleted_at IS NULL LIMIT 1",
+        result.tenant_id
+    )
+    .fetch_optional(&ctx.pool)
+    .await
+    .ok()
+    .flatten();
+
+    let user_extra = sqlx::query!(
+        r#"
+        SELECT 
+            COALESCE(
+                (SELECT s.nisn FROM students s WHERE s.user_id = $1 ORDER BY s.updated_at DESC LIMIT 1),
+                (SELECT t.nip FROM teachers t WHERE t.user_id = $1 ORDER BY t.updated_at DESC LIMIT 1),
+                (SELECT NULLIF(g.phone_number, '') FROM guardians g WHERE g.user_id = $1 ORDER BY g.updated_at DESC LIMIT 1),
+                (SELECT CONCAT('WALI-', s.nisn) FROM guardians g JOIN students s ON s.guardian_id = g.id WHERE g.user_id = $1 ORDER BY s.updated_at DESC LIMIT 1),
+                ''
+            ) as "identifier!",
+            COALESCE(
+                (
+                    SELECT c.name 
+                    FROM students s 
+                    JOIN enrollments en ON en.student_id = s.id 
+                    JOIN classes c ON c.id = en.class_id 
+                    WHERE s.user_id = $1 AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                    ORDER BY en.enrolled_at DESC 
+                    LIMIT 1
+                ),
+                (
+                    SELECT c.name 
+                    FROM teachers t 
+                    JOIN classes c ON c.homeroom_teacher_id = t.id 
+                    WHERE t.user_id = $1 
+                    ORDER BY c.name ASC 
+                    LIMIT 1
+                ),
+                (
+                    SELECT c.name 
+                    FROM guardians g 
+                    JOIN students s ON s.guardian_id = g.id
+                    JOIN enrollments en ON en.student_id = s.id 
+                    JOIN classes c ON c.id = en.class_id 
+                    WHERE g.user_id = $1 AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                    ORDER BY en.enrolled_at DESC 
+                    LIMIT 1
+                )
+            ) as "class_name?",
+            (
+                SELECT s.full_name 
+                FROM guardians g 
+                JOIN students s ON s.guardian_id = g.id
+                WHERE g.user_id = $1
+                ORDER BY s.created_at ASC
+                LIMIT 1
+            ) as "child_name?",
+            (
+                SELECT s.id::text 
+                FROM guardians g 
+                JOIN students s ON s.guardian_id = g.id
+                WHERE g.user_id = $1
+                ORDER BY s.created_at ASC
+                LIMIT 1
+            ) as "child_id?"
+        "#,
+        result.user_id
+    )
+    .fetch_optional(&ctx.pool)
+    .await
+    .ok()
+    .flatten();
+
+    let (user_identifier, class_name, child_name, child_id) = if let Some(e) = user_extra {
+        (
+            if e.identifier.is_empty() { None } else { Some(e.identifier) },
+            e.class_name,
+            e.child_name,
+            e.child_id,
+        )
+    } else {
+        (None, None, None, None)
+    };
+
+    let refresh_claims = school_core::identity::application::auth::authenticate_user::Claims {
+        sub: result.user_id.to_string(),
+        tenant_id: result.tenant_id.to_string(),
+        email: Some(result.email.clone()),
+        full_name: Some(result.full_name.clone()),
+        role: Some(result.role.clone()),
+        exp: (chrono::Utc::now() + chrono::Duration::days(30)).timestamp() as usize,
+    };
+    let refresh_token = jsonwebtoken::encode(
+        &jsonwebtoken::Header::default(),
+        &refresh_claims,
+        &jsonwebtoken::EncodingKey::from_secret("super_secret_jwt_key_123".as_ref()),
+    ).ok();
+
     let response_data = LoginResponse {
         access_token: result.token,
         token_type: "Bearer".to_string(),
         expires_in: result.expires_in,
+        refresh_token,
         user_id: Some(result.user_id.to_string()),
         tenant_id: Some(result.tenant_id.to_string()),
         name: Some(result.full_name),
         email: Some(result.email),
         role: Some(result.role),
+        school_name: school_info.as_ref().map(|s| s.name.clone()),
+        school_logo_url: school_info.and_then(|s| s.logo_url),
+        identifier: user_identifier,
+        class_name,
+        child_name,
+        child_id,
     };
 
     Ok(Json(ApiResponse::success(
@@ -522,21 +850,51 @@ async fn list_users_qr_status(
             u.email, 
             u.full_name, 
             u.is_active,
-            COALESCE(r.name, 'No Role') as role_name,
-            COALESCE(s.nisn, t.nip, g.phone_number, '') as "identifier!",
-            c.name as "class_name?",
+            COALESCE(
+                (SELECT r.name FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = u.id ORDER BY r.is_system_default DESC LIMIT 1),
+                'No Role'
+            ) as role_name,
+            COALESCE(
+                (SELECT s.nisn FROM students s WHERE s.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),
+                (SELECT t.nip FROM teachers t WHERE t.user_id = u.id ORDER BY t.updated_at DESC LIMIT 1),
+                (SELECT NULLIF(g.phone_number, '') FROM guardians g WHERE g.user_id = u.id ORDER BY g.updated_at DESC LIMIT 1),
+                (SELECT CONCAT('WALI-', s.nisn) FROM guardians g JOIN students s ON s.guardian_id = g.id WHERE g.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),
+                ''
+            ) as "identifier!",
+            COALESCE(
+                  (
+                    SELECT c.name 
+                    FROM students s 
+                    JOIN enrollments en ON en.student_id = s.id 
+                    JOIN classes c ON c.id = en.class_id 
+                    WHERE s.user_id = u.id AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                    ORDER BY en.enrolled_at DESC 
+                    LIMIT 1
+                  ),
+                  (
+                    SELECT c.name 
+                    FROM teachers t 
+                    JOIN classes c ON c.homeroom_teacher_id = t.id 
+                    WHERE t.user_id = u.id 
+                    ORDER BY c.name ASC 
+                    LIMIT 1
+                  ),
+                  (
+                    SELECT c.name 
+                    FROM guardians g 
+                    JOIN students s ON s.guardian_id = g.id
+                    JOIN enrollments en ON en.student_id = s.id 
+                    JOIN classes c ON c.id = en.class_id 
+                    WHERE g.user_id = u.id AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                    ORDER BY en.enrolled_at DESC 
+                    LIMIT 1
+                )
+            ) as "class_name?",
             (SELECT q.id FROM user_qr_tokens q WHERE q.user_id = u.id AND q.is_active = true ORDER BY q.created_at DESC LIMIT 1) as active_token_id,
             (SELECT q.label FROM user_qr_tokens q WHERE q.user_id = u.id AND q.is_active = true ORDER BY q.created_at DESC LIMIT 1) as active_token_label,
             (SELECT q.created_at FROM user_qr_tokens q WHERE q.user_id = u.id AND q.is_active = true ORDER BY q.created_at DESC LIMIT 1) as token_created_at,
             (SELECT q.last_used_at FROM user_qr_tokens q WHERE q.user_id = u.id AND q.is_active = true ORDER BY q.created_at DESC LIMIT 1) as token_last_used_at
         FROM users u
-        LEFT JOIN user_roles ur ON u.id = ur.user_id
-        LEFT JOIN roles r ON ur.role_id = r.id
-        LEFT JOIN students s ON s.user_id = u.id
-        LEFT JOIN teachers t ON t.user_id = u.id
-        LEFT JOIN guardians g ON g.user_id = u.id
-        LEFT JOIN enrollments en ON en.student_id = s.id AND en.status = 'ACTIVE'
-        LEFT JOIN classes c ON c.id = en.class_id
         WHERE u.tenant_id = $1
         ORDER BY u.created_at DESC
         "#,
@@ -650,5 +1008,118 @@ async fn batch_generate_qr_tokens_endpoint(
 
     Ok(Json(ApiResponse::success(results, req_ctx.request_id)))
 }
+
+#[derive(Debug, serde::Deserialize)]
+pub struct RefreshTokenRequest {
+    #[serde(alias = "refreshToken", alias = "refresh_token")]
+    pub refresh_token: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct RefreshTokenDataDto {
+    pub access_token: String,
+    pub refresh_token: String,
+    #[serde(rename = "accessToken")]
+    pub access_token_camel: String,
+    #[serde(rename = "refreshToken")]
+    pub refresh_token_camel: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct RefreshCombinedResponse {
+    pub success: bool,
+    pub data: Option<RefreshTokenDataDto>,
+    pub access_token: String,
+    pub refresh_token: String,
+    #[serde(rename = "accessToken")]
+    pub access_token_camel: String,
+    #[serde(rename = "refreshToken")]
+    pub refresh_token_camel: String,
+    pub request_id: String,
+}
+
+async fn refresh(
+    req_ctx: RequestContext,
+    Json(payload): Json<RefreshTokenRequest>,
+) -> Result<Json<RefreshCombinedResponse>, ApiError> {
+    use jsonwebtoken::{decode, DecodingKey, Validation};
+    use school_core::identity::application::auth::authenticate_user::Claims;
+
+    let mut validation = Validation::default();
+    validation.validate_exp = false;
+
+    let token_data = decode::<Claims>(
+        &payload.refresh_token,
+        &DecodingKey::from_secret("super_secret_jwt_key_123".as_ref()),
+        &validation,
+    )
+    .map_err(|_| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthInvalidToken,
+                "Invalid refresh token".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let new_access_claims = Claims {
+        sub: token_data.claims.sub.clone(),
+        tenant_id: token_data.claims.tenant_id.clone(),
+        email: token_data.claims.email.clone(),
+        full_name: token_data.claims.full_name.clone(),
+        role: token_data.claims.role.clone(),
+        exp: (chrono::Utc::now() + chrono::Duration::hours(24)).timestamp() as usize,
+    };
+    let new_access_token = jsonwebtoken::encode(
+        &jsonwebtoken::Header::default(),
+        &new_access_claims,
+        &jsonwebtoken::EncodingKey::from_secret("super_secret_jwt_key_123".as_ref()),
+    )
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Internal(e.to_string()),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let new_refresh_claims = Claims {
+        sub: token_data.claims.sub,
+        tenant_id: token_data.claims.tenant_id,
+        email: token_data.claims.email,
+        full_name: token_data.claims.full_name,
+        role: token_data.claims.role,
+        exp: (chrono::Utc::now() + chrono::Duration::days(30)).timestamp() as usize,
+    };
+    let new_refresh_token = jsonwebtoken::encode(
+        &jsonwebtoken::Header::default(),
+        &new_refresh_claims,
+        &jsonwebtoken::EncodingKey::from_secret("super_secret_jwt_key_123".as_ref()),
+    )
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Internal(e.to_string()),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let data_dto = RefreshTokenDataDto {
+        access_token: new_access_token.clone(),
+        refresh_token: new_refresh_token.clone(),
+        access_token_camel: new_access_token.clone(),
+        refresh_token_camel: new_refresh_token.clone(),
+    };
+
+    Ok(Json(RefreshCombinedResponse {
+        success: true,
+        data: Some(data_dto),
+        access_token: new_access_token.clone(),
+        refresh_token: new_refresh_token.clone(),
+        access_token_camel: new_access_token,
+        refresh_token_camel: new_refresh_token,
+        request_id: req_ctx.request_id,
+    }))
+}
+
 
 

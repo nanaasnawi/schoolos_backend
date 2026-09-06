@@ -162,6 +162,7 @@ use crate::presentation::{
     academic::classes::controller::class_routes,
     academic::enrollments::controller::enrollment_routes,
     academic::grade_levels::controller::grade_level_routes,
+    academic::schedules::controller::schedule_routes,
     academic::subjects::controller::subject_routes, academic::terms::controller::term_routes,
     analytics::controller::analytics_routes,
     auth::controller::auth_routes, dapodik::controller::dapodik_routes, health::controller::health_routes,
@@ -173,7 +174,8 @@ use crate::presentation::{
     learning::progress::controller::progress_routes, learning::quizzes::controller::quiz_routes,
     learning::sessions::controller::session_routes,
     learning::syllabuses::controller::syllabus_routes,
-    notifications::controller::notification_routes, people::guardian::controller::guardian_routes,
+    notifications::controller::notification_routes, announcements::controller::announcement_routes,
+    people::guardian::controller::guardian_routes,
     people::staff::controller::staff_routes, people::students::controller::student_routes,
     people::teacher::controller::teacher_routes, school::controller::school_routes,
     school::controller::get_school_public_info,
@@ -717,6 +719,18 @@ impl Bootstrap {
                     )),
             )
             .nest(
+                "/api/v1/academic/schedules",
+                schedule_routes()
+                    .layer(axum::middleware::from_fn_with_state(
+                        context.clone(),
+                        idempotency::idempotency_middleware,
+                    ))
+                    .layer(axum::middleware::from_fn_with_state(
+                        context.clone(),
+                        auth_middleware,
+                    )),
+            )
+            .nest(
                 "/api/v1/academic/grade-levels",
                 grade_level_routes()
                     .layer(axum::middleware::from_fn_with_state(
@@ -837,6 +851,18 @@ impl Bootstrap {
                     )),
             )
             .nest(
+                "/api/v1/learning/assessments",
+                assessment_routes()
+                    .layer(axum::middleware::from_fn_with_state(
+                        context.clone(),
+                        idempotency::idempotency_middleware,
+                    ))
+                    .layer(axum::middleware::from_fn_with_state(
+                        context.clone(),
+                        auth_middleware,
+                    )),
+            )
+            .nest(
                 "/api/v1/learning/progress",
                 progress_routes()
                     .layer(axum::middleware::from_fn_with_state(
@@ -879,6 +905,14 @@ impl Bootstrap {
                         context.clone(),
                         idempotency::idempotency_middleware,
                     ))
+                    .layer(axum::middleware::from_fn_with_state(
+                        context.clone(),
+                        auth_middleware,
+                    )),
+            )
+            .nest(
+                "/api/v1/announcements",
+                announcement_routes()
                     .layer(axum::middleware::from_fn_with_state(
                         context.clone(),
                         auth_middleware,

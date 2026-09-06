@@ -24,6 +24,14 @@ pub struct QuizResponse {
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub teacher_name: Option<String>,
 }
 
 impl From<Quiz> for QuizResponse {
@@ -47,6 +55,10 @@ impl From<Quiz> for QuizResponse {
             is_active: q.is_active,
             created_at: q.created_at,
             updated_at: q.updated_at,
+            class_id: None,
+            class_name: None,
+            subject_name: None,
+            teacher_name: None,
         }
     }
 }

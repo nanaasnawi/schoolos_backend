@@ -60,9 +60,23 @@ impl UserRepository for PgUserRepository {
     ) -> Result<Option<User>, InfrastructureError> {
         let user = sqlx::query_as::<_, User>(
             r#"
-            SELECT id, tenant_id, email, password_hash, full_name, is_active, created_at, updated_at
-            FROM users
-            WHERE tenant_id = $1 AND email = $2
+            SELECT u.id, u.tenant_id, u.email, u.password_hash, u.full_name, u.is_active, u.created_at, u.updated_at
+            FROM users u
+            LEFT JOIN teachers t ON t.user_id = u.id
+            LEFT JOIN students s ON s.user_id = u.id
+            LEFT JOIN guardians g ON g.user_id = u.id
+            WHERE u.tenant_id = $1 
+              AND (
+                u.email ILIKE $2 
+                OR u.id::text = $2 
+                OR t.nip = $2 
+                OR s.nisn = $2 
+                OR g.phone_number = $2
+                OR g.phone_number = REPLACE($2, '+62', '0')
+                OR ('0' || SUBSTRING($2 FROM 3)) = g.phone_number
+                OR REPLACE(REPLACE(REPLACE(COALESCE(g.phone_number, ''), ' ', ''), '-', ''), '+62', '0') = REPLACE(REPLACE(REPLACE($2, ' ', ''), '-', ''), '+62', '0')
+              )
+            LIMIT 1
             "#,
         )
         .bind(tenant_id)
@@ -79,10 +93,22 @@ impl UserRepository for PgUserRepository {
     ) -> Result<Option<User>, InfrastructureError> {
         let user = sqlx::query_as::<_, User>(
             r#"
-            SELECT id, tenant_id, email, password_hash, full_name, is_active, created_at, updated_at
-            FROM users
-            WHERE email = $1 AND is_active = true
-            ORDER BY created_at DESC
+            SELECT u.id, u.tenant_id, u.email, u.password_hash, u.full_name, u.is_active, u.created_at, u.updated_at
+            FROM users u
+            LEFT JOIN teachers t ON t.user_id = u.id
+            LEFT JOIN students s ON s.user_id = u.id
+            LEFT JOIN guardians g ON g.user_id = u.id
+            WHERE (
+                u.email ILIKE $1 
+                OR u.id::text = $1 
+                OR t.nip = $1 
+                OR s.nisn = $1 
+                OR g.phone_number = $1
+                OR g.phone_number = REPLACE($1, '+62', '0')
+                OR ('0' || SUBSTRING($1 FROM 3)) = g.phone_number
+                OR REPLACE(REPLACE(REPLACE(COALESCE(g.phone_number, ''), ' ', ''), '-', ''), '+62', '0') = REPLACE(REPLACE(REPLACE($1, ' ', ''), '-', ''), '+62', '0')
+            ) AND u.is_active = true
+            ORDER BY u.created_at DESC
             LIMIT 1
             "#,
         )

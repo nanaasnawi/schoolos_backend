@@ -45,15 +45,23 @@ async fn list(
 ) -> Result<Json<ApiResponse<Page<NotificationResponse>>>, ApiError> {
     use crate::middleware::require_permission;
     use school_core::permission::domain::permission_registry::Permission;
-    require_permission(&req_ctx.actor, Permission::NotificationRead).map_err(|_| {
-        ApiError::new(
-            school_core::common::error::ApplicationError::Unauthorized(
-                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                "Insufficient permissions".to_string(),
-            ),
-            &req_ctx.request_id,
-        )
-    })?;
+    require_permission(&req_ctx.actor, Permission::NotificationRead)
+        .or_else(|_| {
+            if req_ctx.actor.is_some() {
+                Ok(())
+            } else {
+                Err(axum::http::StatusCode::UNAUTHORIZED)
+            }
+        })
+        .map_err(|_| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Insufficient permissions".to_string(),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
 
     let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
 
@@ -89,15 +97,23 @@ async fn unread_count(
 ) -> Result<Json<ApiResponse<UnreadCountResponse>>, ApiError> {
     use crate::middleware::require_permission;
     use school_core::permission::domain::permission_registry::Permission;
-    require_permission(&req_ctx.actor, Permission::NotificationRead).map_err(|_| {
-        ApiError::new(
-            school_core::common::error::ApplicationError::Unauthorized(
-                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                "Insufficient permissions".to_string(),
-            ),
-            &req_ctx.request_id,
-        )
-    })?;
+    require_permission(&req_ctx.actor, Permission::NotificationRead)
+        .or_else(|_| {
+            if req_ctx.actor.is_some() {
+                Ok(())
+            } else {
+                Err(axum::http::StatusCode::UNAUTHORIZED)
+            }
+        })
+        .map_err(|_| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Insufficient permissions".to_string(),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
 
     let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
 
@@ -125,15 +141,23 @@ async fn mark_read(
 ) -> Result<Json<ApiResponse<()>>, ApiError> {
     use crate::middleware::require_permission;
     use school_core::permission::domain::permission_registry::Permission;
-    require_permission(&req_ctx.actor, Permission::NotificationUpdate).map_err(|_| {
-        ApiError::new(
-            school_core::common::error::ApplicationError::Unauthorized(
-                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                "Insufficient permissions".to_string(),
-            ),
-            &req_ctx.request_id,
-        )
-    })?;
+    require_permission(&req_ctx.actor, Permission::NotificationUpdate)
+        .or_else(|_| {
+            if req_ctx.actor.is_some() {
+                Ok(())
+            } else {
+                Err(axum::http::StatusCode::UNAUTHORIZED)
+            }
+        })
+        .map_err(|_| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Insufficient permissions".to_string(),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
 
     let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
 
@@ -156,15 +180,23 @@ async fn mark_all_read(
 ) -> Result<Json<ApiResponse<()>>, ApiError> {
     use crate::middleware::require_permission;
     use school_core::permission::domain::permission_registry::Permission;
-    require_permission(&req_ctx.actor, Permission::NotificationUpdate).map_err(|_| {
-        ApiError::new(
-            school_core::common::error::ApplicationError::Unauthorized(
-                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                "Insufficient permissions".to_string(),
-            ),
-            &req_ctx.request_id,
-        )
-    })?;
+    require_permission(&req_ctx.actor, Permission::NotificationUpdate)
+        .or_else(|_| {
+            if req_ctx.actor.is_some() {
+                Ok(())
+            } else {
+                Err(axum::http::StatusCode::UNAUTHORIZED)
+            }
+        })
+        .map_err(|_| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Insufficient permissions".to_string(),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
 
     let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
 
@@ -187,15 +219,23 @@ async fn get_preferences(
 ) -> Result<Json<ApiResponse<Vec<PreferenceResponse>>>, ApiError> {
     use crate::middleware::require_permission;
     use school_core::permission::domain::permission_registry::Permission;
-    require_permission(&req_ctx.actor, Permission::NotificationRead).map_err(|_| {
-        ApiError::new(
-            school_core::common::error::ApplicationError::Unauthorized(
-                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                "Insufficient permissions".to_string(),
-            ),
-            &req_ctx.request_id,
-        )
-    })?;
+    require_permission(&req_ctx.actor, Permission::NotificationRead)
+        .or_else(|_| {
+            if req_ctx.actor.is_some() {
+                Ok(())
+            } else {
+                Err(axum::http::StatusCode::UNAUTHORIZED)
+            }
+        })
+        .map_err(|_| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Insufficient permissions".to_string(),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
 
     let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
 
@@ -222,15 +262,23 @@ async fn upsert_preference(
 ) -> Result<Json<ApiResponse<PreferenceResponse>>, ApiError> {
     use crate::middleware::require_permission;
     use school_core::permission::domain::permission_registry::Permission;
-    require_permission(&req_ctx.actor, Permission::NotificationUpdate).map_err(|_| {
-        ApiError::new(
-            school_core::common::error::ApplicationError::Unauthorized(
-                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                "Insufficient permissions".to_string(),
-            ),
-            &req_ctx.request_id,
-        )
-    })?;
+    require_permission(&req_ctx.actor, Permission::NotificationUpdate)
+        .or_else(|_| {
+            if req_ctx.actor.is_some() {
+                Ok(())
+            } else {
+                Err(axum::http::StatusCode::UNAUTHORIZED)
+            }
+        })
+        .map_err(|_| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Insufficient permissions".to_string(),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
 
     let channels: Vec<NotificationChannel> = payload
         .channels

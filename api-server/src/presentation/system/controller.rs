@@ -28,6 +28,7 @@ pub fn system_routes(context: ApplicationContext) -> Router<ApplicationContext> 
     Router::new()
         .route("/login", post(system_login))
         .route("/maintenance-status", get(get_maintenance_status))
+        .route("/mobile-config", get(get_mobile_config))
         .merge(
             Router::new()
                 .route("/overview", get(get_system_overview))
@@ -812,6 +813,31 @@ async fn get_maintenance_status(
         serde_json::json!({
             "maintenance_mode": false,
             "maintenance_message": "Sistem sedang dalam peningkatan performa server terjadwal. Silakan kembali dalam beberapa menit."
+        })
+    });
+
+    Ok(Json(ApiResponse::success(val, req_ctx.request_id)))
+}
+
+/// Public endpoint for Mobile Gateway & Server URL discovery
+async fn get_mobile_config(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let row = sqlx::query!(
+        "SELECT value FROM system_settings WHERE key = 'mobile'"
+    )
+    .fetch_optional(&ctx.pool)
+    .await
+    .ok()
+    .flatten();
+
+    let val = row.map(|r| r.value).unwrap_or_else(|| {
+        serde_json::json!({
+            "server_url": "http://192.168.1.10:8000/api/v1/",
+            "fallback_url": "http://127.0.0.1:8000/api/v1/",
+            "server_name": "Server Utama Sekolah (Wi-Fi LAN)",
+            "allow_fallback": true
         })
     });
 

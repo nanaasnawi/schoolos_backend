@@ -57,7 +57,7 @@ impl AssignmentRepository for PgAssignmentRepository {
         Ok(record.map(|r| Assignment {
             id: r.get("id"),
             tenant_id: r.get("tenant_id"),
-            lesson_id: r.get("lesson_id"),
+            lesson_id: r.get::<Option<Uuid>, _>("lesson_id").unwrap_or_default(),
             title: r.get("title"),
             description: r.get("description"),
             instructions: r.get("instructions"),
@@ -94,7 +94,7 @@ impl AssignmentRepository for PgAssignmentRepository {
             .map(|r| Assignment {
                 id: r.get("id"),
                 tenant_id: r.get("tenant_id"),
-                lesson_id: r.get("lesson_id"),
+                lesson_id: r.get::<Option<Uuid>, _>("lesson_id").unwrap_or_default(),
                 title: r.get("title"),
                 description: r.get("description"),
                 instructions: r.get("instructions"),

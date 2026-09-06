@@ -313,6 +313,27 @@ async fn get_by_id(
     .await
     .unwrap_or(None);
 
+    let guardian_info = if let Some(gid) = profile.student.guardian_id {
+        #[derive(sqlx::FromRow, serde::Serialize)]
+        struct GuardianDetail {
+            id: Uuid,
+            full_name: String,
+            phone_number: Option<String>,
+        }
+        sqlx::query_as!(
+            GuardianDetail,
+            r#"SELECT id, full_name, phone_number FROM guardians WHERE id = $1"#,
+            gid
+        )
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|g| serde_json::to_value(g).unwrap_or_default())
+    } else {
+        None
+    };
+
     let response_data = super::dto::student_responses::StudentProfileResponse {
         id: profile.student.id,
         tenant_id: profile.student.tenant_id,
@@ -332,10 +353,12 @@ async fn get_by_id(
         status: profile.student.status.as_db_str().to_string(),
         class_name,
         grade: None,
-        // Related read models — None until Academic API (Sprint 4.3)
-        guardian: profile
-            .guardian
-            .map(|g| serde_json::to_value(g).unwrap_or_default()),
+        // Populated from guardians table or core domain model
+        guardian: guardian_info.or_else(|| {
+            profile
+                .guardian
+                .map(|g| serde_json::to_value(g).unwrap_or_default())
+        }),
         current_class: profile
             .current_class
             .map(|c| serde_json::to_value(c).unwrap_or_default()),

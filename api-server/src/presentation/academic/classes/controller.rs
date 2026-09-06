@@ -124,15 +124,19 @@ async fn list(
 ) -> Result<Json<ApiResponse<Vec<ClassResponse>>>, crate::error::ApiError> {
     use crate::middleware::require_permission;
     use school_core::permission::domain::permission_registry::Permission;
-    require_permission(&req_ctx.actor, Permission::AcademicManage).map_err(|_| {
-        crate::error::ApiError::new(
-            school_core::common::error::ApplicationError::Unauthorized(
-                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                "Insufficient permissions".to_string(),
-            ),
-            &req_ctx.request_id,
-        )
-    })?;
+    require_permission(&req_ctx.actor, Permission::AcademicManage)
+        .or_else(|_| require_permission(&req_ctx.actor, Permission::LearningCurriculumRead))
+        .or_else(|_| require_permission(&req_ctx.actor, Permission::StudentRead))
+        .or_else(|_| require_permission(&req_ctx.actor, Permission::TeacherRead))
+        .map_err(|_| {
+            crate::error::ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Insufficient permissions".to_string(),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
 
     let query = ListClassesQuery {
         tenant_id: req_ctx.tenant_id,

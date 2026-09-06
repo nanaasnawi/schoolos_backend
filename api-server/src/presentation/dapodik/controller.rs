@@ -428,6 +428,7 @@ pub struct DapodikRawStudent {
     pub agama_id_str: Option<String>,
     pub nama_ayah: Option<String>,
     pub pekerjaan_ayah_id_str: Option<String>,
+    #[serde(alias = "nama_ibu_kandung", alias = "nama_ibu_kandung_str", alias = "ibu_kandung")]
     pub nama_ibu: Option<String>,
     pub pekerjaan_ibu_id_str: Option<String>,
     pub nama_wali: Option<String>,
@@ -601,33 +602,84 @@ pub async fn pull_dapodik_records(
 
     // ── 3. Pre-fetch Roles Once (Finding 2) ───────────────────────────────────
     let role_guru_id = match sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO roles (id, tenant_id, name, permissions, created_at) VALUES ($1, $2, 'Guru', '[\"StudentView\", \"ClassView\"]', NOW()) ON CONFLICT (tenant_id, name) DO UPDATE SET updated_at = EXCLUDED.created_at RETURNING id"
+        "SELECT id FROM roles WHERE tenant_id = $1 AND name = 'Guru' LIMIT 1",
     )
-    .bind(Uuid::now_v7())
     .bind(ctx.tenant_id)
-    .fetch_one(&mut *tx)
-    .await {
-        Ok(id) => id,
-        Err(_) => sqlx::query_scalar::<_, Uuid>("SELECT id FROM roles WHERE tenant_id = $1 AND name = 'Guru'")
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Internal(format!("Database error reading Guru role: {}", e)),
+            &ctx.request_id,
+        )
+    })? {
+        Some(id) => id,
+        None => {
+            let new_role_id = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO roles (id, tenant_id, name, description, allowed_platforms, is_system_default, created_at, updated_at) VALUES ($1, $2, 'Guru', 'Guru / Tenaga Pendidik', 'WEB, ANDROID', true, NOW(), NOW())"
+            )
+            .bind(new_role_id)
             .bind(ctx.tenant_id)
-            .fetch_one(&mut *tx)
+            .execute(&mut *tx)
             .await
-            .unwrap_or_else(|_| Uuid::now_v7()),
+            .map_err(|e| ApiError::new(ApplicationError::Internal(format!("Failed to insert Guru role: {}", e)), &ctx.request_id))?;
+            new_role_id
+        }
     };
 
     let role_siswa_id = match sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO roles (id, tenant_id, name, permissions, created_at) VALUES ($1, $2, 'Siswa', '[\"StudentView\"]', NOW()) ON CONFLICT (tenant_id, name) DO UPDATE SET updated_at = EXCLUDED.created_at RETURNING id"
+        "SELECT id FROM roles WHERE tenant_id = $1 AND name = 'Siswa' LIMIT 1",
     )
-    .bind(Uuid::now_v7())
     .bind(ctx.tenant_id)
-    .fetch_one(&mut *tx)
-    .await {
-        Ok(id) => id,
-        Err(_) => sqlx::query_scalar::<_, Uuid>("SELECT id FROM roles WHERE tenant_id = $1 AND name = 'Siswa'")
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Internal(format!("Database error reading Siswa role: {}", e)),
+            &ctx.request_id,
+        )
+    })? {
+        Some(id) => id,
+        None => {
+            let new_role_id = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO roles (id, tenant_id, name, description, allowed_platforms, is_system_default, created_at, updated_at) VALUES ($1, $2, 'Siswa', 'Siswa / Peserta Didik', 'ANDROID', true, NOW(), NOW())"
+            )
+            .bind(new_role_id)
             .bind(ctx.tenant_id)
-            .fetch_one(&mut *tx)
+            .execute(&mut *tx)
             .await
-            .unwrap_or_else(|_| Uuid::now_v7()),
+            .map_err(|e| ApiError::new(ApplicationError::Internal(format!("Failed to insert Siswa role: {}", e)), &ctx.request_id))?;
+            new_role_id
+        }
+    };
+
+    let role_wali_id = match sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM roles WHERE tenant_id = $1 AND name = 'Wali Siswa' LIMIT 1",
+    )
+    .bind(ctx.tenant_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Internal(format!("Database error reading Wali Siswa role: {}", e)),
+            &ctx.request_id,
+        )
+    })? {
+        Some(id) => id,
+        None => {
+            let new_role_id = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO roles (id, tenant_id, name, description, allowed_platforms, is_system_default, created_at, updated_at) VALUES ($1, $2, 'Wali Siswa', 'Orang Tua / Wali Siswa', 'ANDROID', true, NOW(), NOW())"
+            )
+            .bind(new_role_id)
+            .bind(ctx.tenant_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ApiError::new(ApplicationError::Internal(format!("Failed to insert Wali Siswa role: {}", e)), &ctx.request_id))?;
+            new_role_id
+        }
     };
 
     // ── 4. In-Memory Cache Pre-loading (Finding 2: Eliminating N+1) ───────────
@@ -651,6 +703,7 @@ pub async fn pull_dapodik_records(
     let mut teacher_by_nip: HashMap<String, Uuid> = HashMap::new();
     let mut teacher_by_nuptk: HashMap<String, Uuid> = HashMap::new();
     let mut teacher_by_name: HashMap<String, Uuid> = HashMap::new();
+    let mut teacher_by_email: HashMap<String, Uuid> = HashMap::new();
     for t in teacher_rows {
         if let Some(n) = t.nip {
             teacher_by_nip.insert(n, t.id);
@@ -659,6 +712,22 @@ pub async fn pull_dapodik_records(
             teacher_by_nuptk.insert(nup, t.id);
         }
         teacher_by_name.insert(t.full_name, t.id);
+    }
+
+    if let Ok(teacher_user_rows) = sqlx::query!(
+        r#"
+        SELECT t.id as teacher_id, u.email 
+        FROM teachers t 
+        JOIN users u ON t.user_id = u.id 
+        WHERE t.tenant_id = $1
+        "#,
+        ctx.tenant_id
+    )
+    .fetch_all(&mut *tx)
+    .await {
+        for r in teacher_user_rows {
+            teacher_by_email.insert(r.email.to_lowercase(), r.teacher_id);
+        }
     }
 
     let staff_rows = sqlx::query!(
@@ -674,16 +743,20 @@ pub async fn pull_dapodik_records(
         .collect();
 
     let student_rows = sqlx::query!(
-        "SELECT id, nisn, full_name FROM students WHERE tenant_id = $1",
+        "SELECT id, nisn, nik, full_name FROM students WHERE tenant_id = $1",
         ctx.tenant_id
     )
     .fetch_all(&mut *tx)
     .await
     .unwrap_or_default();
     let mut student_by_nisn: HashMap<String, Uuid> = HashMap::new();
+    let mut student_by_nik: HashMap<String, Uuid> = HashMap::new();
     let mut student_by_name: HashMap<String, Uuid> = HashMap::new();
     for s in student_rows {
         student_by_nisn.insert(s.nisn, s.id);
+        if let Some(n) = s.nik {
+            student_by_nik.insert(n, s.id);
+        }
         student_by_name.insert(s.full_name, s.id);
     }
 
@@ -715,6 +788,75 @@ pub async fn pull_dapodik_records(
 
     let mut imported_records: Vec<DapodikSyncRecordDto> = Vec::new();
     let now = Utc::now();
+
+    // ── 4.5. PULL PROFIL SEKOLAH (getSekolah) ──────────────────────────────────
+    let target_sekolah_url = format!(
+        "{}/WebService/getSekolah?npsn={}",
+        dapodik_url.trim_end_matches('/'),
+        npsn
+    );
+    let mut req_builder_sekolah = client.get(&target_sekolah_url);
+    if !token.is_empty() {
+        req_builder_sekolah = req_builder_sekolah.header("Authorization", format!("Bearer {}", token));
+    }
+    if let Ok(resp) = req_builder_sekolah.send().await {
+        if resp.status().is_success() {
+            if let Ok(val) = resp.json::<serde_json::Value>().await {
+                let row_obj = if val.is_object() && val.get("rows").is_some() {
+                    if val["rows"].is_array() {
+                        val["rows"].as_array().and_then(|a| a.first()).cloned()
+                    } else {
+                        val.get("rows").cloned()
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(r) = row_obj {
+                    let sek_nama = r.get("nama").and_then(|v| v.as_str());
+                    let sek_npsn = r.get("npsn").and_then(|v| v.as_str());
+                    let sek_jalan = r.get("alamat_jalan").and_then(|v| v.as_str()).unwrap_or_default();
+                    let sek_desa = r.get("desa_kelurahan").and_then(|v| v.as_str()).unwrap_or_default();
+                    let sek_kec = r.get("kecamatan").and_then(|v| v.as_str()).unwrap_or_default();
+                    let sek_kab = r.get("kabupaten_kota").and_then(|v| v.as_str()).unwrap_or_default();
+                    let sek_prov = r.get("provinsi").and_then(|v| v.as_str()).unwrap_or_default();
+                    let sek_pos = r.get("kode_pos").and_then(|v| v.as_str()).unwrap_or_default();
+                    let sek_telp = r.get("nomor_telepon").and_then(|v| v.as_str());
+                    let sek_email = r.get("email").and_then(|v| v.as_str());
+
+                    let mut parts: Vec<&str> = Vec::new();
+                    if !sek_jalan.is_empty() { parts.push(sek_jalan); }
+                    if !sek_desa.is_empty() { parts.push(sek_desa); }
+                    if !sek_kec.is_empty() { parts.push(sek_kec); }
+                    if !sek_kab.is_empty() { parts.push(sek_kab); }
+                    if !sek_prov.is_empty() { parts.push(sek_prov); }
+                    if !sek_pos.is_empty() { parts.push(sek_pos); }
+                    let full_address = parts.join(", ");
+
+                    let _ = sqlx::query!(
+                        r#"
+                        UPDATE schools 
+                        SET name = COALESCE($1, name),
+                            npsn = COALESCE($2, npsn),
+                            address = $3,
+                            phone_number = COALESCE($4, phone_number),
+                            email = COALESCE($5, email),
+                            updated_at = NOW()
+                        WHERE tenant_id = $6
+                        "#,
+                        sek_nama,
+                        sek_npsn,
+                        full_address,
+                        sek_telp,
+                        sek_email,
+                        ctx.tenant_id
+                    )
+                    .execute(&mut *tx)
+                    .await;
+                }
+            }
+        }
+    }
 
     // ── 5. PULL GTK (Guru & Tendik) ──────────────────────────────────────────
     let target_gtk_url = format!(
@@ -769,18 +911,23 @@ pub async fn pull_dapodik_records(
                         ptk_id.chars().take(8).collect::<String>()
                     );
 
-                    let _ = sqlx::query(
-                        "INSERT INTO users (id, tenant_id, email, password_hash, full_name, is_active, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, true, $6, $6) ON CONFLICT (tenant_id, email) DO NOTHING"
-                    ).bind(user_id).bind(ctx.tenant_id).bind(&email).bind("$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY").bind(&nama).bind(now).execute(&mut *tx).await;
-
-                    let actual_user_id = sqlx::query_scalar::<_, Uuid>(
-                        "SELECT id FROM users WHERE tenant_id = $1 AND email = $2",
+                    let actual_user_id = match sqlx::query_scalar::<_, Uuid>(
+                        r#"
+                        INSERT INTO users (id, tenant_id, email, password_hash, full_name, is_active, created_at, updated_at) 
+                        VALUES ($1, $2, $3, $4, $5, true, $6, $6) 
+                        ON CONFLICT (tenant_id, email) DO UPDATE SET full_name = EXCLUDED.full_name, updated_at = EXCLUDED.updated_at
+                        RETURNING id
+                        "#
                     )
-                    .bind(ctx.tenant_id)
-                    .bind(&email)
+                    .bind(user_id).bind(ctx.tenant_id).bind(&email).bind("$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY").bind(&nama).bind(now)
                     .fetch_one(&mut *tx)
-                    .await
-                    .unwrap_or(user_id);
+                    .await {
+                        Ok(uid) => uid,
+                        Err(e) => {
+                            tracing::error!("Failed to upsert user for teacher {}: {}", nama, e);
+                            continue;
+                        }
+                    };
 
                     let _ = sqlx::query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
                         .bind(actual_user_id).bind(role_guru_id).execute(&mut *tx).await;
@@ -798,7 +945,7 @@ pub async fn pull_dapodik_records(
                         let existing_staff = staff_by_name.get(&nama_upper).copied();
 
                         if let Some(sid) = existing_staff {
-                            let _ = sqlx::query("UPDATE staff SET user_id = $1, job_title = $2, jk = $3, tempat_lahir = $4, tanggal_lahir = $5, agama = $6, updated_at = $7 WHERE id = $8")
+                            let _ = sqlx::query("UPDATE staff SET user_id = COALESCE(staff.user_id, $1), job_title = $2, jk = $3, tempat_lahir = $4, tanggal_lahir = $5, agama = $6, updated_at = $7 WHERE id = $8")
                                 .bind(actual_user_id).bind(&job_title).bind(&gtk.jenis_kelamin).bind(&gtk.tempat_lahir).bind(tgl_lahir).bind(&gtk.agama_id_str).bind(now).bind(sid)
                                 .execute(&mut *tx).await;
                         } else {
@@ -845,7 +992,7 @@ pub async fn pull_dapodik_records(
                             let _ = sqlx::query(
                                 r#"
                                 UPDATE teachers 
-                                SET user_id = $1, subject = COALESCE($2, teachers.subject), jk = $3, tempat_lahir = $4, tanggal_lahir = $5, agama = $6, updated_at = $7, nuptk = COALESCE($8, teachers.nuptk)
+                                SET user_id = COALESCE(teachers.user_id, $1), subject = COALESCE($2, teachers.subject), jk = $3, tempat_lahir = $4, tanggal_lahir = $5, agama = $6, updated_at = $7, nuptk = COALESCE($8, teachers.nuptk)
                                 WHERE id = $9
                                 "#
                             )
@@ -926,19 +1073,57 @@ pub async fn pull_dapodik_records(
 
                 for rmbl in rombels {
                     let nama_rombel = rmbl.nama.unwrap_or_else(|| "ROMBEL DAPODIK".to_string());
+                    // KKA adalah pelajaran tambahan/keterampilan, bukan rombel kelas utama
+                    if nama_rombel.trim().starts_with("KKA") {
+                        continue;
+                    }
                     let new_id = Uuid::now_v7();
+
+                    let matched_teacher_id = rmbl.ptk_id.as_ref().and_then(|pid| {
+                        let prefix = pid.chars().take(8).collect::<String>();
+                        let expected_email = format!("{}@guru.schoolos.id", prefix).to_lowercase();
+                        teacher_by_email.get(&expected_email).copied()
+                    }).or_else(|| {
+                        let guru_name = match nama_rombel.trim() {
+                            "PAKET A4" => Some("KRISTIANTI"),
+                            "PAKET A5" => Some("AMIN LISANA"),
+                            "PAKET A6" => Some("ASEP RIFAI"),
+                            "PAKET B7" => Some("KRISTIANTI"),
+                            "PAKET B8" | "PAKET B8a" => Some("SITI MUNIROH"),
+                            "PAKET B8b" => Some("FITRI NAFISAH"),
+                            "PAKET B9" => Some("SRI MULYANI.S.AG"),
+                            "PAKET C10" => Some("ESI ROKESI"),
+                            "PAKET C11a" | "PAKET C11b" => Some("TAUFIQ HIDAYAT"),
+                            "PAKET C12a" | "PAKET C12b" => Some("ASY SYIFA RAHMAH IHSANI"),
+                            "KKA C11 1" => Some("ASEP RIFAI"),
+                            "KKA C11 2" => Some("KRISTIANTI"),
+                            "KKA C11 3" => Some("AMIN LISANA"),
+                            "KKA C11 4" => Some("EHA MEIDA KARTIKA"),
+                            "KKA C12 1" => Some("ROHMANA"),
+                            "KKA C12 2" => Some("KUSWANTO ADI WIJAYA"),
+                            "KKA C12 3" => Some("ASY SYIFA RAHMAH IHSANI"),
+                            "KKA C12 4" => Some("SRI MULYANI.S.AG"),
+                            _ => None,
+                        };
+                        guru_name.and_then(|gn| teacher_by_name.get(gn).copied())
+                    });
 
                     if !class_map.contains_key(&nama_rombel) {
                         let _ = sqlx::query(
                             r#"
-                            INSERT INTO classes (id, tenant_id, academic_year_id, grade_level_id, name, capacity, created_at, updated_at)
-                            VALUES ($1, $2, $3, $4, $5, 30, $6, $6)
+                            INSERT INTO classes (id, tenant_id, academic_year_id, grade_level_id, name, capacity, homeroom_teacher_id, created_at, updated_at)
+                            VALUES ($1, $2, $3, $4, $5, 30, $6, $7, $7)
                             "#
                         )
                         .bind(new_id).bind(ctx.tenant_id).bind(academic_year_id).bind(grade_level_id)
-                        .bind(&nama_rombel).bind(now).execute(&mut *tx).await;
+                        .bind(&nama_rombel).bind(matched_teacher_id).bind(now).execute(&mut *tx).await;
 
                         class_map.insert(nama_rombel.clone(), new_id);
+                    } else if let Some(existing_cid) = class_map.get(&nama_rombel) {
+                        if let Some(tid) = matched_teacher_id {
+                            let _ = sqlx::query("UPDATE classes SET homeroom_teacher_id = $1, updated_at = $2 WHERE id = $3")
+                                .bind(tid).bind(now).bind(existing_cid).execute(&mut *tx).await;
+                        }
                     }
 
                     // Extract Pembelajaran (Mata Pelajaran) from Rombel
@@ -1160,35 +1345,46 @@ pub async fn pull_dapodik_records(
                         pd_id.chars().take(8).collect::<String>()
                     );
 
-                    let _ = sqlx::query(
-                        "INSERT INTO users (id, tenant_id, email, password_hash, full_name, is_active, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, true, $6, $6) ON CONFLICT (tenant_id, email) DO UPDATE SET full_name = EXCLUDED.full_name, updated_at = EXCLUDED.updated_at"
-                    ).bind(user_id).bind(ctx.tenant_id).bind(&email).bind("$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY").bind(&nama).bind(now).execute(&mut *tx).await;
-
-                    let actual_user_id = sqlx::query_scalar::<_, Uuid>(
-                        "SELECT id FROM users WHERE tenant_id = $1 AND email = $2",
+                    let actual_user_id = match sqlx::query_scalar::<_, Uuid>(
+                        r#"
+                        INSERT INTO users (id, tenant_id, email, password_hash, full_name, is_active, created_at, updated_at) 
+                        VALUES ($1, $2, $3, $4, $5, true, $6, $6) 
+                        ON CONFLICT (tenant_id, email) DO UPDATE SET full_name = EXCLUDED.full_name, updated_at = EXCLUDED.updated_at
+                        RETURNING id
+                        "#
                     )
+                    .bind(user_id)
                     .bind(ctx.tenant_id)
                     .bind(&email)
+                    .bind("$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY")
+                    .bind(&nama)
+                    .bind(now)
                     .fetch_one(&mut *tx)
-                    .await
-                    .unwrap_or(user_id);
+                    .await {
+                        Ok(uid) => uid,
+                        Err(e) => {
+                            tracing::error!("Failed to upsert user for student {}: {}", nama, e);
+                            continue;
+                        }
+                    };
 
                     let _ = sqlx::query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
                         .bind(actual_user_id).bind(role_siswa_id).execute(&mut *tx).await;
 
                     // Guardian Handling (using guardian_map cache)
-                    let guardian_name = if let Some(ref a) = std
-                        .nama_ayah
-                        .as_ref()
-                        .filter(|s| !s.trim().is_empty() && *s != "-" && *s != "Tidak ada")
-                    {
-                        Some(a.trim().to_uppercase())
-                    } else if let Some(ref i) = std
+                    // Guardian Handling: User explicitly requested mother's name (nama_ibu / nama_ibu_kandung) as primary
+                    let guardian_name = if let Some(ref i) = std
                         .nama_ibu
                         .as_ref()
                         .filter(|s| !s.trim().is_empty() && *s != "-" && *s != "Tidak ada")
                     {
                         Some(i.trim().to_uppercase())
+                    } else if let Some(ref a) = std
+                        .nama_ayah
+                        .as_ref()
+                        .filter(|s| !s.trim().is_empty() && *s != "-" && *s != "Tidak ada")
+                    {
+                        Some(a.trim().to_uppercase())
                     } else if let Some(ref w) = std
                         .nama_wali
                         .as_ref()
@@ -1216,11 +1412,43 @@ pub async fn pull_dapodik_records(
                             final_guardian_id = Some(gid);
                         } else {
                             let new_gid = Uuid::now_v7();
+                            
+                            // Provision user account for the guardian
+                            let guardian_email = format!("wali-{}@wali.schoolos.id", new_gid.to_string().chars().take(8).collect::<String>());
+                            let guardian_user_id = match sqlx::query_scalar::<_, Uuid>(
+                                r#"
+                                INSERT INTO users (id, tenant_id, email, password_hash, full_name, is_active, created_at, updated_at) 
+                                VALUES ($1, $2, $3, $4, $5, true, $6, $6) 
+                                ON CONFLICT (tenant_id, email) DO UPDATE SET full_name = EXCLUDED.full_name, updated_at = EXCLUDED.updated_at
+                                RETURNING id
+                                "#
+                            )
+                            .bind(Uuid::now_v7())
+                            .bind(ctx.tenant_id)
+                            .bind(&guardian_email)
+                            .bind("$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY")
+                            .bind(g_name)
+                            .bind(now)
+                            .fetch_one(&mut *tx)
+                            .await {
+                                Ok(uid) => Some(uid),
+                                Err(e) => {
+                                    tracing::warn!("Failed to create user account for guardian {}: {}", g_name, e);
+                                    None
+                                }
+                            };
+
+                            if let Some(uid) = guardian_user_id {
+                                let _ = sqlx::query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+                                    .bind(uid).bind(role_wali_id).execute(&mut *tx).await;
+                            }
+
                             if let Ok(_) = sqlx::query(
-                                "INSERT INTO guardians (id, tenant_id, full_name, phone_number, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $5)"
+                                "INSERT INTO guardians (id, tenant_id, user_id, full_name, phone_number, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $6)"
                             )
                             .bind(new_gid)
                             .bind(ctx.tenant_id)
+                            .bind(guardian_user_id)
                             .bind(g_name)
                             .bind(&guardian_phone)
                             .bind(now)
@@ -1232,28 +1460,35 @@ pub async fn pull_dapodik_records(
                         }
                     }
 
-                    // Student Record Upsert (using student_by_nisn cache)
-                    let existing_student_id = if !final_nisn.starts_with("T-") {
-                        student_by_nisn.get(&final_nisn).copied()
-                    } else {
-                        student_by_name.get(&nama_upper).copied()
-                    };
+                    // Student Record Upsert (using student_by_nisn, student_by_nik, student_by_name)
+                    let existing_student_id = student_by_nisn.get(&final_nisn).copied()
+                        .or_else(|| nik.as_ref().and_then(|n| student_by_nik.get(n).copied()))
+                        .or_else(|| student_by_name.get(&nama_upper).copied());
 
                     let student_db_id = if let Some(sid) = existing_student_id {
-                        let _ = sqlx::query(
+                        let update_res = sqlx::query(
                             r#"
                             UPDATE students 
-                            SET full_name = $1, user_id = $2, nik = $3, gender = $4, place_of_birth = $5, date_of_birth = $6, religion = $7, 
+                            SET full_name = $1, user_id = COALESCE(students.user_id, $2), nik = $3, gender = $4, place_of_birth = $5, date_of_birth = $6, religion = $7, 
                                 guardian_id = COALESCE($8, students.guardian_id), nipd = COALESCE($9, students.nipd),
                                 alamat_jalan = COALESCE($10, students.alamat_jalan), no_hp = COALESCE($11, students.no_hp),
-                                email = COALESCE($12, students.email), status = 'active', updated_at = $13
-                            WHERE id = $14
+                                email = COALESCE($12, students.email), status = 'active', updated_at = $13, nisn = $14
+                            WHERE id = $15
                             "#
                         )
                         .bind(&nama_upper).bind(actual_user_id).bind(&nik).bind(&std.jenis_kelamin).bind(&std.tempat_lahir)
                         .bind(std.tanggal_lahir.as_ref().and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()))
                         .bind(&std.agama_id_str).bind(final_guardian_id).bind(nipd_val.clone()).bind(&student_address).bind(&guardian_phone)
-                        .bind(&std.email).bind(now).bind(sid).execute(&mut *tx).await;
+                        .bind(&std.email).bind(now).bind(&final_nisn).bind(sid).execute(&mut *tx).await;
+
+                        if let Err(ref e) = update_res {
+                            tracing::error!("Failed to update student (NISN: {}, Name: {}): {}", final_nisn, nama, e);
+                        }
+                        student_by_nisn.insert(final_nisn.clone(), sid);
+                        if let Some(ref n) = nik {
+                            student_by_nik.insert(n.clone(), sid);
+                        }
+                        student_by_name.insert(nama_upper.clone(), sid);
                         sid
                     } else {
                         let inserted_id = sqlx::query_scalar::<_, Uuid>(
@@ -1541,10 +1776,25 @@ pub async fn generate_prefill_dapodik(
                         .await;
 
                         let role_siswa_id = match sqlx::query_scalar::<_, Uuid>(
-                            "INSERT INTO roles (id, tenant_id, name, permissions, created_at) VALUES ($1, $2, 'Siswa', '[\"StudentView\"]', $3) ON CONFLICT (tenant_id, name) DO UPDATE SET updated_at = EXCLUDED.created_at RETURNING id"
-                        ).bind(Uuid::now_v7()).bind(ctx.tenant_id).bind(now).fetch_one(&state.pool).await {
-                            Ok(id) => id,
-                            Err(_) => sqlx::query_scalar::<_, Uuid>("SELECT id FROM roles WHERE tenant_id = $1 AND name = 'Siswa'").bind(ctx.tenant_id).fetch_one(&state.pool).await.unwrap_or(Uuid::now_v7()),
+                            "SELECT id FROM roles WHERE tenant_id = $1 AND name = 'Siswa' LIMIT 1"
+                        )
+                        .bind(ctx.tenant_id)
+                        .fetch_optional(&state.pool)
+                        .await
+                        .unwrap_or(None)
+                        {
+                            Some(id) => id,
+                            None => {
+                                let new_role_id = Uuid::now_v7();
+                                let _ = sqlx::query(
+                                    "INSERT INTO roles (id, tenant_id, name, description, allowed_platforms, is_system_default, created_at, updated_at) VALUES ($1, $2, 'Siswa', 'Siswa / Peserta Didik', 'ANDROID', true, NOW(), NOW())"
+                                )
+                                .bind(new_role_id)
+                                .bind(ctx.tenant_id)
+                                .execute(&state.pool)
+                                .await;
+                                new_role_id
+                            }
                         };
 
                         let user_id = Uuid::now_v7();
@@ -1553,18 +1803,28 @@ pub async fn generate_prefill_dapodik(
                             nisn.to_lowercase().replace(" ", "")
                         );
 
-                        let _ = sqlx::query(
-                            "INSERT INTO users (id, tenant_id, email, password_hash, full_name, is_active, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, true, $6, $6) ON CONFLICT (tenant_id, email) DO NOTHING"
-                        ).bind(user_id).bind(ctx.tenant_id).bind(&email).bind("$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY").bind(&nama).bind(now).execute(&state.pool).await;
-
-                        let actual_user_id = sqlx::query_scalar::<_, Uuid>(
-                            "SELECT id FROM users WHERE tenant_id = $1 AND email = $2",
+                        let actual_user_id = match sqlx::query_scalar::<_, Uuid>(
+                            r#"
+                            INSERT INTO users (id, tenant_id, email, password_hash, full_name, is_active, created_at, updated_at) 
+                            VALUES ($1, $2, $3, $4, $5, true, $6, $6) 
+                            ON CONFLICT (tenant_id, email) DO UPDATE SET full_name = EXCLUDED.full_name, updated_at = EXCLUDED.updated_at
+                            RETURNING id
+                            "#
                         )
+                        .bind(user_id)
                         .bind(ctx.tenant_id)
                         .bind(&email)
+                        .bind("$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY")
+                        .bind(&nama)
+                        .bind(now)
                         .fetch_one(&state.pool)
-                        .await
-                        .unwrap_or(user_id);
+                        .await {
+                            Ok(uid) => uid,
+                            Err(e) => {
+                                tracing::error!("Failed to upsert user for prefill student {}: {}", nama, e);
+                                continue;
+                            }
+                        };
 
                         let _ = sqlx::query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(actual_user_id).bind(role_siswa_id).execute(&state.pool).await;
 
@@ -1573,7 +1833,7 @@ pub async fn generate_prefill_dapodik(
                             INSERT INTO students (id, tenant_id, user_id, nisn, full_name, status, created_at, updated_at)
                             VALUES ($1, $2, $3, $4, $5, 'Active', $6, $6)
                             ON CONFLICT (tenant_id, nisn) DO UPDATE 
-                            SET full_name = EXCLUDED.full_name, user_id = EXCLUDED.user_id, updated_at = EXCLUDED.updated_at
+                            SET full_name = EXCLUDED.full_name, user_id = COALESCE(students.user_id, EXCLUDED.user_id), updated_at = EXCLUDED.updated_at
                             "#
                         )
                         .bind(new_id)

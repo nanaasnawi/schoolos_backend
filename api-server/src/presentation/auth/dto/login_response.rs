@@ -13,6 +13,9 @@ pub struct LoginResponse {
     pub expires_in: usize,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -26,4 +29,22 @@ pub struct LoginResponse {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub school_name: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub school_logo_url: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identifier: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_name: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_name: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_id: Option<String>,
 }

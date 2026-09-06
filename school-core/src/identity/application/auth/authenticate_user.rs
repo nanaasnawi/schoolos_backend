@@ -1,6 +1,7 @@
 use crate::common::domain::clock::Clock;
 use crate::common::error::ApplicationError;
 use crate::common::error_code::ErrorCode;
+use crate::identity::domain::user::User;
 use crate::identity::infrastructure::pg_user_repository::UserRepository;
 use argon2::{
     password_hash::{PasswordHash, PasswordVerifier},
@@ -52,7 +53,7 @@ impl AuthenticateUserUseCase {
     pub async fn execute(
         &self,
         command: AuthenticateUserCommand,
-    ) -> Result<String, ApplicationError> {
+    ) -> Result<(String, User), ApplicationError> {
         let user_opt = self
             .user_repo
             .find_by_email(command.tenant_id, &command.email)
@@ -99,7 +100,7 @@ impl AuthenticateUserUseCase {
                 .map_err(|e| {
                     ApplicationError::Internal(format!("Failed to encode token: {}", e))
                 })?;
-                return Ok(token);
+                return Ok((token, user));
             }
         }
 
@@ -109,3 +110,4 @@ impl AuthenticateUserUseCase {
         ))
     }
 }
+

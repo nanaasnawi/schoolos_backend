@@ -19,6 +19,14 @@ pub struct AssignmentResponse {
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub teacher_name: Option<String>,
 }
 
 impl From<Assignment> for AssignmentResponse {
@@ -37,6 +45,10 @@ impl From<Assignment> for AssignmentResponse {
             is_active: a.is_active,
             created_at: a.created_at,
             updated_at: a.updated_at,
+            class_id: None,
+            class_name: None,
+            subject_name: None,
+            teacher_name: None,
         }
     }
 }
