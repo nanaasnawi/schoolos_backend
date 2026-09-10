@@ -500,6 +500,8 @@ pub struct AgentInfoResponse {
     pub tenant_id: String,
     pub school_name: String,
     pub npsn: String,
+    pub dapodik_url: String,
+    pub dapodik_token: String,
     pub total_students: i64,
     pub total_teachers: i64,
     pub total_classes: i64,
@@ -510,7 +512,7 @@ pub async fn get_agent_info(
     state: State<ApplicationContext>,
 ) -> Result<Json<ApiResponse<AgentInfoResponse>>, ApiError> {
     let school = sqlx::query!(
-        "SELECT name, npsn FROM schools WHERE tenant_id = $1 LIMIT 1",
+        "SELECT name, npsn, dapodik_url, dapodik_token FROM schools WHERE tenant_id = $1 LIMIT 1",
         ctx.tenant_id
     )
     .fetch_optional(&state.pool)
@@ -544,10 +546,28 @@ pub async fn get_agent_info(
     .unwrap_or(Some(0))
     .unwrap_or(0);
 
+    let (school_name, npsn, dapodik_url, dapodik_token) = if let Some(s) = school {
+        (
+            s.name,
+            s.npsn.unwrap_or_default(),
+            s.dapodik_url.unwrap_or_else(|| "http://127.0.0.1:5774".to_string()),
+            s.dapodik_token.unwrap_or_default(),
+        )
+    } else {
+        (
+            "School OS".into(),
+            String::new(),
+            "http://127.0.0.1:5774".to_string(),
+            String::new(),
+        )
+    };
+
     let info = AgentInfoResponse {
         tenant_id: ctx.tenant_id.to_string(),
-        school_name: school.as_ref().map(|s| s.name.clone()).unwrap_or_else(|| "School OS".into()),
-        npsn: school.as_ref().and_then(|s| s.npsn.clone()).unwrap_or_else(|| "P2962010".into()),
+        school_name,
+        npsn,
+        dapodik_url,
+        dapodik_token,
         total_students,
         total_teachers,
         total_classes,

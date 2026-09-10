@@ -19,15 +19,15 @@ impl Default for AgentConfig {
             cloud_url: "https://schoolosbackend-production.up.railway.app".to_string(),
             cloud_token: String::new(),
             dapodik_url: "http://127.0.0.1:5774".to_string(),
-            npsn: "P2962010".to_string(),
-            dapodik_token: "AuOczk2Vrzi62S0".to_string(),
+            npsn: String::new(),
+            dapodik_token: String::new(),
             sync_interval_mins: 60,
         }
     }
 }
 
 pub fn default_config_path() -> PathBuf {
-    // Check if schoolos-agent.json exists next to executable
+    // 1. Check next to executable
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(parent) = exe_path.parent() {
             let next_to_exe = parent.join("schoolos-agent.json");
@@ -36,6 +36,34 @@ pub fn default_config_path() -> PathBuf {
             }
         }
     }
+
+    // 2. Check current working directory
+    let cur = PathBuf::from("schoolos-agent.json");
+    if cur.exists() {
+        return cur;
+    }
+
+    // 3. Check Windows Downloads, Desktop, and Documents folders
+    if let Ok(user_profile) = std::env::var("USERPROFILE") {
+        let downloads = PathBuf::from(&user_profile).join("Downloads").join("schoolos-agent.json");
+        if downloads.exists() {
+            println!("📂 Otomatis menemukan konfigurasi di folder Downloads: {:?}", downloads);
+            return downloads;
+        }
+
+        let desktop = PathBuf::from(&user_profile).join("Desktop").join("schoolos-agent.json");
+        if desktop.exists() {
+            println!("📂 Otomatis menemukan konfigurasi di Desktop: {:?}", desktop);
+            return desktop;
+        }
+
+        let documents = PathBuf::from(&user_profile).join("Documents").join("schoolos-agent.json");
+        if documents.exists() {
+            println!("📂 Otomatis menemukan konfigurasi di Documents: {:?}", documents);
+            return documents;
+        }
+    }
+
     PathBuf::from("schoolos-agent.json")
 }
 
@@ -89,7 +117,6 @@ pub fn interactive_setup(target_path: &Path) -> Result<AgentConfig, Box<dyn std:
 
     let default_cloud = "https://schoolosbackend-production.up.railway.app";
     let default_dapodik = "http://127.0.0.1:5774";
-    let default_npsn = "P2962010";
     let default_interval = "60";
 
     let cloud_url = prompt_line("1. URL Server School OS Cloud", Some(default_cloud));
@@ -98,8 +125,8 @@ pub fn interactive_setup(target_path: &Path) -> Result<AgentConfig, Box<dyn std:
         None,
     );
     let dapodik_url = prompt_line("3. URL WebService Dapodik Lokal", Some(default_dapodik));
-    let npsn = prompt_line("4. NPSN Sekolah", Some(default_npsn));
-    let dapodik_token = prompt_line("5. Token WebService Dapodik", Some("AuOczk2Vrzi62S0"));
+    let npsn = prompt_line("4. NPSN Sekolah", None);
+    let dapodik_token = prompt_line("5. Token WebService Dapodik (dari Aplikasi Dapodik)", None);
     let interval_str = prompt_line("6. Interval Auto-Sync (Menit)", Some(default_interval));
     let sync_interval_mins = interval_str.parse::<u64>().unwrap_or(60);
 
