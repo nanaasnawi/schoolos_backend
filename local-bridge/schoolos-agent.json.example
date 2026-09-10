@@ -1,0 +1,8 @@
+{
+  "cloud_url": "https://schoolosbackend-production.up.railway.app",
+  "cloud_token": "TEMPEL_TOKEN_PAIRING_DARI_DASHBOARD_DAPODIK",
+  "dapodik_url": "http://127.0.0.1:5774",
+  "npsn": "P2962010",
+  "dapodik_token": "AuOczk2Vrzi62S0",
+  "sync_interval_mins": 60
+}

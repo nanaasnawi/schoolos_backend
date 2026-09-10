@@ -112,6 +112,8 @@ pub fn dapodik_routes() -> Router<ApplicationContext> {
         .route("/sync-records", get(list_sync_records))
         .route("/outbox-jobs", get(list_outbox_jobs))
         .route("/pull", post(pull_dapodik_records))
+        .route("/agent/sync", post(pull_dapodik_records))
+        .route("/agent/info", get(get_agent_info))
         .route("/push", post(push_dapodik_job))
         .route("/prefill/generate", post(generate_prefill_dapodik))
         .route("/prefill/upload", post(upload_prefill_file))
@@ -404,14 +406,7 @@ pub async fn check_dapodik_health(
     Ok(Json(ApiResponse::success(response, ctx.request_id)))
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct PullDapodikRequest {
-    pub dapodik_url: Option<String>,
-    pub npsn: Option<String>,
-    pub bearer_token: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 #[allow(dead_code)]
 pub struct DapodikRawStudent {
     pub peserta_didik_id: Option<String>,
@@ -446,7 +441,7 @@ pub struct DapodikRawStudent {
     pub aktif: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct DapodikRawGtk {
     pub ptk_id: Option<String>,
     pub nip: Option<String>,
@@ -466,7 +461,7 @@ pub struct DapodikRawGtk {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct DapodikRawPembelajaran {
     pub pembelajaran_id: Option<String>,
     pub mata_pelajaran_id: Option<serde_json::Value>,
@@ -478,7 +473,7 @@ pub struct DapodikRawPembelajaran {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct DapodikRawRombel {
     pub rombongan_belajar_id: Option<String>,
     pub nama: Option<String>,
@@ -489,15 +484,97 @@ pub struct DapodikRawRombel {
     pub pembelajaran: Option<Vec<DapodikRawPembelajaran>>,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct PullDapodikRequest {
+    pub dapodik_url: Option<String>,
+    pub npsn: Option<String>,
+    pub bearer_token: Option<String>,
+    pub raw_students: Option<Vec<DapodikRawStudent>>,
+    pub raw_gtk: Option<Vec<DapodikRawGtk>>,
+    pub raw_rombel: Option<Vec<DapodikRawRombel>>,
+    pub raw_sekolah: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AgentInfoResponse {
+    pub tenant_id: String,
+    pub school_name: String,
+    pub npsn: String,
+    pub total_students: i64,
+    pub total_teachers: i64,
+    pub total_classes: i64,
+}
+
+pub async fn get_agent_info(
+    ctx: RequestContext,
+    state: State<ApplicationContext>,
+) -> Result<Json<ApiResponse<AgentInfoResponse>>, ApiError> {
+    let school = sqlx::query!(
+        "SELECT name, npsn FROM schools WHERE tenant_id = $1 LIMIT 1",
+        ctx.tenant_id
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or_default();
+
+    let total_students = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM students WHERE tenant_id = $1 AND deleted_at IS NULL",
+        ctx.tenant_id
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or(Some(0))
+    .unwrap_or(0);
+
+    let total_teachers = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM teachers WHERE tenant_id = $1 AND deleted_at IS NULL",
+        ctx.tenant_id
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or(Some(0))
+    .unwrap_or(0);
+
+    let total_classes = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM classes WHERE tenant_id = $1 AND deleted_at IS NULL",
+        ctx.tenant_id
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or(Some(0))
+    .unwrap_or(0);
+
+    let info = AgentInfoResponse {
+        tenant_id: ctx.tenant_id.to_string(),
+        school_name: school.as_ref().map(|s| s.name.clone()).unwrap_or_else(|| "School OS".into()),
+        npsn: school.as_ref().and_then(|s| s.npsn.clone()).unwrap_or_else(|| "P2962010".into()),
+        total_students,
+        total_teachers,
+        total_classes,
+    };
+
+    Ok(Json(ApiResponse::success(info, ctx.request_id)))
+}
+
 pub async fn pull_dapodik_records(
     ctx: RequestContext,
     state: State<ApplicationContext>,
     payload: Option<Json<PullDapodikRequest>>,
 ) -> Result<Json<ApiResponse<Vec<DapodikSyncRecordDto>>>, ApiError> {
-    let (override_url, override_npsn, override_token) = match payload {
-        Some(Json(req)) => (req.dapodik_url, req.npsn, req.bearer_token),
-        None => (None, None, None),
+    let (override_url, override_npsn, override_token, agent_students, agent_gtk, agent_rombel, agent_sekolah) = match payload {
+        Some(Json(req)) => (
+            req.dapodik_url,
+            req.npsn,
+            req.bearer_token,
+            req.raw_students,
+            req.raw_gtk,
+            req.raw_rombel,
+            req.raw_sekolah,
+        ),
+        None => (None, None, None, None, None, None, None),
     };
+
+    let is_agent_sync = agent_students.is_some();
 
     let (dapodik_url, host, port, npsn, token) = resolve_dapodik_config(
         &state.pool,
@@ -508,16 +585,18 @@ pub async fn pull_dapodik_records(
     )
     .await;
 
-    // Probe TCP connectivity
-    let is_online = probe_dapodik_tcp(&host, port).await;
-    if !is_online {
-        return Err(ApiError::new(
-            ApplicationError::Internal(format!(
-                "Sinkronisasi PULL Dibatalkan: Dapodik WebService ({}) sedang OFFLINE / Tidak Terjangkau. Pastikan aplikasi Dapodik dan WebService port {} di-start di host {}.",
-                dapodik_url, port, host
-            )),
-            &ctx.request_id,
-        ));
+    // Probe TCP connectivity only when performing direct web pull
+    if !is_agent_sync {
+        let is_online = probe_dapodik_tcp(&host, port).await;
+        if !is_online {
+            return Err(ApiError::new(
+                ApplicationError::Internal(format!(
+                    "Sinkronisasi PULL Dibatalkan: Dapodik WebService ({}) sedang OFFLINE / Tidak Terjangkau. Pastikan aplikasi Dapodik dan WebService port {} di-start di host {}.",
+                    dapodik_url, port, host
+                )),
+                &ctx.request_id,
+            ));
+        }
     }
 
     let client = reqwest::Client::builder()
@@ -799,27 +878,41 @@ pub async fn pull_dapodik_records(
     let now = Utc::now();
 
     // ── 4.5. PULL PROFIL SEKOLAH (getSekolah) ──────────────────────────────────
-    let target_sekolah_url = format!(
-        "{}/WebService/getSekolah?npsn={}",
-        dapodik_url.trim_end_matches('/'),
-        npsn
-    );
-    let mut req_builder_sekolah = client.get(&target_sekolah_url);
-    if !token.is_empty() {
-        req_builder_sekolah = req_builder_sekolah.header("Authorization", format!("Bearer {}", token));
-    }
-    if let Ok(resp) = req_builder_sekolah.send().await {
-        if resp.status().is_success() {
-            if let Ok(val) = resp.json::<serde_json::Value>().await {
-                let row_obj = if val.is_object() && val.get("rows").is_some() {
-                    if val["rows"].is_array() {
-                        val["rows"].as_array().and_then(|a| a.first()).cloned()
-                    } else {
-                        val.get("rows").cloned()
-                    }
-                } else {
-                    None
-                };
+    let school_raw_val = if let Some(ref s) = agent_sekolah {
+        Some(s.clone())
+    } else {
+        let target_sekolah_url = format!(
+            "{}/WebService/getSekolah?npsn={}",
+            dapodik_url.trim_end_matches('/'),
+            npsn
+        );
+        let mut req_builder_sekolah = client.get(&target_sekolah_url);
+        if !token.is_empty() {
+            req_builder_sekolah = req_builder_sekolah.header("Authorization", format!("Bearer {}", token));
+        }
+        if let Ok(resp) = req_builder_sekolah.send().await {
+            if resp.status().is_success() {
+                resp.json::<serde_json::Value>().await.ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    if let Some(val) = school_raw_val {
+        let row_obj = if val.is_object() && val.get("rows").is_some() {
+            if val["rows"].is_array() {
+                val["rows"].as_array().and_then(|a| a.first()).cloned()
+            } else {
+                val.get("rows").cloned()
+            }
+        } else if val.is_object() && val.get("nama").is_some() {
+            Some(val)
+        } else {
+            None
+        };
 
                 if let Some(r) = row_obj {
                     let sek_nama = r.get("nama").and_then(|v| v.as_str());
@@ -863,37 +956,48 @@ pub async fn pull_dapodik_records(
                     .execute(&mut *tx)
                     .await;
                 }
-            }
-        }
     }
 
     // ── 5. PULL GTK (Guru & Tendik) ──────────────────────────────────────────
-    let target_gtk_url = format!(
-        "{}/WebService/getGtk?npsn={}&limit=5000",
-        dapodik_url.trim_end_matches('/'),
-        npsn
-    );
-    let mut req_builder_gtk = client.get(&target_gtk_url);
-    if !token.is_empty() {
-        req_builder_gtk = req_builder_gtk.header("Authorization", format!("Bearer {}", token));
-    }
+    let extracted_gtk: Option<Vec<DapodikRawGtk>> = if let Some(gtk) = agent_gtk {
+        Some(gtk)
+    } else {
+        let target_gtk_url = format!(
+            "{}/WebService/getGtk?npsn={}&limit=5000",
+            dapodik_url.trim_end_matches('/'),
+            npsn
+        );
+        let mut req_builder_gtk = client.get(&target_gtk_url);
+        if !token.is_empty() {
+            req_builder_gtk = req_builder_gtk.header("Authorization", format!("Bearer {}", token));
+        }
 
-    if let Ok(resp) = req_builder_gtk.send().await {
-        if resp.status().is_success() {
-            let raw_text = resp.text().await.unwrap_or_default();
-            tracing::info!(
-                "Dapodik getGtk raw response (first 200 chars): {}",
-                raw_text.chars().take(200).collect::<String>()
-            );
-            let parsed_value: Result<serde_json::Value, _> = serde_json::from_str(&raw_text);
-            let mut extracted_gtk: Option<Vec<DapodikRawGtk>> = None;
-            if let Ok(val) = parsed_value {
-                if val.is_array() {
-                    extracted_gtk = serde_json::from_value(val).ok();
-                } else if val.is_object() && val.get("rows").is_some() {
-                    extracted_gtk = serde_json::from_value(val["rows"].clone()).ok();
+        if let Ok(resp) = req_builder_gtk.send().await {
+            if resp.status().is_success() {
+                let raw_text = resp.text().await.unwrap_or_default();
+                tracing::info!(
+                    "Dapodik getGtk raw response (first 200 chars): {}",
+                    raw_text.chars().take(200).collect::<String>()
+                );
+                let parsed_value: Result<serde_json::Value, _> = serde_json::from_str(&raw_text);
+                if let Ok(val) = parsed_value {
+                    if val.is_array() {
+                        serde_json::from_value(val).ok()
+                    } else if val.is_object() && val.get("rows").is_some() {
+                        serde_json::from_value(val["rows"].clone()).ok()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
                 }
+            } else {
+                None
             }
+        } else {
+            None
+        }
+    };
             if let Some(teachers) = extracted_gtk {
                 for (idx, gtk) in teachers.into_iter().enumerate() {
                     let ptk_id = gtk.ptk_id.clone().unwrap_or_else(|| format!("ptk-{}", idx));
@@ -1046,37 +1150,48 @@ pub async fn pull_dapodik_records(
                     }
                 }
             }
-        }
-    }
 
     // ── 6. PULL ROMBEL & PEMBELAJARAN (MAPEL) ────────────────────────────────
-    let target_rombel_url = format!(
-        "{}/WebService/getRombonganBelajar?npsn={}&limit=5000",
-        dapodik_url.trim_end_matches('/'),
-        npsn
-    );
-    let mut req_builder_rombel = client.get(&target_rombel_url);
-    if !token.is_empty() {
-        req_builder_rombel =
-            req_builder_rombel.header("Authorization", format!("Bearer {}", token));
-    }
+    let extracted_rombel: Option<Vec<DapodikRawRombel>> = if let Some(rmbl) = agent_rombel {
+        Some(rmbl)
+    } else {
+        let target_rombel_url = format!(
+            "{}/WebService/getRombonganBelajar?npsn={}&limit=5000",
+            dapodik_url.trim_end_matches('/'),
+            npsn
+        );
+        let mut req_builder_rombel = client.get(&target_rombel_url);
+        if !token.is_empty() {
+            req_builder_rombel =
+                req_builder_rombel.header("Authorization", format!("Bearer {}", token));
+        }
 
-    if let Ok(resp) = req_builder_rombel.send().await {
-        if resp.status().is_success() {
-            let raw_text = resp.text().await.unwrap_or_default();
-            tracing::info!(
-                "Dapodik getRombel raw response (first 200 chars): {}",
-                raw_text.chars().take(200).collect::<String>()
-            );
-            let parsed_value: Result<serde_json::Value, _> = serde_json::from_str(&raw_text);
-            let mut extracted_rombel: Option<Vec<DapodikRawRombel>> = None;
-            if let Ok(val) = parsed_value {
-                if val.is_array() {
-                    extracted_rombel = serde_json::from_value(val).ok();
-                } else if val.is_object() && val.get("rows").is_some() {
-                    extracted_rombel = serde_json::from_value(val["rows"].clone()).ok();
+        if let Ok(resp) = req_builder_rombel.send().await {
+            if resp.status().is_success() {
+                let raw_text = resp.text().await.unwrap_or_default();
+                tracing::info!(
+                    "Dapodik getRombel raw response (first 200 chars): {}",
+                    raw_text.chars().take(200).collect::<String>()
+                );
+                let parsed_value: Result<serde_json::Value, _> = serde_json::from_str(&raw_text);
+                if let Ok(val) = parsed_value {
+                    if val.is_array() {
+                        serde_json::from_value(val).ok()
+                    } else if val.is_object() && val.get("rows").is_some() {
+                        serde_json::from_value(val["rows"].clone()).ok()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
                 }
+            } else {
+                None
             }
+        } else {
+            None
+        }
+    };
             if let Some(rombels) = extracted_rombel {
                 // Bersihkan kelas KKA lama dari PostgreSQL karena KKA bukan rombel kelas reguler
                 let _ = sqlx::query(
@@ -1223,47 +1338,63 @@ pub async fn pull_dapodik_records(
                     });
                 }
             }
-        }
-    }
 
     // ── 7. PULL PESERTA DIDIK (O(1) HashSet & Strict Rombel Safety) ──────────
-    let target_api_url = format!(
-        "{}/WebService/getPesertaDidik?npsn={}&limit=5000",
-        dapodik_url.trim_end_matches('/'),
-        npsn
-    );
-    let mut req_builder = client.get(&target_api_url);
-    if !token.is_empty() {
-        req_builder = req_builder.header("Authorization", format!("Bearer {}", token));
-    }
+    let extracted_students: Option<Vec<DapodikRawStudent>> = if let Some(std) = agent_students {
+        Some(std)
+    } else {
+        let target_api_url = format!(
+            "{}/WebService/getPesertaDidik?npsn={}&limit=5000",
+            dapodik_url.trim_end_matches('/'),
+            npsn
+        );
+        let mut req_builder = client.get(&target_api_url);
+        if !token.is_empty() {
+            req_builder = req_builder.header("Authorization", format!("Bearer {}", token));
+        }
 
-    let http_res = req_builder.send().await;
-    match http_res {
-        Ok(resp) => {
-            let status = resp.status();
-            if !status.is_success() {
+        let http_res = req_builder.send().await;
+        match http_res {
+            Ok(resp) => {
+                let status = resp.status();
+                if !status.is_success() {
+                    return Err(ApiError::new(
+                        ApplicationError::Internal(format!(
+                            "WebService Dapodik ({}) merespon HTTP status {}. Mohon cek NPSN dan Token WebService Dapodik di Pengaturan Sekolah.",
+                            target_api_url, status
+                        )),
+                        &ctx.request_id,
+                    ));
+                }
+                let raw_text = resp.text().await.unwrap_or_default();
+                tracing::info!(
+                    "Dapodik getPesertaDidik raw response (first 500 chars): {}",
+                    raw_text.chars().take(500).collect::<String>()
+                );
+                let parsed_value: Result<serde_json::Value, _> = serde_json::from_str(&raw_text);
+                if let Ok(val) = parsed_value {
+                    if val.is_array() {
+                        serde_json::from_value(val).ok()
+                    } else if val.is_object() && val.get("rows").is_some() {
+                        serde_json::from_value(val["rows"].clone()).ok()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            Err(err) => {
                 return Err(ApiError::new(
                     ApplicationError::Internal(format!(
-                        "WebService Dapodik ({}) merespon HTTP status {}. Mohon cek NPSN dan Token WebService Dapodik di Pengaturan Sekolah.",
-                        target_api_url, status
+                        "Koneksi HTTP ke Dapodik WebService gagal: {}",
+                        err
                     )),
                     &ctx.request_id,
                 ));
             }
-            let raw_text = resp.text().await.unwrap_or_default();
-            tracing::info!(
-                "Dapodik getPesertaDidik raw response (first 500 chars): {}",
-                raw_text.chars().take(500).collect::<String>()
-            );
-            let parsed_value: Result<serde_json::Value, _> = serde_json::from_str(&raw_text);
-            let mut extracted_students: Option<Vec<DapodikRawStudent>> = None;
-            if let Ok(val) = parsed_value {
-                if val.is_array() {
-                    extracted_students = serde_json::from_value(val).ok();
-                } else if val.is_object() && val.get("rows").is_some() {
-                    extracted_students = serde_json::from_value(val["rows"].clone()).ok();
-                }
-            }
+        }
+    };
             if let Some(students) = extracted_students {
                 // Finding 4: Use HashSet for O(1) duplicate & mutasi lookup
                 let mut active_nisns: HashSet<String> = HashSet::new();
@@ -1752,34 +1883,7 @@ pub async fn pull_dapodik_records(
                         empty_class_names
                     );
                 }
-            } else {
-                if raw_text.contains("Access denied") {
-                    return Err(ApiError::new(
-                        ApplicationError::Internal(
-                            "Akses WebService Dapodik Ditolak (Access Denied). Mohon cek 2 hal di Dapodik: 1) Buka menu Pengaturan > Web Service, pastikan 'IP Pengakses' diisi '127.0.0.1' / host server. 2) Pastikan 'Token WebService' dan 'NPSN' di Pengaturan School OS sudah sesuai dengan data di Dapodik.".to_string()
-                        ),
-                        &ctx.request_id,
-                    ));
-                }
-                return Err(ApiError::new(
-                    ApplicationError::Internal(format!(
-                        "Terhubung ke Dapodik WebService, tetapi respon WebService bukan JSON array peserta didik. Respon: {}",
-                        raw_text.chars().take(150).collect::<String>()
-                    )),
-                    &ctx.request_id,
-                ));
             }
-        }
-        Err(err) => {
-            return Err(ApiError::new(
-                ApplicationError::Internal(format!(
-                    "Koneksi HTTP ke Dapodik WebService gagal: {}",
-                    err
-                )),
-                &ctx.request_id,
-            ));
-        }
-    }
 
     // ── 10. Commit Database Transaction (Finding 1) ───────────────────────────
     tx.commit().await.map_err(|e| {
