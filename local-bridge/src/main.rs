@@ -1,13 +1,7 @@
-pub mod auth;
-pub mod config;
-pub mod dapodik_acl;
-pub mod domain;
-pub mod store;
-pub mod sync;
-
-use config::{default_config_path, interactive_setup, load_config, AgentConfig};
+use local_bridge::config::{default_config_path, interactive_setup, load_config, AgentConfig};
+use local_bridge::dapodik_acl::client::DapodikLocalClient;
+use local_bridge::sync::engine::SyncEngine;
 use std::env;
-use sync::engine::SyncEngine;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -110,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Mode Test
     if test_only {
         println!("🧪 Menguji koneksi Dapodik lokal...");
-        let dapodik_client = dapodik_acl::client::DapodikLocalClient::new(
+        let dapodik_client = DapodikLocalClient::new(
             config.dapodik_url.clone(),
             config.dapodik_token.clone(),
             config.npsn.clone(),
