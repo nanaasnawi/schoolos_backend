@@ -20,6 +20,9 @@ COPY api-server ./api-server
 COPY local-bridge ./local-bridge
 COPY hash-gen ./hash-gen
 COPY migrations ./migrations
+COPY .sqlx ./.sqlx
+
+ENV SQLX_OFFLINE=true
 
 # Build the api-server binary in release mode
 RUN cargo build --release -p api-server --bin api-server

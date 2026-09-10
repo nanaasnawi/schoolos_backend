@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    SELECT e.class_id \n                    FROM enrollments e \n                    JOIN students s ON s.id = e.student_id \n                    WHERE s.user_id = $1 AND e.status ILIKE 'active'\n                    LIMIT 1\n                    ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "class_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5c72cf9e8a2ff318534df2a425597d8efcac85c06b4acfe8377a3b63be667b62"
+}

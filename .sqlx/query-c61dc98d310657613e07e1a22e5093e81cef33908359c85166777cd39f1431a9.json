@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT COUNT(*)::int as \"count!\"\n        FROM learning_sessions\n        WHERE tenant_id = $1 AND (class_id IS NULL OR class_id = $2) AND status = 'completed' AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "c61dc98d310657613e07e1a22e5093e81cef33908359c85166777cd39f1431a9"
+}

@@ -1,0 +1,95 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT \n            cs.id, cs.tenant_id, cs.class_id, cs.subject_id, cs.teacher_id,\n            cs.day_of_week, cs.start_time, cs.end_time, COALESCE(cs.room, 'Ruang Kelas') as \"room!\",\n            s.name as subject_name, t.full_name as teacher_name, t.user_id as teacher_user_id,\n            c.name as class_name\n        FROM class_schedules cs\n        JOIN subjects s ON s.id = cs.subject_id\n        JOIN teachers t ON t.id = cs.teacher_id\n        JOIN classes c ON c.id = cs.class_id\n        WHERE cs.id = $1 AND cs.tenant_id = $2 AND cs.deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "tenant_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "class_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "subject_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "teacher_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "day_of_week",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "start_time",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "end_time",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "room!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "subject_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 10,
+        "name": "teacher_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 11,
+        "name": "teacher_user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 12,
+        "name": "class_name",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      null,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "fdd595ea0c155bd8b0d31a4c4cfbae1dd9a5e84d8465970e631a94620f67b0d2"
+}

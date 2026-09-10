@@ -1,0 +1,82 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT \n            u.id, \n            u.email, \n            u.full_name, \n            u.is_active,\n            COALESCE(\n                (SELECT r.name FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = u.id ORDER BY r.is_system_default DESC LIMIT 1),\n                'No Role'\n            ) as role_name,\n            COALESCE(\n                (SELECT s.nisn FROM students s WHERE s.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),\n                (SELECT t.nip FROM teachers t WHERE t.user_id = u.id ORDER BY t.updated_at DESC LIMIT 1),\n                (SELECT NULLIF(g.phone_number, '') FROM guardians g WHERE g.user_id = u.id ORDER BY g.updated_at DESC LIMIT 1),\n                (SELECT CONCAT('WALI-', s.nisn) FROM guardians g JOIN students s ON s.guardian_id = g.id WHERE g.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),\n                ''\n            ) as \"identifier!\",\n            COALESCE(\n                  (\n                    SELECT c.name \n                    FROM students s \n                    JOIN enrollments en ON en.student_id = s.id \n                    JOIN classes c ON c.id = en.class_id \n                    WHERE s.user_id = u.id AND (en.status = 'Active' OR en.status = 'ACTIVE')\n                    ORDER BY en.enrolled_at DESC \n                    LIMIT 1\n                  ),\n                  (\n                    SELECT c.name \n                    FROM teachers t \n                    JOIN classes c ON c.homeroom_teacher_id = t.id \n                    WHERE t.user_id = u.id \n                    ORDER BY c.name ASC \n                    LIMIT 1\n                  ),\n                  (\n                    SELECT c.name \n                    FROM guardians g \n                    JOIN students s ON s.guardian_id = g.id\n                    JOIN enrollments en ON en.student_id = s.id \n                    JOIN classes c ON c.id = en.class_id \n                    WHERE g.user_id = u.id AND (en.status = 'Active' OR en.status = 'ACTIVE')\n                    ORDER BY en.enrolled_at DESC \n                    LIMIT 1\n                )\n            ) as \"class_name?\",\n            (SELECT q.id FROM user_qr_tokens q WHERE q.user_id = u.id AND q.is_active = true ORDER BY q.created_at DESC LIMIT 1) as active_token_id,\n            (SELECT q.label FROM user_qr_tokens q WHERE q.user_id = u.id AND q.is_active = true ORDER BY q.created_at DESC LIMIT 1) as active_token_label,\n            (SELECT q.created_at FROM user_qr_tokens q WHERE q.user_id = u.id AND q.is_active = true ORDER BY q.created_at DESC LIMIT 1) as token_created_at,\n            (SELECT q.last_used_at FROM user_qr_tokens q WHERE q.user_id = u.id AND q.is_active = true ORDER BY q.created_at DESC LIMIT 1) as token_last_used_at\n        FROM users u\n        WHERE u.tenant_id = $1\n        ORDER BY u.created_at DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "email",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "full_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "is_active",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 4,
+        "name": "role_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "identifier!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "class_name?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "active_token_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 8,
+        "name": "active_token_label",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "token_created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "token_last_used_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "fef8d34d332e28472af45a06d4e7443c194811c6b113e02cf29bcf10f43534dd"
+}

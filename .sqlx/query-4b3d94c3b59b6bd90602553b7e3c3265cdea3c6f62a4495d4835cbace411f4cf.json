@@ -1,0 +1,91 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT ge.id, ge.student_id, ge.class_id, ge.subject_id, ge.component_name, ge.source_type,\n               ge.raw_score::TEXT as raw_score_text,\n               ge.max_raw_score::TEXT as max_raw_score_text,\n               ge.weighted_score::TEXT as weighted_score_text,\n               ge.weight_percentage::TEXT as weight_percentage_text,\n               ge.calculated_at,\n               sub.name as subject_name\n        FROM gradebook_entries ge\n        LEFT JOIN subjects sub ON sub.id = ge.subject_id\n        WHERE ge.tenant_id = $1\n          AND ($2::uuid IS NULL OR ge.student_id = $2)\n          AND ($3::uuid IS NULL OR ge.class_id = $3)\n          AND ($4::uuid IS NULL OR ge.subject_id = $4)\n        ORDER BY ge.calculated_at DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "student_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "class_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "subject_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "component_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "source_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "raw_score_text",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "max_raw_score_text",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "weighted_score_text",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "weight_percentage_text",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "calculated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "subject_name",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      null,
+      null,
+      null,
+      null,
+      false,
+      false
+    ]
+  },
+  "hash": "4b3d94c3b59b6bd90602553b7e3c3265cdea3c6f62a4495d4835cbace411f4cf"
+}

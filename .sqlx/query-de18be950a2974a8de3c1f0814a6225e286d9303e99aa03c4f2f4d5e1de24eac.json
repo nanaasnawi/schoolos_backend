@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE learning_materials SET class_id = $1, teacher_id = $2, created_by = $3 WHERE id = $4",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "de18be950a2974a8de3c1f0814a6225e286d9303e99aa03c4f2f4d5e1de24eac"
+}

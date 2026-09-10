@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT COUNT(*)::int as \"count!\"\n        FROM session_attendances\n        WHERE student_id = $1 AND (status = 'present' OR status = 'late')\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "837c0d25a6fec3481ec38ff6146ccbfbec786874384e9ef05b5b6462942fd308"
+}

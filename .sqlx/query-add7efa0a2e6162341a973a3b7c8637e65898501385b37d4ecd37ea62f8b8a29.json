@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT COUNT(*)::int as \"count!\"\n        FROM assignments\n        WHERE tenant_id = $1 AND deleted_at IS NULL\n          AND (class_id IS NULL OR class_id = $2)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "add7efa0a2e6162341a973a3b7c8637e65898501385b37d4ecd37ea62f8b8a29"
+}

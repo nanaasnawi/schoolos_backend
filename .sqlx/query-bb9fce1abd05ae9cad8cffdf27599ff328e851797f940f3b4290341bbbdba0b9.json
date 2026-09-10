@@ -1,0 +1,111 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO schools (id, tenant_id, name, npsn, logo_url, address, phone_number, email, status, dapodik_url, dapodik_token, accreditation, created_at, updated_at)\n        VALUES ($1, $2, COALESCE($3, 'Nama Sekolah'), $4, $5, $6, $7, $8, COALESCE($9, 'Active'), $10, $11, $12, NOW(), NOW())\n        ON CONFLICT (tenant_id) DO UPDATE SET\n            name = COALESCE(EXCLUDED.name, schools.name),\n            npsn = COALESCE(EXCLUDED.npsn, schools.npsn),\n            logo_url = EXCLUDED.logo_url,\n            address = COALESCE(EXCLUDED.address, schools.address),\n            phone_number = COALESCE(EXCLUDED.phone_number, schools.phone_number),\n            email = COALESCE(EXCLUDED.email, schools.email),\n            status = COALESCE(EXCLUDED.status, schools.status),\n            dapodik_url = COALESCE(EXCLUDED.dapodik_url, schools.dapodik_url),\n            dapodik_token = COALESCE(EXCLUDED.dapodik_token, schools.dapodik_token),\n            accreditation = COALESCE(EXCLUDED.accreditation, schools.accreditation),\n            updated_at = NOW()\n        RETURNING id, tenant_id, name, npsn, address, phone_number, email, logo_url, status, dapodik_url, dapodik_token, accreditation, created_at, updated_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "tenant_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "npsn",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "address",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "phone_number",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "email",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "logo_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "dapodik_url",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 10,
+        "name": "dapodik_token",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 11,
+        "name": "accreditation",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 12,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 13,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Varchar",
+        "Text",
+        "Text",
+        "Varchar",
+        "Varchar",
+        "Text",
+        "Varchar",
+        "Varchar",
+        "Varchar"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "bb9fce1abd05ae9cad8cffdf27599ff328e851797f940f3b4290341bbbdba0b9"
+}

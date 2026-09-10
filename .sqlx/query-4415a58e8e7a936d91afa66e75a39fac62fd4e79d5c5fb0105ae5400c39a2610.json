@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE tenants SET is_active = NOT is_active WHERE id = $1 RETURNING is_active",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "is_active",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4415a58e8e7a936d91afa66e75a39fac62fd4e79d5c5fb0105ae5400c39a2610"
+}

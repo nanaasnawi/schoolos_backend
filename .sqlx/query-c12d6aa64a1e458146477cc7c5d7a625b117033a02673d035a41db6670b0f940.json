@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT \n            s.id as student_id,\n            s.full_name as student_name,\n            s.nisn as student_nisn,\n            g.id as \"guardian_id?\",\n            g.full_name as \"guardian_name?\",\n            COALESCE(g.phone_number, s.no_hp, '') as \"phone?\"\n        FROM students s\n        LEFT JOIN guardians g ON g.id = s.guardian_id\n        WHERE s.tenant_id = $1\n        ORDER BY s.full_name ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "student_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "student_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "student_nisn",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "guardian_id?",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "guardian_name?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "phone?",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "c12d6aa64a1e458146477cc7c5d7a625b117033a02673d035a41db6670b0f940"
+}

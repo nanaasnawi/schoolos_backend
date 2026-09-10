@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, is_read, created_at)\n            SELECT \n                gen_random_uuid(),\n                u.tenant_id,\n                u.id,\n                $2 as title,\n                $3 as body,\n                'ANNOUNCEMENT',\n                'in_app',\n                FALSE,\n                NOW()\n            FROM users u\n            WHERE u.tenant_id = $1\n              AND u.is_active = TRUE\n              AND (\n                $4 = 'ALL'\n                OR ($4 = 'STUDENT' AND EXISTS (\n                    SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id \n                    WHERE ur.user_id = u.id AND (LOWER(r.name) LIKE '%siswa%' OR LOWER(r.name) LIKE '%student%')\n                ))\n                OR ($4 = 'GUARDIAN' AND EXISTS (\n                    SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id \n                    WHERE ur.user_id = u.id AND (LOWER(r.name) LIKE '%wali%' OR LOWER(r.name) LIKE '%parent%' OR LOWER(r.name) LIKE '%ortu%')\n                ))\n                OR ($4 = 'TEACHER' AND EXISTS (\n                    SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id \n                    WHERE ur.user_id = u.id AND (LOWER(r.name) LIKE '%guru%' OR LOWER(r.name) LIKE '%teacher%')\n                ))\n              )\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f46002f24df85859fbfcacdb9f40c6468ca178855d9ab7bf4019642786a75b7a"
+}

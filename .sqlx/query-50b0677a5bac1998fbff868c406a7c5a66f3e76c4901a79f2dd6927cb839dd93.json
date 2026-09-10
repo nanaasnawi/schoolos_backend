@@ -1,0 +1,100 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT \n                m.id, m.tenant_id, m.lesson_id, m.material_type, m.title, m.description, \n                m.storage_key, m.external_url, m.order_index, m.visibility, m.is_active, \n                m.created_at, m.updated_at,\n                (SELECT COUNT(*)::bigint FROM student_material_completions smc WHERE smc.material_id = m.id) as \"completed_count!\"\n            FROM learning_materials m\n            WHERE m.tenant_id = $1 AND m.deleted_at IS NULL\n            ORDER BY m.created_at DESC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "tenant_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "lesson_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "material_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "title",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "storage_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "external_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "order_index",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "visibility",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 10,
+        "name": "is_active",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 11,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 13,
+        "name": "completed_count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "50b0677a5bac1998fbff868c406a7c5a66f3e76c4901a79f2dd6927cb839dd93"
+}

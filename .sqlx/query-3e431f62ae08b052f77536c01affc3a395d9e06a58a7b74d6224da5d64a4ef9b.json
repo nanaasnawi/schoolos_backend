@@ -1,0 +1,103 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT \n            cs.id,\n            cs.tenant_id,\n            cs.class_id,\n            c.name as class_name,\n            cs.subject_id,\n            s.name as subject_name,\n            cs.teacher_id,\n            t.full_name as teacher_name,\n            t.user_id as teacher_user_id,\n            cs.day_of_week,\n            cs.start_time,\n            cs.end_time,\n            COALESCE(cs.room, 'Ruang Kelas') as \"room!\",\n            cs.created_at\n        FROM class_schedules cs\n        JOIN classes c ON c.id = cs.class_id\n        JOIN subjects s ON s.id = cs.subject_id\n        JOIN teachers t ON t.id = cs.teacher_id\n        WHERE cs.tenant_id = $1 \n          AND cs.deleted_at IS NULL\n          AND ($2::uuid IS NULL OR cs.class_id = $2)\n          AND ($3::uuid IS NULL OR cs.teacher_id = $3 OR t.user_id = $3)\n          AND ($4::text IS NULL OR cs.day_of_week = $4)\n        ORDER BY \n            CASE cs.day_of_week\n                WHEN 'Senin' THEN 1\n                WHEN 'Selasa' THEN 2\n                WHEN 'Rabu' THEN 3\n                WHEN 'Kamis' THEN 4\n                WHEN 'Jumat' THEN 5\n                WHEN 'Sabtu' THEN 6\n                ELSE 7\n            END,\n            cs.start_time ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "tenant_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "class_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "class_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "subject_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "subject_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "teacher_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 7,
+        "name": "teacher_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "teacher_user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 9,
+        "name": "day_of_week",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 10,
+        "name": "start_time",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 11,
+        "name": "end_time",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 12,
+        "name": "room!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 13,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      null,
+      false
+    ]
+  },
+  "hash": "3e431f62ae08b052f77536c01affc3a395d9e06a58a7b74d6224da5d64a4ef9b"
+}

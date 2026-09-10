@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO class_schedules (\n            id, tenant_id, class_id, subject_id, teacher_id, academic_year_id,\n            day_of_week, start_time, end_time, room, created_at, updated_at\n        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "89797776fd55533f0d77f5fcbbc7261b6953c49fab62dd5bd0213cd6dcf9e7bb"
+}

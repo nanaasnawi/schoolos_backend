@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE announcements\n        SET is_pinned = NOT is_pinned, updated_at = NOW()\n        WHERE id = $1 AND tenant_id = $2\n        RETURNING is_pinned\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "is_pinned",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d776e332835dc59882821ed58b87148a58a812c0c62d9f8e09c4882893de67e7"
+}

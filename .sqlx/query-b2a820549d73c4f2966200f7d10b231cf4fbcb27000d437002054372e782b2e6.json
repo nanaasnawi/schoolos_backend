@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT c.name as class_name, t.full_name as \"teacher_name?\"\n            FROM classes c\n            LEFT JOIN teachers t ON t.id = c.homeroom_teacher_id\n            WHERE c.id = $1\n            LIMIT 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "class_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "teacher_name?",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "b2a820549d73c4f2966200f7d10b231cf4fbcb27000d437002054372e782b2e6"
+}

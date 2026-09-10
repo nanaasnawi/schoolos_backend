@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT u.id, u.email, u.full_name, r.name as \"role_name?\"\n        FROM users u\n        LEFT JOIN user_roles ur ON ur.user_id = u.id\n        LEFT JOIN roles r ON r.id = ur.role_id\n        WHERE u.tenant_id = $1 AND u.is_active = true\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "email",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "full_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "role_name?",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "5abb9fabf77ad5c3ee51869e2f056eac2de2c1d8f33306cb53d31daa15788ff4"
+}

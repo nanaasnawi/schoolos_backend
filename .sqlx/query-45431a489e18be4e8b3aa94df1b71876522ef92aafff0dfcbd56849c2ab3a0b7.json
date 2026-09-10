@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT s.name, s.logo_url, s.npsn\n        FROM schools s\n        WHERE s.deleted_at IS NULL\n          AND ($1::text IS NULL OR s.npsn = $1)\n          AND ($2::uuid IS NULL OR s.tenant_id = $2)\n        ORDER BY \n          (SELECT count(*) FROM students st WHERE st.tenant_id = s.tenant_id) DESC,\n          s.updated_at DESC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "logo_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "npsn",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "45431a489e18be4e8b3aa94df1b71876522ef92aafff0dfcbd56849c2ab3a0b7"
+}

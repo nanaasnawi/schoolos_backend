@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT en.class_id\n        FROM enrollments en\n        WHERE en.student_id = $1 AND (en.status = 'Active' OR en.status = 'ACTIVE')\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "class_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "bc0a8c15a716682f0b5f6f3a444c3bcf63454584a465e7612b63758c7af3dff6"
+}

@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    SELECT c.id, c.name \n                    FROM classes c \n                    WHERE c.tenant_id = $1 \n                      AND NOT EXISTS (\n                          SELECT 1 FROM enrollments e \n                          WHERE e.class_id = c.id \n                            AND e.tenant_id = c.tenant_id \n                            AND (e.status = 'Active' OR e.status = 'active')\n                      )\n                    ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "b689fd52ff1c16e4d6a923e6c00b079cc06c200f7e7eb8e05bb370d39b0de1ed"
+}

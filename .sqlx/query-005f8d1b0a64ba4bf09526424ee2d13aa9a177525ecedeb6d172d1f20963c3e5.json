@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE inquiry_threads\n        SET status = 'ANSWERED', updated_at = NOW()\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "005f8d1b0a64ba4bf09526424ee2d13aa9a177525ecedeb6d172d1f20963c3e5"
+}

@@ -1,0 +1,119 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT \n                a.id, a.tenant_id, a.lesson_id, a.title, a.description, a.instructions,\n                a.max_score, a.due_at, a.assignment_type, a.status, a.is_active,\n                a.created_at, a.updated_at,\n                a.class_id,\n                c.name as \"class_name?\",\n                sub.name as \"subject_name?\",\n                t.full_name as \"teacher_name?\"\n            FROM assignments a\n            LEFT JOIN classes c ON c.id = a.class_id\n            LEFT JOIN subjects sub ON sub.id = a.subject_id\n            LEFT JOIN teachers t ON t.id = a.teacher_id\n            WHERE a.tenant_id = $1 \n              AND a.deleted_at IS NULL\n              AND (\n                  a.created_by = $2 \n                  OR a.teacher_id IN (SELECT id FROM teachers WHERE user_id = $2)\n                  OR a.teacher_id IS NULL\n              )\n            ORDER BY a.created_at DESC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "tenant_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "lesson_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "title",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "instructions",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "max_score",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "due_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "assignment_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 10,
+        "name": "is_active",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 11,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 13,
+        "name": "class_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 14,
+        "name": "class_name?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 15,
+        "name": "subject_name?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 16,
+        "name": "teacher_name?",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "a8bec7af188919ad791c4a402d7653c229f76d1b3fc8a3fa42a20205b87b9845"
+}

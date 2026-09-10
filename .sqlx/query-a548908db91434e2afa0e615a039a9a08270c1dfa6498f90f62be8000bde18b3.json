@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                        SELECT s.id\n                        FROM guardians g\n                        JOIN students s ON s.guardian_id = g.id\n                        WHERE g.user_id = $1 AND g.tenant_id = $2\n                        LIMIT 1\n                        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a548908db91434e2afa0e615a039a9a08270c1dfa6498f90f62be8000bde18b3"
+}

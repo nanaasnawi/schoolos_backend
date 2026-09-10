@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT dapodik_url, npsn, dapodik_token FROM schools WHERE tenant_id = $1 LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "dapodik_url",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "npsn",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "dapodik_token",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "6e2e1f302f0b80fdd84d436fd48b8b5dbb6b32a98232385ca4241bed96ab31a0"
+}

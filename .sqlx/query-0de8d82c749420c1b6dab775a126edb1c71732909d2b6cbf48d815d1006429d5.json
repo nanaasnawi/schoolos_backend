@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO gradebooks (id, tenant_id, student_id, class_id, subject_id, academic_year_id, final_score, letter_grade, passed, status, created_at, updated_at)\n            VALUES ($1, $2, $3, $4, $5, $6, $7::TEXT::NUMERIC, $8, $9, $10, NOW(), NOW())\n            ON CONFLICT (student_id, class_id, subject_id) DO UPDATE\n            SET final_score = COALESCE($7::TEXT::NUMERIC, gradebooks.final_score),\n                letter_grade = COALESCE($8, gradebooks.letter_grade),\n                passed = $9,\n                status = $10,\n                updated_at = NOW()\n            RETURNING id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Varchar",
+        "Bool",
+        "Varchar"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0de8d82c749420c1b6dab775a126edb1c71732909d2b6cbf48d815d1006429d5"
+}

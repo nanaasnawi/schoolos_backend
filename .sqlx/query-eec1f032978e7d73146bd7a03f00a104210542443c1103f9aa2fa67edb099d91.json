@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    SELECT \n                        a.tenant_id, a.teacher_id, \n                        t.full_name as teacher_name, \n                        sub.name as subject_name,\n                        c.name as class_name\n                    FROM assignments a\n                    LEFT JOIN teachers t ON t.id = a.teacher_id\n                    LEFT JOIN subjects sub ON sub.id = a.subject_id\n                    LEFT JOIN classes c ON c.id = a.class_id\n                    WHERE a.id = $1\n                    ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "tenant_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "teacher_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "teacher_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "subject_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "class_name",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "eec1f032978e7d73146bd7a03f00a104210542443c1103f9aa2fa67edb099d91"
+}

@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT \n                    u.full_name, \n                    u.email, \n                    COALESCE(r.name, 'No Role') as role_name,\n                    COALESCE(s.nisn, t.nip, g.phone_number, '') as \"identifier!\",\n                    c.name as \"class_name?\"\n                FROM users u\n                LEFT JOIN user_roles ur ON u.id = ur.user_id\n                LEFT JOIN roles r ON ur.role_id = r.id\n                LEFT JOIN students s ON s.user_id = u.id\n                LEFT JOIN teachers t ON t.user_id = u.id\n                LEFT JOIN guardians g ON g.user_id = u.id\n                LEFT JOIN enrollments en ON en.student_id = s.id AND en.status = 'ACTIVE'\n                LEFT JOIN classes c ON c.id = en.class_id\n                WHERE u.id = $1 AND u.tenant_id = $2\n                LIMIT 1\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "full_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "email",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "role_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "identifier!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "class_name?",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      null,
+      false
+    ]
+  },
+  "hash": "e4c7eb345d0edb1cb2e543a3be2b93907e1a87804f22ff8624810e96270f3850"
+}

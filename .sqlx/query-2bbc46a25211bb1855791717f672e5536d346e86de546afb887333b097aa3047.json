@@ -1,0 +1,44 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT a.id, t.name as \"tenant_name?\", a.action as event_type, \n               COALESCE(a.resource || ' (' || a.decision || ')', a.decision) as \"details!\", \n               a.timestamp as created_at\n        FROM audit_logs a\n        LEFT JOIN tenants t ON t.id = a.tenant_id\n        ORDER BY a.timestamp DESC\n        LIMIT 50\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "tenant_name?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "event_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "details!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      false
+    ]
+  },
+  "hash": "2bbc46a25211bb1855791717f672e5536d346e86de546afb887333b097aa3047"
+}

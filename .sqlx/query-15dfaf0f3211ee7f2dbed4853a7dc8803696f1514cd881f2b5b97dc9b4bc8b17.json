@@ -1,0 +1,73 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT \n            s.id, s.full_name, s.nisn, s.gender, s.status, s.no_hp, s.email,\n            c.id as class_id, c.name as class_name\n        FROM students s\n        JOIN enrollments en ON en.student_id = s.id\n        JOIN classes c ON c.id = en.class_id\n        WHERE c.tenant_id = $1\n          AND ($2::uuid IS NULL OR c.id = $2)\n          AND ($3::text IS NULL OR $3 = '' OR c.name ILIKE '%' || $3 || '%')\n          AND (\n              $4::text IS NULL OR $4 = '' OR \n              s.full_name ILIKE '%' || $4 || '%' OR \n              s.nisn ILIKE '%' || $4 || '%'\n          )\n        ORDER BY s.full_name ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "full_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "nisn",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "gender",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "no_hp",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "email",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "class_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 8,
+        "name": "class_name",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "15dfaf0f3211ee7f2dbed4853a7dc8803696f1514cd881f2b5b97dc9b4bc8b17"
+}

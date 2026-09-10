@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, question_text, question_type, points, order_index\n        FROM quiz_questions\n        WHERE quiz_id = $1\n        ORDER BY order_index ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "question_text",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "question_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "points",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "order_index",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "51f04d1902fc1de2593b76cd9c7f274a8d27e95fe5422c202c341a65d045fd31"
+}

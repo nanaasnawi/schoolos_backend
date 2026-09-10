@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT u.id, u.email, u.full_name, u.is_active, u.created_at,\n               COALESCE(r.name, 'Administrator') as role_name,\n               COALESCE(\n                 (SELECT s.nisn FROM students s WHERE s.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),\n                 (SELECT t.nip FROM teachers t WHERE t.user_id = u.id ORDER BY t.updated_at DESC LIMIT 1),\n                 (SELECT NULLIF(g.phone_number, '') FROM guardians g WHERE g.user_id = u.id ORDER BY g.updated_at DESC LIMIT 1),\n                 (SELECT CONCAT('WALI-', s.nisn) FROM guardians g JOIN students s ON s.guardian_id = g.id WHERE g.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),\n                 ''\n               ) as \"identifier!\",\n               COALESCE(\n                 (\n                   SELECT c.name \n                   FROM students s \n                   JOIN enrollments en ON en.student_id = s.id \n                   JOIN classes c ON c.id = en.class_id \n                   WHERE s.user_id = u.id AND (en.status = 'Active' OR en.status = 'ACTIVE')\n                   ORDER BY en.enrolled_at DESC \n                   LIMIT 1\n                 ),\n                 (\n                   SELECT c.name \n                   FROM teachers t \n                   JOIN classes c ON c.homeroom_teacher_id = t.id \n                   WHERE t.user_id = u.id \n                   ORDER BY c.name ASC \n                   LIMIT 1\n                 ),\n                 (\n                   SELECT c.name \n                   FROM guardians g \n                   JOIN students s ON s.guardian_id = g.id\n                   JOIN enrollments en ON en.student_id = s.id \n                   JOIN classes c ON c.id = en.class_id \n                   WHERE g.user_id = u.id AND (en.status = 'Active' OR en.status = 'ACTIVE')\n                   ORDER BY en.enrolled_at DESC \n                   LIMIT 1\n                 )\n               ) as \"class_name?\",\n               (\n                 SELECT s.full_name \n                 FROM guardians g \n                 JOIN students s ON s.guardian_id = g.id\n                 WHERE g.user_id = u.id\n                 ORDER BY s.created_at ASC\n                 LIMIT 1\n               ) as \"child_name?\",\n               (\n                 SELECT s.id::text \n                 FROM guardians g \n                 JOIN students s ON s.guardian_id = g.id\n                 WHERE g.user_id = u.id\n                 ORDER BY s.created_at ASC\n                 LIMIT 1\n               ) as \"child_id?\"\n        FROM users u\n        LEFT JOIN user_roles ur ON u.id = ur.user_id\n        LEFT JOIN roles r ON ur.role_id = r.id\n        WHERE u.id = $1\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "email",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "full_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "is_active",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 4,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "role_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "identifier!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "class_name?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "child_name?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "child_id?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "da0040de8f3a847cab4b1188469a11619a44f0d23e5856b781ec362155845d2e"
+}

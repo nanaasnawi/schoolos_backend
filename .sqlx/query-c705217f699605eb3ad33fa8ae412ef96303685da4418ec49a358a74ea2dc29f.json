@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    INSERT INTO gradebook_entries (\n                        id, tenant_id, student_id, class_id, subject_id,\n                        component_name, source_type, raw_score, max_raw_score,\n                        weighted_score, weight_percentage, calculated_at, created_at, gradebook_id\n                    )\n                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::TEXT::NUMERIC, 100.0, $9::TEXT::NUMERIC, $10::TEXT::NUMERIC, NOW(), NOW(), $11)\n                    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Text",
+        "Text",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c705217f699605eb3ad33fa8ae412ef96303685da4418ec49a358a74ea2dc29f"
+}

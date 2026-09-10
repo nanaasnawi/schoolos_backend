@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE user_qr_tokens SET last_used_at = NOW(), is_active = false WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7687c0da22594c4a23730662d4516429c9ece2df4ff0042a7c6d07a0ef8625e7"
+}

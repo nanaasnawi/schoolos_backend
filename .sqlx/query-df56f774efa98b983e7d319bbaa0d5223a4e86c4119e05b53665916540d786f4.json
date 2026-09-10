@@ -1,0 +1,111 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO inquiry_threads (\n            id, tenant_id, student_id, student_name, student_class,\n            teacher_id, teacher_name, subject_name, inquiry_type,\n            reference_title, reference_id, status, last_message_content,\n            last_message_at, created_at, updated_at\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'WAITING_REPLY', $12, NOW(), NOW(), NOW())\n        RETURNING id, student_id, student_name, student_class, teacher_id, teacher_name,\n                  subject_name, inquiry_type, reference_title, reference_id, status,\n                  last_message_content, last_message_at, created_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "student_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "student_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "student_class",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "teacher_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "teacher_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "subject_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "inquiry_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "reference_title",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "reference_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 10,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 11,
+        "name": "last_message_content",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "last_message_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 13,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "df56f774efa98b983e7d319bbaa0d5223a4e86c4119e05b53665916540d786f4"
+}

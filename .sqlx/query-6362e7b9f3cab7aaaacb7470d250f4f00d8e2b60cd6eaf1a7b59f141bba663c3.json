@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id, choice_text, order_index, is_correct\n            FROM quiz_choices\n            WHERE question_id = $1\n            ORDER BY order_index ASC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "choice_text",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "order_index",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "is_correct",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "6362e7b9f3cab7aaaacb7470d250f4f00d8e2b60cd6eaf1a7b59f141bba663c3"
+}

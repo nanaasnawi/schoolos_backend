@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT \n                t.id as token_id,\n                t.token_type,\n                t.is_active as token_is_active,\n                t.expires_at,\n                u.id as user_id,\n                u.tenant_id,\n                u.email,\n                u.full_name,\n                u.is_active as user_is_active,\n                COALESCE(r.name, 'Siswa') as \"role_name!\"\n            FROM user_qr_tokens t\n            JOIN users u ON t.user_id = u.id\n            LEFT JOIN user_roles ur ON u.id = ur.user_id\n            LEFT JOIN roles r ON ur.role_id = r.id\n            WHERE t.token_hash = $1\n            ORDER BY t.created_at DESC\n            LIMIT 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "token_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "token_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "token_is_active",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 3,
+        "name": "expires_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 4,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "tenant_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "email",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "full_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "user_is_active",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 9,
+        "name": "role_name!",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "092b2575ba5cc51161513020b91841e62b9b22404f716bcf2624277777f30dd0"
+}
