@@ -28,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use api_server::ApiDoc;
     use utoipa::OpenApi;
     #[test]
     fn export_openapi() {

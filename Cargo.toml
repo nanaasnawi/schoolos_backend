@@ -5,7 +5,7 @@ members = [
     "local-bridge",
     "hash-gen"
 ]
-default-members = ["school-core", "local-bridge"]
+default-members = ["api-server", "school-core", "local-bridge"]
 
 resolver = "2"
 

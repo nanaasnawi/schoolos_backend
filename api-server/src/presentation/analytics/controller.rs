@@ -110,6 +110,36 @@ async fn get_overview(
     .await
     .unwrap_or(0);
 
+    let at_risk_students = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(DISTINCT student_id) FROM gradebooks WHERE tenant_id = $1 AND passed = false",
+    )
+    .bind(req_ctx.tenant_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    let total_attendances = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM session_attendances WHERE tenant_id = $1",
+    )
+    .bind(req_ctx.tenant_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    let present_attendances = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM session_attendances WHERE tenant_id = $1 AND status IN ('Present', 'present', 'Hadir', 'hadir')",
+    )
+    .bind(req_ctx.tenant_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    let attendance_rate = if total_attendances > 0 {
+        ((present_attendances as f64 / total_attendances as f64) * 100.0 * 10.0).round() / 10.0
+    } else {
+        0.0
+    };
+
     let response_data = AnalyticsOverviewResponse {
         total_students,
         active_students,
@@ -118,8 +148,8 @@ async fn get_overview(
         total_classes,
         active_classes,
         total_guardians,
-        attendance_rate: 96.2, // Mocked for UI phase 3
-        at_risk_students: 11, // Mocked for UI phase 3
+        attendance_rate,
+        at_risk_students,
     };
 
     Ok(Json(ApiResponse::success(

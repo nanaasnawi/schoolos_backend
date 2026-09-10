@@ -1,0 +1,22 @@
+# Rust build artifacts
+target/
+target_temp/
+**/*.rs.bk
+
+# Environments & secrets
+.env
+.env.local
+.env.*.local
+*.env
+
+# Logs & temp
+*.log
+scratch/
+uploads/
+node_modules/
+
+# IDEs & OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

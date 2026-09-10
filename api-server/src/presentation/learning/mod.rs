@@ -8,4 +8,5 @@ pub mod materials;
 pub mod progress;
 pub mod quizzes;
 pub mod sessions;
+pub mod inquiries;
 pub mod syllabuses;

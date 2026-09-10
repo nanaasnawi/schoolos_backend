@@ -202,12 +202,24 @@ async fn list(
             }
 
             // Teacher isolation: non-management teachers only see their own teaching schedules
+            // IMPORTANT: If teacher_user_id is NULL (teacher has no linked user), skip the row
+            // to prevent data leakage between teachers.
             if is_teacher && !is_management {
-                if let Some(uid) = user_id {
-                    if let Some(t_uid) = row.teacher_user_id {
-                        if t_uid != uid {
-                            continue;
+                match user_id {
+                    Some(uid) => {
+                        match row.teacher_user_id {
+                            Some(t_uid) if t_uid == uid => {
+                                // This schedule belongs to the logged-in teacher — allow it
+                            }
+                            _ => {
+                                // NULL teacher_user_id or different teacher — skip to prevent leakage
+                                continue;
+                            }
                         }
+                    }
+                    None => {
+                        // No user context for teacher — skip all to prevent leakage
+                        continue;
                     }
                 }
             }

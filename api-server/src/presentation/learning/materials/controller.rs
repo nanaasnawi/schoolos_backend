@@ -1,9 +1,10 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, State, Multipart, DefaultBodyLimit},
     routing::{get, post},
 };
 use uuid::Uuid;
+
 
 use super::dto::{
     create_learning_material_request::CreateLearningMaterialRequest,
@@ -24,9 +25,14 @@ use school_core::learning::application::learning_material::{
 pub fn material_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/", post(create).get(list))
+        .route(
+            "/upload",
+            post(upload_file).layer(DefaultBodyLimit::max(100 * 1024 * 1024)),
+        )
         .route("/completed", get(get_completed_materials))
         .route("/{id}", get(get_by_id).patch(update).delete(delete))
         .route("/{id}/toggle-complete", post(toggle_complete))
+        .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
 }
 
 async fn create(
@@ -543,4 +549,111 @@ async fn delete(
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
     Ok(Json(ApiResponse::success((), req_ctx.request_id)))
+}
+
+/// Upload a PDF or image file for use as learning material.
+/// Returns a JSON with `url` field pointing to the uploaded file.
+async fn upload_file(
+    State(_ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    mut multipart: Multipart,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    use crate::middleware::require_permission;
+    use school_core::permission::domain::permission_registry::Permission;
+    require_permission(&req_ctx.actor, Permission::LearningMaterialCreate).map_err(|_| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Insufficient permissions".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    // Create uploads directory if it doesn't exist
+    let uploads_dir = std::path::PathBuf::from("uploads");
+    tokio::fs::create_dir_all(&uploads_dir).await.map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Internal(
+                format!("Failed to create uploads directory: {e}"),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let mut file_url: Option<String> = None;
+
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Internal(
+                format!("Multipart error: {e}"),
+            ),
+            &req_ctx.request_id,
+        )
+    })? {
+        let field_name = field.name().unwrap_or("").to_string();
+        if field_name == "file" {
+            let original_filename = field.file_name()
+                .unwrap_or("upload")
+                .to_string();
+            let ext = std::path::Path::new(&original_filename)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("bin")
+                .to_lowercase();
+
+            // Only allow safe file types
+            let allowed = ["pdf", "jpg", "jpeg", "png", "gif", "webp"];
+            if !allowed.contains(&ext.as_str()) {
+                return Err(ApiError::new(
+                    school_core::common::error::ApplicationError::Domain(
+                        school_core::common::error::DomainError::Validation(
+                            format!("Tipe file .{ext} tidak diizinkan. Hanya PDF dan gambar yang diperbolehkan."),
+                        ),
+                    ),
+                    &req_ctx.request_id,
+                ));
+            }
+
+            let bytes = field.bytes().await.map_err(|e| {
+                ApiError::new(
+                    school_core::common::error::ApplicationError::Internal(
+                        format!("Failed to read file bytes: {e}"),
+                    ),
+                    &req_ctx.request_id,
+                )
+            })?;
+
+            // Generate unique filename
+            let unique_name = format!("{}.{}", uuid::Uuid::new_v4(), ext);
+            let file_path = uploads_dir.join(&unique_name);
+
+            tokio::fs::write(&file_path, &bytes).await.map_err(|e| {
+                ApiError::new(
+                    school_core::common::error::ApplicationError::Internal(
+                        format!("Failed to save file: {e}"),
+                    ),
+                    &req_ctx.request_id,
+                )
+            })?;
+
+            // Construct URL (served by backend static file handler or Nginx)
+            file_url = Some(format!("/uploads/{unique_name}"));
+        }
+    }
+
+    match file_url {
+        Some(url) => Ok(Json(ApiResponse::success(
+            serde_json::json!({ "url": url }),
+            req_ctx.request_id,
+        ))),
+        None => Err(ApiError::new(
+            school_core::common::error::ApplicationError::Domain(
+                school_core::common::error::DomainError::Validation(
+                    "Tidak ada file yang diunggah dalam request.".to_string(),
+                ),
+            ),
+            &req_ctx.request_id,
+        )),
+    }
 }

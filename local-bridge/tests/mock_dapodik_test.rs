@@ -155,13 +155,17 @@ async fn test_dapodik_adapter_get_students() {
     .expect("Adapter creation should succeed");
 
     let students = adapter
-        .get_students(0, 50)
+        .get_students(0_i64, 50_i32)
         .await
         .expect("Fetching students from mock Dapodik should succeed");
 
     assert_eq!(students.len(), 2);
-    assert_eq!(students[0].full_name, "Ahmad Dani");
-    assert_eq!(students[0].external_id, "pd-101");
-    assert_eq!(students[1].full_name, "Siti Rahma");
-    assert_eq!(students[1].external_id, "pd-102");
+
+    let first = &students[0];
+    let second = &students[1];
+
+    assert_eq!(first.full_name, "Ahmad Dani");
+    assert_eq!(first.external_id, "pd-101");
+    assert_eq!(second.full_name, "Siti Rahma");
+    assert_eq!(second.external_id, "pd-102");
 }

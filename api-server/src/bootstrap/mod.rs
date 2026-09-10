@@ -10,6 +10,7 @@ use sqlx::postgres::PgPoolOptions;
 use tower_http::{
     cors::CorsLayer,
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
+    services::ServeDir,
     trace::TraceLayer,
 };
 use utoipa::OpenApi;
@@ -174,6 +175,7 @@ use crate::presentation::{
     learning::progress::controller::progress_routes, learning::quizzes::controller::quiz_routes,
     learning::sessions::controller::session_routes,
     learning::syllabuses::controller::syllabus_routes,
+    learning::inquiries::controller::inquiry_routes,
     notifications::controller::notification_routes, announcements::controller::announcement_routes,
     people::guardian::controller::guardian_routes,
     people::staff::controller::staff_routes, people::students::controller::student_routes,
@@ -227,6 +229,13 @@ impl Bootstrap {
             .max_connections(5)
             .connect(&self.database_url)
             .await?;
+
+        // Run database schema migrations automatically on startup
+        if let Err(e) = sqlx::migrate!("../migrations").run(&pool).await {
+            tracing::warn!("Database migration notice: {:?}", e);
+        } else {
+            tracing::info!("Database schema migrations up to date.");
+        }
 
         // Infrastructure
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
@@ -781,6 +790,7 @@ impl Bootstrap {
             .nest(
                 "/api/v1/learning/materials",
                 material_routes()
+                    .layer(axum::extract::DefaultBodyLimit::max(100 * 1024 * 1024))
                     .layer(axum::middleware::from_fn_with_state(
                         context.clone(),
                         idempotency::idempotency_middleware,
@@ -899,6 +909,10 @@ impl Bootstrap {
                     )),
             )
             .nest(
+                "/api/v1/learning/inquiries",
+                inquiry_routes(),
+            )
+            .nest(
                 "/api/v1/notifications",
                 notification_routes()
                     .layer(axum::middleware::from_fn_with_state(
@@ -935,6 +949,10 @@ impl Bootstrap {
                 system_routes(context.clone())
             )
             .nest("/health", health_routes())
+            .nest_service(
+                "/uploads",
+                ServeDir::new("uploads"),
+            )
             .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
             .route(
                 "/metrics",

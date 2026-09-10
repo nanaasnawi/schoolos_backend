@@ -437,6 +437,13 @@ pub struct DapodikRawStudent {
     pub nomor_telepon_rumah: Option<String>,
     pub alamat_jalan: Option<String>,
     pub email: Option<String>,
+    pub jenis_keluar_id: Option<serde_json::Value>,
+    pub jenis_keluar_id_str: Option<String>,
+    pub tanggal_keluar: Option<String>,
+    pub keterangan_keluar: Option<String>,
+    pub status: Option<String>,
+    pub status_di_sekolah: Option<String>,
+    pub aktif: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -477,6 +484,8 @@ pub struct DapodikRawRombel {
     pub nama: Option<String>,
     pub ptk_id: Option<String>,
     pub tingkat_pendidikan_id: Option<String>,
+    pub jenis_rombel: Option<serde_json::Value>,
+    pub jenis_rombel_str: Option<String>,
     pub pembelajaran: Option<Vec<DapodikRawPembelajaran>>,
 }
 
@@ -1069,12 +1078,30 @@ pub async fn pull_dapodik_records(
                 }
             }
             if let Some(rombels) = extracted_rombel {
+                // Bersihkan kelas KKA lama dari PostgreSQL karena KKA bukan rombel kelas reguler
+                let _ = sqlx::query(
+                    "DELETE FROM classes WHERE tenant_id = $1 AND (name ILIKE 'KKA%' OR name ILIKE '%KKA%')"
+                )
+                .bind(ctx.tenant_id)
+                .execute(&mut *tx)
+                .await;
+
+                // Refresh class_map setelah pembersihan KKA
+                class_map.retain(|name, _| !name.to_uppercase().starts_with("KKA") && !name.to_uppercase().contains("KKA"));
+
                 let mut processed_subjects: HashSet<String> = HashSet::new();
 
                 for rmbl in rombels {
                     let nama_rombel = rmbl.nama.unwrap_or_else(|| "ROMBEL DAPODIK".to_string());
-                    // KKA adalah pelajaran tambahan/keterampilan, bukan rombel kelas utama
-                    if nama_rombel.trim().starts_with("KKA") {
+                    let nama_upper = nama_rombel.trim().to_uppercase();
+
+                    // KKA adalah kelompok keterampilan/ekskul bukan rombel reguler, abaikan dan jangan diekspor ke PostgreSQL
+                    let is_kka = nama_upper.starts_with("KKA")
+                        || nama_upper.contains("KKA")
+                        || rmbl.jenis_rombel_str.as_deref().map(|s| s.to_uppercase().contains("KETERAMPILAN") || s.to_uppercase().contains("KKA")).unwrap_or(false);
+
+                    if is_kka {
+                        tracing::info!("Mengabaikan rombel non-reguler / KKA dari Dapodik: {}", nama_rombel);
                         continue;
                     }
                     let new_id = Uuid::now_v7();
@@ -1095,14 +1122,6 @@ pub async fn pull_dapodik_records(
                             "PAKET C10" => Some("ESI ROKESI"),
                             "PAKET C11a" | "PAKET C11b" => Some("TAUFIQ HIDAYAT"),
                             "PAKET C12a" | "PAKET C12b" => Some("ASY SYIFA RAHMAH IHSANI"),
-                            "KKA C11 1" => Some("ASEP RIFAI"),
-                            "KKA C11 2" => Some("KRISTIANTI"),
-                            "KKA C11 3" => Some("AMIN LISANA"),
-                            "KKA C11 4" => Some("EHA MEIDA KARTIKA"),
-                            "KKA C12 1" => Some("ROHMANA"),
-                            "KKA C12 2" => Some("KUSWANTO ADI WIJAYA"),
-                            "KKA C12 3" => Some("ASY SYIFA RAHMAH IHSANI"),
-                            "KKA C12 4" => Some("SRI MULYANI.S.AG"),
                             _ => None,
                         };
                         guru_name.and_then(|gn| teacher_by_name.get(gn).copied())
@@ -1248,6 +1267,7 @@ pub async fn pull_dapodik_records(
             if let Some(students) = extracted_students {
                 // Finding 4: Use HashSet for O(1) duplicate & mutasi lookup
                 let mut active_nisns: HashSet<String> = HashSet::new();
+                let mut active_student_ids: HashSet<Uuid> = HashSet::new();
 
                 for (idx, std) in students.into_iter().enumerate() {
                     let pd_id = std
@@ -1281,6 +1301,60 @@ pub async fn pull_dapodik_records(
                             )
                         });
 
+                    // Cek apakah siswa ini tercatat sudah termutasi / keluar / lulus di data Dapodik
+                    let is_mutasi_or_keluar = std.jenis_keluar_id_str.as_ref().map(|s| {
+                        let u = s.to_uppercase();
+                        u.contains("MUTASI") || u.contains("KELUAR") || u.contains("LULUS") || u.contains("WAFAT") || u.contains("UNDUR") || u.contains("PUTUS") || u.contains("DIKELUARKAN")
+                    }).unwrap_or(false)
+                    || std.status.as_ref().map(|s| {
+                        let u = s.to_uppercase();
+                        u.contains("MUTASI") || u.contains("KELUAR") || u.contains("LULUS") || u.contains("TIDAK AKTIF") || u.contains("NON")
+                    }).unwrap_or(false)
+                    || std.status_di_sekolah.as_ref().map(|s| {
+                        let u = s.to_uppercase();
+                        u.contains("MUTASI") || u.contains("KELUAR") || u.contains("LULUS")
+                    }).unwrap_or(false)
+                    || std.tanggal_keluar.as_ref().map(|s| !s.trim().is_empty() && s != "-").unwrap_or(false)
+                    || std.keterangan_keluar.as_ref().map(|s| !s.trim().is_empty() && s != "-").unwrap_or(false);
+
+                    if is_mutasi_or_keluar {
+                        // Siswa sudah termutasi/keluar/lulus: langsung hapus datanya dari PostgreSQL jika sudah ada
+                        let existing_student = student_by_nisn.get(&final_nisn).copied()
+                            .or_else(|| nik.as_ref().and_then(|n| student_by_nik.get(n).copied()))
+                            .or_else(|| student_by_name.get(&nama_upper).copied());
+
+                        if let Some(sid) = existing_student {
+                            let user_to_delete = sqlx::query_scalar::<_, Option<Uuid>>(
+                                "SELECT user_id FROM students WHERE id = $1 AND tenant_id = $2"
+                            )
+                            .bind(sid)
+                            .bind(ctx.tenant_id)
+                            .fetch_optional(&mut *tx)
+                            .await
+                            .ok()
+                            .flatten()
+                            .flatten();
+
+                            let _ = sqlx::query("DELETE FROM students WHERE id = $1 AND tenant_id = $2")
+                                .bind(sid).bind(ctx.tenant_id).execute(&mut *tx).await;
+
+                            if let Some(uid) = user_to_delete {
+                                let _ = sqlx::query("DELETE FROM users WHERE id = $1 AND tenant_id = $2")
+                                    .bind(uid).bind(ctx.tenant_id).execute(&mut *tx).await;
+                            }
+
+                            let _ = sqlx::query("DELETE FROM dapodik_sync_records WHERE tenant_id = $1 AND (nisn = $2 OR nama_school_os = $3)")
+                                .bind(ctx.tenant_id).bind(&final_nisn).bind(&nama_upper).execute(&mut *tx).await;
+
+                            student_by_nisn.remove(&final_nisn);
+                            if let Some(ref n) = nik { student_by_nik.remove(n); }
+                            student_by_name.remove(&nama_upper);
+
+                            tracing::info!("Siswa {} (NISN: {}) terdeteksi termutasi/keluar/lulus di Dapodik -> berhasil dihapus dari PostgreSQL", nama, final_nisn);
+                        }
+                        continue;
+                    }
+
                     // O(1) HashSet check
                     if active_nisns.contains(&final_nisn) {
                         final_nisn = format!(
@@ -1295,12 +1369,14 @@ pub async fn pull_dapodik_records(
                     active_nisns.insert(final_nisn.clone());
 
                     // Clean & Validate Rombel from Dapodik
-                    // USER RULE: Siswa yang belum masuk rombel jangan asal dimasukkan rombel dummy!
+                    // USER RULE 1: Siswa yang belum masuk rombel jangan asal dimasukkan rombel dummy!
+                    // USER RULE 2: Kelas KKA bukan rombel reguler, jangan diekspor ke PostgreSQL!
                     let valid_rombel = std
                         .rombel
                         .or(std.nama_rombel)
                         .map(|s| s.trim().to_string())
                         .filter(|s| {
+                            let upper = s.to_uppercase();
                             !s.is_empty()
                                 && s != "-"
                                 && s != "null"
@@ -1308,6 +1384,8 @@ pub async fn pull_dapodik_records(
                                 && !s.eq_ignore_ascii_case("belum masuk rombel")
                                 && !s.eq_ignore_ascii_case("umum")
                                 && !s.eq_ignore_ascii_case("rombel aktif")
+                                && !upper.starts_with("KKA")
+                                && !upper.contains("KKA")
                         });
 
                     let sync_rombel_label = valid_rombel.clone().unwrap_or_else(|| "-".to_string());
@@ -1511,34 +1589,39 @@ pub async fn pull_dapodik_records(
                         inserted_id
                     };
 
+                    active_student_ids.insert(student_db_id);
+
                     // ── 8. Enrollment & Rombel Association Logic ─────────────
                     if let Some(ref r_name) = valid_rombel {
-                        let c_id = if let Some(&id) = class_map.get(r_name) {
-                            id
-                        } else {
-                            let new_c_id = Uuid::now_v7();
+                        let r_upper = r_name.to_uppercase();
+                        if !r_upper.starts_with("KKA") && !r_upper.contains("KKA") {
+                            let c_id = if let Some(&id) = class_map.get(r_name) {
+                                id
+                            } else {
+                                let new_c_id = Uuid::now_v7();
+                                let _ = sqlx::query(
+                                    r#"
+                                    INSERT INTO classes (id, tenant_id, academic_year_id, grade_level_id, name, capacity, created_at, updated_at)
+                                    VALUES ($1, $2, $3, $4, $5, 30, $6, $6)
+                                    "#
+                                )
+                                .bind(new_c_id).bind(ctx.tenant_id).bind(academic_year_id).bind(grade_level_id).bind(r_name).bind(now).execute(&mut *tx).await;
+
+                                class_map.insert(r_name.clone(), new_c_id);
+                                new_c_id
+                            };
+
                             let _ = sqlx::query(
                                 r#"
-                                INSERT INTO classes (id, tenant_id, academic_year_id, grade_level_id, name, capacity, created_at, updated_at)
-                                VALUES ($1, $2, $3, $4, $5, 30, $6, $6)
+                                INSERT INTO enrollments (id, tenant_id, student_id, class_id, academic_year_id, status, enrolled_at)
+                                VALUES ($1, $2, $3, $4, $5, 'Active', $6)
+                                ON CONFLICT (student_id, academic_year_id) WHERE status = 'Active'
+                                DO UPDATE SET class_id = EXCLUDED.class_id, status = 'Active'
                                 "#
                             )
-                            .bind(new_c_id).bind(ctx.tenant_id).bind(academic_year_id).bind(grade_level_id).bind(r_name).bind(now).execute(&mut *tx).await;
-
-                            class_map.insert(r_name.clone(), new_c_id);
-                            new_c_id
-                        };
-
-                        let _ = sqlx::query(
-                            r#"
-                            INSERT INTO enrollments (id, tenant_id, student_id, class_id, academic_year_id, status, enrolled_at)
-                            VALUES ($1, $2, $3, $4, $5, 'Active', $6)
-                            ON CONFLICT (student_id, academic_year_id) WHERE status = 'Active'
-                            DO UPDATE SET class_id = EXCLUDED.class_id, status = 'Active'
-                            "#
-                        )
-                        .bind(Uuid::now_v7()).bind(ctx.tenant_id).bind(student_db_id).bind(c_id)
-                        .bind(academic_year_id).bind(now).execute(&mut *tx).await;
+                            .bind(Uuid::now_v7()).bind(ctx.tenant_id).bind(student_db_id).bind(c_id)
+                            .bind(academic_year_id).bind(now).execute(&mut *tx).await;
+                        }
                     } else {
                         // SISWA BELUM MASUK ROMBEL DI DAPODIK -> KOSONGKAN & JANGAN ASAL ENROLL!
                         let _ = sqlx::query(
@@ -1570,17 +1653,104 @@ pub async fn pull_dapodik_records(
                     });
                 }
 
-                // ── 9. Automatic Detection for Transferred Out (Mutasi Keluar) ─
-                if !active_nisns.is_empty() {
-                    let active_nisns_vec: Vec<String> = active_nisns.into_iter().collect();
+                // ── 9. Automatic Deletion for Transferred / Left / Graduated Students ─
+                if !active_student_ids.is_empty() {
+                    let active_ids_vec: Vec<Uuid> = active_student_ids.into_iter().collect();
 
-                    let _ = sqlx::query(
-                        "UPDATE students SET status = 'transferred', updated_at = $2 WHERE tenant_id = $1 AND (status = 'active' OR status = 'Active') AND NOT (nisn = ANY($3))"
-                    ).bind(ctx.tenant_id).bind(now).bind(&active_nisns_vec).execute(&mut *tx).await;
+                    // Cari siswa di PostgreSQL yang sudah tidak ada lagi di data aktif Dapodik (termutasi / keluar / lulus)
+                    let removed_students = sqlx::query!(
+                        "SELECT id, user_id, full_name, nisn FROM students WHERE tenant_id = $1 AND NOT (id = ANY($2))",
+                        ctx.tenant_id,
+                        &active_ids_vec
+                    )
+                    .fetch_all(&mut *tx)
+                    .await
+                    .unwrap_or_default();
 
-                    let _ = sqlx::query(
-                        "UPDATE dapodik_sync_records SET identity_state = 'MUTASI_OUT', mobility_case = 'TRANSFER_OUT_APPROVED', last_synced_at = $2 WHERE tenant_id = $1 AND NOT (nisn = ANY($3))"
-                    ).bind(ctx.tenant_id).bind(now).bind(&active_nisns_vec).execute(&mut *tx).await;
+                    if !removed_students.is_empty() {
+                        let removed_ids: Vec<Uuid> = removed_students.iter().map(|s| s.id).collect();
+                        let removed_user_ids: Vec<Uuid> = removed_students.iter().filter_map(|s| s.user_id).collect();
+                        let removed_nisns: Vec<String> = removed_students.iter().map(|s| s.nisn.clone()).collect();
+                        let removed_names: Vec<String> = removed_students.iter().map(|s| s.full_name.clone()).collect();
+
+                        // 1. Hapus dari tabel students (otomatis cascade ke enrollments, gradebooks, assignment_submissions, attendance, dll)
+                        let _ = sqlx::query(
+                            "DELETE FROM students WHERE tenant_id = $1 AND id = ANY($2)"
+                        )
+                        .bind(ctx.tenant_id)
+                        .bind(&removed_ids)
+                        .execute(&mut *tx)
+                        .await;
+
+                        // 2. Hapus akun login siswa jika ada
+                        if !removed_user_ids.is_empty() {
+                            let _ = sqlx::query(
+                                "DELETE FROM users WHERE tenant_id = $1 AND id = ANY($2)"
+                            )
+                            .bind(ctx.tenant_id)
+                            .bind(&removed_user_ids)
+                            .execute(&mut *tx)
+                            .await;
+                        }
+
+                        // 3. Hapus dari dapodik_sync_records
+                        let _ = sqlx::query(
+                            "DELETE FROM dapodik_sync_records WHERE tenant_id = $1 AND (nisn = ANY($2) OR nama_school_os = ANY($3))"
+                        )
+                        .bind(ctx.tenant_id)
+                        .bind(&removed_nisns)
+                        .bind(&removed_names)
+                        .execute(&mut *tx)
+                        .await;
+
+                        tracing::info!(
+                            "Otomatis menghapus {} siswa termutasi/keluar/lulus dari PostgreSQL: {:?}",
+                            removed_students.len(),
+                            removed_names
+                        );
+                    }
+                }
+
+                // ── 9.5. Automatic Cleanup for Empty Classes (0 Siswa) ─────────
+                let empty_classes = sqlx::query!(
+                    r#"
+                    SELECT c.id, c.name 
+                    FROM classes c 
+                    WHERE c.tenant_id = $1 
+                      AND NOT EXISTS (
+                          SELECT 1 FROM enrollments e 
+                          WHERE e.class_id = c.id 
+                            AND e.tenant_id = c.tenant_id 
+                            AND (e.status = 'Active' OR e.status = 'active')
+                      )
+                    "#,
+                    ctx.tenant_id
+                )
+                .fetch_all(&mut *tx)
+                .await
+                .unwrap_or_default();
+
+                if !empty_classes.is_empty() {
+                    let empty_class_ids: Vec<Uuid> = empty_classes.iter().map(|c| c.id).collect();
+                    let empty_class_names: Vec<String> = empty_classes.iter().map(|c| c.name.clone()).collect();
+
+                    let _ = sqlx::query("DELETE FROM classes WHERE tenant_id = $1 AND id = ANY($2)")
+                        .bind(ctx.tenant_id)
+                        .bind(&empty_class_ids)
+                        .execute(&mut *tx)
+                        .await;
+
+                    let _ = sqlx::query("DELETE FROM dapodik_sync_records WHERE tenant_id = $1 AND rombel = ANY($2)")
+                        .bind(ctx.tenant_id)
+                        .bind(&empty_class_names)
+                        .execute(&mut *tx)
+                        .await;
+
+                    tracing::info!(
+                        "Otomatis menghapus {} kelas kosong (0 siswa) dari PostgreSQL: {:?}",
+                        empty_classes.len(),
+                        empty_class_names
+                    );
                 }
             } else {
                 if raw_text.contains("Access denied") {
