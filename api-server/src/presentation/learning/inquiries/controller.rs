@@ -56,6 +56,8 @@ pub struct ListInquiriesQuery {
     pub inquiry_type: Option<String>,
     pub search: Option<String>,
     pub student_id: Option<Uuid>,
+    pub teacher_id: Option<Uuid>,
+    pub teacher_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,6 +115,27 @@ async fn list_inquiries(
     Query(query): Query<ListInquiriesQuery>,
 ) -> Result<Json<ApiResponse<Vec<InquiryThreadDto>>>, ApiError> {
     let tenant_id = resolve_effective_tenant_id(&ctx.pool, req_ctx.tenant_id).await;
+
+    // Check if the caller is a Teacher in this tenant
+    let actor_teacher = if let Some(ref actor) = req_ctx.actor {
+        sqlx::query!(
+            "SELECT id, full_name FROM teachers WHERE user_id = $1 AND tenant_id = $2",
+            actor.id,
+            tenant_id
+        )
+        .fetch_optional(&ctx.pool)
+        .await
+        .unwrap_or(None)
+    } else {
+        None
+    };
+
+    let effective_teacher_id = query.teacher_id.or(actor_teacher.as_ref().map(|t| t.id));
+    let effective_teacher_name = query.teacher_name
+        .or(actor_teacher.as_ref().map(|t| t.full_name.clone()))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
     let rows = sqlx::query!(
         r#"
         SELECT 
@@ -127,12 +150,17 @@ async fn list_inquiries(
           AND ($3::text IS NULL OR t.inquiry_type = $3)
           AND ($4::uuid IS NULL OR t.student_id = $4)
           AND (
-              $5::text IS NULL OR $5 = '' OR 
-              t.student_name ILIKE '%' || $5 || '%' OR 
-              t.reference_title ILIKE '%' || $5 || '%' OR 
-              t.student_class ILIKE '%' || $5 || '%' OR
-              t.subject_name ILIKE '%' || $5 || '%' OR
-              t.last_message_content ILIKE '%' || $5 || '%'
+              ($5::uuid IS NULL AND $6::text IS NULL) OR
+              t.teacher_id = $5 OR
+              ($6::text IS NOT NULL AND t.teacher_name ILIKE '%' || $6 || '%')
+          )
+          AND (
+              $7::text IS NULL OR $7 = '' OR 
+              t.student_name ILIKE '%' || $7 || '%' OR 
+              t.reference_title ILIKE '%' || $7 || '%' OR 
+              t.student_class ILIKE '%' || $7 || '%' OR
+              t.subject_name ILIKE '%' || $7 || '%' OR
+              t.last_message_content ILIKE '%' || $7 || '%'
           )
         ORDER BY t.last_message_at DESC
         "#,
@@ -140,6 +168,8 @@ async fn list_inquiries(
         query.status,
         query.inquiry_type,
         query.student_id,
+        effective_teacher_id,
+        effective_teacher_name,
         query.search.as_deref().map(|s| s.trim())
     )
     .fetch_all(&ctx.pool)
@@ -365,9 +395,90 @@ async fn create_inquiry(
     };
 
     let tenant_id = resolve_effective_tenant_id(&ctx.pool, req_ctx.tenant_id).await;
+    let mut resolved_tenant_id = tenant_id;
+    let mut resolved_teacher_id = payload.teacher_id;
+    let mut resolved_teacher_name = payload.teacher_name.unwrap_or_else(|| "Guru Pengampu".to_string());
+    let mut resolved_subject_name = payload.subject_name.unwrap_or_else(|| "Umum".to_string());
+    let mut resolved_class_name = student_class.clone();
+
+    // Authority lookup: If reference_id is provided, resolve from authoritative learning_materials or assignments
+    if let Some(ref ref_id_str) = payload.reference_id {
+        if let Ok(ref_uuid) = Uuid::parse_str(ref_id_str) {
+            if payload.inquiry_type.eq_ignore_ascii_case("MATERIAL") {
+                if let Ok(Some(mat)) = sqlx::query!(
+                    r#"
+                    SELECT 
+                        m.tenant_id, m.teacher_id, 
+                        t.full_name as teacher_name, 
+                        sub.name as subject_name,
+                        c.name as class_name
+                    FROM learning_materials m
+                    LEFT JOIN teachers t ON t.id = m.teacher_id
+                    LEFT JOIN subjects sub ON sub.id = m.subject_id
+                    LEFT JOIN classes c ON c.id = m.class_id
+                    WHERE m.id = $1
+                    "#,
+                    ref_uuid
+                ).fetch_optional(&ctx.pool).await {
+                    resolved_tenant_id = mat.tenant_id;
+                    if let Some(tid) = mat.teacher_id { resolved_teacher_id = Some(tid); }
+                    resolved_teacher_name = mat.teacher_name;
+                    resolved_subject_name = mat.subject_name;
+                    resolved_class_name = mat.class_name;
+                }
+            } else if payload.inquiry_type.eq_ignore_ascii_case("ASSIGNMENT") {
+                if let Ok(Some(asg)) = sqlx::query!(
+                    r#"
+                    SELECT 
+                        a.tenant_id, a.teacher_id, 
+                        t.full_name as teacher_name, 
+                        sub.name as subject_name,
+                        c.name as class_name
+                    FROM assignments a
+                    LEFT JOIN teachers t ON t.id = a.teacher_id
+                    LEFT JOIN subjects sub ON sub.id = a.subject_id
+                    LEFT JOIN classes c ON c.id = a.class_id
+                    WHERE a.id = $1
+                    "#,
+                    ref_uuid
+                ).fetch_optional(&ctx.pool).await {
+                    resolved_tenant_id = asg.tenant_id;
+                    if let Some(tid) = asg.teacher_id { resolved_teacher_id = Some(tid); }
+                    resolved_teacher_name = asg.teacher_name;
+                    resolved_subject_name = asg.subject_name;
+                    resolved_class_name = asg.class_name;
+                }
+            }
+        }
+    }
+
+    // If teacher is still unresolved, resolve by subject name in the same tenant
+    if resolved_teacher_id.is_none() {
+        if let Ok(Some(tch)) = sqlx::query!(
+            r#"
+            SELECT id, full_name
+            FROM teachers
+            WHERE tenant_id = $1
+              AND (
+                  (subject IS NOT NULL AND subject ILIKE '%' || $2 || '%') OR
+                  full_name ILIKE '%' || $3 || '%'
+              )
+            ORDER BY created_at ASC
+            LIMIT 1
+            "#,
+            resolved_tenant_id,
+            resolved_subject_name,
+            resolved_teacher_name
+        )
+        .fetch_optional(&ctx.pool)
+        .await
+        {
+            resolved_teacher_id = Some(tch.id);
+            resolved_teacher_name = tch.full_name;
+        }
+    }
+
     let thread_id = Uuid::new_v4();
-    let teacher_name = payload.teacher_name.unwrap_or_else(|| "Guru Pengampu".to_string());
-    let subject_name = payload.subject_name.unwrap_or_else(|| "Umum".to_string());
     let inquiry_type = payload.inquiry_type.to_uppercase();
     let initial_msg = payload.initial_message.trim().to_string();
 
@@ -385,13 +496,13 @@ async fn create_inquiry(
                   last_message_content, last_message_at, created_at
         "#,
         thread_id,
-        tenant_id,
+        resolved_tenant_id,
         student_id,
         student_name,
-        student_class,
-        payload.teacher_id,
-        teacher_name,
-        subject_name,
+        resolved_class_name,
+        resolved_teacher_id,
+        resolved_teacher_name,
+        resolved_subject_name,
         inquiry_type,
         payload.reference_title.trim(),
         payload.reference_id,

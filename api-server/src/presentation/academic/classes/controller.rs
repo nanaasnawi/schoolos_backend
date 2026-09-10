@@ -1,18 +1,40 @@
 use axum::{
     Json, Router,
-    extract::{Query, State},
-    routing::post,
+    extract::{Path, Query, State},
+    routing::{get, post},
 };
 use school_core::academic::application::class::{
     create_class::CreateClassCommand, list_classes::ListClassesQuery,
 };
+use school_core::common::error::ApplicationError;
 use school_core::common::models::page::Pagination;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::bootstrap::ApplicationContext;
+use crate::error::ApiError;
 use crate::extractors::RequestContext;
 use crate::response::{ApiMeta, ApiResponse, PaginationMeta};
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ClassStudentDto {
+    pub id: Uuid,
+    pub full_name: String,
+    pub nisn: String,
+    pub gender: Option<String>,
+    pub status: String,
+    pub no_hp: Option<String>,
+    pub email: Option<String>,
+    pub class_id: Uuid,
+    pub class_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ClassStudentsQuery {
+    pub class_name: Option<String>,
+    pub class_id: Option<Uuid>,
+    pub search: Option<String>,
+}
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct CreateClassRequest {
@@ -43,7 +65,10 @@ impl From<school_core::academic::domain::class::Class> for ClassResponse {
 }
 
 pub fn class_routes() -> Router<ApplicationContext> {
-    Router::new().route("/", post(create).get(list))
+    Router::new()
+        .route("/", post(create).get(list))
+        .route("/students", get(list_class_students))
+        .route("/{id}/students", get(get_class_students_by_id))
 }
 
 #[utoipa::path(
@@ -172,4 +197,112 @@ async fn list(
         meta,
         req_ctx.request_id,
     )))
+}
+
+async fn list_class_students(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Query(query): Query<ClassStudentsQuery>,
+) -> Result<Json<ApiResponse<Vec<ClassStudentDto>>>, ApiError> {
+    let tenant_id = if req_ctx.tenant_id == Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap() {
+        sqlx::query_scalar!("SELECT tenant_id FROM classes LIMIT 1")
+            .fetch_optional(&ctx.pool)
+            .await
+            .unwrap_or(None)
+            .unwrap_or(req_ctx.tenant_id)
+    } else {
+        req_ctx.tenant_id
+    };
+
+    let rows = sqlx::query!(
+        r#"
+        SELECT 
+            s.id, s.full_name, s.nisn, s.gender, s.status, s.no_hp, s.email,
+            c.id as class_id, c.name as class_name
+        FROM students s
+        JOIN enrollments en ON en.student_id = s.id
+        JOIN classes c ON c.id = en.class_id
+        WHERE c.tenant_id = $1
+          AND ($2::uuid IS NULL OR c.id = $2)
+          AND ($3::text IS NULL OR $3 = '' OR c.name ILIKE '%' || $3 || '%')
+          AND (
+              $4::text IS NULL OR $4 = '' OR 
+              s.full_name ILIKE '%' || $4 || '%' OR 
+              s.nisn ILIKE '%' || $4 || '%'
+          )
+        ORDER BY s.full_name ASC
+        "#,
+        tenant_id,
+        query.class_id,
+        query.class_name.as_deref().map(|s| s.trim()),
+        query.search.as_deref().map(|s| s.trim())
+    )
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let dtos = rows.into_iter().map(|r| ClassStudentDto {
+        id: r.id,
+        full_name: r.full_name,
+        nisn: r.nisn,
+        gender: r.gender,
+        status: r.status,
+        no_hp: r.no_hp,
+        email: r.email,
+        class_id: r.class_id,
+        class_name: r.class_name,
+    }).collect();
+
+    Ok(Json(ApiResponse::success(dtos, req_ctx.request_id)))
+}
+
+async fn get_class_students_by_id(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ApiResponse<Vec<ClassStudentDto>>>, ApiError> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT 
+            s.id, s.full_name, s.nisn, s.gender, s.status, s.no_hp, s.email,
+            c.id as class_id, c.name as class_name
+        FROM students s
+        JOIN enrollments en ON en.student_id = s.id
+        JOIN classes c ON c.id = en.class_id
+        WHERE c.id = $1
+        ORDER BY s.full_name ASC
+        "#,
+        id
+    )
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let dtos = rows.into_iter().map(|r| ClassStudentDto {
+        id: r.id,
+        full_name: r.full_name,
+        nisn: r.nisn,
+        gender: r.gender,
+        status: r.status,
+        no_hp: r.no_hp,
+        email: r.email,
+        class_id: r.class_id,
+        class_name: r.class_name,
+    }).collect();
+
+    Ok(Json(ApiResponse::success(dtos, req_ctx.request_id)))
 }
