@@ -854,11 +854,12 @@ pub async fn pull_dapodik_records(
     let mut student_by_nik: HashMap<String, Uuid> = HashMap::new();
     let mut student_by_name: HashMap<String, Uuid> = HashMap::new();
     for s in student_rows {
-        student_by_nisn.insert(s.nisn, s.id);
+        student_by_nisn.insert(s.nisn.trim().to_string(), s.id);
         if let Some(n) = s.nik {
-            student_by_nik.insert(n, s.id);
+            student_by_nik.insert(n.trim().to_string(), s.id);
         }
-        student_by_name.insert(s.full_name, s.id);
+        student_by_name.insert(s.full_name.trim().to_uppercase(), s.id);
+        student_by_name.insert(s.full_name.trim().to_string(), s.id);
     }
 
     let sync_rows = sqlx::query!(
@@ -871,8 +872,9 @@ pub async fn pull_dapodik_records(
     let mut sync_by_nisn: HashMap<String, Uuid> = HashMap::new();
     let mut sync_by_name: HashMap<String, Uuid> = HashMap::new();
     for sr in sync_rows {
-        sync_by_nisn.insert(sr.nisn, sr.id);
-        sync_by_name.insert(sr.nama_dapodik, sr.id);
+        sync_by_nisn.insert(sr.nisn.trim().to_string(), sr.id);
+        sync_by_name.insert(sr.nama_dapodik.trim().to_uppercase(), sr.id);
+        sync_by_name.insert(sr.nama_dapodik.trim().to_string(), sr.id);
     }
 
     let guardian_rows = sqlx::query!(
@@ -1443,7 +1445,9 @@ pub async fn pull_dapodik_records(
                                     .take(8)
                                     .collect::<String>()
                             )
-                        });
+                        })
+                        .trim()
+                        .to_string();
 
                     // Cek apakah siswa ini tercatat sudah termutasi / keluar / lulus di data Dapodik
                     let is_mutasi_or_keluar = std.jenis_keluar_id_str.as_ref().map(|s| {
@@ -1533,31 +1537,35 @@ pub async fn pull_dapodik_records(
                         });
 
                     let sync_rombel_label = valid_rombel.clone().unwrap_or_else(|| "-".to_string());
+                    let sync_nik = nik.as_deref().unwrap_or("-");
 
                     // Sync Records Upsert (using cache)
                     let existing_sync_id = if !final_nisn.starts_with("T-") {
                         sync_by_nisn.get(&final_nisn).copied()
                     } else {
-                        sync_by_name.get(&nama).copied()
+                        sync_by_name.get(&nama_upper).copied().or_else(|| sync_by_name.get(&nama).copied())
                     };
 
                     if let Some(id) = existing_sync_id {
                         let _ = sqlx::query(
                             "UPDATE dapodik_sync_records SET nama_school_os = $1, nama_dapodik = $2, rombel = $3, nik = $4, identity_state = 'ACTIVE', last_synced_at = $5 WHERE id = $6"
-                        ).bind(&nama_upper).bind(&nama).bind(&sync_rombel_label).bind(&nik).bind(now).bind(id).execute(&mut *tx).await;
+                        ).bind(&nama_upper).bind(&nama).bind(&sync_rombel_label).bind(sync_nik).bind(now).bind(id).execute(&mut *tx).await;
                     } else {
                         let _ = sqlx::query(
                             r#"
                             INSERT INTO dapodik_sync_records
                             (id, tenant_id, nisn, nik, nama_school_os, nama_dapodik, rombel, identity_state, mobility_case, classification, action_recommended, stage, last_synced_at)
                             VALUES ($1, $2, $3, $4, $5, $6, $7, 'ACTIVE', 'NONE', 'MATCH', 'Pulled Real-Time from Dapodik Localhost WebService', 'VERIFIED', $8)
+                            ON CONFLICT (id) DO UPDATE 
+                            SET nama_school_os = EXCLUDED.nama_school_os, nama_dapodik = EXCLUDED.nama_dapodik, rombel = EXCLUDED.rombel, nik = EXCLUDED.nik, identity_state = 'ACTIVE', last_synced_at = EXCLUDED.last_synced_at
                             "#
                         )
-                        .bind(new_id).bind(ctx.tenant_id).bind(&final_nisn).bind(&nik).bind(&nama_upper)
+                        .bind(new_id).bind(ctx.tenant_id).bind(&final_nisn).bind(sync_nik).bind(&nama_upper)
                         .bind(&nama).bind(&sync_rombel_label).bind(now).execute(&mut *tx).await;
 
                         sync_by_nisn.insert(final_nisn.clone(), new_id);
                         sync_by_name.insert(nama.clone(), new_id);
+                        sync_by_name.insert(nama_upper.clone(), new_id);
                     }
 
                     // User Account Creation
@@ -1684,8 +1692,9 @@ pub async fn pull_dapodik_records(
 
                     // Student Record Upsert (using student_by_nisn, student_by_nik, student_by_name)
                     let existing_student_id = student_by_nisn.get(&final_nisn).copied()
-                        .or_else(|| nik.as_ref().and_then(|n| student_by_nik.get(n).copied()))
-                        .or_else(|| student_by_name.get(&nama_upper).copied());
+                        .or_else(|| nik.as_ref().and_then(|n| student_by_nik.get(n.trim()).copied()))
+                        .or_else(|| student_by_name.get(&nama_upper).copied())
+                        .or_else(|| student_by_name.get(&nama).copied());
 
                     let student_db_id = if let Some(sid) = existing_student_id {
                         let update_res = sqlx::query(
@@ -1708,15 +1717,31 @@ pub async fn pull_dapodik_records(
                         }
                         student_by_nisn.insert(final_nisn.clone(), sid);
                         if let Some(ref n) = nik {
-                            student_by_nik.insert(n.clone(), sid);
+                            student_by_nik.insert(n.trim().to_string(), sid);
                         }
                         student_by_name.insert(nama_upper.clone(), sid);
+                        student_by_name.insert(nama.clone(), sid);
                         sid
                     } else {
                         let inserted_id = sqlx::query_scalar::<_, Uuid>(
                             r#"
                             INSERT INTO students (id, tenant_id, user_id, guardian_id, nisn, full_name, nik, gender, place_of_birth, date_of_birth, religion, nipd, alamat_jalan, no_hp, email, status, created_at, updated_at)
                             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'active', $16, $16)
+                            ON CONFLICT (tenant_id, nisn) DO UPDATE
+                            SET full_name = EXCLUDED.full_name,
+                                user_id = COALESCE(students.user_id, EXCLUDED.user_id),
+                                guardian_id = COALESCE(EXCLUDED.guardian_id, students.guardian_id),
+                                nik = COALESCE(EXCLUDED.nik, students.nik),
+                                gender = COALESCE(EXCLUDED.gender, students.gender),
+                                place_of_birth = COALESCE(EXCLUDED.place_of_birth, students.place_of_birth),
+                                date_of_birth = COALESCE(EXCLUDED.date_of_birth, students.date_of_birth),
+                                religion = COALESCE(EXCLUDED.religion, students.religion),
+                                nipd = COALESCE(EXCLUDED.nipd, students.nipd),
+                                alamat_jalan = COALESCE(EXCLUDED.alamat_jalan, students.alamat_jalan),
+                                no_hp = COALESCE(EXCLUDED.no_hp, students.no_hp),
+                                email = COALESCE(EXCLUDED.email, students.email),
+                                status = 'active',
+                                updated_at = EXCLUDED.updated_at
                             RETURNING id
                             "#
                         )
@@ -1730,6 +1755,7 @@ pub async fn pull_dapodik_records(
 
                         student_by_nisn.insert(final_nisn.clone(), inserted_id);
                         student_by_name.insert(nama_upper.clone(), inserted_id);
+                        student_by_name.insert(nama.clone(), inserted_id);
                         inserted_id
                     };
 
@@ -1801,12 +1827,20 @@ pub async fn pull_dapodik_records(
                 if !active_student_ids.is_empty() {
                     let active_ids_vec: Vec<Uuid> = active_student_ids.into_iter().collect();
 
+                    #[derive(sqlx::FromRow)]
+                    struct RemovedStudentRow {
+                        id: Uuid,
+                        user_id: Option<Uuid>,
+                        full_name: String,
+                        nisn: String,
+                    }
+
                     // Cari siswa di PostgreSQL yang sudah tidak ada lagi di data aktif Dapodik (termutasi / keluar / lulus)
-                    let removed_students = sqlx::query!(
+                    let removed_students = sqlx::query_as::<_, RemovedStudentRow>(
                         "SELECT id, user_id, full_name, nisn FROM students WHERE tenant_id = $1 AND NOT (id = ANY($2))",
-                        ctx.tenant_id,
-                        &active_ids_vec
                     )
+                    .bind(ctx.tenant_id)
+                    .bind(&active_ids_vec)
                     .fetch_all(&mut *tx)
                     .await
                     .unwrap_or_default();
@@ -1856,7 +1890,13 @@ pub async fn pull_dapodik_records(
                 }
 
                 // ── 9.5. Automatic Cleanup for Empty Classes (0 Siswa) ─────────
-                let empty_classes = sqlx::query!(
+                #[derive(sqlx::FromRow)]
+                struct EmptyClassRow {
+                    id: Uuid,
+                    name: String,
+                }
+
+                let empty_classes = sqlx::query_as::<_, EmptyClassRow>(
                     r#"
                     SELECT c.id, c.name 
                     FROM classes c 
@@ -1868,8 +1908,8 @@ pub async fn pull_dapodik_records(
                             AND (e.status = 'Active' OR e.status = 'active')
                       )
                     "#,
-                    ctx.tenant_id
                 )
+                .bind(ctx.tenant_id)
                 .fetch_all(&mut *tx)
                 .await
                 .unwrap_or_default();
