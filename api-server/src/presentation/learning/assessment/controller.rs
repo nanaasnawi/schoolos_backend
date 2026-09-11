@@ -1,4 +1,4 @@
-use axum::{
+﻿use axum::{
     Json, Router,
     extract::State,
     routing::{get, post},
@@ -249,75 +249,148 @@ async fn save_gradebook(
         }
     };
 
-    for g in payload.grades {
-        // Resolve class_id from enrollment if not provided in payload
-        let class_id = match payload.class_id {
-            Some(cid) => cid,
-            None => {
-                let enrolled_cid = sqlx::query_scalar!(
-                    r#"SELECT class_id FROM enrollments WHERE student_id = $1 AND (status = 'Active' OR status = 'ACTIVE') LIMIT 1"#,
-                    g.student_id
-                )
-                .fetch_optional(&ctx.pool)
-                .await
-                .ok()
-                .flatten();
+    // --- BATCH OPTIMIZATION: Process all grades in 4 queries instead of 6N queries ---
+    if payload.grades.is_empty() {
+        return Ok(Json(ApiResponse::success(true, req_ctx.request_id)));
+    }
 
-                match enrolled_cid {
-                    Some(cid) => cid,
-                    None => continue,
-                }
-            }
+    // Collect all student IDs for batch operations
+    let student_ids: Vec<Uuid> = payload.grades.iter().map(|g| g.student_id).collect();
+
+    // Batch resolve class_ids from enrollments (single query)
+    let class_id_map: std::collections::HashMap<Uuid, Uuid> = if payload.class_id.is_none() {
+        sqlx::query!(
+            r#"
+            SELECT DISTINCT ON (e.student_id) e.student_id, e.class_id
+            FROM enrollments e
+            WHERE e.student_id = ANY($1) AND (e.status = 'Active' OR e.status = 'ACTIVE')
+            ORDER BY e.student_id
+            "#,
+            &student_ids
+        )
+        .fetch_all(&ctx.pool)
+        .await
+        .ok()
+        .map(|rows| {
+            rows.into_iter()
+                .filter_map(|r| Some((r.student_id, r.class_id)))
+                .collect()
+        })
+        .unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    let resolved_class_id = payload.class_id;
+
+    // Prepare batch data for gradebooks
+    let mut gb_ids: Vec<Uuid> = Vec::with_capacity(payload.grades.len());
+    let mut gb_tenant_ids: Vec<Uuid> = Vec::with_capacity(payload.grades.len());
+    let mut gb_student_ids: Vec<Uuid> = Vec::with_capacity(payload.grades.len());
+    let mut gb_class_ids: Vec<Uuid> = Vec::with_capacity(payload.grades.len());
+    let mut gb_subject_ids: Vec<Uuid> = Vec::with_capacity(payload.grades.len());
+    let mut gb_academic_year_ids: Vec<Option<Uuid>> = Vec::with_capacity(payload.grades.len());
+    let mut gb_final_scores: Vec<Option<String>> = Vec::with_capacity(payload.grades.len());
+    let mut gb_letter_grades: Vec<Option<String>> = Vec::with_capacity(payload.grades.len());
+    let mut gb_passed_values: Vec<bool> = Vec::with_capacity(payload.grades.len());
+    let mut gb_statuses: Vec<String> = Vec::with_capacity(payload.grades.len());
+
+    for g in &payload.grades {
+        let class_id = match resolved_class_id {
+            Some(cid) => cid,
+            None => match class_id_map.get(&g.student_id) {
+                Some(cid) => *cid,
+                None => continue,
+            },
         };
 
-        let gb_id = Uuid::new_v4();
-        let passed = g.passed.unwrap_or_else(|| g.final_score.map(|s| s >= 75.0).unwrap_or(false));
-        let status = g.status.unwrap_or_else(|| "published".to_string());
-        let fs_str = g.final_score.map(|s| format!("{:.2}", s));
+        gb_ids.push(Uuid::new_v4());
+        gb_tenant_ids.push(req_ctx.tenant_id);
+        gb_student_ids.push(g.student_id);
+        gb_class_ids.push(class_id);
+        gb_subject_ids.push(subject_id);
+        gb_academic_year_ids.push(payload.academic_year_id);
+        gb_final_scores.push(g.final_score.map(|s| format!("{:.2}", s)));
+        gb_letter_grades.push(g.letter_grade.clone());
+        gb_passed_values.push(g.passed.unwrap_or_else(|| g.final_score.map(|s| s >= 75.0).unwrap_or(false)));
+        gb_statuses.push(g.status.clone().unwrap_or_else(|| "published".to_string()));
+    }
 
-        // 1. Upsert gradebooks table
-        let record = sqlx::query!(
-            r#"
-            INSERT INTO gradebooks (id, tenant_id, student_id, class_id, subject_id, academic_year_id, final_score, letter_grade, passed, status, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7::TEXT::NUMERIC, $8, $9, $10, NOW(), NOW())
-            ON CONFLICT (student_id, class_id, subject_id) DO UPDATE
-            SET final_score = COALESCE($7::TEXT::NUMERIC, gradebooks.final_score),
-                letter_grade = COALESCE($8, gradebooks.letter_grade),
-                passed = $9,
-                status = $10,
-                updated_at = NOW()
-            RETURNING id
-            "#,
-            gb_id,
-            req_ctx.tenant_id,
-            g.student_id,
-            class_id,
-            subject_id,
-            payload.academic_year_id,
-            fs_str,
-            g.letter_grade,
-            passed,
-            status
-        )
-        .fetch_one(&ctx.pool)
-        .await
-        .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
-            school_core::common::error::InfrastructureError::Database(e)
-        ), &req_ctx.request_id))?;
+    if gb_ids.is_empty() {
+        return Ok(Json(ApiResponse::success(true, req_ctx.request_id)));
+    }
 
-        let inserted_gb_id = record.id;
+    let now = chrono::Utc::now();
+    let now_vec = vec![now; gb_ids.len()];
 
-        // 2. Clean previous component entries for this student/class/subject
-        let _ = sqlx::query!(
-            r#"DELETE FROM gradebook_entries WHERE student_id = $1 AND class_id = $2 AND subject_id = $3"#,
-            g.student_id,
-            class_id,
-            subject_id
-        )
-        .execute(&ctx.pool)
-        .await;
+    // Batch upsert gradebooks using UNNEST (single query)
+    sqlx::query!(
+        r#"
+        INSERT INTO gradebooks (id, tenant_id, student_id, class_id, subject_id, academic_year_id, final_score, letter_grade, passed, status, created_at, updated_at)
+        SELECT
+            u.id, u.tenant_id, u.student_id, u.class_id, u.subject_id, u.academic_year_id,
+            u.final_score::NUMERIC, u.letter_grade, u.passed, u.status, u.created_at, u.updated_at
+        FROM UNNEST(
+            $1::uuid[], $2::uuid[], $3::uuid[], $4::uuid[], $5::uuid[],
+            $6::uuid[], $7::text[], $8::text[], $9::bool[], $10::text[],
+            $11::timestamptz[], $12::timestamptz[]
+        ) AS u(id, tenant_id, student_id, class_id, subject_id, academic_year_id, final_score, letter_grade, passed, status, created_at, updated_at)
+        ON CONFLICT (student_id, class_id, subject_id) DO UPDATE
+        SET final_score = COALESCE(EXCLUDED.final_score, gradebooks.final_score),
+            letter_grade = COALESCE(EXCLUDED.letter_grade, gradebooks.letter_grade),
+            passed = EXCLUDED.passed,
+            status = EXCLUDED.status,
+            updated_at = NOW()
+        "#,
+        &gb_ids,
+        &gb_tenant_ids,
+        &gb_student_ids,
+        &gb_class_ids,
+        &gb_subject_ids,
+        &gb_academic_year_ids as &[Option<Uuid>],
+        &gb_final_scores as &[Option<String>],
+        &gb_letter_grades as &[Option<String>],
+        &gb_passed_values,
+        &gb_statuses,
+        &now_vec,
+        &now_vec
+    )
+    .execute(&ctx.pool)
+    .await
+    .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
+        school_core::common::error::InfrastructureError::Database(e)
+    ), &req_ctx.request_id))?;
 
-        // 3. Insert component scores
+    // Batch delete all previous component entries (single query)
+    let _ = sqlx::query!(
+        r#"
+        DELETE FROM gradebook_entries
+        WHERE student_id = ANY($1) AND class_id = ANY($2) AND subject_id = $3
+        "#,
+        &gb_student_ids,
+        &gb_class_ids,
+        subject_id
+    )
+    .execute(&ctx.pool)
+    .await;
+
+    // Prepare batch data for gradebook_entries
+    let mut entry_ids: Vec<Uuid> = Vec::new();
+    let mut entry_tenant_ids: Vec<Uuid> = Vec::new();
+    let mut entry_student_ids: Vec<Uuid> = Vec::new();
+    let mut entry_class_ids: Vec<Uuid> = Vec::new();
+    let mut entry_subject_ids: Vec<Uuid> = Vec::new();
+    let mut entry_component_names: Vec<String> = Vec::new();
+    let mut entry_source_types: Vec<String> = Vec::new();
+    let mut entry_raw_scores: Vec<String> = Vec::new();
+    let mut entry_weighted_scores: Vec<String> = Vec::new();
+    let mut entry_weight_percentages: Vec<String> = Vec::new();
+
+    for (i, g) in payload.grades.iter().enumerate() {
+        if i >= gb_ids.len() {
+            break;
+        }
+
         let components: [(&str, &str, Option<f64>, f64); 4] = [
             ("Formatif 1", "assignment", g.formatif1, 20.0),
             ("Formatif 2", "assignment", g.formatif2, 20.0),
@@ -327,41 +400,66 @@ async fn save_gradebook(
 
         for (comp_name, src_type, raw_opt, weight) in components {
             if let Some(raw) = raw_opt {
-                let entry_id = Uuid::new_v4();
                 let weighted = raw * (weight / 100.0);
-                let raw_str = format!("{:.2}", raw);
-                let weighted_str = format!("{:.2}", weighted);
-                let weight_str = format!("{:.2}", weight);
-
-                let _ = sqlx::query!(
-                    r#"
-                    INSERT INTO gradebook_entries (
-                        id, tenant_id, student_id, class_id, subject_id,
-                        component_name, source_type, raw_score, max_raw_score,
-                        weighted_score, weight_percentage, calculated_at, created_at, gradebook_id
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::TEXT::NUMERIC, 100.0, $9::TEXT::NUMERIC, $10::TEXT::NUMERIC, NOW(), NOW(), $11)
-                    "#,
-                    entry_id,
-                    req_ctx.tenant_id,
-                    g.student_id,
-                    class_id,
-                    subject_id,
-                    comp_name,
-                    src_type,
-                    raw_str,
-                    weighted_str,
-                    weight_str,
-                    inserted_gb_id
-                )
-                .execute(&ctx.pool)
-                .await;
+                entry_ids.push(Uuid::new_v4());
+                entry_tenant_ids.push(req_ctx.tenant_id);
+                entry_student_ids.push(g.student_id);
+                entry_class_ids.push(gb_class_ids[i]);
+                entry_subject_ids.push(subject_id);
+                entry_component_names.push(comp_name.to_string());
+                entry_source_types.push(src_type.to_string());
+                entry_raw_scores.push(format!("{:.2}", raw));
+                entry_weighted_scores.push(format!("{:.2}", weighted));
+                entry_weight_percentages.push(format!("{:.2}", weight));
             }
         }
     }
 
+    // Batch insert all component entries using UNNEST (single query)
+    if !entry_ids.is_empty() {
+        let entry_now_vec = vec![now; entry_ids.len()];
+        sqlx::query!(
+            r#"
+            INSERT INTO gradebook_entries (
+                id, tenant_id, student_id, class_id, subject_id,
+                component_name, source_type, raw_score, max_raw_score,
+                weighted_score, weight_percentage, calculated_at, created_at
+            )
+            SELECT
+                u.id, u.tenant_id, u.student_id, u.class_id, u.subject_id,
+                u.component_name, u.source_type,
+                u.raw_score::NUMERIC, 100.0,
+                u.weighted_score::NUMERIC, u.weight_percentage::NUMERIC,
+                u.calculated_at, u.created_at
+            FROM UNNEST(
+                $1::uuid[], $2::uuid[], $3::uuid[], $4::uuid[], $5::uuid[],
+                $6::text[], $7::text[], $8::text[], $9::text[], $10::text[],
+                $11::timestamptz[], $12::timestamptz[]
+            ) AS u(id, tenant_id, student_id, class_id, subject_id, component_name, source_type, raw_score, weighted_score, weight_percentage, calculated_at, created_at)
+            "#,
+            &entry_ids,
+            &entry_tenant_ids,
+            &entry_student_ids,
+            &entry_class_ids,
+            &entry_subject_ids,
+            &entry_component_names,
+            &entry_source_types,
+            &entry_raw_scores,
+            &entry_weighted_scores,
+            &entry_weight_percentages,
+            &entry_now_vec,
+            &entry_now_vec
+        )
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
+            school_core::common::error::InfrastructureError::Database(e)
+        ), &req_ctx.request_id))?;
+    }
+
     Ok(Json(ApiResponse::success(true, req_ctx.request_id)))
 }
+
 
 async fn get_gradebook(
     State(ctx): State<ApplicationContext>,
@@ -483,3 +581,6 @@ pub struct GradebookParams {
     pub class_id: Option<Uuid>,
     pub subject_id: Option<Uuid>,
 }
+
+
+
