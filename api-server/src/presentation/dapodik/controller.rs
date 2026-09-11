@@ -4,7 +4,7 @@ use axum::{
     routing::{get, post},
 };
 use chrono::Utc;
-use school_core::common::error::ApplicationError;
+use school_core::common::error::{ApplicationError, DomainError};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::collections::{HashMap, HashSet};
@@ -596,7 +596,7 @@ pub async fn pull_dapodik_records(
 
     let is_agent_sync = agent_students.is_some();
 
-    let (dapodik_url, host, port, npsn, token) = resolve_dapodik_config(
+    let (dapodik_url, _host, _port, npsn, token) = resolve_dapodik_config(
         &state.pool,
         ctx.tenant_id,
         override_url,
@@ -605,18 +605,14 @@ pub async fn pull_dapodik_records(
     )
     .await;
 
-    // Probe TCP connectivity only when performing direct web pull
+    // Jika dipanggil tanpa data dari bridge lokal, beri instruksi jelas (server cloud tidak bisa akses localhost operator)
     if !is_agent_sync {
-        let is_online = probe_dapodik_tcp(&host, port).await;
-        if !is_online {
-            return Err(ApiError::new(
-                ApplicationError::Internal(format!(
-                    "Sinkronisasi PULL Dibatalkan: Dapodik WebService ({}) sedang OFFLINE / Tidak Terjangkau. Pastikan aplikasi Dapodik dan WebService port {} di-start di host {}.",
-                    dapodik_url, port, host
-                )),
-                &ctx.request_id,
-            ));
-        }
+        return Err(ApiError::new(
+            ApplicationError::Domain(DomainError::Validation(
+                "Sinkronisasi Dapodik memerlukan School OS Bridge aktif di laptop/komputer Dapodik (port 5775). Silakan unduh dan jalankan SchoolOS-Bridge lalu klik tombol 'Tarik Data Siswa Baru' dari Dashboard Web.".into()
+            )),
+            &ctx.request_id,
+        ));
     }
 
     let client = reqwest::Client::builder()
