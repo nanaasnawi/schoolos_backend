@@ -1,18 +1,25 @@
-# Rust build artifacts
-target/
-target_temp/
+# Rust Build Artifacts
+/target/
+/target_temp/
 **/*.rs.bk
 
-# Environments & secrets
+# Environments & Secrets
 .env
-.env.local
-.env.*.local
-*.env
+.env.*
+!.env.example
 
-# Logs & temp
+# Local Bridge Daemon & Compiled Agents
+schoolos-agent.json
+!schoolos-agent.json.example
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Logs, uploads & scratch
 *.log
-scratch/
-uploads/
+/scratch/
+/uploads/
 node_modules/
 
 # IDEs & OS
