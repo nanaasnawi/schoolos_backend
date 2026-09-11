@@ -511,47 +511,44 @@ pub async fn get_agent_info(
     ctx: RequestContext,
     state: State<ApplicationContext>,
 ) -> Result<Json<ApiResponse<AgentInfoResponse>>, ApiError> {
-    let school = sqlx::query!(
+    let school = sqlx::query(
         "SELECT name, npsn, dapodik_url, dapodik_token FROM schools WHERE tenant_id = $1 LIMIT 1",
-        ctx.tenant_id
     )
+    .bind(ctx.tenant_id)
     .fetch_optional(&state.pool)
     .await
     .unwrap_or_default();
 
-    let total_students = sqlx::query_scalar!(
+    let total_students: i64 = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM students WHERE tenant_id = $1 AND deleted_at IS NULL",
-        ctx.tenant_id
     )
+    .bind(ctx.tenant_id)
     .fetch_one(&state.pool)
     .await
-    .unwrap_or(Some(0))
     .unwrap_or(0);
 
-    let total_teachers = sqlx::query_scalar!(
+    let total_teachers: i64 = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM teachers WHERE tenant_id = $1 AND deleted_at IS NULL",
-        ctx.tenant_id
     )
+    .bind(ctx.tenant_id)
     .fetch_one(&state.pool)
     .await
-    .unwrap_or(Some(0))
     .unwrap_or(0);
 
-    let total_classes = sqlx::query_scalar!(
+    let total_classes: i64 = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM classes WHERE tenant_id = $1 AND deleted_at IS NULL",
-        ctx.tenant_id
     )
+    .bind(ctx.tenant_id)
     .fetch_one(&state.pool)
     .await
-    .unwrap_or(Some(0))
     .unwrap_or(0);
 
     let (school_name, npsn, dapodik_url, dapodik_token) = if let Some(s) = school {
         (
-            s.name,
-            s.npsn.unwrap_or_default(),
-            s.dapodik_url.unwrap_or_else(|| "http://127.0.0.1:5774".to_string()),
-            s.dapodik_token.unwrap_or_default(),
+            s.get::<String, _>("name"),
+            s.get::<Option<String>, _>("npsn").unwrap_or_default(),
+            s.get::<Option<String>, _>("dapodik_url").unwrap_or_else(|| "http://127.0.0.1:5774".to_string()),
+            s.get::<Option<String>, _>("dapodik_token").unwrap_or_default(),
         )
     } else {
         (

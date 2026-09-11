@@ -23,6 +23,7 @@ COPY migrations ./migrations
 COPY .sqlx ./.sqlx
 
 ENV SQLX_OFFLINE=true
+ENV CARGO_BUILD_JOBS=2
 
 # Build the api-server binary in release mode
 RUN cargo build --release -p api-server --bin api-server
