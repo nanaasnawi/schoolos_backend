@@ -38,12 +38,12 @@ impl RoleRepository for PgRoleRepository {
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn assign_permissions(
         &self,
         role_id: Uuid,
         permissions: Vec<Permission>,
     ) -> Result<(), InfrastructureError> {
-        // Simple approach: Delete existing, insert new
         let mut tx = self
             .pool
             .begin()
@@ -56,13 +56,21 @@ impl RoleRepository for PgRoleRepository {
             .await
             .map_err(InfrastructureError::Database)?;
 
-        for perm in permissions {
-            sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2)")
-                .bind(role_id)
-                .bind(perm.as_str())
-                .execute(&mut *tx)
-                .await
-                .map_err(InfrastructureError::Database)?;
+        if !permissions.is_empty() {
+            let role_ids = vec![role_id; permissions.len()];
+            let perm_strs: Vec<&str> = permissions.iter().map(|p| p.as_str()).collect();
+
+            sqlx::query(
+                r#"
+                INSERT INTO role_permissions (role_id, permission)
+                SELECT * FROM UNNEST($1::uuid[], $2::text[])
+                "#,
+            )
+            .bind(&role_ids)
+            .bind(&perm_strs)
+            .execute(&mut *tx)
+            .await
+            .map_err(InfrastructureError::Database)?;
         }
 
         tx.commit().await.map_err(InfrastructureError::Database)?;
@@ -80,14 +88,13 @@ impl RoleRepository for PgRoleRepository {
             .await
             .map_err(InfrastructureError::Database)?;
 
-        let mut permissions = Vec::new();
-        for row in records {
-            let perm_str: String = row.get("permission");
-            if let Some(perm) = Permission::from_str(&perm_str) {
-                permissions.push(perm);
-            }
-        }
-        Ok(permissions)
+        Ok(records
+            .into_iter()
+            .filter_map(|row| {
+                let perm_str: String = row.get("permission");
+                Permission::from_str(&perm_str)
+            })
+            .collect())
     }
 
     async fn get_roles_by_tenant(&self, tenant_id: Uuid) -> Result<Vec<Role>, InfrastructureError> {
@@ -133,6 +140,29 @@ impl RoleRepository for PgRoleRepository {
                 is_system_default: r.get("is_system_default"),
                 created_at: r.get("created_at"),
                 updated_at: r.get("updated_at"),
+            })
+            .collect())
+    }
+
+    async fn find_permissions_by_user_id(&self, user_id: Uuid) -> Result<Vec<Permission>, InfrastructureError> {
+        let records = sqlx::query(
+            r#"
+            SELECT DISTINCT rp.permission
+            FROM role_permissions rp
+            INNER JOIN user_roles ur ON ur.role_id = rp.role_id
+            WHERE ur.user_id = $1
+            "#,
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(InfrastructureError::Database)?;
+
+        Ok(records
+            .into_iter()
+            .filter_map(|row| {
+                let perm_str: String = row.get("permission");
+                Permission::from_str(&perm_str)
             })
             .collect())
     }

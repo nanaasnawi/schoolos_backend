@@ -58,4 +58,6 @@ pub trait OutboxRepository: Send + Sync {
         -> Result<Vec<OutboxEvent>, InfrastructureError>;
 
     async fn update_event_status(&self, event: &OutboxEvent) -> Result<(), InfrastructureError>;
+
+    async fn mark_event_pending(&self, event_id: uuid::Uuid) -> Result<(), InfrastructureError>;
 }

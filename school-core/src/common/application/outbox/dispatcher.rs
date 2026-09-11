@@ -61,7 +61,13 @@ impl OutboxDispatcher {
     ) -> Result<(), crate::common::error::InfrastructureError> {
         event.status = OutboxStatus::Processing;
         event.processed_at = Some(self.clock.now());
-        self.repo.update_event_status(event).await?;
+        if let Err(e) = self.repo.update_event_status(event).await {
+            error!(
+                "Failed to mark outbox event {} as processing: {:?}",
+                event.id, e
+            );
+            return Err(e);
+        }
 
         let domain_event: Arc<dyn DomainEvent> =
             Arc::new(GenericOutboxEvent::from_outbox(event, &*self.clock));
@@ -73,7 +79,14 @@ impl OutboxDispatcher {
 
         event.status = OutboxStatus::Succeeded;
         event.processed_at = Some(self.clock.now());
-        self.repo.update_event_status(event).await?;
+        if let Err(e) = self.repo.update_event_status(event).await {
+            let _ = self.repo.mark_event_pending(event.id).await;
+            error!(
+                "Failed to mark outbox event {} as succeeded: {:?}. Marked as pending for retry.",
+                event.id, e
+            );
+            return Err(e);
+        }
 
         Ok(())
     }

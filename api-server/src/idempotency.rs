@@ -2,7 +2,7 @@ use axum::body::to_bytes;
 use axum::{
     body::Body,
     extract::{Request, State},
-    http::StatusCode,
+    http::{header, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -12,12 +12,28 @@ use uuid::Uuid;
 
 use crate::bootstrap::ApplicationContext;
 
+/// Ukuran maksimal body yang di-hash untuk idempotency (1 MB).
+/// Body yang lebih besar dari batas ini tidak di-hash dan tidak disimpan,
+/// tapi request tetap diproses secara normal.
+const MAX_BODY_HASH_SIZE: usize = 1_048_576;
+
 pub async fn idempotency_middleware(
     State(state): State<ApplicationContext>,
     req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if req.method() != axum::http::Method::POST {
+    // Hanya aktif untuk POST requests
+    if req.method() != Method::POST {
+        return Ok(next.run(req).await);
+    }
+
+    // Skip middleware untuk multipart/form-data (file upload) — tidak perlu idempotency
+    let content_type = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if content_type.starts_with("multipart/") {
         return Ok(next.run(req).await);
     }
 
@@ -41,9 +57,13 @@ pub async fn idempotency_middleware(
 
     let (parts, body) = req.into_parts();
 
-    let bytes = match to_bytes(body, usize::MAX).await {
+    // Baca body dengan batas ukuran — kalau lebih besar dari MAX_BODY_HASH_SIZE,
+    // body tidak bisa di-hash dan idempotency key tidak disimpan.
+    let bytes = match to_bytes(body, MAX_BODY_HASH_SIZE).await {
         Ok(b) => b,
-        Err(_) => return Err(StatusCode::BAD_REQUEST),
+        Err(_) => {
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
     };
 
     let hash = hex::encode(Sha256::digest(&bytes));
@@ -75,7 +95,7 @@ pub async fn idempotency_middleware(
     if (200..300).contains(&status) {
         let (resp_parts, resp_body) = response.into_parts();
 
-        if let Ok(resp_bytes) = to_bytes(resp_body, usize::MAX).await {
+        if let Ok(resp_bytes) = to_bytes(resp_body, MAX_BODY_HASH_SIZE).await {
             if let Ok(resp_json) = serde_json::from_slice::<Value>(&resp_bytes) {
                 let _ = sqlx::query(
                     "INSERT INTO idempotency_keys (idempotency_key, tenant_id, request_hash, response_status, response_body) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",

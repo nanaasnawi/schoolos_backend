@@ -95,4 +95,20 @@ impl OutboxRepository for PgOutboxRepository {
 
         Ok(())
     }
+
+    async fn mark_event_pending(&self, event_id: uuid::Uuid) -> Result<(), InfrastructureError> {
+        sqlx::query(
+            r#"
+            UPDATE outbox_events
+            SET status = 'pending', processed_at = NULL
+            WHERE id = $1
+            "#,
+        )
+        .bind(event_id)
+        .execute(&self.pool)
+        .await
+        .map_err(InfrastructureError::Database)?;
+
+        Ok(())
+    }
 }

@@ -667,33 +667,45 @@ async fn add_question(
 
     let mut choice_responses = Vec::new();
     if let Some(choices) = payload.choices {
+        let choice_count = choices.len();
+        let mut choice_ids = Vec::with_capacity(choice_count);
+        let mut choice_texts = Vec::with_capacity(choice_count);
+        let mut is_corrects = Vec::with_capacity(choice_count);
+        let mut order_indexes = Vec::with_capacity(choice_count);
+
         for (idx, c) in choices.into_iter().enumerate() {
-            let c_id = Uuid::new_v4();
-            let c_order = c.order_index.unwrap_or(idx as i32 + 1);
-            let is_corr = c.is_correct.unwrap_or(false);
+            choice_ids.push(Uuid::new_v4());
+            choice_texts.push(c.choice_text);
+            is_corrects.push(c.is_correct.unwrap_or(false));
+            order_indexes.push(c.order_index.unwrap_or(idx as i32 + 1));
+        }
 
-            sqlx::query!(
-                r#"
-                INSERT INTO quiz_choices (id, question_id, choice_text, is_correct, order_index, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
-                "#,
-                c_id,
-                q_id,
-                c.choice_text,
-                is_corr,
-                c_order
-            )
-            .execute(&ctx.pool)
-            .await
-            .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
-                school_core::common::error::InfrastructureError::Database(e)
-            ), &req_ctx.request_id))?;
+        let q_ids = vec![q_id; choice_count];
+        sqlx::query!(
+            r#"
+            INSERT INTO quiz_choices (id, question_id, choice_text, is_correct, order_index, created_at, updated_at)
+            SELECT u.id, u.question_id, u.choice_text, u.is_correct, u.order_index, NOW(), NOW()
+            FROM UNNEST($1::uuid[], $2::uuid[], $3::text[], $4::boolean[], $5::int[])
+                AS u(id, question_id, choice_text, is_correct, order_index)
+            "#,
+            &choice_ids as &[Uuid],
+            &q_ids as &[Uuid],
+            &choice_texts as &[String],
+            &is_corrects as &[bool],
+            &order_indexes as &[i32],
+        )
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
+            school_core::common::error::InfrastructureError::Database(e)
+        ), &req_ctx.request_id))?;
 
+        for (idx, c_id) in choice_ids.into_iter().enumerate() {
             choice_responses.push(QuizChoiceResponse {
                 id: c_id,
-                choice_text: c.choice_text,
-                order_index: c_order,
-                is_correct: Some(is_corr),
+                choice_text: choice_texts[idx].clone(),
+                order_index: order_indexes[idx],
+                is_correct: Some(is_corrects[idx]),
             });
         }
     }

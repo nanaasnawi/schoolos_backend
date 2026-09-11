@@ -131,20 +131,38 @@ async fn create(
     .execute(&ctx.pool)
     .await;
 
+    let (class_name, subject_name, teacher_name) = tokio::join!(
+        async {
+            if let Some(cid) = target_class_id {
+                sqlx::query_scalar!(r#"SELECT name FROM classes WHERE id = $1"#, cid)
+                    .fetch_optional(&ctx.pool).await.ok().flatten()
+            } else {
+                None
+            }
+        },
+        async {
+            if let Some(sid) = subject_id {
+                sqlx::query_scalar!(r#"SELECT name FROM subjects WHERE id = $1"#, sid)
+                    .fetch_optional(&ctx.pool).await.ok().flatten()
+            } else {
+                None
+            }
+        },
+        async {
+            if let Some(tid) = teacher_id {
+                sqlx::query_scalar!(r#"SELECT full_name FROM teachers WHERE id = $1"#, tid)
+                    .fetch_optional(&ctx.pool).await.ok().flatten()
+            } else {
+                None
+            }
+        },
+    );
+
     let mut resp = AssignmentResponse::from(assignment);
     resp.class_id = target_class_id;
-    if let Some(cid) = target_class_id {
-        resp.class_name = sqlx::query_scalar!(r#"SELECT name FROM classes WHERE id = $1"#, cid)
-            .fetch_optional(&ctx.pool).await.ok().flatten();
-    }
-    if let Some(sid) = subject_id {
-        resp.subject_name = sqlx::query_scalar!(r#"SELECT name FROM subjects WHERE id = $1"#, sid)
-            .fetch_optional(&ctx.pool).await.ok().flatten();
-    }
-    if let Some(tid) = teacher_id {
-        resp.teacher_name = sqlx::query_scalar!(r#"SELECT full_name FROM teachers WHERE id = $1"#, tid)
-            .fetch_optional(&ctx.pool).await.ok().flatten();
-    }
+    resp.class_name = class_name;
+    resp.subject_name = subject_name;
+    resp.teacher_name = teacher_name;
 
     Ok(Json(ApiResponse::success(
         resp,

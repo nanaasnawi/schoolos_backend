@@ -257,6 +257,30 @@ impl Bootstrap {
             }
         });
 
+        // ── Idempotency Cleanup Service ──────────────────────────────────────
+        // Hapus idempotency keys yang sudah melebihi TTL secara periodic.
+        // Default: 24 jam TTL, cleanup setiap 1 jam.
+        let idempotency_ttl = std::env::var("IDEMPOTENCY_TTL_SECONDS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(86400);
+        let idempotency_interval = std::env::var("IDEMPOTENCY_CLEANUP_INTERVAL_SECONDS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(3600);
+        let cleanup_service = crate::idempotency_cleanup::IdempotencyCleanupService::new(
+            pool.clone(),
+            Duration::from_secs(idempotency_interval),
+            Duration::from_secs(idempotency_ttl),
+        );
+        tokio::spawn({
+            let cleanup_service = cleanup_service.clone();
+            async move {
+                tracing::info!(component = "idempotency_cleanup", "Starting idempotency cleanup service");
+                cleanup_service.start().await;
+            }
+        });
+
         // Repositories
         let user_repo = Arc::new(PgUserRepository::new(pool.clone()));
         let _tenant_repo = Arc::new(PgTenantRepository::new(pool.clone()));

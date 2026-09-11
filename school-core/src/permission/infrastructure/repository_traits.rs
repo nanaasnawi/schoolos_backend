@@ -18,4 +18,5 @@ pub trait RoleRepository: Send + Sync {
     ) -> Result<Vec<Permission>, InfrastructureError>;
     async fn get_roles_by_tenant(&self, tenant_id: Uuid) -> Result<Vec<Role>, InfrastructureError>;
     async fn find_roles_by_user_id(&self, user_id: Uuid) -> Result<Vec<Role>, InfrastructureError>;
+    async fn find_permissions_by_user_id(&self, user_id: Uuid) -> Result<Vec<Permission>, InfrastructureError>;
 }

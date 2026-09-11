@@ -204,15 +204,7 @@ async fn list_class_students(
     req_ctx: RequestContext,
     Query(query): Query<ClassStudentsQuery>,
 ) -> Result<Json<ApiResponse<Vec<ClassStudentDto>>>, ApiError> {
-    let tenant_id = if req_ctx.tenant_id == Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap() {
-        sqlx::query_scalar!("SELECT tenant_id FROM classes LIMIT 1")
-            .fetch_optional(&ctx.pool)
-            .await
-            .unwrap_or(None)
-            .unwrap_or(req_ctx.tenant_id)
-    } else {
-        req_ctx.tenant_id
-    };
+    let tenant_id = req_ctx.tenant_id;
 
     let rows = sqlx::query!(
         r#"

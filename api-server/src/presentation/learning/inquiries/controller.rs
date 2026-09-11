@@ -90,31 +90,13 @@ pub fn inquiry_routes() -> Router<ApplicationContext> {
         .route("/{id}/resolve", post(resolve_inquiry))
 }
 
-async fn resolve_effective_tenant_id(pool: &sqlx::PgPool, candidate: Uuid) -> Uuid {
-    let dummy = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
-    if candidate == dummy {
-        if let Ok(Some(tid)) = sqlx::query_scalar!("SELECT tenant_id FROM inquiry_threads LIMIT 1")
-            .fetch_optional(pool)
-            .await
-        {
-            return tid;
-        }
-        if let Ok(Some(tid)) = sqlx::query_scalar!("SELECT id FROM tenants ORDER BY created_at ASC LIMIT 1")
-            .fetch_optional(pool)
-            .await
-        {
-            return tid;
-        }
-    }
-    candidate
-}
 
 async fn list_inquiries(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
     Query(query): Query<ListInquiriesQuery>,
 ) -> Result<Json<ApiResponse<Vec<InquiryThreadDto>>>, ApiError> {
-    let tenant_id = resolve_effective_tenant_id(&ctx.pool, req_ctx.tenant_id).await;
+    let tenant_id = req_ctx.tenant_id;
 
     // Check if the caller is a Teacher in this tenant
     let actor_teacher = if let Some(ref actor) = req_ctx.actor {
@@ -394,7 +376,7 @@ async fn create_inquiry(
         }
     };
 
-    let tenant_id = resolve_effective_tenant_id(&ctx.pool, req_ctx.tenant_id).await;
+    let tenant_id = req_ctx.tenant_id;
     let mut resolved_tenant_id = tenant_id;
     let mut resolved_teacher_id = payload.teacher_id;
     let mut resolved_teacher_name = payload.teacher_name.unwrap_or_else(|| "Guru Pengampu".to_string());

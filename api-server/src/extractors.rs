@@ -61,14 +61,34 @@ where
         // Extract Actor from JWT (We'll assume the Auth middleware will insert Actor into extensions)
         let actor = parts.extensions.get::<Actor>().cloned();
 
-        // Extract tenant_id from Header (e.g. x-tenant-id) or fallback to Actor's tenant_id
-        let tenant_id = if let Some(v) = parts.headers.get("x-tenant-id") {
-            let tenant_id_str = v.to_str().unwrap_or("00000000-0000-0000-0000-000000000001");
-            Uuid::parse_str(tenant_id_str).unwrap_or_else(|_| Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap())
-        } else if let Some(ref a) = actor {
-            a.tenant_id
+        // Extract tenant_id with strict multi-tenant isolation:
+        // 1. If an authenticated Actor is present, ALWAYS bind to actor.tenant_id,
+        //    UNLESS the actor has a SuperAdmin/PlatformAdmin role and explicitly requests a tenant switch.
+        // 2. If no Actor is present (e.g. public endpoint), extract from x-tenant-id header if valid.
+        // 3. Otherwise, fallback to Uuid::nil().
+        let tenant_id = if let Some(ref a) = actor {
+            let is_superadmin = a.roles.iter().any(|r| {
+                let name = r.name.to_lowercase();
+                name == "superadmin" || name == "platformadmin" || name == "super_admin"
+            });
+
+            if is_superadmin {
+                parts
+                    .headers
+                    .get("x-tenant-id")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| Uuid::parse_str(s).ok())
+                    .unwrap_or(a.tenant_id)
+            } else {
+                a.tenant_id
+            }
+        } else if let Some(v) = parts.headers.get("x-tenant-id") {
+            v.to_str()
+                .ok()
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .unwrap_or(Uuid::nil())
         } else {
-            Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()
+            Uuid::nil()
         };
 
         Ok(RequestContext {

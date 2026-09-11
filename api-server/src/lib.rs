@@ -2,6 +2,7 @@ pub mod bootstrap;
 pub mod error;
 pub mod extractors;
 pub mod idempotency;
+pub mod idempotency_cleanup;
 pub mod infrastructure;
 pub mod middleware;
 pub mod presentation;
@@ -25,6 +26,7 @@ use utoipa::OpenApi;
         crate::presentation::academic::academic_years::controller::list,
 
         crate::presentation::analytics::controller::get_overview,
+        crate::presentation::analytics::controller::get_dashboard,
         crate::presentation::academic::classes::controller::create,
         crate::presentation::academic::classes::controller::list,
         crate::presentation::academic::enrollments::controller::create,

@@ -40,22 +40,13 @@ pub async fn auth_middleware(
                     if let Ok(user_id) = Uuid::parse_str(&token_data.claims.sub) {
                         if let Ok(tenant_id) = Uuid::parse_str(&token_data.claims.tenant_id) {
                             let roles = ctx.role_repo.find_roles_by_user_id(user_id).await.unwrap_or_default();
-                            let mut all_permissions = Vec::new();
-                            for role in &roles {
-                                if let Ok(perms) = ctx.role_repo.get_role_permissions(role.id).await {
-                                    for p in perms {
-                                        if !all_permissions.contains(&p) {
-                                            all_permissions.push(p);
-                                        }
-                                    }
-                                }
-                            }
+                            let permissions = ctx.role_repo.find_permissions_by_user_id(user_id).await.unwrap_or_default();
 
                             actor_opt = Some(Actor {
                                 id: user_id,
                                 tenant_id,
                                 roles,
-                                permissions: all_permissions,
+                                permissions,
                             });
                         } else {
                             tracing::error!("Failed to parse tenant_id: {}", token_data.claims.tenant_id);
