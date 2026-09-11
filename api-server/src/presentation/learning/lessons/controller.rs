@@ -88,17 +88,103 @@ async fn list(
         )
     })?;
 
-    let query = ListLessonsQuery {
-        tenant_id: req_ctx.tenant_id,
-    };
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
+    let is_teacher = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Guru" || r.name == "Teacher")).unwrap_or(false);
+    let is_student = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Siswa" || r.name == "Student")).unwrap_or(false);
 
-    let lessons = ctx
-        .list_lessons
-        .execute(query)
+    let items: Vec<LessonResponse> = if is_teacher {
+        // Teacher sees only lessons that have materials they created
+        let rows = sqlx::query!(
+            r#"
+            SELECT DISTINCT l.id, l.tenant_id, l.syllabus_id, l.code, l.title, l.description,
+                   l.learning_objectives, l.duration_minutes, l.order_index, l.status,
+                   l.is_active, l.created_at, l.updated_at
+            FROM lessons l
+            INNER JOIN learning_materials m ON m.lesson_id = l.id AND m.deleted_at IS NULL
+            WHERE l.tenant_id = $1 AND l.deleted_at IS NULL
+              AND (
+                  m.created_by = $2
+                  OR m.teacher_id IN (SELECT id FROM teachers WHERE user_id = $2)
+              )
+            ORDER BY l.created_at DESC
+            "#,
+            req_ctx.tenant_id,
+            actor_id
+        )
+        .fetch_all(&ctx.pool)
         .await
-        .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
+        .unwrap_or_default();
 
-    let items = lessons.into_iter().map(LessonResponse::from).collect();
+        rows.into_iter().map(|r| LessonResponse {
+            id: r.id,
+            tenant_id: r.tenant_id,
+            syllabus_id: r.syllabus_id,
+            code: r.code,
+            title: r.title,
+            description: r.description,
+            learning_objectives: r.learning_objectives,
+            duration_minutes: r.duration_minutes,
+            order_index: r.order_index,
+            status: r.status,
+            is_active: r.is_active,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }).collect()
+    } else if is_student {
+        // Student sees ONLY lessons that have materials for their active enrolled classes
+        let rows = sqlx::query!(
+            r#"
+            SELECT DISTINCT l.id, l.tenant_id, l.syllabus_id, l.code, l.title, l.description,
+                   l.learning_objectives, l.duration_minutes, l.order_index, l.status,
+                   l.is_active, l.created_at, l.updated_at
+            FROM lessons l
+            INNER JOIN learning_materials m ON m.lesson_id = l.id AND m.deleted_at IS NULL
+            WHERE l.tenant_id = $1 AND l.deleted_at IS NULL AND l.is_active = true
+              AND m.is_active = true
+              AND m.class_id IN (
+                  SELECT en.class_id
+                  FROM students s
+                  JOIN enrollments en ON en.student_id = s.id
+                  WHERE s.user_id = $2 AND (en.status = 'Active' OR en.status = 'ACTIVE')
+              )
+            ORDER BY l.created_at DESC
+            "#,
+            req_ctx.tenant_id,
+            actor_id
+        )
+        .fetch_all(&ctx.pool)
+        .await
+        .unwrap_or_default();
+
+        rows.into_iter().map(|r| LessonResponse {
+            id: r.id,
+            tenant_id: r.tenant_id,
+            syllabus_id: r.syllabus_id,
+            code: r.code,
+            title: r.title,
+            description: r.description,
+            learning_objectives: r.learning_objectives,
+            duration_minutes: r.duration_minutes,
+            order_index: r.order_index,
+            status: r.status,
+            is_active: r.is_active,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }).collect()
+    } else {
+        // Super Admin / Kepala Sekolah / Staf sees all lessons in tenant
+        let query = ListLessonsQuery {
+            tenant_id: req_ctx.tenant_id,
+        };
+
+        let lessons = ctx
+            .list_lessons
+            .execute(query)
+            .await
+            .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
+
+        lessons.into_iter().map(LessonResponse::from).collect()
+    };
 
     Ok(Json(ApiResponse::success(items, req_ctx.request_id)))
 }
