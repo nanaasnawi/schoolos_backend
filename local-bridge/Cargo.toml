@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "schoolos-sync"
+name = "schoolos-bridge"
 path = "src/main.rs"
 
 [dependencies]

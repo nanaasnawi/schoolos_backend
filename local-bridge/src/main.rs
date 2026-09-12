@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use axum::{
     extract::Json,
     http::StatusCode,
@@ -6,11 +8,15 @@ use axum::{
     Router,
 };
 use local_bridge::dapodik_acl::client::DapodikLocalClient;
+use local_bridge::service::{
+    is_running_from_install_dir, perform_self_install, show_native_message,
+    unregister_windows_autostart,
+};
 use local_bridge::sync::engine::SyncEngine;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use tower_http::cors::{Any, CorsLayer};
-use tracing::{info, Level};
+use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 #[derive(Debug, Deserialize)]
@@ -109,13 +115,100 @@ async fn sync_handler(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Inisialisasi logging
+    let args: Vec<String> = std::env::args().collect();
+    let current_exe = std::env::current_exe()?;
+
+    // 1. Uninstall flag: removes autostart & kills daemon
+    if args.iter().any(|a| a == "--uninstall" || a == "-u") {
+        match unregister_windows_autostart() {
+            Ok(_) => {
+                show_native_message(
+                    "School OS Bridge",
+                    "✓ School OS Bridge berhasil dicopot dan dinonaktifkan dari startup Windows.",
+                    false,
+                );
+            }
+            Err(e) => {
+                show_native_message(
+                    "School OS Bridge Error",
+                    &format!("Gagal mencopot instalasi: {}", e),
+                    true,
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    // 2. Status query
+    if args.iter().any(|a| a == "--status") {
+        let is_running = reqwest::Client::new()
+            .get("http://127.0.0.1:5775/health")
+            .timeout(std::time::Duration::from_millis(1000))
+            .send()
+            .await
+            .is_ok();
+
+        if is_running {
+            show_native_message(
+                "School OS Bridge Status",
+                "✓ School OS Bridge AKTIF dan berjalan di latar belakang (Port 5775).\n\nKomputer siap untuk sinkronisasi Dapodik.",
+                false,
+            );
+        } else {
+            show_native_message(
+                "School OS Bridge Status",
+                "✗ School OS Bridge TIDAK aktif.\n\nSilakan jalankan aplikasi schoolos-bridge.exe untuk mengaktifkannya.",
+                true,
+            );
+        }
+        return Ok(());
+    }
+
+    let is_daemon = args.iter().any(|a| a == "--daemon" || a == "-d");
+    let is_force_install = args.iter().any(|a| a == "--install" || a == "-i");
+
+    // 3. User interactive double-click check:
+    if !is_daemon && !is_force_install {
+        // Test if bridge is already running on port 5775
+        let is_running = reqwest::Client::new()
+            .get("http://127.0.0.1:5775/health")
+            .timeout(std::time::Duration::from_millis(800))
+            .send()
+            .await
+            .is_ok();
+
+        if is_running && is_running_from_install_dir(&current_exe) {
+            show_native_message(
+                "School OS Bridge",
+                "✓ School OS Bridge sudah aktif di latar belakang (Port 5775).\n\nAutostart komputer telah aktif. Anda siap melakukan tarik data Dapodik kapan saja.",
+                false,
+            );
+            return Ok(());
+        }
+    }
+
+    // 4. If not running in daemon mode and not in installed directory (or force install requested)
+    if is_force_install || (!is_daemon && !is_running_from_install_dir(&current_exe)) {
+        if let Err(e) = perform_self_install(&current_exe) {
+            show_native_message(
+                "School OS Bridge Setup Error",
+                &format!(
+                    "Gagal memasang School OS Bridge otomatis:\n{}\n\nSilakan coba jalankan sebagai Administrator.",
+                    e
+                ),
+                true,
+            );
+        }
+        return Ok(());
+    }
+
+    // 5. Run Axum server as background daemon
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
         .finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
 
-    // Permissive CORS layer allows requests from Vercel (https://school-os-academy.vercel.app)
+    // Permissive CORS layer allows requests from Web Dashboard
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -127,10 +220,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(cors);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 5775));
-    info!("School OS Silent Bridge aktif di http://{}", addr);
+    info!("School OS Silent Native Bridge aktif di http://{}", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => {
+            if let Err(e) = axum::serve(listener, app).await {
+                error!("Bridge server stopped: {}", e);
+            }
+        }
+        Err(e) => {
+            error!("Gagal mengikat port {}: {}", addr, e);
+        }
+    }
 
     Ok(())
 }
