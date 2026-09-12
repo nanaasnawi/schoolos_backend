@@ -178,7 +178,7 @@ async fn list(
         })
     }).unwrap_or(false);
 
-    let items: Vec<LearningMaterialResponse> = if is_teacher && !is_admin {
+    let items: Vec<LearningMaterialResponse> = if is_teacher {
         // Teacher strictly sees ONLY materials they created or are assigned to them
         let rows = sqlx::query!(
             r#"
@@ -356,7 +356,7 @@ async fn get_by_id(
         })
     }).unwrap_or(false);
 
-    if is_teacher && !is_admin {
+    if is_teacher {
         let owns = sqlx::query_scalar::<_, bool>(
             r#"SELECT EXISTS(
                 SELECT 1 FROM learning_materials
