@@ -308,6 +308,166 @@ async fn probe_dapodik_tcp(host: &str, port: u16) -> bool {
     false
 }
 
+fn sanitize_clean_code(s: Option<&str>) -> Option<String> {
+    s.and_then(|val| {
+        let trimmed = val.trim();
+        if trimmed.is_empty()
+            || trimmed == "-"
+            || trimmed == "0"
+            || trimmed.eq_ignore_ascii_case("null")
+            || trimmed.eq_ignore_ascii_case("none")
+        {
+            None
+        } else {
+            let clean: String = trimmed.chars().filter(|c| c.is_alphanumeric()).collect();
+            if clean.is_empty() {
+                None
+            } else {
+                Some(clean)
+            }
+        }
+    })
+}
+
+fn truncate_str(val: &str, max_len: usize) -> String {
+    val.trim().chars().take(max_len).collect()
+}
+
+async fn safe_upsert_user(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: Uuid,
+    username: &str,
+    email: &str,
+    full_name: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Uuid, sqlx::Error> {
+    let clean_uname = truncate_str(username, 100);
+    let clean_email = truncate_str(email, 255);
+    let clean_fullname = truncate_str(full_name, 255);
+
+    // 1. Check if user already exists by email OR username (case-insensitive)
+    let existing_user = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT id FROM users 
+        WHERE tenant_id = $1 AND (email = $2 OR LOWER(username) = LOWER($3))
+        LIMIT 1
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(&clean_email)
+    .bind(&clean_uname)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    if let Some(uid) = existing_user {
+        sqlx::query(
+            r#"
+            UPDATE users 
+            SET full_name = $1, 
+                username = COALESCE(users.username, $2),
+                is_active = true,
+                updated_at = $3
+            WHERE id = $4
+            "#,
+        )
+        .bind(&clean_fullname)
+        .bind(&clean_uname)
+        .bind(now)
+        .bind(uid)
+        .execute(&mut **tx)
+        .await?;
+
+        return Ok(uid);
+    }
+
+    // 2. Insert with savepoint protection against unique constraint abort
+    let new_uid = Uuid::now_v7();
+    let _ = sqlx::query("SAVEPOINT sp_upsert_user").execute(&mut **tx).await;
+
+    let insert_res = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        INSERT INTO users (id, tenant_id, username, email, password_hash, full_name, is_active, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, '$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY', $5, true, $6, $6)
+        ON CONFLICT (tenant_id, email) DO UPDATE SET
+            username = COALESCE(users.username, EXCLUDED.username),
+            full_name = EXCLUDED.full_name,
+            updated_at = EXCLUDED.updated_at
+        RETURNING id
+        "#,
+    )
+    .bind(new_uid)
+    .bind(tenant_id)
+    .bind(&clean_uname)
+    .bind(&clean_email)
+    .bind(&clean_fullname)
+    .bind(now)
+    .fetch_one(&mut **tx)
+    .await;
+
+    match insert_res {
+        Ok(uid) => {
+            let _ = sqlx::query("RELEASE SAVEPOINT sp_upsert_user").execute(&mut **tx).await;
+            Ok(uid)
+        }
+        Err(e) => {
+            let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_upsert_user").execute(&mut **tx).await;
+            tracing::warn!(
+                "User insert conflict for '{}' / '{}': {}. Falling back to fetch/dedup...",
+                clean_uname,
+                clean_email,
+                e
+            );
+
+            // Re-check if inserted concurrently or by username
+            let found_user = sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM users WHERE tenant_id = $1 AND (email = $2 OR LOWER(username) = LOWER($3)) LIMIT 1",
+            )
+            .bind(tenant_id)
+            .bind(&clean_email)
+            .bind(&clean_uname)
+            .fetch_optional(&mut **tx)
+            .await?;
+
+            if let Some(uid) = found_user {
+                Ok(uid)
+            } else {
+                // Fallback: create with suffix to prevent username index collision
+                let suffix: String = Uuid::now_v7().to_string().chars().take(4).collect();
+                let fallback_username = format!("{}_{}", clean_uname, suffix);
+                let fallback_uid = Uuid::now_v7();
+
+                let _ = sqlx::query("SAVEPOINT sp_upsert_user_fb").execute(&mut **tx).await;
+                let fb_res = sqlx::query_scalar::<_, Uuid>(
+                    r#"
+                    INSERT INTO users (id, tenant_id, username, email, password_hash, full_name, is_active, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, '$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY', $5, true, $6, $6)
+                    RETURNING id
+                    "#,
+                )
+                .bind(fallback_uid)
+                .bind(tenant_id)
+                .bind(&fallback_username)
+                .bind(&clean_email)
+                .bind(&clean_fullname)
+                .bind(now)
+                .fetch_one(&mut **tx)
+                .await;
+
+                match fb_res {
+                    Ok(uid) => {
+                        let _ = sqlx::query("RELEASE SAVEPOINT sp_upsert_user_fb").execute(&mut **tx).await;
+                        Ok(uid)
+                    }
+                    Err(fb_err) => {
+                        let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_upsert_user_fb").execute(&mut **tx).await;
+                        Err(fb_err)
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub async fn check_dapodik_health(
     ctx: RequestContext,
     state: State<ApplicationContext>,
@@ -953,34 +1113,53 @@ pub async fn pull_dapodik_records(
             }
             let full_address = parts.join(", ");
 
-            let _ = sqlx::query!(
+            let _ = sqlx::query("SAVEPOINT sp_sekolah").execute(&mut *tx).await;
+            let clean_sek_nama = sek_nama.as_deref().map(|s| truncate_str(s, 255));
+            let clean_sek_npsn = sek_npsn.as_deref().map(|s| truncate_str(s, 50));
+            let clean_address = truncate_str(&full_address, 500);
+            let clean_telp = sek_telp.as_deref().map(|s| truncate_str(s, 50));
+            let clean_email = sek_email.as_deref().map(|s| truncate_str(s, 255));
+
+            let update_school_res = sqlx::query(
                 r#"
-                        UPDATE schools 
-                        SET name = COALESCE(NULLIF($1, ''), name),
-                            npsn = COALESCE(NULLIF($2, ''), npsn),
-                            address = $3,
-                            phone_number = COALESCE($4, phone_number),
-                            email = COALESCE($5, email),
-                            updated_at = NOW()
-                        WHERE tenant_id = $6
-                        "#,
-                sek_nama,
-                sek_npsn,
-                full_address,
-                sek_telp,
-                sek_email,
-                ctx.tenant_id
+                UPDATE schools 
+                SET name = COALESCE(NULLIF($1, ''), name),
+                    npsn = COALESCE(NULLIF($2, ''), npsn),
+                    address = $3,
+                    phone_number = COALESCE($4, phone_number),
+                    email = COALESCE($5, email),
+                    updated_at = NOW()
+                WHERE tenant_id = $6
+                "#,
             )
+            .bind(clean_sek_nama.as_deref())
+            .bind(clean_sek_npsn.as_deref())
+            .bind(&clean_address)
+            .bind(clean_telp.as_deref())
+            .bind(clean_email.as_deref())
+            .bind(ctx.tenant_id)
             .execute(&mut *tx)
             .await;
 
-            if let Some(s_name) = sek_nama {
+            if update_school_res.is_err() {
+                let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_sekolah").execute(&mut *tx).await;
+            } else {
+                let _ = sqlx::query("RELEASE SAVEPOINT sp_sekolah").execute(&mut *tx).await;
+            }
+
+            if let Some(ref s_name) = clean_sek_nama {
                 if !s_name.trim().is_empty() {
-                    let _ = sqlx::query("UPDATE tenants SET name = $1, updated_at = NOW() WHERE id = $2")
+                    let _ = sqlx::query("SAVEPOINT sp_tenant").execute(&mut *tx).await;
+                    let t_res = sqlx::query("UPDATE tenants SET name = $1, updated_at = NOW() WHERE id = $2")
                         .bind(s_name.trim())
                         .bind(ctx.tenant_id)
                         .execute(&mut *tx)
                         .await;
+                    if t_res.is_err() {
+                        let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_tenant").execute(&mut *tx).await;
+                    } else {
+                        let _ = sqlx::query("RELEASE SAVEPOINT sp_tenant").execute(&mut *tx).await;
+                    }
                 }
             }
         }
@@ -1028,55 +1207,61 @@ pub async fn pull_dapodik_records(
     };
     if let Some(teachers) = extracted_gtk {
         for (idx, gtk) in teachers.into_iter().enumerate() {
+            let sp_gtk = format!("sp_gtk_{}", idx);
+            let _ = sqlx::query(&format!("SAVEPOINT {}", sp_gtk)).execute(&mut *tx).await;
+
             let ptk_id = gtk.ptk_id.clone().unwrap_or_else(|| format!("ptk-{}", idx));
-            let nip_val = gtk.nip.clone().or(gtk.nik.clone());
-            let nip = nip_val.filter(|s| !s.trim().is_empty());
-            let nuptk = gtk.nuptk.clone().filter(|s| !s.trim().is_empty());
-            let nama = gtk
+            let clean_ptk: String = ptk_id.chars().filter(|c| c.is_alphanumeric()).collect();
+            let ptk_prefix = if clean_ptk.is_empty() {
+                format!("{:0>8}", idx)
+            } else {
+                clean_ptk.chars().take(8).collect::<String>()
+            };
+
+            let nip = sanitize_clean_code(gtk.nip.as_deref().or(gtk.nik.as_deref())).map(|s| truncate_str(&s, 50));
+            let nuptk = sanitize_clean_code(gtk.nuptk.as_deref()).map(|s| truncate_str(&s, 50));
+            let raw_nama = gtk
                 .nama
                 .clone()
                 .or(gtk.nama_ptk.clone())
                 .or(gtk.nama_gtk.clone())
                 .unwrap_or_else(|| "GURU DAPODIK".to_string());
+            let nama = truncate_str(&raw_nama, 255);
+            let nama_upper = truncate_str(&nama.to_uppercase(), 255);
+
             let subject_val = gtk
                 .jenis_ptk
                 .clone()
                 .or(gtk.jenis_ptk_id_str.clone())
                 .or(gtk.mata_pelajaran.clone())
-                .or(gtk.mapel.clone());
-            let new_id = Uuid::now_v7();
+                .or(gtk.mapel.clone())
+                .map(|s| truncate_str(&s, 100));
 
-            let user_id = Uuid::now_v7();
-            let email = format!(
-                "{}@guru.schoolos.id",
-                ptk_id.chars().take(8).collect::<String>()
-            );
+            let email = format!("{}@guru.schoolos.id", ptk_prefix);
             let username = nip
                 .as_ref()
                 .cloned()
                 .or_else(|| nuptk.as_ref().cloned())
-                .unwrap_or_else(|| format!("guru_{}", ptk_id.chars().take(8).collect::<String>()));
+                .unwrap_or_else(|| format!("guru_{}", ptk_prefix));
 
-            let actual_user_id = match sqlx::query_scalar::<_, Uuid>(
-                        r#"
-                        INSERT INTO users (id, tenant_id, username, email, password_hash, full_name, is_active, created_at, updated_at) 
-                        VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7) 
-                        ON CONFLICT (tenant_id, email) DO UPDATE SET 
-                            username = COALESCE(users.username, EXCLUDED.username),
-                            full_name = EXCLUDED.full_name, 
-                            updated_at = EXCLUDED.updated_at
-                        RETURNING id
-                        "#
-                    )
-                    .bind(user_id).bind(ctx.tenant_id).bind(&username).bind(&email).bind("$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY").bind(&nama).bind(now)
-                    .fetch_one(&mut *tx)
-                    .await {
-                        Ok(uid) => uid,
-                        Err(e) => {
-                            tracing::error!("Failed to upsert user for teacher {}: {}", nama, e);
-                            continue;
-                        }
-                    };
+            let user_res = safe_upsert_user(
+                &mut tx,
+                ctx.tenant_id,
+                &username,
+                &email,
+                &nama,
+                now,
+            )
+            .await;
+
+            let actual_user_id = match user_res {
+                Ok(uid) => uid,
+                Err(e) => {
+                    let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_gtk)).execute(&mut *tx).await;
+                    tracing::warn!("Failed to upsert user for teacher {}: {}", nama, e);
+                    continue;
+                }
+            };
 
             let _ = sqlx::query(
                 "INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
@@ -1119,7 +1304,7 @@ pub async fn pull_dapodik_records(
                 .bind(actual_user_id)
                 .bind(&token_hash)
                 .bind(&raw_token)
-                .bind(format!("Kartu GTK - {}", nama))
+                .bind(truncate_str(&format!("Kartu GTK - {}", nama), 255))
                 .bind(now)
                 .execute(&mut *tx)
                 .await;
@@ -1130,31 +1315,62 @@ pub async fn pull_dapodik_records(
                 .tanggal_lahir
                 .as_ref()
                 .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
-            let nama_upper = nama.to_uppercase();
+
+            let new_id = Uuid::now_v7();
 
             if is_tendik {
                 let job_title = subject_val.clone().unwrap_or_else(|| "Tendik".to_string());
                 let existing_staff = staff_by_name.get(&nama_upper).copied();
 
                 if let Some(sid) = existing_staff {
-                    let _ = sqlx::query("UPDATE staff SET user_id = COALESCE(staff.user_id, $1), job_title = $2, jk = $3, tempat_lahir = $4, tanggal_lahir = $5, agama = $6, updated_at = $7 WHERE id = $8")
-                                .bind(actual_user_id).bind(&job_title).bind(&gtk.jenis_kelamin).bind(&gtk.tempat_lahir).bind(tgl_lahir).bind(&gtk.agama_id_str).bind(now).bind(sid)
-                                .execute(&mut *tx).await;
+                    let staff_update = sqlx::query("UPDATE staff SET user_id = COALESCE(staff.user_id, $1), job_title = $2, jk = $3, tempat_lahir = $4, tanggal_lahir = $5, agama = $6, updated_at = $7 WHERE id = $8")
+                        .bind(actual_user_id)
+                        .bind(truncate_str(&job_title, 255))
+                        .bind(gtk.jenis_kelamin.as_deref().map(|s| truncate_str(s, 20)))
+                        .bind(gtk.tempat_lahir.as_deref().map(|s| truncate_str(s, 100)))
+                        .bind(tgl_lahir)
+                        .bind(gtk.agama_id_str.as_deref().map(|s| truncate_str(s, 50)))
+                        .bind(now)
+                        .bind(sid)
+                        .execute(&mut *tx)
+                        .await;
+
+                    if let Err(e) = staff_update {
+                        let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_gtk)).execute(&mut *tx).await;
+                        tracing::warn!("Failed to update staff {}: {}", nama, e);
+                        continue;
+                    }
                 } else {
-                    let _ = sqlx::query(
-                                r#"
-                                INSERT INTO staff (id, tenant_id, user_id, full_name, job_title, is_active, created_at, updated_at, jk, tempat_lahir, tanggal_lahir, agama)
-                                VALUES ($1, $2, $3, $4, $5, true, $6, $6, $7, $8, $9, $10)
-                                "#
-                            )
-                            .bind(new_id).bind(ctx.tenant_id).bind(actual_user_id).bind(&nama_upper).bind(&job_title).bind(now)
-                            .bind(&gtk.jenis_kelamin).bind(&gtk.tempat_lahir).bind(tgl_lahir).bind(&gtk.agama_id_str)
-                            .execute(&mut *tx).await;
+                    let staff_insert = sqlx::query(
+                        r#"
+                        INSERT INTO staff (id, tenant_id, user_id, full_name, job_title, is_active, created_at, updated_at, jk, tempat_lahir, tanggal_lahir, agama)
+                        VALUES ($1, $2, $3, $4, $5, true, $6, $6, $7, $8, $9, $10)
+                        "#
+                    )
+                    .bind(new_id)
+                    .bind(ctx.tenant_id)
+                    .bind(actual_user_id)
+                    .bind(&nama_upper)
+                    .bind(truncate_str(&job_title, 255))
+                    .bind(now)
+                    .bind(gtk.jenis_kelamin.as_deref().map(|s| truncate_str(s, 20)))
+                    .bind(gtk.tempat_lahir.as_deref().map(|s| truncate_str(s, 100)))
+                    .bind(tgl_lahir)
+                    .bind(gtk.agama_id_str.as_deref().map(|s| truncate_str(s, 50)))
+                    .execute(&mut *tx)
+                    .await;
+
+                    if let Err(e) = staff_insert {
+                        let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_gtk)).execute(&mut *tx).await;
+                        tracing::warn!("Failed to insert staff {}: {}", nama, e);
+                        continue;
+                    }
 
                     staff_by_name.insert(nama_upper.clone(), new_id);
                 }
 
                 let nip_str = nip.clone().unwrap_or_else(|| "-".to_string());
+                let _ = sqlx::query(&format!("RELEASE SAVEPOINT {}", sp_gtk)).execute(&mut *tx).await;
                 imported_records.push(DapodikSyncRecordDto {
                     id: new_id.to_string(),
                     nisn: nip_str.clone(),
@@ -1180,25 +1396,53 @@ pub async fn pull_dapodik_records(
                 };
 
                 if let Some(tid) = existing_teacher {
-                    let _ = sqlx::query(
-                                r#"
-                                UPDATE teachers 
-                                SET user_id = COALESCE(teachers.user_id, $1), subject = COALESCE($2, teachers.subject), jk = $3, tempat_lahir = $4, tanggal_lahir = $5, agama = $6, updated_at = $7, nuptk = COALESCE($8, teachers.nuptk)
-                                WHERE id = $9
-                                "#
-                            )
-                            .bind(actual_user_id).bind(&teacher_subject).bind(&gtk.jenis_kelamin).bind(&gtk.tempat_lahir).bind(tgl_lahir).bind(&gtk.agama_id_str).bind(now).bind(&nuptk).bind(tid)
-                            .execute(&mut *tx).await;
+                    let teacher_update = sqlx::query(
+                        r#"
+                        UPDATE teachers 
+                        SET user_id = COALESCE(teachers.user_id, $1), subject = COALESCE($2, teachers.subject), jk = $3, tempat_lahir = $4, tanggal_lahir = $5, agama = $6, updated_at = $7, nuptk = COALESCE($8, teachers.nuptk)
+                        WHERE id = $9
+                        "#
+                    )
+                    .bind(actual_user_id)
+                    .bind(teacher_subject.as_deref().map(|s| truncate_str(s, 100)))
+                    .bind(gtk.jenis_kelamin.as_deref().map(|s| truncate_str(s, 20)))
+                    .bind(gtk.tempat_lahir.as_deref().map(|s| truncate_str(s, 100)))
+                    .bind(tgl_lahir)
+                    .bind(gtk.agama_id_str.as_deref().map(|s| truncate_str(s, 50)))
+                    .bind(now)
+                    .bind(&nuptk)
+                    .bind(tid)
+                    .execute(&mut *tx)
+                    .await;
+
+                    if let Err(e) = teacher_update {
+                        let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_gtk)).execute(&mut *tx).await;
+                        tracing::warn!("Failed to update teacher {}: {}", nama, e);
+                        continue;
+                    }
                 } else {
-                    let _ = sqlx::query(
-                                r#"
-                                INSERT INTO teachers (id, tenant_id, user_id, nip, full_name, subject, is_active, created_at, updated_at, jk, tempat_lahir, tanggal_lahir, agama, nuptk)
-                                VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7, $8, $9, $10, $11, $12)
-                                "#
-                            )
-                            .bind(new_id).bind(ctx.tenant_id).bind(actual_user_id).bind(&nip).bind(&nama_upper).bind(&teacher_subject).bind(now)
-                            .bind(&gtk.jenis_kelamin).bind(&gtk.tempat_lahir).bind(tgl_lahir).bind(&gtk.agama_id_str).bind(&nuptk)
-                            .execute(&mut *tx).await;
+                    let teacher_insert = sqlx::query(
+                        r#"
+                        INSERT INTO teachers (id, tenant_id, user_id, nip, full_name, subject, is_active, created_at, updated_at, jk, tempat_lahir, tanggal_lahir, agama, nuptk)
+                        VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7, $8, $9, $10, $11, $12)
+                        "#
+                    )
+                    .bind(new_id).bind(ctx.tenant_id).bind(actual_user_id).bind(&nip).bind(&nama_upper)
+                    .bind(teacher_subject.as_deref().map(|s| truncate_str(s, 100)))
+                    .bind(now)
+                    .bind(gtk.jenis_kelamin.as_deref().map(|s| truncate_str(s, 20)))
+                    .bind(gtk.tempat_lahir.as_deref().map(|s| truncate_str(s, 100)))
+                    .bind(tgl_lahir)
+                    .bind(gtk.agama_id_str.as_deref().map(|s| truncate_str(s, 50)))
+                    .bind(&nuptk)
+                    .execute(&mut *tx)
+                    .await;
+
+                    if let Err(e) = teacher_insert {
+                        let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_gtk)).execute(&mut *tx).await;
+                        tracing::warn!("Failed to insert teacher {}: {}", nama, e);
+                        continue;
+                    }
 
                     if let Some(ref n) = nip {
                         teacher_by_nip.insert(n.clone(), new_id);
@@ -1210,6 +1454,7 @@ pub async fn pull_dapodik_records(
                 }
 
                 let nip_str = nip.unwrap_or_else(|| "-".to_string());
+                let _ = sqlx::query(&format!("RELEASE SAVEPOINT {}", sp_gtk)).execute(&mut *tx).await;
                 imported_records.push(DapodikSyncRecordDto {
                     id: new_id.to_string(),
                     nisn: nip_str.clone(),
@@ -1271,12 +1516,19 @@ pub async fn pull_dapodik_records(
     };
     if let Some(rombels) = extracted_rombel {
         // Bersihkan kelas KKA lama dari PostgreSQL karena KKA bukan rombel kelas reguler
-        let _ = sqlx::query(
-                    "DELETE FROM classes WHERE tenant_id = $1 AND (name ILIKE 'KKA%' OR name ILIKE '%KKA%')"
-                )
-                .bind(ctx.tenant_id)
-                .execute(&mut *tx)
-                .await;
+        let _ = sqlx::query("SAVEPOINT sp_kka").execute(&mut *tx).await;
+        let kka_del = sqlx::query(
+            "DELETE FROM classes WHERE tenant_id = $1 AND (name ILIKE 'KKA%' OR name ILIKE '%KKA%')"
+        )
+        .bind(ctx.tenant_id)
+        .execute(&mut *tx)
+        .await;
+
+        if kka_del.is_err() {
+            let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_kka").execute(&mut *tx).await;
+        } else {
+            let _ = sqlx::query("RELEASE SAVEPOINT sp_kka").execute(&mut *tx).await;
+        }
 
         // Refresh class_map setelah pembersihan KKA
         class_map.retain(|name, _| {
@@ -1285,8 +1537,12 @@ pub async fn pull_dapodik_records(
 
         let mut processed_subjects: HashSet<String> = HashSet::new();
 
-        for rmbl in rombels {
-            let nama_rombel = rmbl.nama.unwrap_or_else(|| "ROMBEL DAPODIK".to_string());
+        for (r_idx, rmbl) in rombels.into_iter().enumerate() {
+            let sp_rmbl = format!("sp_rmbl_{}", r_idx);
+            let _ = sqlx::query(&format!("SAVEPOINT {}", sp_rmbl)).execute(&mut *tx).await;
+
+            let raw_nama_rombel = rmbl.nama.unwrap_or_else(|| "ROMBEL DAPODIK".to_string());
+            let nama_rombel = truncate_str(&raw_nama_rombel, 100);
             let nama_upper = nama_rombel.trim().to_uppercase();
 
             // KKA adalah kelompok keterampilan/ekskul bukan rombel reguler, abaikan dan jangan diekspor ke PostgreSQL
@@ -1302,6 +1558,7 @@ pub async fn pull_dapodik_records(
                     .unwrap_or(false);
 
             if is_kka {
+                let _ = sqlx::query(&format!("RELEASE SAVEPOINT {}", sp_rmbl)).execute(&mut *tx).await;
                 tracing::info!(
                     "Mengabaikan rombel non-reguler / KKA dari Dapodik: {}",
                     nama_rombel
@@ -1335,22 +1592,35 @@ pub async fn pull_dapodik_records(
                     guru_name.and_then(|gn| teacher_by_name.get(gn).copied())
                 });
 
-            if !class_map.contains_key(&nama_rombel) {
-                let _ = sqlx::query(
-                            r#"
-                            INSERT INTO classes (id, tenant_id, academic_year_id, grade_level_id, name, capacity, homeroom_teacher_id, created_at, updated_at)
-                            VALUES ($1, $2, $3, $4, $5, 30, $6, $7, $7)
-                            "#
-                        )
-                        .bind(new_id).bind(ctx.tenant_id).bind(academic_year_id).bind(grade_level_id)
-                        .bind(&nama_rombel).bind(matched_teacher_id).bind(now).execute(&mut *tx).await;
+            let class_upsert_res = if !class_map.contains_key(&nama_rombel) {
+                let res = sqlx::query(
+                    r#"
+                    INSERT INTO classes (id, tenant_id, academic_year_id, grade_level_id, name, capacity, homeroom_teacher_id, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, 30, $6, $7, $7)
+                    "#
+                )
+                .bind(new_id).bind(ctx.tenant_id).bind(academic_year_id).bind(grade_level_id)
+                .bind(&nama_rombel).bind(matched_teacher_id).bind(now).execute(&mut *tx).await;
 
-                class_map.insert(nama_rombel.clone(), new_id);
+                if res.is_ok() {
+                    class_map.insert(nama_rombel.clone(), new_id);
+                }
+                res
             } else if let Some(existing_cid) = class_map.get(&nama_rombel) {
                 if let Some(tid) = matched_teacher_id {
-                    let _ = sqlx::query("UPDATE classes SET homeroom_teacher_id = $1, updated_at = $2 WHERE id = $3")
-                                .bind(tid).bind(now).bind(existing_cid).execute(&mut *tx).await;
+                    sqlx::query("UPDATE classes SET homeroom_teacher_id = $1, updated_at = $2 WHERE id = $3")
+                        .bind(tid).bind(now).bind(existing_cid).execute(&mut *tx).await
+                } else {
+                    Ok(sqlx::postgres::PgQueryResult::default())
                 }
+            } else {
+                Ok(sqlx::postgres::PgQueryResult::default())
+            };
+
+            if let Err(e) = class_upsert_res {
+                let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_rmbl)).execute(&mut *tx).await;
+                tracing::warn!("Failed to upsert class {}: {}", nama_rombel, e);
+                continue;
             }
 
             // Extract Pembelajaran (Mata Pelajaran) from Rombel
@@ -1370,50 +1640,60 @@ pub async fn pull_dapodik_records(
                                     .collect::<String>()
                             )
                         });
-                    let code = raw_code.trim().to_string();
+                    let code = truncate_str(&raw_code, 50);
 
-                    let name = p
+                    let raw_name = p
                         .nama_mata_pelajaran
                         .or(p.mata_pelajaran_id_str)
                         .unwrap_or_else(|| "Mata Pelajaran".to_string());
+                    let name = truncate_str(&raw_name, 255);
 
                     if !processed_subjects.contains(&name) {
                         processed_subjects.insert(name.clone());
                         let subject_new_id = Uuid::now_v7();
 
-                        let _ = sqlx::query(
-                                    r#"
-                                    INSERT INTO subjects (id, tenant_id, code, name, is_active, created_at, updated_at)
-                                    VALUES ($1, $2, $3, $4, true, $5, $5)
-                                    ON CONFLICT (tenant_id, code) DO UPDATE 
-                                    SET name = EXCLUDED.name, is_active = true, updated_at = EXCLUDED.updated_at
-                                    "#
-                                )
-                                .bind(subject_new_id)
-                                .bind(ctx.tenant_id)
-                                .bind(&code)
-                                .bind(&name)
-                                .bind(now)
-                                .execute(&mut *tx)
-                                .await;
+                        let _ = sqlx::query("SAVEPOINT sp_subj").execute(&mut *tx).await;
+                        let subj_res = sqlx::query(
+                            r#"
+                            INSERT INTO subjects (id, tenant_id, code, name, is_active, created_at, updated_at)
+                            VALUES ($1, $2, $3, $4, true, $5, $5)
+                            ON CONFLICT (tenant_id, code) DO UPDATE 
+                            SET name = EXCLUDED.name, is_active = true, updated_at = EXCLUDED.updated_at
+                            "#
+                        )
+                        .bind(subject_new_id)
+                        .bind(ctx.tenant_id)
+                        .bind(&code)
+                        .bind(&name)
+                        .bind(now)
+                        .execute(&mut *tx)
+                        .await;
 
-                        imported_records.push(DapodikSyncRecordDto {
-                                    id: subject_new_id.to_string(),
-                                    nisn: code.clone(),
-                                    nik: code.clone(),
-                                    nama_school_os: format!("[MAPEL] {}", name.to_uppercase()),
-                                    nama_dapodik: format!("[MAPEL] {}", name),
-                                    rombel: nama_rombel.clone(),
-                                    identity_state: "ACTIVE".into(),
-                                    mobility_case: "NONE".into(),
-                                    classification: "MATCH".into(),
-                                    action_recommended: "Pulled Pembelajaran (Mata Pelajaran) Real-Time from Dapodik".into(),
-                                    stage: "VERIFIED".into(),
-                                    last_synced_at: now.to_rfc3339(),
-                                });
+                        if subj_res.is_err() {
+                            let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_subj").execute(&mut *tx).await;
+                        } else {
+                            let _ = sqlx::query("RELEASE SAVEPOINT sp_subj").execute(&mut *tx).await;
+
+                            imported_records.push(DapodikSyncRecordDto {
+                                id: subject_new_id.to_string(),
+                                nisn: code.clone(),
+                                nik: code.clone(),
+                                nama_school_os: format!("[MAPEL] {}", name.to_uppercase()),
+                                nama_dapodik: format!("[MAPEL] {}", name),
+                                rombel: nama_rombel.clone(),
+                                identity_state: "ACTIVE".into(),
+                                mobility_case: "NONE".into(),
+                                classification: "MATCH".into(),
+                                action_recommended: "Pulled Pembelajaran (Mata Pelajaran) Real-Time from Dapodik".into(),
+                                stage: "VERIFIED".into(),
+                                last_synced_at: now.to_rfc3339(),
+                            });
+                        }
                     }
                 }
             }
+
+            let _ = sqlx::query(&format!("RELEASE SAVEPOINT {}", sp_rmbl)).execute(&mut *tx).await;
 
             imported_records.push(DapodikSyncRecordDto {
                 id: new_id.to_string(),
@@ -1493,6 +1773,9 @@ pub async fn pull_dapodik_records(
         let mut active_student_ids: HashSet<Uuid> = HashSet::new();
 
         for (idx, std) in students.into_iter().enumerate() {
+            let sp_std = format!("sp_std_{}", idx);
+            let _ = sqlx::query(&format!("SAVEPOINT {}", sp_std)).execute(&mut *tx).await;
+
             // Check status aktif siswa dari field keluar / status
             let is_keluar = std.jenis_keluar_id.is_some()
                 || std.jenis_keluar_id_str.is_some()
@@ -1520,6 +1803,7 @@ pub async fn pull_dapodik_records(
                 .unwrap_or(false);
 
             if is_keluar || is_explicitly_inactive {
+                let _ = sqlx::query(&format!("RELEASE SAVEPOINT {}", sp_std)).execute(&mut *tx).await;
                 tracing::info!(
                     "Melewati siswa non-aktif/keluar/lulus dari Dapodik: {:?}",
                     std.nama
@@ -1531,71 +1815,58 @@ pub async fn pull_dapodik_records(
                 .peserta_didik_id
                 .clone()
                 .unwrap_or_else(|| format!("pd-{}", idx));
-            let raw_nisn = std
-                .nisn
-                .clone()
-                .filter(|s| !s.trim().is_empty() && s.trim() != "-");
-            let final_nisn = raw_nisn.unwrap_or_else(|| {
+            let raw_nisn = sanitize_clean_code(std.nisn.as_deref());
+            let final_nisn = truncate_str(&raw_nisn.unwrap_or_else(|| {
                 let clean_id: String = pd_id.chars().filter(|c| c.is_alphanumeric()).collect();
                 if clean_id.len() >= 10 {
                     clean_id[..10].to_string()
                 } else {
                     format!("{:0>10}", clean_id)
                 }
-            });
+            }), 50);
 
-            let nama = std
+            let raw_nama = std
                 .nama
                 .clone()
                 .or(std.nama_pd.clone())
                 .unwrap_or_else(|| "SISWA DAPODIK".to_string());
-            let nama_upper = nama.trim().to_uppercase();
+            let nama = truncate_str(&raw_nama, 255);
+            let nama_upper = truncate_str(&nama.trim().to_uppercase(), 255);
 
-            let nik = std
-                .nik
-                .clone()
-                .filter(|s| !s.trim().is_empty() && s.trim() != "-");
-            let nipd_val = std
-                .nipd
-                .clone()
-                .filter(|s| !s.trim().is_empty() && s.trim() != "-");
+            let nik = sanitize_clean_code(std.nik.as_deref()).map(|s| truncate_str(&s, 50));
+            let nipd_val = sanitize_clean_code(std.nipd.as_deref()).map(|s| truncate_str(&s, 50));
 
             // Filter out KKA dari rombel siswa
             let raw_rombel = std.rombel.clone().or(std.nama_rombel.clone());
             let valid_rombel = raw_rombel.filter(|r| {
                 let u = r.trim().to_uppercase();
                 !u.starts_with("KKA") && !u.contains("KKA")
-            });
+            }).map(|s| truncate_str(&s, 100));
             let sync_rombel_label = valid_rombel
                 .as_ref()
                 .cloned()
                 .unwrap_or_else(|| "-".to_string());
 
-            let new_id = Uuid::now_v7();
-            let user_id = Uuid::now_v7();
             let email = format!("{}@siswa.schoolos.id", final_nisn);
             let username = final_nisn.clone();
 
-            let actual_user_id = match sqlx::query_scalar::<_, Uuid>(
-                        r#"
-                        INSERT INTO users (id, tenant_id, username, email, password_hash, full_name, is_active, created_at, updated_at) 
-                        VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7) 
-                        ON CONFLICT (tenant_id, email) DO UPDATE SET 
-                            username = COALESCE(users.username, EXCLUDED.username),
-                            full_name = EXCLUDED.full_name, 
-                            updated_at = EXCLUDED.updated_at
-                        RETURNING id
-                        "#
-                    )
-                    .bind(user_id).bind(ctx.tenant_id).bind(&username).bind(&email).bind("$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY").bind(&nama_upper).bind(now)
-                    .fetch_one(&mut *tx)
-                    .await {
-                        Ok(uid) => Some(uid),
-                        Err(e) => {
-                            tracing::error!("Failed to upsert user for student {}: {}", nama, e);
-                            None
-                        }
-                    };
+            let user_res = safe_upsert_user(
+                &mut tx,
+                ctx.tenant_id,
+                &username,
+                &email,
+                &nama_upper,
+                now,
+            )
+            .await;
+
+            let actual_user_id = match user_res {
+                Ok(uid) => Some(uid),
+                Err(e) => {
+                    tracing::warn!("Failed to upsert user for student {}: {}", nama, e);
+                    None
+                }
+            };
 
             if let Some(uid) = actual_user_id {
                 let _ = sqlx::query(
@@ -1639,7 +1910,7 @@ pub async fn pull_dapodik_records(
                     .bind(uid)
                     .bind(&token_hash)
                     .bind(&raw_token)
-                    .bind(format!("Kartu Pelajar - {}", nama_upper))
+                    .bind(truncate_str(&format!("Kartu Pelajar - {}", nama_upper), 255))
                     .bind(now)
                     .execute(&mut *tx)
                     .await;
@@ -1647,18 +1918,9 @@ pub async fn pull_dapodik_records(
             }
 
             // ── Guardian / Orang Tua Synchronization ────────────────
-            let nama_ibu = std
-                .nama_ibu
-                .clone()
-                .filter(|s| !s.trim().is_empty() && s.trim() != "-");
-            let nama_ayah = std
-                .nama_ayah
-                .clone()
-                .filter(|s| !s.trim().is_empty() && s.trim() != "-");
-            let nama_wali = std
-                .nama_wali
-                .clone()
-                .filter(|s| !s.trim().is_empty() && s.trim() != "-");
+            let nama_ibu = sanitize_clean_code(std.nama_ibu.as_deref()).map(|s| truncate_str(&s, 255));
+            let nama_ayah = sanitize_clean_code(std.nama_ayah.as_deref()).map(|s| truncate_str(&s, 255));
+            let nama_wali = sanitize_clean_code(std.nama_wali.as_deref()).map(|s| truncate_str(&s, 255));
 
             // Priority akun login wali murid adalah IBU
             let (guardian_name, relationship) = if let Some(ref ibu) = nama_ibu {
@@ -1671,20 +1933,21 @@ pub async fn pull_dapodik_records(
                 (None, "Guardian")
             };
 
-            let guardian_phone = std
-                .nomor_telepon_seluler
-                .clone()
-                .or(std.nomor_telepon_rumah.clone())
-                .unwrap_or_default();
-            let student_address = std.alamat_jalan.clone().unwrap_or_default();
+            let guardian_phone = truncate_str(
+                &std.nomor_telepon_seluler
+                    .clone()
+                    .or(std.nomor_telepon_rumah.clone())
+                    .unwrap_or_default(),
+                100,
+            );
+            let student_address = truncate_str(&std.alamat_jalan.clone().unwrap_or_default(), 500);
 
             let final_guardian_id = if let Some(g_name) = guardian_name {
-                let g_upper = g_name.trim().to_uppercase();
+                let g_upper = truncate_str(&g_name.trim().to_uppercase(), 255);
                 if let Some(&gid) = guardian_map.get(&g_upper) {
                     Some(gid)
                 } else {
                     let g_id = Uuid::now_v7();
-                    let g_user_id = Uuid::now_v7();
                     let g_username = if relationship == "Mother" {
                         format!("ibu_{}", final_nisn)
                     } else {
@@ -1692,26 +1955,21 @@ pub async fn pull_dapodik_records(
                     };
                     let g_email = format!("{}@wali.schoolos.id", g_username);
 
-                    let actual_g_user_id = match sqlx::query_scalar::<_, Uuid>(
-                                r#"
-                                INSERT INTO users (id, tenant_id, username, email, password_hash, full_name, is_active, created_at, updated_at)
-                                VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7)
-                                ON CONFLICT (tenant_id, email) DO UPDATE SET 
-                                    username = COALESCE(users.username, EXCLUDED.username),
-                                    full_name = EXCLUDED.full_name, 
-                                    updated_at = EXCLUDED.updated_at
-                                RETURNING id
-                                "#
-                            )
-                            .bind(g_user_id).bind(ctx.tenant_id).bind(&g_username).bind(&g_email).bind("$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY").bind(&g_upper).bind(now)
-                            .fetch_one(&mut *tx)
-                            .await {
-                                Ok(uid) => Some(uid),
-                                Err(e) => {
-                                    tracing::error!("Failed to upsert user for guardian {}: {}", g_upper, e);
-                                    None
-                                },
-                            };
+                    let actual_g_user_id = match safe_upsert_user(
+                        &mut tx,
+                        ctx.tenant_id,
+                        &g_username,
+                        &g_email,
+                        &g_upper,
+                        now,
+                    )
+                    .await {
+                        Ok(uid) => Some(uid),
+                        Err(e) => {
+                            tracing::warn!("Failed to upsert user for guardian {}: {}", g_upper, e);
+                            None
+                        }
+                    };
 
                     if let Some(uid) = actual_g_user_id {
                         let _ = sqlx::query(
@@ -1755,7 +2013,7 @@ pub async fn pull_dapodik_records(
                             .bind(uid)
                             .bind(&token_hash)
                             .bind(&raw_token)
-                            .bind(format!("Kartu Akses Wali - {}", g_upper))
+                            .bind(truncate_str(&format!("Kartu Akses Wali - {}", g_upper), 255))
                             .bind(now)
                             .execute(&mut *tx)
                             .await;
@@ -1763,16 +2021,16 @@ pub async fn pull_dapodik_records(
                     }
 
                     let inserted_gid = sqlx::query_scalar::<_, Uuid>(
-                                r#"
-                                INSERT INTO guardians (id, tenant_id, user_id, full_name, relationship, phone_number, address, created_at, updated_at)
-                                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
-                                RETURNING id
-                                "#
-                            )
-                            .bind(g_id).bind(ctx.tenant_id).bind(actual_g_user_id).bind(&g_upper).bind(relationship).bind(&guardian_phone).bind(&student_address).bind(now)
-                            .fetch_one(&mut *tx)
-                            .await
-                            .unwrap_or(g_id);
+                        r#"
+                        INSERT INTO guardians (id, tenant_id, user_id, full_name, relationship, phone_number, address, created_at, updated_at)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+                        RETURNING id
+                        "#
+                    )
+                    .bind(g_id).bind(ctx.tenant_id).bind(actual_g_user_id).bind(&g_upper).bind(relationship).bind(&guardian_phone).bind(&student_address).bind(now)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap_or(g_id);
 
                     guardian_map.insert(g_upper, inserted_gid);
                     Some(inserted_gid)
@@ -1792,31 +2050,35 @@ pub async fn pull_dapodik_records(
                 .or_else(|| student_by_name.get(&nama_upper).copied())
                 .or_else(|| student_by_name.get(&nama).copied());
 
+            let new_id = Uuid::now_v7();
             let student_db_id = if let Some(sid) = existing_student_id {
                 let update_res = sqlx::query(
-                            r#"
-                            UPDATE students 
-                            SET full_name = $1, user_id = COALESCE(students.user_id, $2), nik = $3, gender = $4, place_of_birth = $5, date_of_birth = $6, religion = $7, 
-                                guardian_id = COALESCE($8, students.guardian_id), nipd = COALESCE($9, students.nipd),
-                                alamat_jalan = COALESCE($10, students.alamat_jalan), no_hp = COALESCE($11, students.no_hp),
-                                email = COALESCE($12, students.email), nama_ayah = COALESCE($13, students.nama_ayah), nama_ibu = COALESCE($14, students.nama_ibu),
-                                status = 'active', updated_at = $15, nisn = $16
-                            WHERE id = $17
-                            "#
-                        )
-                        .bind(&nama_upper).bind(actual_user_id).bind(&nik).bind(&std.jenis_kelamin).bind(&std.tempat_lahir)
-                        .bind(std.tanggal_lahir.as_ref().and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()))
-                        .bind(&std.agama_id_str).bind(final_guardian_id).bind(nipd_val.clone()).bind(&student_address).bind(&guardian_phone)
-                        .bind(&std.email).bind(&nama_ayah).bind(&nama_ibu).bind(now).bind(&final_nisn).bind(sid).execute(&mut *tx).await;
+                    r#"
+                    UPDATE students 
+                    SET full_name = $1, user_id = COALESCE(students.user_id, $2), nik = $3, gender = $4, place_of_birth = $5, date_of_birth = $6, religion = $7, 
+                        guardian_id = COALESCE($8, students.guardian_id), nipd = COALESCE($9, students.nipd),
+                        alamat_jalan = COALESCE($10, students.alamat_jalan), no_hp = COALESCE($11, students.no_hp),
+                        email = COALESCE($12, students.email), nama_ayah = COALESCE($13, students.nama_ayah), nama_ibu = COALESCE($14, students.nama_ibu),
+                        status = 'active', updated_at = $15, nisn = $16
+                    WHERE id = $17
+                    "#
+                )
+                .bind(&nama_upper).bind(actual_user_id).bind(&nik)
+                .bind(std.jenis_kelamin.as_deref().map(|s| truncate_str(s, 20)))
+                .bind(std.tempat_lahir.as_deref().map(|s| truncate_str(s, 100)))
+                .bind(std.tanggal_lahir.as_ref().and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()))
+                .bind(std.agama_id_str.as_deref().map(|s| truncate_str(s, 50)))
+                .bind(final_guardian_id).bind(nipd_val.clone()).bind(&student_address).bind(&guardian_phone)
+                .bind(std.email.as_deref().map(|s| truncate_str(s, 255)))
+                .bind(&nama_ayah).bind(&nama_ibu).bind(now).bind(&final_nisn).bind(sid)
+                .execute(&mut *tx).await;
 
-                if let Err(ref e) = update_res {
-                    tracing::error!(
-                        "Failed to update student (NISN: {}, Name: {}): {}",
-                        final_nisn,
-                        nama,
-                        e
-                    );
+                if let Err(e) = update_res {
+                    let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_std)).execute(&mut *tx).await;
+                    tracing::warn!("Failed to update student (NISN: {}, Name: {}): {}", final_nisn, nama, e);
+                    continue;
                 }
+
                 student_by_nisn.insert(final_nisn.clone(), sid);
                 if let Some(ref n) = nik {
                     student_by_nik.insert(n.trim().to_string(), sid);
@@ -1825,38 +2087,48 @@ pub async fn pull_dapodik_records(
                 student_by_name.insert(nama.clone(), sid);
                 sid
             } else {
-                let inserted_id = sqlx::query_scalar::<_, Uuid>(
-                            r#"
-                            INSERT INTO students (id, tenant_id, user_id, guardian_id, nisn, full_name, nik, gender, place_of_birth, date_of_birth, religion, nipd, alamat_jalan, no_hp, email, nama_ayah, nama_ibu, status, created_at, updated_at)
-                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, 'active', $18, $18)
-                            ON CONFLICT (tenant_id, nisn) DO UPDATE
-                            SET full_name = EXCLUDED.full_name,
-                                user_id = COALESCE(students.user_id, EXCLUDED.user_id),
-                                guardian_id = COALESCE(EXCLUDED.guardian_id, students.guardian_id),
-                                nik = COALESCE(EXCLUDED.nik, students.nik),
-                                gender = COALESCE(EXCLUDED.gender, students.gender),
-                                place_of_birth = COALESCE(EXCLUDED.place_of_birth, students.place_of_birth),
-                                date_of_birth = COALESCE(EXCLUDED.date_of_birth, students.date_of_birth),
-                                religion = COALESCE(EXCLUDED.religion, students.religion),
-                                nipd = COALESCE(EXCLUDED.nipd, students.nipd),
-                                alamat_jalan = COALESCE(EXCLUDED.alamat_jalan, students.alamat_jalan),
-                                no_hp = COALESCE(EXCLUDED.no_hp, students.no_hp),
-                                email = COALESCE(EXCLUDED.email, students.email),
-                                nama_ayah = COALESCE(EXCLUDED.nama_ayah, students.nama_ayah),
-                                nama_ibu = COALESCE(EXCLUDED.nama_ibu, students.nama_ibu),
-                                status = 'active',
-                                updated_at = EXCLUDED.updated_at
-                            RETURNING id
-                            "#
-                        )
-                        .bind(new_id).bind(ctx.tenant_id).bind(actual_user_id).bind(final_guardian_id).bind(&final_nisn).bind(&nama_upper)
-                        .bind(&nik).bind(&std.jenis_kelamin).bind(&std.tempat_lahir)
-                        .bind(std.tanggal_lahir.as_ref().and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()))
-                        .bind(&std.agama_id_str).bind(nipd_val).bind(&student_address).bind(&guardian_phone).bind(&std.email)
-                        .bind(&nama_ayah).bind(&nama_ibu).bind(now).fetch_one(&mut *tx).await.unwrap_or_else(|e| {
-                            tracing::error!("Failed to insert student (NISN: {}, Name: {}): {}", final_nisn, nama, e);
-                            new_id
-                        });
+                let insert_res = sqlx::query_scalar::<_, Uuid>(
+                    r#"
+                    INSERT INTO students (id, tenant_id, user_id, guardian_id, nisn, full_name, nik, gender, place_of_birth, date_of_birth, religion, nipd, alamat_jalan, no_hp, email, nama_ayah, nama_ibu, status, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, 'active', $18, $18)
+                    ON CONFLICT (tenant_id, nisn) DO UPDATE
+                    SET full_name = EXCLUDED.full_name,
+                        user_id = COALESCE(students.user_id, EXCLUDED.user_id),
+                        guardian_id = COALESCE(EXCLUDED.guardian_id, students.guardian_id),
+                        nik = COALESCE(EXCLUDED.nik, students.nik),
+                        gender = COALESCE(EXCLUDED.gender, students.gender),
+                        place_of_birth = COALESCE(EXCLUDED.place_of_birth, students.place_of_birth),
+                        date_of_birth = COALESCE(EXCLUDED.date_of_birth, students.date_of_birth),
+                        religion = COALESCE(EXCLUDED.religion, students.religion),
+                        nipd = COALESCE(EXCLUDED.nipd, students.nipd),
+                        alamat_jalan = COALESCE(EXCLUDED.alamat_jalan, students.alamat_jalan),
+                        no_hp = COALESCE(EXCLUDED.no_hp, students.no_hp),
+                        email = COALESCE(EXCLUDED.email, students.email),
+                        nama_ayah = COALESCE(EXCLUDED.nama_ayah, students.nama_ayah),
+                        nama_ibu = COALESCE(EXCLUDED.nama_ibu, students.nama_ibu),
+                        status = 'active',
+                        updated_at = EXCLUDED.updated_at
+                    RETURNING id
+                    "#
+                )
+                .bind(new_id).bind(ctx.tenant_id).bind(actual_user_id).bind(final_guardian_id).bind(&final_nisn).bind(&nama_upper)
+                .bind(&nik)
+                .bind(std.jenis_kelamin.as_deref().map(|s| truncate_str(s, 20)))
+                .bind(std.tempat_lahir.as_deref().map(|s| truncate_str(s, 100)))
+                .bind(std.tanggal_lahir.as_ref().and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()))
+                .bind(std.agama_id_str.as_deref().map(|s| truncate_str(s, 50)))
+                .bind(nipd_val).bind(&student_address).bind(&guardian_phone)
+                .bind(std.email.as_deref().map(|s| truncate_str(s, 255)))
+                .bind(&nama_ayah).bind(&nama_ibu).bind(now).fetch_one(&mut *tx).await;
+
+                let inserted_id = match insert_res {
+                    Ok(id) => id,
+                    Err(e) => {
+                        let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_std)).execute(&mut *tx).await;
+                        tracing::warn!("Failed to insert student (NISN: {}, Name: {}): {}", final_nisn, nama, e);
+                        continue;
+                    }
+                };
 
                 student_by_nisn.insert(final_nisn.clone(), inserted_id);
                 student_by_name.insert(nama_upper.clone(), inserted_id);
@@ -1874,43 +2146,47 @@ pub async fn pull_dapodik_records(
                         id
                     } else {
                         let new_c_id = Uuid::now_v7();
-                        let _ = sqlx::query(
-                                    r#"
-                                    INSERT INTO classes (id, tenant_id, academic_year_id, grade_level_id, name, capacity, created_at, updated_at)
-                                    VALUES ($1, $2, $3, $4, $5, 30, $6, $6)
-                                    "#
-                                )
-                                .bind(new_c_id).bind(ctx.tenant_id).bind(academic_year_id).bind(grade_level_id).bind(r_name).bind(now).execute(&mut *tx).await;
+                        let cls_res = sqlx::query(
+                            r#"
+                            INSERT INTO classes (id, tenant_id, academic_year_id, grade_level_id, name, capacity, created_at, updated_at)
+                            VALUES ($1, $2, $3, $4, $5, 30, $6, $6)
+                            "#
+                        )
+                        .bind(new_c_id).bind(ctx.tenant_id).bind(academic_year_id).bind(grade_level_id).bind(r_name).bind(now).execute(&mut *tx).await;
 
-                        class_map.insert(r_name.clone(), new_c_id);
+                        if cls_res.is_ok() {
+                            class_map.insert(r_name.clone(), new_c_id);
+                        }
                         new_c_id
                     };
 
                     let _ = sqlx::query(
-                                r#"
-                                INSERT INTO enrollments (id, tenant_id, student_id, class_id, academic_year_id, status, enrolled_at)
-                                VALUES ($1, $2, $3, $4, $5, 'Active', $6)
-                                ON CONFLICT (student_id, academic_year_id) WHERE status = 'Active'
-                                DO UPDATE SET class_id = EXCLUDED.class_id, status = 'Active'
-                                "#
-                            )
-                            .bind(Uuid::now_v7()).bind(ctx.tenant_id).bind(student_db_id).bind(c_id)
-                            .bind(academic_year_id).bind(now).execute(&mut *tx).await;
+                        r#"
+                        INSERT INTO enrollments (id, tenant_id, student_id, class_id, academic_year_id, status, enrolled_at)
+                        VALUES ($1, $2, $3, $4, $5, 'Active', $6)
+                        ON CONFLICT (student_id, academic_year_id) WHERE status = 'Active'
+                        DO UPDATE SET class_id = EXCLUDED.class_id, status = 'Active'
+                        "#
+                    )
+                    .bind(Uuid::now_v7()).bind(ctx.tenant_id).bind(student_db_id).bind(c_id)
+                    .bind(academic_year_id).bind(now).execute(&mut *tx).await;
                 }
             } else {
                 // SISWA BELUM MASUK ROMBEL DI DAPODIK -> KOSONGKAN & JANGAN ASAL ENROLL!
                 let _ = sqlx::query(
-                            "DELETE FROM enrollments WHERE tenant_id = $1 AND student_id = $2 AND academic_year_id = $3"
-                        )
-                        .bind(ctx.tenant_id)
-                        .bind(student_db_id)
-                        .bind(academic_year_id)
-                        .execute(&mut *tx)
-                        .await;
+                    "DELETE FROM enrollments WHERE tenant_id = $1 AND student_id = $2 AND academic_year_id = $3"
+                )
+                .bind(ctx.tenant_id)
+                .bind(student_db_id)
+                .bind(academic_year_id)
+                .execute(&mut *tx)
+                .await;
             }
 
             let nisn_str = final_nisn.clone();
             let nik_str = nik.clone().unwrap_or_else(|| "-".to_string());
+            let _ = sqlx::query(&format!("RELEASE SAVEPOINT {}", sp_std)).execute(&mut *tx).await;
+
             imported_records.push(DapodikSyncRecordDto {
                 id: new_id.to_string(),
                 nisn: nisn_str,
@@ -1939,15 +2215,17 @@ pub async fn pull_dapodik_records(
                 nisn: String,
             }
 
+            let _ = sqlx::query("SAVEPOINT sp_cleanup_students").execute(&mut *tx).await;
+
             // Cari siswa di PostgreSQL yang sudah tidak ada lagi di data aktif Dapodik (termutasi / keluar / lulus)
             let removed_students = sqlx::query_as::<_, RemovedStudentRow>(
-                        "SELECT id, user_id, full_name, nisn FROM students WHERE tenant_id = $1 AND NOT (id = ANY($2))",
-                    )
-                    .bind(ctx.tenant_id)
-                    .bind(&active_ids_vec)
-                    .fetch_all(&mut *tx)
-                    .await
-                    .unwrap_or_default();
+                "SELECT id, user_id, full_name, nisn FROM students WHERE tenant_id = $1 AND NOT (id = ANY($2))",
+            )
+            .bind(ctx.tenant_id)
+            .bind(&active_ids_vec)
+            .fetch_all(&mut *tx)
+            .await
+            .unwrap_or_default();
 
             if !removed_students.is_empty() {
                 let removed_ids: Vec<Uuid> = removed_students.iter().map(|s| s.id).collect();
@@ -1960,37 +2238,45 @@ pub async fn pull_dapodik_records(
                     .map(|s| s.full_name.clone())
                     .collect();
 
-                // 1. Hapus dari tabel students (otomatis cascade ke enrollments, gradebooks, assignment_submissions, attendance, dll)
-                let _ = sqlx::query("DELETE FROM students WHERE tenant_id = $1 AND id = ANY($2)")
+                let del_std_res = sqlx::query("DELETE FROM students WHERE tenant_id = $1 AND id = ANY($2)")
                     .bind(ctx.tenant_id)
                     .bind(&removed_ids)
                     .execute(&mut *tx)
                     .await;
 
-                // 2. Hapus akun login siswa jika ada
-                if !removed_user_ids.is_empty() {
-                    let _ = sqlx::query("DELETE FROM users WHERE tenant_id = $1 AND id = ANY($2)")
-                        .bind(ctx.tenant_id)
-                        .bind(&removed_user_ids)
-                        .execute(&mut *tx)
-                        .await;
+                if del_std_res.is_ok() {
+                    // 2. Hapus akun login siswa jika ada
+                    if !removed_user_ids.is_empty() {
+                        let _ = sqlx::query("DELETE FROM users WHERE tenant_id = $1 AND id = ANY($2)")
+                            .bind(ctx.tenant_id)
+                            .bind(&removed_user_ids)
+                            .execute(&mut *tx)
+                            .await;
+                    }
+
+                    // 3. Hapus dari dapodik_sync_records
+                    let _ = sqlx::query(
+                        "DELETE FROM dapodik_sync_records WHERE tenant_id = $1 AND (nisn = ANY($2) OR nama_school_os = ANY($3))"
+                    )
+                    .bind(ctx.tenant_id)
+                    .bind(&removed_nisns)
+                    .bind(&removed_names)
+                    .execute(&mut *tx)
+                    .await;
+
+                    let _ = sqlx::query("RELEASE SAVEPOINT sp_cleanup_students").execute(&mut *tx).await;
+
+                    tracing::info!(
+                        "Otomatis menghapus {} siswa termutasi/keluar/lulus dari PostgreSQL: {:?}",
+                        removed_students.len(),
+                        removed_names
+                    );
+                } else {
+                    let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_cleanup_students").execute(&mut *tx).await;
+                    tracing::warn!("Cleanup of removed students skipped due to constraint dependency");
                 }
-
-                // 3. Hapus dari dapodik_sync_records
-                let _ = sqlx::query(
-                            "DELETE FROM dapodik_sync_records WHERE tenant_id = $1 AND (nisn = ANY($2) OR nama_school_os = ANY($3))"
-                        )
-                        .bind(ctx.tenant_id)
-                        .bind(&removed_nisns)
-                        .bind(&removed_names)
-                        .execute(&mut *tx)
-                        .await;
-
-                tracing::info!(
-                    "Otomatis menghapus {} siswa termutasi/keluar/lulus dari PostgreSQL: {:?}",
-                    removed_students.len(),
-                    removed_names
-                );
+            } else {
+                let _ = sqlx::query("RELEASE SAVEPOINT sp_cleanup_students").execute(&mut *tx).await;
             }
         }
 
@@ -2001,18 +2287,20 @@ pub async fn pull_dapodik_records(
             name: String,
         }
 
+        let _ = sqlx::query("SAVEPOINT sp_cleanup_classes").execute(&mut *tx).await;
+
         let empty_classes = sqlx::query_as::<_, EmptyClassRow>(
             r#"
-                    SELECT c.id, c.name 
-                    FROM classes c 
-                    WHERE c.tenant_id = $1 
-                    AND NOT EXISTS (
-                        SELECT 1 FROM enrollments e 
-                        WHERE e.class_id = c.id 
-                        AND e.tenant_id = c.tenant_id 
-                        AND (e.status = 'Active' OR e.status = 'active')
-                    )
-                    "#,
+            SELECT c.id, c.name 
+            FROM classes c 
+            WHERE c.tenant_id = $1 
+            AND NOT EXISTS (
+                SELECT 1 FROM enrollments e 
+                WHERE e.class_id = c.id 
+                AND e.tenant_id = c.tenant_id 
+                AND (e.status = 'Active' OR e.status = 'active')
+            )
+            "#,
         )
         .bind(ctx.tenant_id)
         .fetch_all(&mut *tx)
@@ -2024,29 +2312,40 @@ pub async fn pull_dapodik_records(
             let empty_class_names: Vec<String> =
                 empty_classes.iter().map(|c| c.name.clone()).collect();
 
-            let _ = sqlx::query("DELETE FROM classes WHERE tenant_id = $1 AND id = ANY($2)")
+            let del_cls_res = sqlx::query("DELETE FROM classes WHERE tenant_id = $1 AND id = ANY($2)")
                 .bind(ctx.tenant_id)
                 .bind(&empty_class_ids)
                 .execute(&mut *tx)
                 .await;
 
-            let _ = sqlx::query(
-                "DELETE FROM dapodik_sync_records WHERE tenant_id = $1 AND rombel = ANY($2)",
-            )
-            .bind(ctx.tenant_id)
-            .bind(&empty_class_names)
-            .execute(&mut *tx)
-            .await;
+            if del_cls_res.is_ok() {
+                let _ = sqlx::query(
+                    "DELETE FROM dapodik_sync_records WHERE tenant_id = $1 AND rombel = ANY($2)",
+                )
+                .bind(ctx.tenant_id)
+                .bind(&empty_class_names)
+                .execute(&mut *tx)
+                .await;
 
-            tracing::info!(
-                "Otomatis menghapus {} kelas kosong (0 siswa) dari PostgreSQL: {:?}",
-                empty_classes.len(),
-                empty_class_names
-            );
+                let _ = sqlx::query("RELEASE SAVEPOINT sp_cleanup_classes").execute(&mut *tx).await;
+
+                tracing::info!(
+                    "Otomatis menghapus {} kelas kosong (0 siswa) dari PostgreSQL: {:?}",
+                    empty_classes.len(),
+                    empty_class_names
+                );
+            } else {
+                let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_cleanup_classes").execute(&mut *tx).await;
+                tracing::warn!("Cleanup of empty classes skipped due to constraint dependency");
+            }
+        } else {
+            let _ = sqlx::query("RELEASE SAVEPOINT sp_cleanup_classes").execute(&mut *tx).await;
         }
     }
 
     // ── 10. Audit Trail: Catat Waktu & Operator Sinkronisasi Dapodik ──
+    let _ = sqlx::query("SAVEPOINT sp_audit").execute(&mut *tx).await;
+
     let actor_id = ctx.actor.as_ref().map(|a| a.id);
     let operator_name = match req_synced_by {
         Some(name) if !name.trim().is_empty() => name.trim().to_string(),
@@ -2065,29 +2364,39 @@ pub async fn pull_dapodik_records(
         }
     };
 
-    let _ = sqlx::query(
-        "UPDATE schools SET dapodik_last_synced_at = $1, dapodik_last_synced_by = $2 WHERE tenant_id = $3"
-    )
-    .bind(now)
-    .bind(&operator_name)
-    .bind(ctx.tenant_id)
-    .execute(&mut *tx)
-    .await;
+    let audit_res = async {
+        sqlx::query(
+            "UPDATE schools SET dapodik_last_synced_at = $1, dapodik_last_synced_by = $2 WHERE tenant_id = $3"
+        )
+        .bind(now)
+        .bind(&operator_name)
+        .bind(ctx.tenant_id)
+        .execute(&mut *tx)
+        .await?;
 
-    let _ = sqlx::query(
-        r#"
-        INSERT INTO audit_logs (id, tenant_id, request_id, actor_id, action, resource, permission, policy, decision, reason, timestamp)
-        VALUES ($1, $2, $3, $4, 'DAPODIK_SYNC_PULL', 'dapodik_sync_records', 'dapodik:sync', 'allow', 'ALLOWED', $5, $6)
-        "#
-    )
-    .bind(Uuid::now_v7())
-    .bind(ctx.tenant_id)
-    .bind(&ctx.request_id)
-    .bind(actor_id)
-    .bind(format!("Sinkronisasi data Dapodik berhasil diperbarui oleh {}", operator_name))
-    .bind(now)
-    .execute(&mut *tx)
-    .await;
+        sqlx::query(
+            r#"
+            INSERT INTO audit_logs (id, tenant_id, request_id, actor_id, action, resource, permission, policy, decision, reason, timestamp)
+            VALUES ($1, $2, $3, $4, 'DAPODIK_SYNC_PULL', 'dapodik_sync_records', 'dapodik:sync', 'allow', 'ALLOWED', $5, $6)
+            "#
+        )
+        .bind(Uuid::now_v7())
+        .bind(ctx.tenant_id)
+        .bind(&ctx.request_id)
+        .bind(actor_id)
+        .bind(format!("Sinkronisasi data Dapodik berhasil diperbarui oleh {}", operator_name))
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+
+        Ok::<(), sqlx::Error>(())
+    }.await;
+
+    if audit_res.is_err() {
+        let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_audit").execute(&mut *tx).await;
+    } else {
+        let _ = sqlx::query("RELEASE SAVEPOINT sp_audit").execute(&mut *tx).await;
+    }
 
     // ── 11. Commit Database Transaction ───────────────────────────
     tx.commit().await.map_err(|e| {

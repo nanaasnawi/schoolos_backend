@@ -1,0 +1,27 @@
+-- 20260913010000_widen_sync_columns_and_clean_constraints.sql
+-- Widen string column lengths to prevent "value too long for type character varying" aborts during Dapodik synchronization
+
+ALTER TABLE students ALTER COLUMN nik TYPE VARCHAR(50);
+ALTER TABLE students ALTER COLUMN no_hp TYPE VARCHAR(100);
+ALTER TABLE students ALTER COLUMN email TYPE VARCHAR(255);
+ALTER TABLE students ALTER COLUMN nisn TYPE VARCHAR(100);
+
+ALTER TABLE guardians ALTER COLUMN phone_number TYPE VARCHAR(100);
+ALTER TABLE guardians ALTER COLUMN relationship TYPE VARCHAR(100);
+
+ALTER TABLE teachers ALTER COLUMN no_hp TYPE VARCHAR(100);
+ALTER TABLE teachers ALTER COLUMN nip TYPE VARCHAR(100);
+ALTER TABLE teachers ALTER COLUMN nuptk TYPE VARCHAR(100);
+
+ALTER TABLE staff ALTER COLUMN no_hp TYPE VARCHAR(100);
+ALTER TABLE staff ALTER COLUMN nip TYPE VARCHAR(100);
+ALTER TABLE staff ALTER COLUMN nuptk TYPE VARCHAR(100);
+ALTER TABLE staff ALTER COLUMN job_title TYPE VARCHAR(255);
+
+ALTER TABLE classes ALTER COLUMN name TYPE VARCHAR(100);
+ALTER TABLE subjects ALTER COLUMN name TYPE VARCHAR(255);
+ALTER TABLE user_qr_tokens ALTER COLUMN label TYPE VARCHAR(255);
+
+ALTER TABLE dapodik_sync_records ALTER COLUMN nisn TYPE VARCHAR(100);
+ALTER TABLE dapodik_sync_records ALTER COLUMN nik TYPE VARCHAR(100);
+ALTER TABLE dapodik_sync_records ALTER COLUMN rombel TYPE VARCHAR(100);
