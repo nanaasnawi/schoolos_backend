@@ -984,14 +984,14 @@ pub async fn pull_dapodik_records(
     .unwrap_or_default();
     let mut student_by_nisn: HashMap<String, Uuid> = HashMap::new();
     let mut student_by_nik: HashMap<String, Uuid> = HashMap::new();
-    let mut student_by_name: HashMap<String, Uuid> = HashMap::new();
     for s in student_rows {
         student_by_nisn.insert(s.nisn.trim().to_string(), s.id);
         if let Some(n) = s.nik {
-            student_by_nik.insert(n.trim().to_string(), s.id);
+            let trimmed = n.trim().to_string();
+            if trimmed.len() >= 10 && !trimmed.chars().all(|c| c == '0' || c == '-') {
+                student_by_nik.insert(trimmed, s.id);
+            }
         }
-        student_by_name.insert(s.full_name.trim().to_uppercase(), s.id);
-        student_by_name.insert(s.full_name.trim().to_string(), s.id);
     }
 
     let sync_rows = sqlx::query!(
@@ -1002,11 +1002,8 @@ pub async fn pull_dapodik_records(
     .await
     .unwrap_or_default();
     let mut sync_by_nisn: HashMap<String, Uuid> = HashMap::new();
-    let mut sync_by_name: HashMap<String, Uuid> = HashMap::new();
     for sr in sync_rows {
         sync_by_nisn.insert(sr.nisn.trim().to_string(), sr.id);
-        sync_by_name.insert(sr.nama_dapodik.trim().to_uppercase(), sr.id);
-        sync_by_name.insert(sr.nama_dapodik.trim().to_string(), sr.id);
     }
 
     let guardian_rows = sqlx::query!(
@@ -1391,8 +1388,10 @@ pub async fn pull_dapodik_records(
                     teacher_by_nip.get(n).copied()
                 } else if let Some(ref nup) = nuptk {
                     teacher_by_nuptk.get(nup).copied()
+                } else if let Some(tid) = teacher_by_email.get(&email.to_lowercase()).copied() {
+                    Some(tid)
                 } else {
-                    teacher_by_name.get(&nama_upper).copied()
+                    None
                 };
 
                 if let Some(tid) = existing_teacher {
@@ -2039,16 +2038,21 @@ pub async fn pull_dapodik_records(
                 None
             };
 
-            // Resolution student ID by NISN -> NIK -> Name
+            // Resolution student ID MUTLAK berdasarkan NISN -> NIK valid.
+            // DILARANG KERAS menggunakan string nama untuk deduplikasi atau pencarian siswa!
             let existing_student_id = student_by_nisn
                 .get(&final_nisn)
                 .copied()
                 .or_else(|| {
-                    nik.as_ref()
-                        .and_then(|n| student_by_nik.get(n.trim()).copied())
-                })
-                .or_else(|| student_by_name.get(&nama_upper).copied())
-                .or_else(|| student_by_name.get(&nama).copied());
+                    nik.as_ref().and_then(|n| {
+                        let trimmed = n.trim();
+                        if trimmed.len() >= 10 && !trimmed.chars().all(|c| c == '0' || c == '-') {
+                            student_by_nik.get(trimmed).copied()
+                        } else {
+                            None
+                        }
+                    })
+                });
 
             let new_id = Uuid::now_v7();
             let student_db_id = if let Some(sid) = existing_student_id {
@@ -2081,10 +2085,11 @@ pub async fn pull_dapodik_records(
 
                 student_by_nisn.insert(final_nisn.clone(), sid);
                 if let Some(ref n) = nik {
-                    student_by_nik.insert(n.trim().to_string(), sid);
+                    let trimmed = n.trim().to_string();
+                    if trimmed.len() >= 10 && !trimmed.chars().all(|c| c == '0' || c == '-') {
+                        student_by_nik.insert(trimmed, sid);
+                    }
                 }
-                student_by_name.insert(nama_upper.clone(), sid);
-                student_by_name.insert(nama.clone(), sid);
                 sid
             } else {
                 let insert_res = sqlx::query_scalar::<_, Uuid>(
@@ -2131,8 +2136,12 @@ pub async fn pull_dapodik_records(
                 };
 
                 student_by_nisn.insert(final_nisn.clone(), inserted_id);
-                student_by_name.insert(nama_upper.clone(), inserted_id);
-                student_by_name.insert(nama.clone(), inserted_id);
+                if let Some(ref n) = nik {
+                    let trimmed = n.trim().to_string();
+                    if trimmed.len() >= 10 && !trimmed.chars().all(|c| c == '0' || c == '-') {
+                        student_by_nik.insert(trimmed, inserted_id);
+                    }
+                }
                 inserted_id
             };
 
@@ -2254,13 +2263,12 @@ pub async fn pull_dapodik_records(
                             .await;
                     }
 
-                    // 3. Hapus dari dapodik_sync_records
+                    // 3. Hapus dari dapodik_sync_records MUTLAK menggunakan NISN (tidak boleh pakai nama agar siswa lain dengan nama serupa tidak ikut terhapus)
                     let _ = sqlx::query(
-                        "DELETE FROM dapodik_sync_records WHERE tenant_id = $1 AND (nisn = ANY($2) OR nama_school_os = ANY($3))"
+                        "DELETE FROM dapodik_sync_records WHERE tenant_id = $1 AND nisn = ANY($2)"
                     )
                     .bind(ctx.tenant_id)
                     .bind(&removed_nisns)
-                    .bind(&removed_names)
                     .execute(&mut *tx)
                     .await;
 
