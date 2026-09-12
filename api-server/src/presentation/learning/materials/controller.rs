@@ -40,17 +40,20 @@ async fn create(
     req_ctx: RequestContext,
     Json(payload): Json<CreateLearningMaterialRequest>,
 ) -> Result<Json<ApiResponse<LearningMaterialResponse>>, ApiError> {
-    use crate::middleware::require_permission;
-    use school_core::permission::domain::permission_registry::Permission;
-    require_permission(&req_ctx.actor, Permission::LearningMaterialCreate).map_err(|_| {
-        ApiError::new(
-            school_core::common::error::ApplicationError::Unauthorized(
-                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                "Insufficient permissions".to_string(),
-            ),
-            &req_ctx.request_id,
-        )
-    })?;
+    let is_teacher = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Guru" || r.name == "Teacher")).unwrap_or(false);
+    if !is_teacher {
+        use crate::middleware::require_permission;
+        use school_core::permission::domain::permission_registry::Permission;
+        require_permission(&req_ctx.actor, Permission::LearningMaterialCreate).map_err(|_| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Insufficient permissions".to_string(),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+    }
 
     let command = CreateLearningMaterialCommand {
         tenant_id: req_ctx.tenant_id,
@@ -736,17 +739,20 @@ async fn upload_file(
     req_ctx: RequestContext,
     mut multipart: Multipart,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    use crate::middleware::require_permission;
-    use school_core::permission::domain::permission_registry::Permission;
-    require_permission(&req_ctx.actor, Permission::LearningMaterialCreate).map_err(|_| {
-        ApiError::new(
-            school_core::common::error::ApplicationError::Unauthorized(
-                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                "Insufficient permissions".to_string(),
-            ),
-            &req_ctx.request_id,
-        )
-    })?;
+    let is_teacher = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Guru" || r.name == "Teacher")).unwrap_or(false);
+    if !is_teacher {
+        use crate::middleware::require_permission;
+        use school_core::permission::domain::permission_registry::Permission;
+        require_permission(&req_ctx.actor, Permission::LearningMaterialCreate).map_err(|_| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Insufficient permissions".to_string(),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+    }
 
     // Create uploads directory if it doesn't exist
     let uploads_dir = std::path::PathBuf::from("uploads");
@@ -774,11 +780,23 @@ async fn upload_file(
             let original_filename = field.file_name()
                 .unwrap_or("upload")
                 .to_string();
-            let ext = std::path::Path::new(&original_filename)
+            let content_type = field.content_type().unwrap_or("").to_string();
+            let mut ext = std::path::Path::new(&original_filename)
                 .extension()
                 .and_then(|e| e.to_str())
-                .unwrap_or("bin")
+                .unwrap_or("")
                 .to_lowercase();
+
+            if ext.is_empty() {
+                ext = match content_type.as_str() {
+                    "application/pdf" => "pdf".to_string(),
+                    "image/jpeg" | "image/jpg" => "jpg".to_string(),
+                    "image/png" => "png".to_string(),
+                    "image/webp" => "webp".to_string(),
+                    "image/gif" => "gif".to_string(),
+                    _ => "bin".to_string(),
+                };
+            }
 
             // Only allow safe file types
             let allowed = ["pdf", "jpg", "jpeg", "png", "gif", "webp"];

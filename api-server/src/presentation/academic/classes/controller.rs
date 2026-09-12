@@ -147,21 +147,26 @@ async fn list(
     req_ctx: RequestContext,
     Query(params): Query<ListClassesParams>,
 ) -> Result<Json<ApiResponse<Vec<ClassResponse>>>, crate::error::ApiError> {
-    use crate::middleware::require_permission;
-    use school_core::permission::domain::permission_registry::Permission;
-    require_permission(&req_ctx.actor, Permission::AcademicManage)
-        .or_else(|_| require_permission(&req_ctx.actor, Permission::LearningCurriculumRead))
-        .or_else(|_| require_permission(&req_ctx.actor, Permission::StudentRead))
-        .or_else(|_| require_permission(&req_ctx.actor, Permission::TeacherRead))
-        .map_err(|_| {
-            crate::error::ApiError::new(
-                school_core::common::error::ApplicationError::Unauthorized(
-                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                    "Insufficient permissions".to_string(),
-                ),
-                &req_ctx.request_id,
-            )
-        })?;
+    let is_teacher = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Guru" || r.name == "Teacher")).unwrap_or(false);
+    let is_student = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Siswa" || r.name == "Student")).unwrap_or(false);
+
+    if !is_teacher && !is_student {
+        use crate::middleware::require_permission;
+        use school_core::permission::domain::permission_registry::Permission;
+        require_permission(&req_ctx.actor, Permission::AcademicManage)
+            .or_else(|_| require_permission(&req_ctx.actor, Permission::LearningCurriculumRead))
+            .or_else(|_| require_permission(&req_ctx.actor, Permission::StudentRead))
+            .or_else(|_| require_permission(&req_ctx.actor, Permission::TeacherRead))
+            .map_err(|_| {
+                crate::error::ApiError::new(
+                    school_core::common::error::ApplicationError::Unauthorized(
+                        school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                        "Insufficient permissions".to_string(),
+                    ),
+                    &req_ctx.request_id,
+                )
+            })?;
+    }
 
     let query = ListClassesQuery {
         tenant_id: req_ctx.tenant_id,
