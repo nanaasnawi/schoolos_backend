@@ -24,6 +24,7 @@ impl SyncEngine {
         dapodik_url: &str,
         npsn: &str,
         dapodik_token: &str,
+        synced_by: Option<&str>,
     ) -> Result<SyncSummary, Box<dyn std::error::Error>> {
         info!("Memulai sinkronisasi on-demand dari Web Dashboard...");
 
@@ -80,6 +81,7 @@ impl SyncEngine {
             raw_gtk: Some(gtk_list),
             raw_rombel: Some(rombel_list),
             raw_students: Some(student_list),
+            synced_by: synced_by.map(|s| s.to_string()),
         };
 
         // 8. Kirim ke School OS Cloud Hub

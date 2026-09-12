@@ -431,6 +431,7 @@ pub struct PullDapodikRequest {
     pub raw_gtk: Option<Vec<DapodikRawGtk>>,
     pub raw_rombel: Option<Vec<DapodikRawRombel>>,
     pub raw_sekolah: Option<serde_json::Value>,
+    pub synced_by: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -443,6 +444,8 @@ pub struct AgentInfoResponse {
     pub total_students: i64,
     pub total_teachers: i64,
     pub total_classes: i64,
+    pub last_synced_at: Option<String>,
+    pub last_synced_by: Option<String>,
 }
 
 pub async fn get_agent_info(
@@ -450,7 +453,7 @@ pub async fn get_agent_info(
     state: State<ApplicationContext>,
 ) -> Result<Json<ApiResponse<AgentInfoResponse>>, ApiError> {
     let school = sqlx::query(
-        "SELECT name, npsn, dapodik_url, dapodik_token FROM schools WHERE tenant_id = $1 LIMIT 1",
+        "SELECT name, npsn, dapodik_url, dapodik_token, dapodik_last_synced_at, dapodik_last_synced_by FROM schools WHERE tenant_id = $1 LIMIT 1",
     )
     .bind(ctx.tenant_id)
     .fetch_optional(&state.pool)
@@ -481,7 +484,19 @@ pub async fn get_agent_info(
     .await
     .unwrap_or(0);
 
-    let (school_name, npsn, dapodik_url, dapodik_token) = if let Some(s) = school {
+    let db_latest_sync: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT MAX(last_synced_at) FROM dapodik_sync_records WHERE tenant_id = $1",
+    )
+    .bind(ctx.tenant_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+
+    let (school_name, npsn, dapodik_url, dapodik_token, last_synced_at, last_synced_by) = if let Some(s) = school {
+        let synced_at: Option<chrono::DateTime<Utc>> = s.try_get("dapodik_last_synced_at").ok().flatten();
+        let synced_by: Option<String> = s.try_get("dapodik_last_synced_by").ok().flatten();
+        let final_synced_at = synced_at.or(db_latest_sync).map(|dt| dt.to_rfc3339());
         (
             s.get::<String, _>("name"),
             s.get::<Option<String>, _>("npsn").unwrap_or_default(),
@@ -489,6 +504,8 @@ pub async fn get_agent_info(
                 .unwrap_or_else(|| "http://127.0.0.1:5774".to_string()),
             s.get::<Option<String>, _>("dapodik_token")
                 .unwrap_or_default(),
+            final_synced_at,
+            synced_by,
         )
     } else {
         (
@@ -496,6 +513,8 @@ pub async fn get_agent_info(
             String::new(),
             "http://127.0.0.1:5774".to_string(),
             String::new(),
+            db_latest_sync.map(|dt| dt.to_rfc3339()),
+            None,
         )
     };
 
@@ -508,6 +527,8 @@ pub async fn get_agent_info(
         total_students,
         total_teachers,
         total_classes,
+        last_synced_at,
+        last_synced_by,
     };
 
     Ok(Json(ApiResponse::success(info, ctx.request_id)))
@@ -526,6 +547,7 @@ pub async fn pull_dapodik_records(
         agent_gtk,
         agent_rombel,
         agent_sekolah,
+        req_synced_by,
     ) = match payload {
         Some(Json(req)) => (
             req.dapodik_url,
@@ -535,8 +557,9 @@ pub async fn pull_dapodik_records(
             req.raw_gtk,
             req.raw_rombel,
             req.raw_sekolah,
+            req.synced_by,
         ),
-        None => (None, None, None, None, None, None, None),
+        None => (None, None, None, None, None, None, None, None),
     };
 
     let is_agent_sync = agent_students.is_some();
@@ -2023,7 +2046,50 @@ pub async fn pull_dapodik_records(
         }
     }
 
-    // ── 10. Commit Database Transaction ───────────────────────────
+    // ── 10. Audit Trail: Catat Waktu & Operator Sinkronisasi Dapodik ──
+    let actor_id = ctx.actor.as_ref().map(|a| a.id);
+    let operator_name = match req_synced_by {
+        Some(name) if !name.trim().is_empty() => name.trim().to_string(),
+        _ => {
+            if let Some(aid) = actor_id {
+                sqlx::query_scalar::<_, String>("SELECT COALESCE(full_name, email) FROM users WHERE id = $1")
+                    .bind(aid)
+                    .fetch_optional(&state.pool)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "Administrator".to_string())
+            } else {
+                "Administrator".to_string()
+            }
+        }
+    };
+
+    let _ = sqlx::query(
+        "UPDATE schools SET dapodik_last_synced_at = $1, dapodik_last_synced_by = $2 WHERE tenant_id = $3"
+    )
+    .bind(now)
+    .bind(&operator_name)
+    .bind(ctx.tenant_id)
+    .execute(&mut *tx)
+    .await;
+
+    let _ = sqlx::query(
+        r#"
+        INSERT INTO audit_logs (id, tenant_id, request_id, actor_id, action, resource, permission, policy, decision, reason, timestamp)
+        VALUES ($1, $2, $3, $4, 'DAPODIK_SYNC_PULL', 'dapodik_sync_records', 'dapodik:sync', 'allow', 'ALLOWED', $5, $6)
+        "#
+    )
+    .bind(Uuid::now_v7())
+    .bind(ctx.tenant_id)
+    .bind(&ctx.request_id)
+    .bind(actor_id)
+    .bind(format!("Sinkronisasi data Dapodik berhasil diperbarui oleh {}", operator_name))
+    .bind(now)
+    .execute(&mut *tx)
+    .await;
+
+    // ── 11. Commit Database Transaction ───────────────────────────
     tx.commit().await.map_err(|e| {
         ApiError::new(
             ApplicationError::Internal(format!("Failed to commit database transaction: {}", e)),

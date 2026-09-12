@@ -87,6 +87,7 @@ pub struct AgentSyncPayload {
     pub raw_gtk: Option<Vec<DapodikRawGtk>>,
     pub raw_rombel: Option<Vec<DapodikRawRombel>>,
     pub raw_sekolah: Option<serde_json::Value>,
+    pub synced_by: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

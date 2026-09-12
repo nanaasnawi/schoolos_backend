@@ -26,6 +26,7 @@ struct OnDemandSyncRequest {
     dapodik_url: Option<String>,
     npsn: Option<String>,
     dapodik_token: Option<String>,
+    synced_by: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -76,6 +77,7 @@ async fn sync_handler(
         .unwrap_or_else(|| "http://127.0.0.1:5774".to_string());
     let npsn = payload.npsn.unwrap_or_default();
     let dapodik_token = payload.dapodik_token.unwrap_or_default();
+    let synced_by = payload.synced_by;
 
     if npsn.trim().is_empty() {
         return Err((
@@ -94,6 +96,7 @@ async fn sync_handler(
         &dapodik_url,
         &npsn,
         &dapodik_token,
+        synced_by.as_deref(),
     )
     .await
     {
