@@ -105,7 +105,7 @@ impl AuthenticateQrTokenUseCase {
             }
         };
 
-        // 3. Validation: User Active & Expiration
+        // 3. Validation: User Active & Token Status
         if !record.user_is_active {
             return Err(ApplicationError::Unauthorized(
                 ErrorCode::AuthInvalidCredentials,
@@ -113,18 +113,10 @@ impl AuthenticateQrTokenUseCase {
             ));
         }
 
-        // If card was marked inactive in DB (e.g. after reseed) but belongs to an active user, auto-reactivate for frictionless login
         if !record.token_is_active {
-            let _ = sqlx::query!("UPDATE user_qr_tokens SET is_active = true WHERE id = $1", record.token_id)
-                .execute(&self.pool)
-                .await;
-            tracing::info!("Auto-reactivated physical QR card token_id={}", record.token_id);
-        }
-
-        if !record.user_is_active {
             return Err(ApplicationError::Unauthorized(
                 ErrorCode::AuthInvalidCredentials,
-                "Akun pengguna yang terkait QR ini sedang tidak aktif.".to_string(),
+                "Kartu QR ini telah dinonaktifkan atau di-reset oleh pihak sekolah. Silakan hubungi Administrator untuk mendapatkan kartu QR terbaru.".to_string(),
             ));
         }
 

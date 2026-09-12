@@ -3,7 +3,7 @@ use crate::common::error::ApplicationError;
 use hex::ToHex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -14,6 +14,8 @@ pub struct GenerateQrTokenCommand {
     pub token_type: Option<String>,
     pub label: Option<String>,
     pub expires_in_days: Option<i64>,
+    #[serde(default)]
+    pub force_reset: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -42,6 +44,43 @@ impl GenerateQrTokenUseCase {
         &self,
         command: GenerateQrTokenCommand,
     ) -> Result<GeneratedQrToken, ApplicationError> {
+        let now = self.clock.now();
+
+        // If not explicit force_reset, reuse existing active token if raw_token is present
+        if !command.force_reset.unwrap_or(false) {
+            let existing = sqlx::query(
+                r#"
+                SELECT id, token_type, label, raw_token, expires_at, created_at
+                FROM user_qr_tokens
+                WHERE tenant_id = $1 AND user_id = $2 AND is_active = true
+                ORDER BY created_at DESC
+                LIMIT 1
+                "#,
+            )
+            .bind(command.tenant_id)
+            .bind(command.user_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| ApplicationError::Infrastructure(crate::common::error::InfrastructureError::Database(e)))?;
+
+            if let Some(row) = existing {
+                if let Ok(Some(existing_raw)) = row.try_get::<Option<String>, _>("raw_token") {
+                    if !existing_raw.trim().is_empty() {
+                        return Ok(GeneratedQrToken {
+                            id: row.get("id"),
+                            raw_token: existing_raw,
+                            user_id: command.user_id,
+                            tenant_id: command.tenant_id,
+                            token_type: row.get("token_type"),
+                            label: row.get("label"),
+                            expires_at: row.try_get("expires_at").unwrap_or(None),
+                            created_at: row.get("created_at"),
+                        });
+                    }
+                }
+            }
+        }
+
         let token_id = Uuid::now_v7();
         let entropy = Uuid::now_v7().to_string().replace('-', "");
         let raw_token = format!("sch_qr_v1_{}_{}", token_id.to_string().replace('-', ""), &entropy[0..16]);
@@ -62,41 +101,39 @@ impl GenerateQrTokenUseCase {
                 .unwrap_or_else(|| self.clock.now())
         });
 
-        let now = self.clock.now();
-
         // Deactivate previous active tokens for this user so old/lost cards are immediately revoked
-        sqlx::query!(
+        sqlx::query(
             r#"
             UPDATE user_qr_tokens
             SET is_active = false, updated_at = $3
             WHERE tenant_id = $1 AND user_id = $2 AND is_active = true
             "#,
-            command.tenant_id,
-            command.user_id,
-            now
         )
+        .bind(command.tenant_id)
+        .bind(command.user_id)
+        .bind(now)
         .execute(&self.pool)
         .await
         .map_err(|e| ApplicationError::Infrastructure(crate::common::error::InfrastructureError::Database(e)))?;
 
-        sqlx::query!(
+        sqlx::query(
             r#"
             INSERT INTO user_qr_tokens (
-                id, tenant_id, user_id, token_hash, token_type, label, is_active, expires_at, created_at, updated_at
+                id, tenant_id, user_id, token_hash, raw_token, token_type, label, is_active, expires_at, created_at, updated_at
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, true, $7, $8, $8
+                $1, $2, $3, $4, $5, $6, $7, true, $8, $9, $9
             )
             "#,
-
-            token_id,
-            command.tenant_id,
-            command.user_id,
-            token_hash,
-            token_type,
-            label,
-            expires_at,
-            now
         )
+        .bind(token_id)
+        .bind(command.tenant_id)
+        .bind(command.user_id)
+        .bind(&token_hash)
+        .bind(&raw_token)
+        .bind(&token_type)
+        .bind(&label)
+        .bind(expires_at)
+        .bind(now)
         .execute(&self.pool)
         .await
         .map_err(|e| ApplicationError::Infrastructure(crate::common::error::InfrastructureError::Database(e)))?;

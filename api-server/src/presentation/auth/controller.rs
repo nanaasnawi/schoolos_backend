@@ -3,6 +3,7 @@ use axum::{
     extract::{Json, State},
     routing::post,
 };
+use sqlx::Row;
 
 use super::dto::{
     login_request::LoginRequest, login_response::LoginResponse,
@@ -752,6 +753,7 @@ async fn generate_qr_token_endpoint(
         token_type: payload.token_type,
         label: payload.label,
         expires_in_days: payload.expires_in_days,
+        force_reset: payload.force_reset,
     };
 
     let generated = ctx
@@ -806,6 +808,7 @@ async fn get_my_qr_badge(
         token_type: Some("BADGE".to_string()),
         label: Some("Kartu Identitas Digital".to_string()),
         expires_in_days: None,
+        force_reset: None,
     };
 
     let generated = ctx
@@ -843,7 +846,7 @@ async fn list_users_qr_status(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
 ) -> Result<Json<ApiResponse<Vec<UserQrStatusDto>>>, ApiError> {
-    let rows = sqlx::query!(
+    let rows = sqlx::query(
         r#"
         SELECT 
             u.id, 
@@ -860,7 +863,7 @@ async fn list_users_qr_status(
                 (SELECT NULLIF(g.phone_number, '') FROM guardians g WHERE g.user_id = u.id ORDER BY g.updated_at DESC LIMIT 1),
                 (SELECT CONCAT('WALI-', s.nisn) FROM guardians g JOIN students s ON s.guardian_id = g.id WHERE g.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),
                 ''
-            ) as "identifier!",
+            ) as identifier,
             COALESCE(
                   (
                     SELECT c.name 
@@ -889,33 +892,39 @@ async fn list_users_qr_status(
                     ORDER BY en.enrolled_at DESC 
                     LIMIT 1
                 )
-            ) as "class_name?",
+            ) as class_name,
             (SELECT q.id FROM user_qr_tokens q WHERE q.user_id = u.id AND q.is_active = true ORDER BY q.created_at DESC LIMIT 1) as active_token_id,
             (SELECT q.label FROM user_qr_tokens q WHERE q.user_id = u.id AND q.is_active = true ORDER BY q.created_at DESC LIMIT 1) as active_token_label,
             (SELECT q.created_at FROM user_qr_tokens q WHERE q.user_id = u.id AND q.is_active = true ORDER BY q.created_at DESC LIMIT 1) as token_created_at,
-            (SELECT q.last_used_at FROM user_qr_tokens q WHERE q.user_id = u.id AND q.is_active = true ORDER BY q.created_at DESC LIMIT 1) as token_last_used_at
+            (SELECT q.last_used_at FROM user_qr_tokens q WHERE q.user_id = u.id AND q.is_active = true ORDER BY q.created_at DESC LIMIT 1) as token_last_used_at,
+            (SELECT q.raw_token FROM user_qr_tokens q WHERE q.user_id = u.id AND q.is_active = true ORDER BY q.created_at DESC LIMIT 1) as active_raw_token
         FROM users u
         WHERE u.tenant_id = $1
         ORDER BY u.created_at DESC
         "#,
-        req_ctx.tenant_id
     )
+    .bind(req_ctx.tenant_id)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
 
-    let dtos = rows.into_iter().map(|r| UserQrStatusDto {
-        id: r.id,
-        email: r.email,
-        full_name: r.full_name,
-        role: r.role_name.unwrap_or_default(),
-        is_active: r.is_active,
-        identifier: if r.identifier.is_empty() { None } else { Some(r.identifier) },
-        class_name: r.class_name,
-        has_active_token: r.active_token_id.is_some(),
-        active_token_label: r.active_token_label,
-        token_created_at: r.token_created_at,
-        token_last_used_at: r.token_last_used_at,
+    let dtos = rows.into_iter().map(|r| {
+        let active_id: Option<uuid::Uuid> = r.try_get("active_token_id").unwrap_or(None);
+        let id_str: String = r.try_get("identifier").unwrap_or_default();
+        UserQrStatusDto {
+            id: r.get("id"),
+            email: r.get("email"),
+            full_name: r.get("full_name"),
+            role: r.try_get("role_name").unwrap_or_default(),
+            is_active: r.get("is_active"),
+            identifier: if id_str.is_empty() { None } else { Some(id_str) },
+            class_name: r.try_get("class_name").unwrap_or(None),
+            has_active_token: active_id.is_some(),
+            active_token_label: r.try_get("active_token_label").unwrap_or(None),
+            raw_token: r.try_get("active_raw_token").unwrap_or(None),
+            token_created_at: r.try_get("token_created_at").unwrap_or(None),
+            token_last_used_at: r.try_get("token_last_used_at").unwrap_or(None),
+        }
     }).collect();
 
     Ok(Json(ApiResponse::success(dtos, req_ctx.request_id)))
@@ -947,6 +956,7 @@ async fn batch_generate_qr_tokens_endpoint(
             token_type: payload.token_type.clone(),
             label: payload.label.clone(),
             expires_in_days: payload.expires_in_days,
+            force_reset: payload.force_reset,
         };
 
         if let Ok(generated) = ctx.generate_qr_token.execute(command).await {

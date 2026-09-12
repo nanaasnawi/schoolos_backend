@@ -18,6 +18,8 @@ pub struct GenerateQrBadgeRequest {
     pub label: Option<String>,
     /// Masa berlaku dalam hari (opsional, default: aktif terus sampai di-revoke)
     pub expires_in_days: Option<i64>,
+    /// Force reset: jika true, nonaktifkan QR token lama dan buat token baru (misal kartu hilang/dicuri)
+    pub force_reset: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
@@ -30,6 +32,8 @@ pub struct BatchGenerateQrBadgesRequest {
     pub label: Option<String>,
     /// Masa berlaku dalam hari (opsional)
     pub expires_in_days: Option<i64>,
+    /// Force reset: jika true, nonaktifkan QR token lama
+    pub force_reset: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -43,6 +47,7 @@ pub struct UserQrStatusDto {
     pub class_name: Option<String>,
     pub has_active_token: bool,
     pub active_token_label: Option<String>,
+    pub raw_token: Option<String>,
     #[schema(value_type = Option<String>, format = DateTime)]
     pub token_created_at: Option<chrono::DateTime<chrono::Utc>>,
     #[schema(value_type = Option<String>, format = DateTime)]

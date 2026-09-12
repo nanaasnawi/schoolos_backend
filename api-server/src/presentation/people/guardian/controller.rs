@@ -265,12 +265,15 @@ pub struct GuardianOverviewDto {
     pub student_nisn: String,
     pub phone: String,
     pub is_real_data: bool,
+    pub nama_ayah: Option<String>,
+    pub nama_ibu: Option<String>,
 }
 
 async fn get_guardians_overview(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
 ) -> Result<Json<ApiResponse<Vec<GuardianOverviewDto>>>, ApiError> {
+    #[derive(sqlx::FromRow)]
     struct RowResult {
         student_id: Uuid,
         student_name: String,
@@ -278,25 +281,28 @@ async fn get_guardians_overview(
         guardian_id: Option<Uuid>,
         guardian_name: Option<String>,
         phone: Option<String>,
+        nama_ayah: Option<String>,
+        nama_ibu: Option<String>,
     }
 
-    let records = sqlx::query_as!(
-        RowResult,
+    let records = sqlx::query_as::<_, RowResult>(
         r#"
         SELECT 
             s.id as student_id,
             s.full_name as student_name,
             s.nisn as student_nisn,
-            g.id as "guardian_id?",
-            g.full_name as "guardian_name?",
-            COALESCE(g.phone_number, s.no_hp, '') as "phone?"
+            g.id as guardian_id,
+            g.full_name as guardian_name,
+            COALESCE(g.phone_number, s.no_hp, '') as phone,
+            s.nama_ayah as nama_ayah,
+            s.nama_ibu as nama_ibu
         FROM students s
         LEFT JOIN guardians g ON g.id = s.guardian_id
         WHERE s.tenant_id = $1
         ORDER BY s.full_name ASC
-        "#,
-        req_ctx.tenant_id
+        "#
     )
+    .bind(req_ctx.tenant_id)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Internal(e.to_string()), &req_ctx.request_id))?;
@@ -305,13 +311,15 @@ async fn get_guardians_overview(
         let has_guardian = r.guardian_name.is_some() && !r.guardian_name.as_ref().unwrap().trim().is_empty();
         GuardianOverviewDto {
             id: r.guardian_id.map(|u| u.to_string()).unwrap_or_else(|| r.student_id.to_string()),
-            full_name: r.guardian_name.unwrap_or_else(|| "(Belum Ada Data Wali)".to_string()),
-            relationship: if has_guardian { "Ibu Kandung / Wali".to_string() } else { "Belum Diisi".to_string() },
+            full_name: r.guardian_name.unwrap_or_else(|| r.nama_ibu.clone().unwrap_or_else(|| "(Belum Ada Data Wali)".to_string())),
+            relationship: if has_guardian || r.nama_ibu.is_some() { "Ibu Kandung".to_string() } else { "Belum Diisi".to_string() },
             student_id: r.student_id.to_string(),
             student_name: r.student_name,
             student_nisn: r.student_nisn,
             phone: r.phone.filter(|p| !p.trim().is_empty()).unwrap_or_else(|| "-".to_string()),
-            is_real_data: has_guardian,
+            is_real_data: has_guardian || r.nama_ibu.is_some(),
+            nama_ayah: r.nama_ayah,
+            nama_ibu: r.nama_ibu,
         }
     }).collect();
 

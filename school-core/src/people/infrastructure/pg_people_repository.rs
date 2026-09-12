@@ -878,8 +878,8 @@ impl StudentRepository for PgPeopleRepository {
 
         sqlx::query(
             r#"
-            INSERT INTO students (id, tenant_id, user_id, guardian_id, nisn, full_name, nik, gender, place_of_birth, date_of_birth, religion, nipd, alamat_jalan, no_hp, email, status, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+            INSERT INTO students (id, tenant_id, user_id, guardian_id, nisn, full_name, nik, gender, place_of_birth, date_of_birth, religion, nipd, alamat_jalan, no_hp, email, status, nama_ayah, nama_ibu, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
             "#
         )
         .bind(student.id)
@@ -898,6 +898,8 @@ impl StudentRepository for PgPeopleRepository {
         .bind(&student.no_hp)
         .bind(&student.email)
         .bind(student.status.as_db_str())
+        .bind(&student.nama_ayah)
+        .bind(&student.nama_ibu)
         .bind(student.created_at)
         .bind(student.updated_at)
         .execute(&mut **tx)
@@ -909,7 +911,7 @@ impl StudentRepository for PgPeopleRepository {
 
     async fn find_by_id(&self, id: Uuid) -> Result<Option<Student>, InfrastructureError> {
         let record = sqlx::query(
-            r#"SELECT id, tenant_id, user_id, guardian_id, nisn, full_name, nik, gender, place_of_birth, date_of_birth, religion, nipd, alamat_jalan, no_hp, email, status, created_at, updated_at, deleted_at, deleted_by FROM students WHERE id = $1 AND deleted_at IS NULL"#
+            r#"SELECT id, tenant_id, user_id, guardian_id, nisn, full_name, nik, gender, place_of_birth, date_of_birth, religion, nipd, alamat_jalan, no_hp, email, status, nama_ayah, nama_ibu, created_at, updated_at, deleted_at, deleted_by FROM students WHERE id = $1 AND deleted_at IS NULL"#
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -938,6 +940,8 @@ impl StudentRepository for PgPeopleRepository {
                 r.get("updated_at"),
                 r.get("deleted_at"),
                 r.get("deleted_by"),
+                r.get("nama_ayah"),
+                r.get("nama_ibu"),
             )
         }))
     }
@@ -955,8 +959,8 @@ impl StudentRepository for PgPeopleRepository {
         sqlx::query(
             r#"
             UPDATE students
-            SET nisn = $1, full_name = $2, nik = $3, gender = $4, place_of_birth = $5, date_of_birth = $6, religion = $7, nipd = $8, alamat_jalan = $9, no_hp = $10, email = $11, guardian_id = $12, status = $13, updated_at = $14
-            WHERE id = $15 AND tenant_id = $16
+            SET nisn = $1, full_name = $2, nik = $3, gender = $4, place_of_birth = $5, date_of_birth = $6, religion = $7, nipd = $8, alamat_jalan = $9, no_hp = $10, email = $11, guardian_id = $12, status = $13, nama_ayah = $14, nama_ibu = $15, updated_at = $16
+            WHERE id = $17 AND tenant_id = $18
             "#,
         )
         .bind(&student.nisn)
@@ -972,6 +976,8 @@ impl StudentRepository for PgPeopleRepository {
         .bind(&student.email)
         .bind(student.guardian_id)
         .bind(student.status.as_db_str()) // ✅ stable
+        .bind(&student.nama_ayah)
+        .bind(&student.nama_ibu)
         .bind(student.updated_at)
         .bind(student.id)
         .bind(student.tenant_id)
@@ -984,7 +990,7 @@ impl StudentRepository for PgPeopleRepository {
 
     async fn find_by_tenant(&self, tenant_id: Uuid) -> Result<Vec<Student>, InfrastructureError> {
         let records = sqlx::query(
-            r#"SELECT id, tenant_id, user_id, guardian_id, nisn, full_name, nik, gender, place_of_birth, date_of_birth, religion, nipd, alamat_jalan, no_hp, email, status, created_at, updated_at, deleted_at, deleted_by FROM students WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC"#
+            r#"SELECT id, tenant_id, user_id, guardian_id, nisn, full_name, nik, gender, place_of_birth, date_of_birth, religion, nipd, alamat_jalan, no_hp, email, status, nama_ayah, nama_ibu, created_at, updated_at, deleted_at, deleted_by FROM students WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC"#
         )
         .bind(tenant_id)
         .fetch_all(&self.pool)
@@ -1015,6 +1021,8 @@ impl StudentRepository for PgPeopleRepository {
                     r.get("updated_at"),
                     r.get("deleted_at"),
                     r.get("deleted_by"),
+                    r.get("nama_ayah"),
+                    r.get("nama_ibu"),
                 )
             })
             .collect())
@@ -1077,7 +1085,7 @@ impl crate::people::infrastructure::repository_traits::StudentQueryRepository
         count_qb.push_bind(query.tenant_id);
 
         let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
-            "SELECT students.id, students.nisn, students.full_name, students.nik, students.gender, students.place_of_birth, students.date_of_birth, students.religion, students.nipd, students.alamat_jalan, students.no_hp, students.email, students.status, students.updated_at, classes.name as class_name FROM students LEFT JOIN enrollments ON enrollments.student_id = students.id AND enrollments.status = 'Active' LEFT JOIN classes ON classes.id = enrollments.class_id WHERE ",
+            "SELECT students.id, students.nisn, students.full_name, students.nik, students.gender, students.place_of_birth, students.date_of_birth, students.religion, students.nipd, students.alamat_jalan, students.no_hp, students.email, students.nama_ayah, students.nama_ibu, students.status, students.updated_at, classes.name as class_name FROM students LEFT JOIN enrollments ON enrollments.student_id = students.id AND enrollments.status = 'Active' LEFT JOIN classes ON classes.id = enrollments.class_id WHERE ",
         );
         qb.push(base_where);
         qb.push_bind(query.tenant_id);
@@ -1140,6 +1148,8 @@ impl crate::people::infrastructure::repository_traits::StudentQueryRepository
                 alamat_jalan: r.try_get("alamat_jalan").unwrap_or(None),
                 no_hp: r.try_get("no_hp").unwrap_or(None),
                 email: r.try_get("email").unwrap_or(None),
+                nama_ayah: r.try_get("nama_ayah").unwrap_or(None),
+                nama_ibu: r.try_get("nama_ibu").unwrap_or(None),
                 status: parse_status(&r),
                 class_name: r.try_get("class_name").unwrap_or(None),
                 grade: None,
@@ -1157,7 +1167,7 @@ impl crate::people::infrastructure::repository_traits::StudentQueryRepository
 
     async fn get_profile(&self, id: Uuid) -> Result<Option<StudentProfile>, InfrastructureError> {
         let record = sqlx::query(
-            r#"SELECT id, tenant_id, user_id, guardian_id, nisn, full_name, nik, gender, place_of_birth, date_of_birth, religion, nipd, alamat_jalan, no_hp, email, status, created_at, updated_at FROM students WHERE id = $1 AND deleted_at IS NULL"#
+            r#"SELECT id, tenant_id, user_id, guardian_id, nisn, full_name, nik, gender, place_of_birth, date_of_birth, religion, nipd, alamat_jalan, no_hp, email, nama_ayah, nama_ibu, status, created_at, updated_at FROM students WHERE id = $1 AND deleted_at IS NULL"#
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -1181,6 +1191,8 @@ impl crate::people::infrastructure::repository_traits::StudentQueryRepository
                 alamat_jalan: r.try_get("alamat_jalan").unwrap_or(None),
                 no_hp: r.try_get("no_hp").unwrap_or(None),
                 email: r.try_get("email").unwrap_or(None),
+                nama_ayah: r.try_get("nama_ayah").unwrap_or(None),
+                nama_ibu: r.try_get("nama_ibu").unwrap_or(None),
                 status: parse_status(&r),
                 created_at: r.get("created_at"),
                 updated_at: r.get("updated_at"),

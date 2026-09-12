@@ -35,12 +35,13 @@ impl UserRepository for PgUserRepository {
     async fn create(&self, user: &User) -> Result<(), InfrastructureError> {
         sqlx::query(
             r#"
-            INSERT INTO users (id, tenant_id, email, password_hash, full_name, is_active, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO users (id, tenant_id, username, email, password_hash, full_name, is_active, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             "#
         )
         .bind(user.id)
         .bind(user.tenant_id)
+        .bind(&user.username)
         .bind(&user.email)
         .bind(&user.password_hash)
         .bind(&user.full_name)
@@ -60,7 +61,7 @@ impl UserRepository for PgUserRepository {
     ) -> Result<Option<User>, InfrastructureError> {
         let user = sqlx::query_as::<_, User>(
             r#"
-            SELECT u.id, u.tenant_id, u.email, u.password_hash, u.full_name, u.is_active, u.created_at, u.updated_at
+            SELECT u.id, u.tenant_id, u.username, u.email, u.password_hash, u.full_name, u.is_active, u.created_at, u.updated_at
             FROM users u
             LEFT JOIN teachers t ON t.user_id = u.id
             LEFT JOIN students s ON s.user_id = u.id
@@ -68,6 +69,8 @@ impl UserRepository for PgUserRepository {
             WHERE u.tenant_id = $1 
               AND (
                 u.email ILIKE $2 
+                OR u.username ILIKE $2
+                OR u.full_name ILIKE $2
                 OR u.id::text = $2 
                 OR t.nip = $2 
                 OR s.nisn = $2 
@@ -93,13 +96,15 @@ impl UserRepository for PgUserRepository {
     ) -> Result<Option<User>, InfrastructureError> {
         let user = sqlx::query_as::<_, User>(
             r#"
-            SELECT u.id, u.tenant_id, u.email, u.password_hash, u.full_name, u.is_active, u.created_at, u.updated_at
+            SELECT u.id, u.tenant_id, u.username, u.email, u.password_hash, u.full_name, u.is_active, u.created_at, u.updated_at
             FROM users u
             LEFT JOIN teachers t ON t.user_id = u.id
             LEFT JOIN students s ON s.user_id = u.id
             LEFT JOIN guardians g ON g.user_id = u.id
             WHERE (
                 u.email ILIKE $1 
+                OR u.username ILIKE $1
+                OR u.full_name ILIKE $1
                 OR u.id::text = $1 
                 OR t.nip = $1 
                 OR s.nisn = $1 
@@ -122,7 +127,7 @@ impl UserRepository for PgUserRepository {
     async fn find_by_id(&self, id: Uuid) -> Result<Option<User>, InfrastructureError> {
         let user = sqlx::query_as::<_, User>(
             r#"
-            SELECT id, tenant_id, email, password_hash, full_name, is_active, created_at, updated_at
+            SELECT id, tenant_id, username, email, password_hash, full_name, is_active, created_at, updated_at
             FROM users
             WHERE id = $1
             "#,

@@ -67,6 +67,8 @@ pub struct Student {
     pub email: Option<String>,
     pub guardian_id: Option<Uuid>,
     pub status: StudentStatus,
+    pub nama_ayah: Option<String>,
+    pub nama_ibu: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
@@ -108,6 +110,8 @@ impl std::fmt::Debug for Student {
             .field("religion", &self.religion)
             .field("guardian_id", &self.guardian_id)
             .field("status", &self.status)
+            .field("nama_ayah", &self.nama_ayah)
+            .field("nama_ibu", &self.nama_ibu)
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
             .field("deleted_at", &self.deleted_at)
@@ -163,6 +167,8 @@ impl Student {
             email,
             guardian_id,
             status: StudentStatus::Pending,
+            nama_ayah: None,
+            nama_ibu: None,
             created_at: now,
             updated_at: now,
             deleted_at: None,
@@ -198,6 +204,8 @@ impl Student {
         updated_at: DateTime<Utc>,
         deleted_at: Option<DateTime<Utc>>,
         deleted_by: Option<Uuid>,
+        nama_ayah: Option<String>,
+        nama_ibu: Option<String>,
     ) -> Self {
         Self {
             id,
@@ -216,6 +224,8 @@ impl Student {
             email,
             guardian_id,
             status,
+            nama_ayah,
+            nama_ibu,
             created_at,
             updated_at,
             deleted_at,

@@ -1,7 +1,9 @@
 use axum::{extract::State, Json};
 use chrono::Utc;
+use hex::ToHex;
 use school_core::common::error::{ApplicationError, DomainError};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::Row;
 use std::collections::{HashMap, HashSet};
 use utoipa::ToSchema;
@@ -1026,16 +1028,24 @@ pub async fn pull_dapodik_records(
                 "{}@guru.schoolos.id",
                 ptk_id.chars().take(8).collect::<String>()
             );
+            let username = nip
+                .as_ref()
+                .cloned()
+                .or_else(|| nuptk.as_ref().cloned())
+                .unwrap_or_else(|| format!("guru_{}", ptk_id.chars().take(8).collect::<String>()));
 
             let actual_user_id = match sqlx::query_scalar::<_, Uuid>(
                         r#"
-                        INSERT INTO users (id, tenant_id, email, password_hash, full_name, is_active, created_at, updated_at) 
-                        VALUES ($1, $2, $3, $4, $5, true, $6, $6) 
-                        ON CONFLICT (tenant_id, email) DO UPDATE SET full_name = EXCLUDED.full_name, updated_at = EXCLUDED.updated_at
+                        INSERT INTO users (id, tenant_id, username, email, password_hash, full_name, is_active, created_at, updated_at) 
+                        VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7) 
+                        ON CONFLICT (tenant_id, email) DO UPDATE SET 
+                            username = COALESCE(users.username, EXCLUDED.username),
+                            full_name = EXCLUDED.full_name, 
+                            updated_at = EXCLUDED.updated_at
                         RETURNING id
                         "#
                     )
-                    .bind(user_id).bind(ctx.tenant_id).bind(&email).bind("$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY").bind(&nama).bind(now)
+                    .bind(user_id).bind(ctx.tenant_id).bind(&username).bind(&email).bind("$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY").bind(&nama).bind(now)
                     .fetch_one(&mut *tx)
                     .await {
                         Ok(uid) => uid,
@@ -1052,6 +1062,45 @@ pub async fn pull_dapodik_records(
             .bind(role_guru_id)
             .execute(&mut *tx)
             .await;
+
+            // Ensure active QR badge token exists for GTK without touching existing active cards
+            let has_active_qr = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM user_qr_tokens WHERE tenant_id = $1 AND user_id = $2 AND is_active = true)"
+            )
+            .bind(ctx.tenant_id)
+            .bind(actual_user_id)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap_or(false);
+
+            if !has_active_qr {
+                let token_id = Uuid::now_v7();
+                let entropy = Uuid::now_v7().to_string().replace('-', "");
+                let raw_token = format!("sch_qr_v1_{}_{}", token_id.to_string().replace('-', ""), &entropy[0..16]);
+                let mut hasher = Sha256::new();
+                hasher.update(raw_token.as_bytes());
+                let token_hash = hasher.finalize().encode_hex::<String>();
+
+                let _ = sqlx::query(
+                    r#"
+                    INSERT INTO user_qr_tokens (
+                        id, tenant_id, user_id, token_hash, raw_token, token_type, label, is_active, created_at, updated_at
+                    ) VALUES (
+                        $1, $2, $3, $4, $5, 'BADGE', $6, true, $7, $7
+                    )
+                    ON CONFLICT (token_hash) DO NOTHING
+                    "#
+                )
+                .bind(token_id)
+                .bind(ctx.tenant_id)
+                .bind(actual_user_id)
+                .bind(&token_hash)
+                .bind(&raw_token)
+                .bind(format!("Kartu GTK - {}", nama))
+                .bind(now)
+                .execute(&mut *tx)
+                .await;
+            }
 
             let is_tendik = gtk.jenis_ptk_id_str.as_deref().unwrap_or("").to_lowercase() != "guru";
             let tgl_lahir = gtk
@@ -1502,16 +1551,20 @@ pub async fn pull_dapodik_records(
             let new_id = Uuid::now_v7();
             let user_id = Uuid::now_v7();
             let email = format!("{}@siswa.schoolos.id", final_nisn);
+            let username = final_nisn.clone();
 
             let actual_user_id = match sqlx::query_scalar::<_, Uuid>(
                         r#"
-                        INSERT INTO users (id, tenant_id, email, password_hash, full_name, is_active, created_at, updated_at) 
-                        VALUES ($1, $2, $3, $4, $5, true, $6, $6) 
-                        ON CONFLICT (tenant_id, email) DO UPDATE SET full_name = EXCLUDED.full_name, updated_at = EXCLUDED.updated_at
+                        INSERT INTO users (id, tenant_id, username, email, password_hash, full_name, is_active, created_at, updated_at) 
+                        VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7) 
+                        ON CONFLICT (tenant_id, email) DO UPDATE SET 
+                            username = COALESCE(users.username, EXCLUDED.username),
+                            full_name = EXCLUDED.full_name, 
+                            updated_at = EXCLUDED.updated_at
                         RETURNING id
                         "#
                     )
-                    .bind(user_id).bind(ctx.tenant_id).bind(&email).bind("$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY").bind(&nama_upper).bind(now)
+                    .bind(user_id).bind(ctx.tenant_id).bind(&username).bind(&email).bind("$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY").bind(&nama_upper).bind(now)
                     .fetch_one(&mut *tx)
                     .await {
                         Ok(uid) => Some(uid),
@@ -1529,6 +1582,45 @@ pub async fn pull_dapodik_records(
                 .bind(role_siswa_id)
                 .execute(&mut *tx)
                 .await;
+
+                // Ensure active QR badge token exists for student without invalidating existing active card
+                let has_active_qr = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(SELECT 1 FROM user_qr_tokens WHERE tenant_id = $1 AND user_id = $2 AND is_active = true)"
+                )
+                .bind(ctx.tenant_id)
+                .bind(uid)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap_or(false);
+
+                if !has_active_qr {
+                    let token_id = Uuid::now_v7();
+                    let entropy = Uuid::now_v7().to_string().replace('-', "");
+                    let raw_token = format!("sch_qr_v1_{}_{}", token_id.to_string().replace('-', ""), &entropy[0..16]);
+                    let mut hasher = Sha256::new();
+                    hasher.update(raw_token.as_bytes());
+                    let token_hash = hasher.finalize().encode_hex::<String>();
+
+                    let _ = sqlx::query(
+                        r#"
+                        INSERT INTO user_qr_tokens (
+                            id, tenant_id, user_id, token_hash, raw_token, token_type, label, is_active, created_at, updated_at
+                        ) VALUES (
+                            $1, $2, $3, $4, $5, 'BADGE', $6, true, $7, $7
+                        )
+                        ON CONFLICT (token_hash) DO NOTHING
+                        "#
+                    )
+                    .bind(token_id)
+                    .bind(ctx.tenant_id)
+                    .bind(uid)
+                    .bind(&token_hash)
+                    .bind(&raw_token)
+                    .bind(format!("Kartu Pelajar - {}", nama_upper))
+                    .bind(now)
+                    .execute(&mut *tx)
+                    .await;
+                }
             }
 
             // ── Guardian / Orang Tua Synchronization ────────────────
@@ -1545,12 +1637,13 @@ pub async fn pull_dapodik_records(
                 .clone()
                 .filter(|s| !s.trim().is_empty() && s.trim() != "-");
 
-            let (guardian_name, relationship) = if let Some(ibu) = nama_ibu {
-                (Some(ibu), "Mother")
-            } else if let Some(ayah) = nama_ayah {
-                (Some(ayah), "Father")
-            } else if let Some(wali) = nama_wali {
-                (Some(wali), "Guardian")
+            // Priority akun login wali murid adalah IBU
+            let (guardian_name, relationship) = if let Some(ref ibu) = nama_ibu {
+                (Some(ibu.clone()), "Mother")
+            } else if let Some(ref wali) = nama_wali {
+                (Some(wali.clone()), "Guardian")
+            } else if let Some(ref ayah) = nama_ayah {
+                (Some(ayah.clone()), "Father")
             } else {
                 (None, "Guardian")
             };
@@ -1569,25 +1662,32 @@ pub async fn pull_dapodik_records(
                 } else {
                     let g_id = Uuid::now_v7();
                     let g_user_id = Uuid::now_v7();
-                    let g_email = format!(
-                        "wali_{}_{}@wali.schoolos.id",
-                        final_nisn,
-                        Uuid::new_v4().to_string().chars().take(4).collect::<String>()
-                    );
+                    let g_username = if relationship == "Mother" {
+                        format!("ibu_{}", final_nisn)
+                    } else {
+                        format!("wali_{}", final_nisn)
+                    };
+                    let g_email = format!("{}@wali.schoolos.id", g_username);
 
                     let actual_g_user_id = match sqlx::query_scalar::<_, Uuid>(
                                 r#"
-                                INSERT INTO users (id, tenant_id, email, password_hash, full_name, is_active, created_at, updated_at)
-                                VALUES ($1, $2, $3, $4, $5, true, $6, $6)
-                                ON CONFLICT (tenant_id, email) DO UPDATE SET full_name = EXCLUDED.full_name, updated_at = EXCLUDED.updated_at
+                                INSERT INTO users (id, tenant_id, username, email, password_hash, full_name, is_active, created_at, updated_at)
+                                VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7)
+                                ON CONFLICT (tenant_id, email) DO UPDATE SET 
+                                    username = COALESCE(users.username, EXCLUDED.username),
+                                    full_name = EXCLUDED.full_name, 
+                                    updated_at = EXCLUDED.updated_at
                                 RETURNING id
                                 "#
                             )
-                            .bind(g_user_id).bind(ctx.tenant_id).bind(&g_email).bind("$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY").bind(&g_upper).bind(now)
+                            .bind(g_user_id).bind(ctx.tenant_id).bind(&g_username).bind(&g_email).bind("$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY").bind(&g_upper).bind(now)
                             .fetch_one(&mut *tx)
                             .await {
                                 Ok(uid) => Some(uid),
-                                Err(_) => None,
+                                Err(e) => {
+                                    tracing::error!("Failed to upsert user for guardian {}: {}", g_upper, e);
+                                    None
+                                },
                             };
 
                     if let Some(uid) = actual_g_user_id {
@@ -1598,6 +1698,45 @@ pub async fn pull_dapodik_records(
                         .bind(role_wali_id)
                         .execute(&mut *tx)
                         .await;
+
+                        // Ensure active QR badge token exists for guardian without invalidating existing card
+                        let has_active_qr = sqlx::query_scalar::<_, bool>(
+                            "SELECT EXISTS(SELECT 1 FROM user_qr_tokens WHERE tenant_id = $1 AND user_id = $2 AND is_active = true)"
+                        )
+                        .bind(ctx.tenant_id)
+                        .bind(uid)
+                        .fetch_one(&mut *tx)
+                        .await
+                        .unwrap_or(false);
+
+                        if !has_active_qr {
+                            let token_id = Uuid::now_v7();
+                            let entropy = Uuid::now_v7().to_string().replace('-', "");
+                            let raw_token = format!("sch_qr_v1_{}_{}", token_id.to_string().replace('-', ""), &entropy[0..16]);
+                            let mut hasher = Sha256::new();
+                            hasher.update(raw_token.as_bytes());
+                            let token_hash = hasher.finalize().encode_hex::<String>();
+
+                            let _ = sqlx::query(
+                                r#"
+                                INSERT INTO user_qr_tokens (
+                                    id, tenant_id, user_id, token_hash, raw_token, token_type, label, is_active, created_at, updated_at
+                                ) VALUES (
+                                    $1, $2, $3, $4, $5, 'BADGE', $6, true, $7, $7
+                                )
+                                ON CONFLICT (token_hash) DO NOTHING
+                                "#
+                            )
+                            .bind(token_id)
+                            .bind(ctx.tenant_id)
+                            .bind(uid)
+                            .bind(&token_hash)
+                            .bind(&raw_token)
+                            .bind(format!("Kartu Akses Wali - {}", g_upper))
+                            .bind(now)
+                            .execute(&mut *tx)
+                            .await;
+                        }
                     }
 
                     let inserted_gid = sqlx::query_scalar::<_, Uuid>(
@@ -1637,14 +1776,15 @@ pub async fn pull_dapodik_records(
                             SET full_name = $1, user_id = COALESCE(students.user_id, $2), nik = $3, gender = $4, place_of_birth = $5, date_of_birth = $6, religion = $7, 
                                 guardian_id = COALESCE($8, students.guardian_id), nipd = COALESCE($9, students.nipd),
                                 alamat_jalan = COALESCE($10, students.alamat_jalan), no_hp = COALESCE($11, students.no_hp),
-                                email = COALESCE($12, students.email), status = 'active', updated_at = $13, nisn = $14
-                            WHERE id = $15
+                                email = COALESCE($12, students.email), nama_ayah = COALESCE($13, students.nama_ayah), nama_ibu = COALESCE($14, students.nama_ibu),
+                                status = 'active', updated_at = $15, nisn = $16
+                            WHERE id = $17
                             "#
                         )
                         .bind(&nama_upper).bind(actual_user_id).bind(&nik).bind(&std.jenis_kelamin).bind(&std.tempat_lahir)
                         .bind(std.tanggal_lahir.as_ref().and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()))
                         .bind(&std.agama_id_str).bind(final_guardian_id).bind(nipd_val.clone()).bind(&student_address).bind(&guardian_phone)
-                        .bind(&std.email).bind(now).bind(&final_nisn).bind(sid).execute(&mut *tx).await;
+                        .bind(&std.email).bind(&nama_ayah).bind(&nama_ibu).bind(now).bind(&final_nisn).bind(sid).execute(&mut *tx).await;
 
                 if let Err(ref e) = update_res {
                     tracing::error!(
@@ -1664,8 +1804,8 @@ pub async fn pull_dapodik_records(
             } else {
                 let inserted_id = sqlx::query_scalar::<_, Uuid>(
                             r#"
-                            INSERT INTO students (id, tenant_id, user_id, guardian_id, nisn, full_name, nik, gender, place_of_birth, date_of_birth, religion, nipd, alamat_jalan, no_hp, email, status, created_at, updated_at)
-                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'active', $16, $16)
+                            INSERT INTO students (id, tenant_id, user_id, guardian_id, nisn, full_name, nik, gender, place_of_birth, date_of_birth, religion, nipd, alamat_jalan, no_hp, email, nama_ayah, nama_ibu, status, created_at, updated_at)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, 'active', $18, $18)
                             ON CONFLICT (tenant_id, nisn) DO UPDATE
                             SET full_name = EXCLUDED.full_name,
                                 user_id = COALESCE(students.user_id, EXCLUDED.user_id),
@@ -1679,6 +1819,8 @@ pub async fn pull_dapodik_records(
                                 alamat_jalan = COALESCE(EXCLUDED.alamat_jalan, students.alamat_jalan),
                                 no_hp = COALESCE(EXCLUDED.no_hp, students.no_hp),
                                 email = COALESCE(EXCLUDED.email, students.email),
+                                nama_ayah = COALESCE(EXCLUDED.nama_ayah, students.nama_ayah),
+                                nama_ibu = COALESCE(EXCLUDED.nama_ibu, students.nama_ibu),
                                 status = 'active',
                                 updated_at = EXCLUDED.updated_at
                             RETURNING id
@@ -1687,7 +1829,8 @@ pub async fn pull_dapodik_records(
                         .bind(new_id).bind(ctx.tenant_id).bind(actual_user_id).bind(final_guardian_id).bind(&final_nisn).bind(&nama_upper)
                         .bind(&nik).bind(&std.jenis_kelamin).bind(&std.tempat_lahir)
                         .bind(std.tanggal_lahir.as_ref().and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()))
-                        .bind(&std.agama_id_str).bind(nipd_val).bind(&student_address).bind(&guardian_phone).bind(&std.email).bind(now).fetch_one(&mut *tx).await.unwrap_or_else(|e| {
+                        .bind(&std.agama_id_str).bind(nipd_val).bind(&student_address).bind(&guardian_phone).bind(&std.email)
+                        .bind(&nama_ayah).bind(&nama_ibu).bind(now).fetch_one(&mut *tx).await.unwrap_or_else(|e| {
                             tracing::error!("Failed to insert student (NISN: {}, Name: {}): {}", final_nisn, nama, e);
                             new_id
                         });

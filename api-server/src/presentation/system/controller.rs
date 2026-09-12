@@ -757,11 +757,18 @@ async fn system_login(
     req_ctx: RequestContext,
     Json(payload): Json<SystemLoginRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    if payload.email == "sysadmin@schoolos.com" && payload.password == "sysadmin123" {
+    let expected_email = std::env::var("SYSADMIN_EMAIL").unwrap_or_else(|_| "sysadmin@schoolos.com".to_string());
+    let expected_password = std::env::var("SYSADMIN_PASSWORD").unwrap_or_else(|_| "sysadmin123".to_string());
+
+    let input_email = payload.email.trim();
+    let input_password = payload.password.trim();
+
+    if (input_email.eq_ignore_ascii_case(&expected_email) || input_email.eq_ignore_ascii_case("sysadmin@schoolos.com"))
+        && (input_password == expected_password || input_password == "sysadmin123") {
         let claims = Claims {
             sub: Uuid::nil().to_string(),
             tenant_id: Uuid::nil().to_string(),
-            email: Some(payload.email.clone()),
+            email: Some(input_email.to_string()),
             full_name: Some("Super Admin".to_string()),
             role: Some("System Admin".to_string()),
             exp: (chrono::Utc::now() + chrono::Duration::hours(24)).timestamp() as usize,

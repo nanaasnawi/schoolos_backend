@@ -9,6 +9,8 @@ use sqlx::FromRow;
 pub struct User {
     pub id: Uuid,
     pub tenant_id: Uuid,
+    #[serde(default)]
+    pub username: Option<String>,
     pub email: String,
     pub password_hash: String,
     pub full_name: String,
@@ -29,6 +31,7 @@ impl User {
         Self {
             id: Uuid::now_v7(),
             tenant_id,
+            username: None,
             email,
             password_hash,
             full_name,
