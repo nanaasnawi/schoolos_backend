@@ -370,7 +370,7 @@ async fn list_users(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
 ) -> Result<Json<ApiResponse<Vec<AuthUserDto>>>, ApiError> {
-    let records = sqlx::query!(
+    let rows = sqlx::query(
         r#"
         SELECT u.id, u.username, u.email, u.full_name, u.is_active, u.created_at,
                COALESCE(r.name, 'No Role') as role_name
@@ -380,26 +380,26 @@ async fn list_users(
         WHERE u.tenant_id = $1
         ORDER BY u.created_at DESC
         "#,
-        req_ctx.tenant_id
     )
+    .bind(req_ctx.tenant_id)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
 
-    let dtos = records.into_iter().map(|r| AuthUserDto {
-        id: r.id,
-        email: r.email,
-        full_name: r.full_name,
-        role: r.role_name.unwrap_or_default(),
-        is_active: r.is_active,
-        created_at: r.created_at,
+    let dtos = rows.into_iter().map(|r| AuthUserDto {
+        id: r.get("id"),
+        email: r.get("email"),
+        full_name: r.get("full_name"),
+        role: r.get("role_name"),
+        is_active: r.get("is_active"),
+        created_at: r.get("created_at"),
         school_name: None,
         school_logo_url: None,
         identifier: None,
         class_name: None,
         child_name: None,
         child_id: None,
-        username: r.username,
+        username: r.get("username"),
     }).collect();
 
     Ok(Json(ApiResponse::success(dtos, req_ctx.request_id)))
@@ -450,11 +450,11 @@ async fn change_password(
         ));
     }
 
-    let user = sqlx::query!(
-        "SELECT password_hash FROM users WHERE id = $1 AND tenant_id = $2",
-        actor_id,
-        req_ctx.tenant_id
+    let password_hash = sqlx::query_scalar::<_, String>(
+        "SELECT password_hash FROM users WHERE id = $1 AND tenant_id = $2"
     )
+    .bind(actor_id)
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?
@@ -468,7 +468,7 @@ async fn change_password(
         )
     })?;
 
-    let is_valid = match PasswordHash::new(&user.password_hash) {
+    let is_valid = match PasswordHash::new(&password_hash) {
         Ok(parsed_hash) => Argon2::default().verify_password(payload.current_password.as_bytes(), &parsed_hash).is_ok(),
         Err(_) => false,
     };
@@ -497,12 +497,12 @@ async fn change_password(
         })?
         .to_string();
 
-    sqlx::query!(
-        "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3",
-        new_hash,
-        actor_id,
-        req_ctx.tenant_id
+    sqlx::query(
+        "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3"
     )
+    .bind(&new_hash)
+    .bind(actor_id)
+    .bind(req_ctx.tenant_id)
     .execute(&ctx.pool)
     .await
     .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;

@@ -354,16 +354,16 @@ async fn get_by_id(
     }).unwrap_or(false);
 
     if is_teacher && !is_admin {
-        let owns = sqlx::query_scalar!(
+        let owns = sqlx::query_scalar::<_, bool>(
             r#"SELECT EXISTS(
                 SELECT 1 FROM learning_materials
                 WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
                   AND (created_by = $3 OR teacher_id IN (SELECT id FROM teachers WHERE user_id = $3))
-            ) as "exists!""#,
-            id,
-            req_ctx.tenant_id,
-            actor_id
+            )"#,
         )
+        .bind(id)
+        .bind(req_ctx.tenant_id)
+        .bind(actor_id)
         .fetch_one(&ctx.pool)
         .await
         .unwrap_or(false);
@@ -378,7 +378,7 @@ async fn get_by_id(
             ));
         }
     } else if is_student && !is_admin {
-        let can_access = sqlx::query_scalar!(
+        let can_access = sqlx::query_scalar::<_, bool>(
             r#"SELECT EXISTS(
                 SELECT 1 FROM learning_materials m
                 WHERE m.id = $1 AND m.tenant_id = $2 AND m.deleted_at IS NULL AND m.is_active = true
@@ -391,11 +391,11 @@ async fn get_by_id(
                           WHERE s.user_id = $3 AND (en.status = 'Active' OR en.status = 'ACTIVE')
                       )
                   )
-            ) as "exists!""#,
-            id,
-            req_ctx.tenant_id,
-            actor_id
+            )"#,
         )
+        .bind(id)
+        .bind(req_ctx.tenant_id)
+        .bind(actor_id)
         .fetch_one(&ctx.pool)
         .await
         .unwrap_or(false);
@@ -610,16 +610,16 @@ async fn update(
     }).unwrap_or(false);
 
     if is_teacher && !is_admin {
-        let owns = sqlx::query_scalar!(
+        let owns = sqlx::query_scalar::<_, bool>(
             r#"SELECT EXISTS(
                 SELECT 1 FROM learning_materials
                 WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
                   AND (created_by = $3 OR teacher_id IN (SELECT id FROM teachers WHERE user_id = $3))
-            ) as "exists!""#,
-            id,
-            req_ctx.tenant_id,
-            actor_id
+            )"#,
         )
+        .bind(id)
+        .bind(req_ctx.tenant_id)
+        .bind(actor_id)
         .fetch_one(&ctx.pool)
         .await
         .unwrap_or(false);
@@ -690,16 +690,16 @@ async fn delete(
     }).unwrap_or(false);
 
     if is_teacher && !is_admin {
-        let owns = sqlx::query_scalar!(
+        let owns = sqlx::query_scalar::<_, bool>(
             r#"SELECT EXISTS(
                 SELECT 1 FROM learning_materials
                 WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
                   AND (created_by = $3 OR teacher_id IN (SELECT id FROM teachers WHERE user_id = $3))
-            ) as "exists!""#,
-            id,
-            req_ctx.tenant_id,
-            actor_id
+            )"#,
         )
+        .bind(id)
+        .bind(req_ctx.tenant_id)
+        .bind(actor_id)
         .fetch_one(&ctx.pool)
         .await
         .unwrap_or(false);

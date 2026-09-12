@@ -519,10 +519,10 @@ async fn create_inquiry(
 
     // Create real-time in-app notification for Teacher
     if let Some(tid) = resolved_teacher_id {
-        if let Ok(Some(teacher_user_id)) = sqlx::query_scalar!(
-            r#"SELECT user_id FROM teachers WHERE id = $1 LIMIT 1"#,
-            tid
+        if let Ok(Some(teacher_user_id)) = sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT user_id FROM teachers WHERE id = $1 LIMIT 1"
         )
+        .bind(tid)
         .fetch_optional(&ctx.pool)
         .await
         {
@@ -533,21 +533,21 @@ async fn create_inquiry(
                     student_name, resolved_class_name, initial_msg
                 );
                 let notif_id = Uuid::new_v4();
-                let _ = sqlx::query!(
+                let _ = sqlx::query(
                     r#"
                     INSERT INTO notifications (
                         id, tenant_id, user_id, title, body, notification_type, channel,
                         reference_type, reference_id, is_read, created_at
                     )
                     VALUES ($1, $2, $3, $4, $5, 'INQUIRY', 'in_app', 'inquiry', $6, false, NOW())
-                    "#,
-                    notif_id,
-                    resolved_tenant_id,
-                    t_uid,
-                    notif_title,
-                    notif_body,
-                    thread_id
+                    "#
                 )
+                .bind(notif_id)
+                .bind(resolved_tenant_id)
+                .bind(t_uid)
+                .bind(&notif_title)
+                .bind(&notif_body)
+                .bind(thread_id)
                 .execute(&ctx.pool)
                 .await;
             }
@@ -670,15 +670,15 @@ async fn send_message(
     // Create real-time in-app notification for recipient
     if is_teacher {
         // Teacher replied -> notify student
-        if let Ok(Some(student_user_id)) = sqlx::query_scalar!(
+        if let Ok(Some(student_user_id)) = sqlx::query_scalar::<_, Option<Uuid>>(
             r#"
             SELECT s.user_id 
             FROM students s 
             JOIN inquiry_threads t ON t.student_id = s.id 
             WHERE t.id = $1 LIMIT 1
-            "#,
-            id
+            "#
         )
+        .bind(id)
         .fetch_optional(&ctx.pool)
         .await
         {
@@ -686,36 +686,36 @@ async fn send_message(
                 let notif_title = format!("Balasan Guru: {}", sender_name);
                 let notif_body = format!("{}: \"{}\"", sender_name, content);
                 let notif_id = Uuid::new_v4();
-                let _ = sqlx::query!(
+                let _ = sqlx::query(
                     r#"
                     INSERT INTO notifications (
                         id, tenant_id, user_id, title, body, notification_type, channel,
                         reference_type, reference_id, is_read, created_at
                     )
                     VALUES ($1, $2, $3, $4, $5, 'INQUIRY_REPLY', 'in_app', 'inquiry', $6, false, NOW())
-                    "#,
-                    notif_id,
-                    effective_tenant_id,
-                    s_uid,
-                    notif_title,
-                    notif_body,
-                    id
+                    "#
                 )
+                .bind(notif_id)
+                .bind(effective_tenant_id)
+                .bind(s_uid)
+                .bind(&notif_title)
+                .bind(&notif_body)
+                .bind(id)
                 .execute(&ctx.pool)
                 .await;
             }
         }
     } else {
         // Student replied -> notify teacher
-        if let Ok(Some(teacher_user_id)) = sqlx::query_scalar!(
+        if let Ok(Some(teacher_user_id)) = sqlx::query_scalar::<_, Option<Uuid>>(
             r#"
             SELECT t.user_id 
             FROM teachers t 
             JOIN inquiry_threads th ON th.teacher_id = t.id 
             WHERE th.id = $1 LIMIT 1
-            "#,
-            id
+            "#
         )
+        .bind(id)
         .fetch_optional(&ctx.pool)
         .await
         {
@@ -723,21 +723,21 @@ async fn send_message(
                 let notif_title = format!("Pesan Baru Tanya Jawab: {}", sender_name);
                 let notif_body = format!("{}: \"{}\"", sender_name, content);
                 let notif_id = Uuid::new_v4();
-                let _ = sqlx::query!(
+                let _ = sqlx::query(
                     r#"
                     INSERT INTO notifications (
                         id, tenant_id, user_id, title, body, notification_type, channel,
                         reference_type, reference_id, is_read, created_at
                     )
                     VALUES ($1, $2, $3, $4, $5, 'INQUIRY_MESSAGE', 'in_app', 'inquiry', $6, false, NOW())
-                    "#,
-                    notif_id,
-                    effective_tenant_id,
-                    t_uid,
-                    notif_title,
-                    notif_body,
-                    id
+                    "#
                 )
+                .bind(notif_id)
+                .bind(effective_tenant_id)
+                .bind(t_uid)
+                .bind(&notif_title)
+                .bind(&notif_body)
+                .bind(id)
                 .execute(&ctx.pool)
                 .await;
             }
