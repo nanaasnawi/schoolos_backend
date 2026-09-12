@@ -6,6 +6,7 @@ use axum::{
 use uuid::Uuid;
 
 use super::dto::{create_subject_request::CreateSubjectRequest, subject_response::SubjectResponse};
+use sqlx::Row;
 use crate::{
     bootstrap::ApplicationContext, error::ApiError, extractors::RequestContext,
     response::ApiResponse,
@@ -82,7 +83,7 @@ async fn list(
 
     let items: Vec<SubjectResponse> = if is_teacher {
         // Teacher sees only subjects that have lessons/materials they created
-        let rows = sqlx::query!(
+        let rows = sqlx::query(
             r#"
             SELECT DISTINCT s.id, s.tenant_id, s.code, s.name, s.is_active, s.created_at, s.updated_at
             FROM subjects s
@@ -95,26 +96,26 @@ async fn list(
                   OR m.teacher_id IN (SELECT id FROM teachers WHERE user_id = $2)
               )
             ORDER BY s.name ASC
-            "#,
-            req_ctx.tenant_id,
-            actor_id
+            "#
         )
+        .bind(req_ctx.tenant_id)
+        .bind(actor_id)
         .fetch_all(&ctx.pool)
         .await
         .unwrap_or_default();
 
         rows.into_iter().map(|r| SubjectResponse {
-            id: r.id,
-            tenant_id: r.tenant_id,
-            code: r.code,
-            name: r.name,
-            is_active: r.is_active,
-            created_at: r.created_at,
-            updated_at: r.updated_at,
+            id: r.get("id"),
+            tenant_id: r.get("tenant_id"),
+            code: r.get("code"),
+            name: r.get("name"),
+            is_active: r.get("is_active"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
         }).collect()
     } else if is_student {
         // Student sees ONLY subjects that have materials for their active enrolled classes
-        let rows = sqlx::query!(
+        let rows = sqlx::query(
             r#"
             SELECT DISTINCT s.id, s.tenant_id, s.code, s.name, s.is_active, s.created_at, s.updated_at
             FROM subjects s
@@ -130,22 +131,22 @@ async fn list(
                   WHERE st.user_id = $2 AND (en.status = 'Active' OR en.status = 'ACTIVE')
               )
             ORDER BY s.name ASC
-            "#,
-            req_ctx.tenant_id,
-            actor_id
+            "#
         )
+        .bind(req_ctx.tenant_id)
+        .bind(actor_id)
         .fetch_all(&ctx.pool)
         .await
         .unwrap_or_default();
 
         rows.into_iter().map(|r| SubjectResponse {
-            id: r.id,
-            tenant_id: r.tenant_id,
-            code: r.code,
-            name: r.name,
-            is_active: r.is_active,
-            created_at: r.created_at,
-            updated_at: r.updated_at,
+            id: r.get("id"),
+            tenant_id: r.get("tenant_id"),
+            code: r.get("code"),
+            name: r.get("name"),
+            is_active: r.get("is_active"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
         }).collect()
     } else {
         // Super Admin / Kepala Sekolah / Staf sees all subjects in tenant
@@ -191,7 +192,7 @@ async fn get_by_id(
 
     // Access control: teachers and students can only see subjects tied to them
     if is_teacher || is_student {
-        let has_access = sqlx::query_scalar!(
+        let has_access = sqlx::query_scalar::<_, bool>(
             r#"
             SELECT EXISTS(
                 SELECT 1 FROM subjects s
@@ -218,14 +219,14 @@ async fn get_by_id(
                             )
                       )
                   )
-            ) as "has_access!"
-            "#,
-            id,
-            req_ctx.tenant_id,
-            is_teacher,
-            is_student,
-            actor_id
+            )
+            "#
         )
+        .bind(id)
+        .bind(req_ctx.tenant_id)
+        .bind(is_teacher)
+        .bind(is_student)
+        .bind(actor_id)
         .fetch_one(&ctx.pool)
         .await
         .unwrap_or(false);

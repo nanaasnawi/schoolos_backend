@@ -3,6 +3,7 @@ use axum::{
     extract::{Path, State},
     routing::{get, post},
 };
+use sqlx::Row;
 use uuid::Uuid;
 
 use super::dto::{
@@ -94,7 +95,7 @@ async fn list(
 
     let items: Vec<LessonResponse> = if is_teacher {
         // Teacher sees only lessons that have materials they created
-        let rows = sqlx::query!(
+        let rows = sqlx::query(
             r#"
             SELECT DISTINCT l.id, l.tenant_id, l.syllabus_id, l.code, l.title, l.description,
                    l.learning_objectives, l.duration_minutes, l.order_index, l.status,
@@ -107,32 +108,32 @@ async fn list(
                   OR m.teacher_id IN (SELECT id FROM teachers WHERE user_id = $2)
               )
             ORDER BY l.created_at DESC
-            "#,
-            req_ctx.tenant_id,
-            actor_id
+            "#
         )
+        .bind(req_ctx.tenant_id)
+        .bind(actor_id)
         .fetch_all(&ctx.pool)
         .await
         .unwrap_or_default();
 
         rows.into_iter().map(|r| LessonResponse {
-            id: r.id,
-            tenant_id: r.tenant_id,
-            syllabus_id: r.syllabus_id,
-            code: r.code,
-            title: r.title,
-            description: r.description,
-            learning_objectives: r.learning_objectives,
-            duration_minutes: r.duration_minutes,
-            order_index: r.order_index,
-            status: r.status,
-            is_active: r.is_active,
-            created_at: r.created_at,
-            updated_at: r.updated_at,
+            id: r.get("id"),
+            tenant_id: r.get("tenant_id"),
+            syllabus_id: r.get("syllabus_id"),
+            code: r.get("code"),
+            title: r.get("title"),
+            description: r.get("description"),
+            learning_objectives: r.get("learning_objectives"),
+            duration_minutes: r.get("duration_minutes"),
+            order_index: r.get("order_index"),
+            status: r.get("status"),
+            is_active: r.get("is_active"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
         }).collect()
     } else if is_student {
         // Student sees ONLY lessons that have materials for their active enrolled classes
-        let rows = sqlx::query!(
+        let rows = sqlx::query(
             r#"
             SELECT DISTINCT l.id, l.tenant_id, l.syllabus_id, l.code, l.title, l.description,
                    l.learning_objectives, l.duration_minutes, l.order_index, l.status,
@@ -148,28 +149,28 @@ async fn list(
                   WHERE s.user_id = $2 AND (en.status = 'Active' OR en.status = 'ACTIVE')
               )
             ORDER BY l.created_at DESC
-            "#,
-            req_ctx.tenant_id,
-            actor_id
+            "#
         )
+        .bind(req_ctx.tenant_id)
+        .bind(actor_id)
         .fetch_all(&ctx.pool)
         .await
         .unwrap_or_default();
 
         rows.into_iter().map(|r| LessonResponse {
-            id: r.id,
-            tenant_id: r.tenant_id,
-            syllabus_id: r.syllabus_id,
-            code: r.code,
-            title: r.title,
-            description: r.description,
-            learning_objectives: r.learning_objectives,
-            duration_minutes: r.duration_minutes,
-            order_index: r.order_index,
-            status: r.status,
-            is_active: r.is_active,
-            created_at: r.created_at,
-            updated_at: r.updated_at,
+            id: r.get("id"),
+            tenant_id: r.get("tenant_id"),
+            syllabus_id: r.get("syllabus_id"),
+            code: r.get("code"),
+            title: r.get("title"),
+            description: r.get("description"),
+            learning_objectives: r.get("learning_objectives"),
+            duration_minutes: r.get("duration_minutes"),
+            order_index: r.get("order_index"),
+            status: r.get("status"),
+            is_active: r.get("is_active"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
         }).collect()
     } else {
         // Super Admin / Kepala Sekolah / Staf sees all lessons in tenant

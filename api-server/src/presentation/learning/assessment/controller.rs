@@ -1,8 +1,9 @@
-﻿use axum::{
+use axum::{
     Json, Router,
     extract::State,
     routing::{get, post},
 };
+use sqlx::Row;
 use uuid::Uuid;
 
 use super::dto::{
@@ -259,21 +260,28 @@ async fn save_gradebook(
 
     // Batch resolve class_ids from enrollments (single query)
     let class_id_map: std::collections::HashMap<Uuid, Uuid> = if payload.class_id.is_none() {
-        sqlx::query!(
+        sqlx::query(
             r#"
             SELECT DISTINCT ON (e.student_id) e.student_id, e.class_id
             FROM enrollments e
             WHERE e.student_id = ANY($1) AND (e.status = 'Active' OR e.status = 'ACTIVE')
             ORDER BY e.student_id
-            "#,
-            &student_ids
+            "#
         )
+        .bind(&student_ids)
         .fetch_all(&ctx.pool)
         .await
         .ok()
         .map(|rows| {
             rows.into_iter()
-                .filter_map(|r| Some((r.student_id, r.class_id)))
+                .filter_map(|r| {
+                    let s_id: Option<Uuid> = r.get("student_id");
+                    let c_id: Option<Uuid> = r.get("class_id");
+                    match (s_id, c_id) {
+                        (Some(s), Some(c)) => Some((s, c)),
+                        _ => None,
+                    }
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -324,7 +332,7 @@ async fn save_gradebook(
     let now_vec = vec![now; gb_ids.len()];
 
     // Batch upsert gradebooks using UNNEST (single query)
-    sqlx::query!(
+    sqlx::query(
         r#"
         INSERT INTO gradebooks (id, tenant_id, student_id, class_id, subject_id, academic_year_id, final_score, letter_grade, passed, status, created_at, updated_at)
         SELECT
@@ -341,20 +349,20 @@ async fn save_gradebook(
             passed = EXCLUDED.passed,
             status = EXCLUDED.status,
             updated_at = NOW()
-        "#,
-        &gb_ids,
-        &gb_tenant_ids,
-        &gb_student_ids,
-        &gb_class_ids,
-        &gb_subject_ids,
-        &gb_academic_year_ids as &[Option<Uuid>],
-        &gb_final_scores as &[Option<String>],
-        &gb_letter_grades as &[Option<String>],
-        &gb_passed_values,
-        &gb_statuses,
-        &now_vec,
-        &now_vec
+        "#
     )
+    .bind(&gb_ids)
+    .bind(&gb_tenant_ids)
+    .bind(&gb_student_ids)
+    .bind(&gb_class_ids)
+    .bind(&gb_subject_ids)
+    .bind(&gb_academic_year_ids as &[Option<Uuid>])
+    .bind(&gb_final_scores as &[Option<String>])
+    .bind(&gb_letter_grades as &[Option<String>])
+    .bind(&gb_passed_values)
+    .bind(&gb_statuses)
+    .bind(&now_vec)
+    .bind(&now_vec)
     .execute(&ctx.pool)
     .await
     .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
@@ -362,15 +370,15 @@ async fn save_gradebook(
     ), &req_ctx.request_id))?;
 
     // Batch delete all previous component entries (single query)
-    let _ = sqlx::query!(
+    let _ = sqlx::query(
         r#"
         DELETE FROM gradebook_entries
         WHERE student_id = ANY($1) AND class_id = ANY($2) AND subject_id = $3
-        "#,
-        &gb_student_ids,
-        &gb_class_ids,
-        subject_id
+        "#
     )
+    .bind(&gb_student_ids)
+    .bind(&gb_class_ids)
+    .bind(subject_id)
     .execute(&ctx.pool)
     .await;
 
@@ -418,7 +426,7 @@ async fn save_gradebook(
     // Batch insert all component entries using UNNEST (single query)
     if !entry_ids.is_empty() {
         let entry_now_vec = vec![now; entry_ids.len()];
-        sqlx::query!(
+        sqlx::query(
             r#"
             INSERT INTO gradebook_entries (
                 id, tenant_id, student_id, class_id, subject_id,
@@ -436,20 +444,20 @@ async fn save_gradebook(
                 $6::text[], $7::text[], $8::text[], $9::text[], $10::text[],
                 $11::timestamptz[], $12::timestamptz[]
             ) AS u(id, tenant_id, student_id, class_id, subject_id, component_name, source_type, raw_score, weighted_score, weight_percentage, calculated_at, created_at)
-            "#,
-            &entry_ids,
-            &entry_tenant_ids,
-            &entry_student_ids,
-            &entry_class_ids,
-            &entry_subject_ids,
-            &entry_component_names,
-            &entry_source_types,
-            &entry_raw_scores,
-            &entry_weighted_scores,
-            &entry_weight_percentages,
-            &entry_now_vec,
-            &entry_now_vec
+            "#
         )
+        .bind(&entry_ids)
+        .bind(&entry_tenant_ids)
+        .bind(&entry_student_ids)
+        .bind(&entry_class_ids)
+        .bind(&entry_subject_ids)
+        .bind(&entry_component_names)
+        .bind(&entry_source_types)
+        .bind(&entry_raw_scores)
+        .bind(&entry_weighted_scores)
+        .bind(&entry_weight_percentages)
+        .bind(&entry_now_vec)
+        .bind(&entry_now_vec)
         .execute(&ctx.pool)
         .await
         .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(

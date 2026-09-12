@@ -681,19 +681,19 @@ async fn add_question(
         }
 
         let q_ids = vec![q_id; choice_count];
-        sqlx::query!(
+        sqlx::query(
             r#"
             INSERT INTO quiz_choices (id, question_id, choice_text, is_correct, order_index, created_at, updated_at)
             SELECT u.id, u.question_id, u.choice_text, u.is_correct, u.order_index, NOW(), NOW()
             FROM UNNEST($1::uuid[], $2::uuid[], $3::text[], $4::boolean[], $5::int[])
                 AS u(id, question_id, choice_text, is_correct, order_index)
-            "#,
-            &choice_ids as &[Uuid],
-            &q_ids as &[Uuid],
-            &choice_texts as &[String],
-            &is_corrects as &[bool],
-            &order_indexes as &[i32],
+            "#
         )
+        .bind(&choice_ids as &[Uuid])
+        .bind(&q_ids as &[Uuid])
+        .bind(&choice_texts as &[String])
+        .bind(&is_corrects as &[bool])
+        .bind(&order_indexes as &[i32])
         .execute(&ctx.pool)
         .await
         .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
@@ -710,12 +710,10 @@ async fn add_question(
         }
     }
 
-    let _ = sqlx::query!(
-        r#"UPDATE quizzes SET questions_count = questions_count + 1 WHERE id = $1"#,
-        id
-    )
-    .execute(&ctx.pool)
-    .await;
+    let _ = sqlx::query("UPDATE quizzes SET questions_count = questions_count + 1 WHERE id = $1")
+        .bind(id)
+        .execute(&ctx.pool)
+        .await;
 
     Ok(Json(ApiResponse::success(
         QuizQuestionResponse {

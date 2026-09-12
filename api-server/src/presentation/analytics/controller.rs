@@ -4,6 +4,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use sqlx::Row;
 use uuid::Uuid;
 
 use crate::{
@@ -319,16 +320,16 @@ async fn get_dashboard(
     let total_students_num = if total_students > 0 { total_students } else { 1 } as f64;
 
     // Gender distribution
-    let gender_rows = sqlx::query!(
+    let gender_rows = sqlx::query(
         r#"
         SELECT gender, COUNT(*)::int8 AS count
         FROM students
         WHERE tenant_id = $1 AND deleted_at IS NULL
         GROUP BY gender
         ORDER BY gender
-        "#,
-        tid
+        "#
     )
+    .bind(tid)
     .fetch_all(pool)
     .await
     .unwrap_or_default();
@@ -336,11 +337,12 @@ async fn get_dashboard(
     let mut male_count = 0i64;
     let mut female_count = 0i64;
     for r in gender_rows {
-        let g = r.gender.as_deref().unwrap_or("").to_uppercase();
-        let cnt = r.count.unwrap_or(0);
-        if g == "L" || g == "MALE" || g == "LAKI-LAKI" {
+        let g: Option<String> = r.get("gender");
+        let g_str = g.as_deref().unwrap_or("").to_uppercase();
+        let cnt: i64 = r.get("count");
+        if g_str == "L" || g_str == "MALE" || g_str == "LAKI-LAKI" {
             male_count += cnt;
-        } else if g == "P" || g == "FEMALE" || g == "PEREMPUAN" {
+        } else if g_str == "P" || g_str == "FEMALE" || g_str == "PEREMPUAN" {
             female_count += cnt;
         }
     }
@@ -363,7 +365,7 @@ async fn get_dashboard(
     ];
 
     // Jenjang distribution
-    let jenjang_rows = sqlx::query!(
+    let jenjang_rows = sqlx::query(
         r#"
         SELECT 
             CASE 
@@ -379,9 +381,9 @@ async fn get_dashboard(
         WHERE c.tenant_id = $1 AND c.deleted_at IS NULL
         GROUP BY 1
         ORDER BY 1
-        "#,
-        tid
+        "#
     )
+    .bind(tid)
     .fetch_all(pool)
     .await
     .unwrap_or_default();
@@ -389,12 +391,13 @@ async fn get_dashboard(
     let jenjang_distribution = jenjang_rows
         .into_iter()
         .filter_map(|r| {
-            let j = r.jenjang?;
-            let s_cnt = r.student_count.unwrap_or(0);
-            let c_cnt = r.class_count.unwrap_or(0);
-            if j != "Lainnya" || s_cnt > 0 {
+            let j: Option<String> = r.get("jenjang");
+            let j_val = j?;
+            let s_cnt: i64 = r.get("student_count");
+            let c_cnt: i64 = r.get("class_count");
+            if j_val != "Lainnya" || s_cnt > 0 {
                 Some(JenjangDistributionDto {
-                    jenjang: j,
+                    jenjang: j_val,
                     student_count: s_cnt,
                     class_count: c_cnt,
                     percentage: ((s_cnt as f64 / total_students_num) * 100.0 * 10.0).round() / 10.0,
@@ -406,7 +409,7 @@ async fn get_dashboard(
         .collect();
 
     // Rombel distribution
-    let rombel_rows = sqlx::query!(
+    let rombel_rows = sqlx::query(
         r#"
         SELECT 
             c.id, 
@@ -420,9 +423,9 @@ async fn get_dashboard(
         HAVING COUNT(e.id) > 0
         ORDER BY student_count DESC, c.name ASC
         LIMIT 15
-        "#,
-        tid
+        "#
     )
+    .bind(tid)
     .fetch_all(pool)
     .await
     .unwrap_or_default();
@@ -430,15 +433,15 @@ async fn get_dashboard(
     let rombel_distribution = rombel_rows
         .into_iter()
         .map(|r| RombelDistributionDto {
-            id: r.id,
-            name: r.name,
-            jenis_rombel: r.jenis_rombel,
-            student_count: r.student_count.unwrap_or(0),
+            id: r.get("id"),
+            name: r.get("name"),
+            jenis_rombel: r.get("jenis_rombel"),
+            student_count: r.get("student_count"),
         })
         .collect();
 
     // Academic performance
-    let academic_rows = sqlx::query!(
+    let academic_rows = sqlx::query(
         r#"
         SELECT 
             s.id AS subject_id,
@@ -457,9 +460,9 @@ async fn get_dashboard(
         HAVING MAX(g.final_score) > 0
         ORDER BY average_score DESC
         LIMIT 10
-        "#,
-        tid
+        "#
     )
+    .bind(tid)
     .fetch_all(pool)
     .await
     .unwrap_or_default();
@@ -467,20 +470,20 @@ async fn get_dashboard(
     let academic_performance = academic_rows
         .into_iter()
         .map(|r| AcademicPerformanceDto {
-            subject_id: r.subject_id,
-            subject_name: r.subject_name,
-            subject_code: r.subject_code,
-            total_graded: r.total_graded.unwrap_or(0),
-            average_score: r.average_score.unwrap_or(0.0),
-            min_score: r.min_score.unwrap_or(0.0),
-            max_score: r.max_score.unwrap_or(0.0),
-            passed_count: r.passed_count.unwrap_or(0),
-            remedial_count: r.remedial_count.unwrap_or(0),
+            subject_id: r.get("subject_id"),
+            subject_name: r.get("subject_name"),
+            subject_code: r.get("subject_code"),
+            total_graded: r.get("total_graded"),
+            average_score: r.get("average_score"),
+            min_score: r.get("min_score"),
+            max_score: r.get("max_score"),
+            passed_count: r.get("passed_count"),
+            remedial_count: r.get("remedial_count"),
         })
         .collect();
 
     // Announcements
-    let announcements_rows = sqlx::query!(
+    let announcements_rows = sqlx::query(
         r#"
         SELECT 
             id, title, content, category, target, author, is_pinned, push_status, created_at
@@ -488,9 +491,9 @@ async fn get_dashboard(
         WHERE tenant_id = $1
         ORDER BY is_pinned DESC, created_at DESC
         LIMIT 6
-        "#,
-        tid
+        "#
     )
+    .bind(tid)
     .fetch_all(pool)
     .await
     .unwrap_or_default();
@@ -498,20 +501,20 @@ async fn get_dashboard(
     let announcements = announcements_rows
         .into_iter()
         .map(|r| DashboardAnnouncementDto {
-            id: r.id,
-            title: r.title,
-            content: r.content,
-            category: r.category,
-            target: r.target,
-            author: r.author,
-            is_pinned: r.is_pinned,
-            push_status: r.push_status,
-            created_at: r.created_at,
+            id: r.get("id"),
+            title: r.get("title"),
+            content: r.get("content"),
+            category: r.get("category"),
+            target: r.get("target"),
+            author: r.get("author"),
+            is_pinned: r.get("is_pinned"),
+            push_status: r.get("push_status"),
+            created_at: r.get("created_at"),
         })
         .collect();
 
     // Audit logs / recent activities
-    let audit_rows = sqlx::query!(
+    let audit_rows = sqlx::query(
         r#"
         SELECT 
             id, action, resource, decision, reason, timestamp AS created_at
@@ -519,9 +522,9 @@ async fn get_dashboard(
         WHERE tenant_id = $1
         ORDER BY timestamp DESC
         LIMIT 6
-        "#,
-        tid
+        "#
     )
+    .bind(tid)
     .fetch_all(pool)
     .await
     .unwrap_or_default();
@@ -529,12 +532,12 @@ async fn get_dashboard(
     let recent_activities = audit_rows
         .into_iter()
         .map(|r| DashboardRecentActivityDto {
-            id: r.id,
-            action: r.action,
-            resource: r.resource,
-            decision: r.decision,
-            reason: r.reason,
-            created_at: r.created_at,
+            id: r.get("id"),
+            action: r.get("action"),
+            resource: r.get("resource"),
+            decision: r.get("decision"),
+            reason: r.get("reason"),
+            created_at: r.get("created_at"),
         })
         .collect();
 
