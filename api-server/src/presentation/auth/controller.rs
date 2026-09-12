@@ -36,6 +36,7 @@ pub fn auth_routes(context: ApplicationContext) -> Router<ApplicationContext> {
             Router::new()
                 .route("/me", axum::routing::get(get_me))
                 .route("/users", axum::routing::get(list_users))
+                .route("/change-password", axum::routing::post(change_password))
                 .route("/qr-tokens/generate", post(generate_qr_token_endpoint))
                 .route("/qr-tokens/batch-generate", post(batch_generate_qr_tokens_endpoint))
                 .route("/qr-tokens/users", axum::routing::get(list_users_qr_status))
@@ -343,6 +344,14 @@ pub struct AuthUserDto {
     pub child_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub child_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+}
+
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct ChangePasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
 }
 
 #[utoipa::path(
@@ -363,7 +372,7 @@ async fn list_users(
 ) -> Result<Json<ApiResponse<Vec<AuthUserDto>>>, ApiError> {
     let records = sqlx::query!(
         r#"
-        SELECT u.id, u.email, u.full_name, u.is_active, u.created_at,
+        SELECT u.id, u.username, u.email, u.full_name, u.is_active, u.created_at,
                COALESCE(r.name, 'No Role') as role_name
         FROM users u
         LEFT JOIN user_roles ur ON u.id = ur.user_id
@@ -390,9 +399,120 @@ async fn list_users(
         class_name: None,
         child_name: None,
         child_id: None,
+        username: r.username,
     }).collect();
 
     Ok(Json(ApiResponse::success(dtos, req_ctx.request_id)))
+}
+
+/// Change password for currently authenticated user
+#[utoipa::path(
+    post,
+    operation_id = "changePassword",
+    path = "/api/v1/auth/change-password",
+    request_body = ChangePasswordRequest,
+    responses(
+        (status = 200, description = "Password changed successfully", body = inline(ApiResponse<serde_json::Value>)),
+    ),
+    security(
+        ("Bearer" = [])
+    ),
+    tag = "Auth"
+)]
+async fn change_password(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Json(payload): Json<ChangePasswordRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    use argon2::{
+        password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+        Argon2,
+    };
+
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id).ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthInvalidToken,
+                "Authentication required".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    if payload.new_password.trim().len() < 6 {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Domain(
+                school_core::common::error::DomainError::Validation(
+                    "Kata sandi baru minimal 6 karakter".to_string(),
+                ),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
+    let user = sqlx::query!(
+        "SELECT password_hash FROM users WHERE id = $1 AND tenant_id = $2",
+        actor_id,
+        req_ctx.tenant_id
+    )
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?
+    .ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::NotFound(
+                school_core::common::error_code::ErrorCode::ResourceNotFound,
+                "User tidak ditemukan".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let is_valid = match PasswordHash::new(&user.password_hash) {
+        Ok(parsed_hash) => Argon2::default().verify_password(payload.current_password.as_bytes(), &parsed_hash).is_ok(),
+        Err(_) => false,
+    };
+
+    if !is_valid {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Domain(
+                school_core::common::error::DomainError::Validation(
+                    "Kata sandi saat ini tidak sesuai".to_string(),
+                ),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
+    let salt = SaltString::generate(&mut OsRng);
+    let new_hash = Argon2::default()
+        .hash_password(payload.new_password.as_bytes(), &salt)
+        .map_err(|e| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Domain(
+                    school_core::common::error::DomainError::Validation(format!("Gagal mengenkripsi kata sandi: {}", e)),
+                ),
+                &req_ctx.request_id,
+            )
+        })?
+        .to_string();
+
+    sqlx::query!(
+        "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3",
+        new_hash,
+        actor_id,
+        req_ctx.tenant_id
+    )
+    .execute(&ctx.pool)
+    .await
+    .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
+
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({
+            "message": "Kata sandi berhasil diperbarui"
+        }),
+        req_ctx.request_id,
+    )))
 }
 
 /// Get the current authenticated user profile
@@ -438,6 +558,7 @@ async fn get_me(
                 class_name: None,
                 child_name: None,
                 child_id: None,
+                username: None,
             },
             req_ctx.request_id,
         )));
@@ -525,6 +646,7 @@ async fn get_me(
             class_name: r.class_name,
             child_name: r.child_name,
             child_id: r.child_id,
+            username: None,
         },
         None => AuthUserDto {
             id: actor_id,
@@ -539,6 +661,7 @@ async fn get_me(
             class_name: None,
             child_name: None,
             child_id: None,
+            username: None,
         },
     };
 

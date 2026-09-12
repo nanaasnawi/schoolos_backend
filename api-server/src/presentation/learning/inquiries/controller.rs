@@ -62,6 +62,7 @@ pub struct ListInquiriesQuery {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateInquiryRequest {
+    pub id: Option<Uuid>,
     pub student_id: Option<Uuid>,
     pub student_name: Option<String>,
     pub student_class: Option<String>,
@@ -460,7 +461,7 @@ async fn create_inquiry(
         }
     }
 
-    let thread_id = Uuid::new_v4();
+    let thread_id = payload.id.unwrap_or_else(Uuid::new_v4);
     let inquiry_type = payload.inquiry_type.to_uppercase();
     let initial_msg = payload.initial_message.trim().to_string();
 
@@ -515,6 +516,43 @@ async fn create_inquiry(
     )
     .execute(&ctx.pool)
     .await;
+
+    // Create real-time in-app notification for Teacher
+    if let Some(tid) = resolved_teacher_id {
+        if let Ok(Some(teacher_user_id)) = sqlx::query_scalar!(
+            r#"SELECT user_id FROM teachers WHERE id = $1 LIMIT 1"#,
+            tid
+        )
+        .fetch_optional(&ctx.pool)
+        .await
+        {
+            if let Some(t_uid) = teacher_user_id {
+                let notif_title = format!("Tanya Jawab Baru: {}", payload.reference_title.trim());
+                let notif_body = format!(
+                    "{} ({}) mengajukan pertanyaan: \"{}\"",
+                    student_name, resolved_class_name, initial_msg
+                );
+                let notif_id = Uuid::new_v4();
+                let _ = sqlx::query!(
+                    r#"
+                    INSERT INTO notifications (
+                        id, tenant_id, user_id, title, body, notification_type, channel,
+                        reference_type, reference_id, is_read, created_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, 'INQUIRY', 'in_app', 'inquiry', $6, false, NOW())
+                    "#,
+                    notif_id,
+                    resolved_tenant_id,
+                    t_uid,
+                    notif_title,
+                    notif_body,
+                    thread_id
+                )
+                .execute(&ctx.pool)
+                .await;
+            }
+        }
+    }
 
     let dto = InquiryThreadDto {
         id: thread.id,
@@ -628,6 +666,83 @@ async fn send_message(
     )
     .execute(&ctx.pool)
     .await;
+
+    // Create real-time in-app notification for recipient
+    if is_teacher {
+        // Teacher replied -> notify student
+        if let Ok(Some(student_user_id)) = sqlx::query_scalar!(
+            r#"
+            SELECT s.user_id 
+            FROM students s 
+            JOIN inquiry_threads t ON t.student_id = s.id 
+            WHERE t.id = $1 LIMIT 1
+            "#,
+            id
+        )
+        .fetch_optional(&ctx.pool)
+        .await
+        {
+            if let Some(s_uid) = student_user_id {
+                let notif_title = format!("Balasan Guru: {}", sender_name);
+                let notif_body = format!("{}: \"{}\"", sender_name, content);
+                let notif_id = Uuid::new_v4();
+                let _ = sqlx::query!(
+                    r#"
+                    INSERT INTO notifications (
+                        id, tenant_id, user_id, title, body, notification_type, channel,
+                        reference_type, reference_id, is_read, created_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, 'INQUIRY_REPLY', 'in_app', 'inquiry', $6, false, NOW())
+                    "#,
+                    notif_id,
+                    effective_tenant_id,
+                    s_uid,
+                    notif_title,
+                    notif_body,
+                    id
+                )
+                .execute(&ctx.pool)
+                .await;
+            }
+        }
+    } else {
+        // Student replied -> notify teacher
+        if let Ok(Some(teacher_user_id)) = sqlx::query_scalar!(
+            r#"
+            SELECT t.user_id 
+            FROM teachers t 
+            JOIN inquiry_threads th ON th.teacher_id = t.id 
+            WHERE th.id = $1 LIMIT 1
+            "#,
+            id
+        )
+        .fetch_optional(&ctx.pool)
+        .await
+        {
+            if let Some(t_uid) = teacher_user_id {
+                let notif_title = format!("Pesan Baru Tanya Jawab: {}", sender_name);
+                let notif_body = format!("{}: \"{}\"", sender_name, content);
+                let notif_id = Uuid::new_v4();
+                let _ = sqlx::query!(
+                    r#"
+                    INSERT INTO notifications (
+                        id, tenant_id, user_id, title, body, notification_type, channel,
+                        reference_type, reference_id, is_read, created_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, 'INQUIRY_MESSAGE', 'in_app', 'inquiry', $6, false, NOW())
+                    "#,
+                    notif_id,
+                    effective_tenant_id,
+                    t_uid,
+                    notif_title,
+                    notif_body,
+                    id
+                )
+                .execute(&ctx.pool)
+                .await;
+            }
+        }
+    }
 
     let dto = InquiryMessageDto {
         id: msg.id,

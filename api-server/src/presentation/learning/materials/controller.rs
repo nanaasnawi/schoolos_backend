@@ -154,11 +154,29 @@ async fn list(
     })?;
 
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
-    let is_teacher = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Guru")).unwrap_or(false);
-    let is_student = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Siswa")).unwrap_or(false);
+    let is_admin = req_ctx.actor.as_ref().map(|a| {
+        a.roles.iter().any(|r| {
+            let n = r.name.to_lowercase();
+            n.contains("admin") || n.contains("kepala sekolah") || n.contains("operator")
+        })
+    }).unwrap_or(false);
 
-    let items: Vec<LearningMaterialResponse> = if is_teacher {
-        // Teacher sees only materials they created or assigned to them
+    let is_teacher = req_ctx.actor.as_ref().map(|a| {
+        a.roles.iter().any(|r| {
+            let n = r.name.to_lowercase();
+            n == "guru" || n.contains("teacher")
+        })
+    }).unwrap_or(false);
+
+    let is_student = req_ctx.actor.as_ref().map(|a| {
+        a.roles.iter().any(|r| {
+            let n = r.name.to_lowercase();
+            n == "siswa" || n.contains("student")
+        })
+    }).unwrap_or(false);
+
+    let items: Vec<LearningMaterialResponse> = if is_teacher && !is_admin {
+        // Teacher strictly sees ONLY materials they created or are assigned to them
         let rows = sqlx::query!(
             r#"
             SELECT 
@@ -201,7 +219,7 @@ async fn list(
             is_completed: None,
             completed_count: Some(r.completed_count),
         }).collect()
-    } else if is_student {
+    } else if is_student && !is_admin {
         // Student sees materials ONLY for their active enrolled classes (Paket A / B / C strictly isolated)
         let rows = sqlx::query!(
             r#"
@@ -251,7 +269,7 @@ async fn list(
             is_completed: Some(r.is_completed),
             completed_count: None,
         }).collect()
-    } else {
+    } else if is_admin {
         // Super Admin / Kepala Sekolah / Staf sees all materials in tenant
         let rows = sqlx::query!(
             r#"
@@ -289,6 +307,8 @@ async fn list(
             is_completed: None,
             completed_count: Some(r.completed_count),
         }).collect()
+    } else {
+        vec![]
     };
 
     Ok(Json(ApiResponse::success(items, req_ctx.request_id)))
@@ -311,6 +331,86 @@ async fn get_by_id(
         )
     })?;
 
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
+    let is_admin = req_ctx.actor.as_ref().map(|a| {
+        a.roles.iter().any(|r| {
+            let n = r.name.to_lowercase();
+            n.contains("admin") || n.contains("kepala sekolah") || n.contains("operator")
+        })
+    }).unwrap_or(false);
+
+    let is_teacher = req_ctx.actor.as_ref().map(|a| {
+        a.roles.iter().any(|r| {
+            let n = r.name.to_lowercase();
+            n == "guru" || n.contains("teacher")
+        })
+    }).unwrap_or(false);
+
+    let is_student = req_ctx.actor.as_ref().map(|a| {
+        a.roles.iter().any(|r| {
+            let n = r.name.to_lowercase();
+            n == "siswa" || n.contains("student")
+        })
+    }).unwrap_or(false);
+
+    if is_teacher && !is_admin {
+        let owns = sqlx::query_scalar!(
+            r#"SELECT EXISTS(
+                SELECT 1 FROM learning_materials
+                WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+                  AND (created_by = $3 OR teacher_id IN (SELECT id FROM teachers WHERE user_id = $3))
+            ) as "exists!""#,
+            id,
+            req_ctx.tenant_id,
+            actor_id
+        )
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap_or(false);
+
+        if !owns {
+            return Err(ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Anda tidak memiliki hak akses untuk materi pembelajaran guru lain".to_string(),
+                ),
+                &req_ctx.request_id,
+            ));
+        }
+    } else if is_student && !is_admin {
+        let can_access = sqlx::query_scalar!(
+            r#"SELECT EXISTS(
+                SELECT 1 FROM learning_materials m
+                WHERE m.id = $1 AND m.tenant_id = $2 AND m.deleted_at IS NULL AND m.is_active = true
+                  AND (
+                      m.class_id IS NULL OR
+                      m.class_id IN (
+                          SELECT en.class_id 
+                          FROM students s
+                          JOIN enrollments en ON en.student_id = s.id
+                          WHERE s.user_id = $3 AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                      )
+                  )
+            ) as "exists!""#,
+            id,
+            req_ctx.tenant_id,
+            actor_id
+        )
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap_or(false);
+
+        if !can_access {
+            return Err(ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Materi ini tidak tersedia untuk kelas Anda".to_string(),
+                ),
+                &req_ctx.request_id,
+            ));
+        }
+    }
+
     let query = GetLearningMaterialQuery {
         tenant_id: req_ctx.tenant_id,
         material_id: id,
@@ -321,9 +421,6 @@ async fn get_by_id(
         .execute(query)
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
-
-    let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
-    let is_student = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Siswa")).unwrap_or(false);
 
     let is_completed = if is_student {
         sqlx::query_scalar!(
@@ -497,6 +594,47 @@ async fn update(
         )
     })?;
 
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
+    let is_admin = req_ctx.actor.as_ref().map(|a| {
+        a.roles.iter().any(|r| {
+            let n = r.name.to_lowercase();
+            n.contains("admin") || n.contains("kepala sekolah") || n.contains("operator")
+        })
+    }).unwrap_or(false);
+
+    let is_teacher = req_ctx.actor.as_ref().map(|a| {
+        a.roles.iter().any(|r| {
+            let n = r.name.to_lowercase();
+            n == "guru" || n.contains("teacher")
+        })
+    }).unwrap_or(false);
+
+    if is_teacher && !is_admin {
+        let owns = sqlx::query_scalar!(
+            r#"SELECT EXISTS(
+                SELECT 1 FROM learning_materials
+                WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+                  AND (created_by = $3 OR teacher_id IN (SELECT id FROM teachers WHERE user_id = $3))
+            ) as "exists!""#,
+            id,
+            req_ctx.tenant_id,
+            actor_id
+        )
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap_or(false);
+
+        if !owns {
+            return Err(ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Anda tidak memiliki izin mengubah materi guru lain".to_string(),
+                ),
+                &req_ctx.request_id,
+            ));
+        }
+    }
+
     let command = UpdateLearningMaterialCommand {
         tenant_id: req_ctx.tenant_id,
         material_id: id,
@@ -537,6 +675,46 @@ async fn delete(
     })?;
 
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
+    let is_admin = req_ctx.actor.as_ref().map(|a| {
+        a.roles.iter().any(|r| {
+            let n = r.name.to_lowercase();
+            n.contains("admin") || n.contains("kepala sekolah") || n.contains("operator")
+        })
+    }).unwrap_or(false);
+
+    let is_teacher = req_ctx.actor.as_ref().map(|a| {
+        a.roles.iter().any(|r| {
+            let n = r.name.to_lowercase();
+            n == "guru" || n.contains("teacher")
+        })
+    }).unwrap_or(false);
+
+    if is_teacher && !is_admin {
+        let owns = sqlx::query_scalar!(
+            r#"SELECT EXISTS(
+                SELECT 1 FROM learning_materials
+                WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+                  AND (created_by = $3 OR teacher_id IN (SELECT id FROM teachers WHERE user_id = $3))
+            ) as "exists!""#,
+            id,
+            req_ctx.tenant_id,
+            actor_id
+        )
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap_or(false);
+
+        if !owns {
+            return Err(ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Anda tidak memiliki izin menghapus materi guru lain".to_string(),
+                ),
+                &req_ctx.request_id,
+            ));
+        }
+    }
+
     let command = DeleteLearningMaterialCommand {
         tenant_id: req_ctx.tenant_id,
         material_id: id,
