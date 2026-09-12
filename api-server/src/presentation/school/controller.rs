@@ -103,10 +103,24 @@ pub async fn get_current_school_profile(
     .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
 
     let response_data = if let Some(r) = row {
+        let final_school_name = if r.name.trim().is_empty() {
+            sqlx::query_scalar::<_, String>(
+                "SELECT name FROM tenants WHERE id = $1"
+            )
+            .bind(req_ctx.tenant_id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "Nama Sekolah".to_string())
+        } else {
+            r.name
+        };
+
         SchoolResponse {
             id: r.id,
             tenant_id: r.tenant_id,
-            name: r.name,
+            name: final_school_name,
             npsn: r.npsn,
             logo_url: r.logo_url,
             address: r.address,
@@ -206,6 +220,24 @@ pub async fn update_current_school_profile(
         Uuid::now_v7()
     };
 
+    let name_trimmed = payload.name.as_ref().map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+    let npsn_trimmed = payload.npsn.as_ref().map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+
+    if let Some(ref n) = name_trimmed {
+        let _ = sqlx::query("UPDATE tenants SET name = $1, updated_at = NOW() WHERE id = $2")
+            .bind(n)
+            .bind(req_ctx.tenant_id)
+            .execute(&ctx.pool)
+            .await;
+    }
+    if let Some(ref n) = npsn_trimmed {
+        let _ = sqlx::query("UPDATE tenants SET npsn = $1, updated_at = NOW() WHERE id = $2")
+            .bind(n)
+            .bind(req_ctx.tenant_id)
+            .execute(&ctx.pool)
+            .await;
+    }
+
     let updated = sqlx::query!(
         r#"
         INSERT INTO schools (id, tenant_id, name, npsn, logo_url, address, phone_number, email, status, dapodik_url, dapodik_token, accreditation, created_at, updated_at)
@@ -226,8 +258,8 @@ pub async fn update_current_school_profile(
         "#,
         school_id,
         req_ctx.tenant_id,
-        payload.name,
-        payload.npsn,
+        name_trimmed,
+        npsn_trimmed,
         payload.logo_url,
         payload.address,
         payload.phone_number,

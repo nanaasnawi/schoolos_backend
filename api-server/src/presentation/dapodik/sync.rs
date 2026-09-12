@@ -931,8 +931,8 @@ pub async fn pull_dapodik_records(
             let _ = sqlx::query!(
                 r#"
                         UPDATE schools 
-                        SET name = COALESCE($1, name),
-                            npsn = COALESCE($2, npsn),
+                        SET name = COALESCE(NULLIF($1, ''), name),
+                            npsn = COALESCE(NULLIF($2, ''), npsn),
                             address = $3,
                             phone_number = COALESCE($4, phone_number),
                             email = COALESCE($5, email),
@@ -948,6 +948,16 @@ pub async fn pull_dapodik_records(
             )
             .execute(&mut *tx)
             .await;
+
+            if let Some(s_name) = sek_nama {
+                if !s_name.trim().is_empty() {
+                    let _ = sqlx::query("UPDATE tenants SET name = $1, updated_at = NOW() WHERE id = $2")
+                        .bind(s_name.trim())
+                        .bind(ctx.tenant_id)
+                        .execute(&mut *tx)
+                        .await;
+                }
+            }
         }
     }
 
