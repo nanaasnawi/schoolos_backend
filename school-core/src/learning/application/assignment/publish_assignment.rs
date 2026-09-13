@@ -46,19 +46,24 @@ impl PublishAssignmentUseCase {
                 )
             })?;
 
-        let lesson = self
-            .lesson_repo
-            .find_by_id(assignment.lesson_id)
-            .await?
-            .ok_or_else(|| {
-                ApplicationError::NotFound(
-                    ErrorCode::LessonNotFound,
-                    format!("Associated Lesson {} not found", assignment.lesson_id),
-                )
-            })?;
+        let lesson_status = if let Some(lid) = assignment.lesson_id {
+            let lesson = self
+                .lesson_repo
+                .find_by_id(lid)
+                .await?
+                .ok_or_else(|| {
+                    ApplicationError::NotFound(
+                        ErrorCode::LessonNotFound,
+                        format!("Associated Lesson {} not found", lid),
+                    )
+                })?;
+            Some(lesson.status)
+        } else {
+            None
+        };
 
         assignment
-            .publish(&lesson.status, &*self.clock)
+            .publish(lesson_status.as_deref(), &*self.clock)
             .map_err(ApplicationError::Domain)?;
 
         self.repo.update(&assignment).await?;

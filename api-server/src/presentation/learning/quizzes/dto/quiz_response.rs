@@ -8,7 +8,7 @@ use uuid::Uuid;
 pub struct QuizResponse {
     pub id: Uuid,
     pub tenant_id: Uuid,
-    pub lesson_id: Uuid,
+    pub lesson_id: Option<Uuid>,
     pub title: String,
     pub description: Option<String>,
     pub duration_minutes: i32,

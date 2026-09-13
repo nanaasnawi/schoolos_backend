@@ -51,7 +51,7 @@ async fn create(
 
     let command = CreateQuizCommand {
         tenant_id: req_ctx.tenant_id,
-        lesson_id: payload.lesson_id.unwrap_or_else(Uuid::new_v4),
+        lesson_id: payload.lesson_id,
         title: payload.title,
         description: payload.description.clone(),
         duration_minutes: payload.duration_minutes.unwrap_or(30),
@@ -209,7 +209,7 @@ async fn list(
         rows.into_iter().map(|r| QuizResponse {
             id: r.id,
             tenant_id: r.tenant_id,
-            lesson_id: r.lesson_id.unwrap_or_default(),
+            lesson_id: r.lesson_id,
             title: r.title,
             description: r.description,
             duration_minutes: r.time_limit_minutes.unwrap_or(30),
@@ -271,7 +271,7 @@ async fn list(
         rows.into_iter().map(|r| QuizResponse {
             id: r.id,
             tenant_id: r.tenant_id,
-            lesson_id: r.lesson_id.unwrap_or_default(),
+            lesson_id: r.lesson_id,
             title: r.title,
             description: r.description,
             duration_minutes: r.time_limit_minutes.unwrap_or(30),
@@ -322,7 +322,7 @@ async fn list(
         rows.into_iter().map(|r| QuizResponse {
             id: r.id,
             tenant_id: r.tenant_id,
-            lesson_id: r.lesson_id.unwrap_or_default(),
+            lesson_id: r.lesson_id,
             title: r.title,
             description: r.description,
             duration_minutes: r.time_limit_minutes.unwrap_or(30),

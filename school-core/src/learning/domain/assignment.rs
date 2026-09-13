@@ -51,7 +51,7 @@ impl std::fmt::Display for AssignmentStatus {
 pub struct Assignment {
     pub id: Uuid,
     pub tenant_id: Uuid,
-    pub lesson_id: Uuid,
+    pub lesson_id: Option<Uuid>,
     pub title: String,
     pub description: Option<String>,
     pub instructions: Option<String>,
@@ -109,7 +109,7 @@ impl AggregateRoot for Assignment {
 impl Assignment {
     pub fn new(
         tenant_id: Uuid,
-        lesson_id: Uuid,
+        lesson_id: Option<Uuid>,
         title: String,
         description: Option<String>,
         instructions: Option<String>,
@@ -119,7 +119,9 @@ impl Assignment {
         clock: &dyn Clock,
     ) -> Result<Self, DomainError> {
         assert!(!tenant_id.is_nil(), "tenant_id must not be nil");
-        assert!(!lesson_id.is_nil(), "lesson_id must not be nil");
+        if let Some(lid) = lesson_id {
+            assert!(!lid.is_nil(), "lesson_id must not be nil");
+        }
         if title.is_empty() {
             return Err(DomainError::Validation(
                 "title must not be empty".to_string(),
@@ -178,7 +180,7 @@ impl Assignment {
     pub fn rehydrate(
         id: Uuid,
         tenant_id: Uuid,
-        lesson_id: Uuid,
+        lesson_id: Option<Uuid>,
         title: String,
         description: Option<String>,
         instructions: Option<String>,
@@ -220,17 +222,19 @@ impl Assignment {
     /// - Parent Lesson MUST be Published (cannot publish assignment for draft lesson)
     /// - Title must not be empty
     /// - Due date (if set) must be in the future
-    pub fn publish(&mut self, lesson_status: &str, clock: &dyn Clock) -> Result<(), DomainError> {
+    pub fn publish(&mut self, lesson_status: Option<&str>, clock: &dyn Clock) -> Result<(), DomainError> {
         if self.status != "draft" {
             return Err(DomainError::Validation(format!(
                 "Cannot publish assignment in '{}' state",
                 self.status
             )));
         }
-        if lesson_status != "published" {
-            return Err(DomainError::Validation(
-                "Cannot publish assignment when associated lesson is not published".to_string(),
-            ));
+        if let Some(status) = lesson_status {
+            if status != "published" {
+                return Err(DomainError::Validation(
+                    "Cannot publish assignment when associated lesson is not published".to_string(),
+                ));
+            }
         }
         if self.title.is_empty() {
             return Err(DomainError::Validation(

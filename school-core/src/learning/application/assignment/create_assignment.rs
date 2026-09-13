@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 pub struct CreateAssignmentCommand {
     pub tenant_id: Uuid,
-    pub lesson_id: Uuid,
+    pub lesson_id: Option<Uuid>,
     pub title: String,
     pub description: Option<String>,
     pub instructions: Option<String>,

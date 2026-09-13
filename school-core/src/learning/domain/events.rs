@@ -163,7 +163,7 @@ impl DomainEvent for LessonDeletedEvent {
 pub struct AssignmentCreatedEvent {
     pub metadata: EventMetadata,
     pub assignment_id: Uuid,
-    pub lesson_id: Uuid,
+    pub lesson_id: Option<Uuid>,
     pub title: String,
 }
 
@@ -206,7 +206,7 @@ impl DomainEvent for AssignmentUpdatedEvent {
 pub struct AssignmentPublishedEvent {
     pub metadata: EventMetadata,
     pub assignment_id: Uuid,
-    pub lesson_id: Uuid,
+    pub lesson_id: Option<Uuid>,
     pub title: String,
 }
 
@@ -469,7 +469,7 @@ impl DomainEvent for SubmissionDeletedEvent {
 pub struct QuizCreatedEvent {
     pub metadata: EventMetadata,
     pub quiz_id: Uuid,
-    pub lesson_id: Uuid,
+    pub lesson_id: Option<Uuid>,
     pub title: String,
 }
 
@@ -533,7 +533,7 @@ impl DomainEvent for QuestionRemovedEvent {
 pub struct QuizPublishedEvent {
     pub metadata: EventMetadata,
     pub quiz_id: Uuid,
-    pub lesson_id: Uuid,
+    pub lesson_id: Option<Uuid>,
 }
 
 impl DomainEvent for QuizPublishedEvent {

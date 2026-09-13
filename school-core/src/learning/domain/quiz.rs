@@ -45,7 +45,7 @@ impl QuizStatus {
 pub struct Quiz {
     pub id: Uuid,
     pub tenant_id: Uuid,
-    pub lesson_id: Uuid,
+    pub lesson_id: Option<Uuid>,
     pub title: String,
     pub description: Option<String>,
     pub status: String,
@@ -115,7 +115,7 @@ impl AggregateRoot for Quiz {
 impl Quiz {
     pub fn new(
         tenant_id: Uuid,
-        lesson_id: Uuid,
+        lesson_id: Option<Uuid>,
         title: String,
         description: Option<String>,
         duration_minutes: i32,
@@ -132,10 +132,12 @@ impl Quiz {
                 "tenant_id must not be nil".to_string(),
             ));
         }
-        if lesson_id.is_nil() {
-            return Err(DomainError::Validation(
-                "lesson_id must not be nil".to_string(),
-            ));
+        if let Some(lid) = lesson_id {
+            if lid.is_nil() {
+                return Err(DomainError::Validation(
+                    "lesson_id must not be nil".to_string(),
+                ));
+            }
         }
         if title.trim().is_empty() {
             return Err(DomainError::Validation(
@@ -289,12 +291,14 @@ impl Quiz {
     /// Rules:
     /// - Associated Lesson status MUST be 'published'
     /// - Quiz MUST have at least 1 question
-    pub fn publish(&mut self, lesson_status: &str, clock: &dyn Clock) -> Result<(), DomainError> {
-        if lesson_status != "published" {
-            return Err(DomainError::Validation(format!(
-                "Cannot publish quiz when associated lesson status is '{}'",
-                lesson_status
-            )));
+    pub fn publish(&mut self, lesson_status: Option<&str>, clock: &dyn Clock) -> Result<(), DomainError> {
+        if let Some(status) = lesson_status {
+            if status != "published" {
+                return Err(DomainError::Validation(format!(
+                    "Cannot publish quiz when associated lesson status is '{}'",
+                    status
+                )));
+            }
         }
 
         if self.questions.is_empty() && self.questions_count == 0 {

@@ -236,7 +236,7 @@ mod tests {
 
         let res = Assignment::new(
             tenant_id,
-            lesson_id,
+            Some(lesson_id),
             "Tugas Aljabar".to_string(),
             None,
             None,
@@ -261,7 +261,7 @@ mod tests {
 
         let mut assignment = Assignment::new(
             tenant_id,
-            lesson_id,
+            Some(lesson_id),
             "Tugas Matriks".to_string(),
             None,
             None,
@@ -272,7 +272,7 @@ mod tests {
         )
         .unwrap();
 
-        let publish_res = assignment.publish("draft", &clock);
+        let publish_res = assignment.publish(Some("draft"), &clock);
         assert!(publish_res.is_err());
         assert_eq!(assignment.status, "draft");
     }
@@ -290,7 +290,7 @@ mod tests {
 
         let mut assignment = Assignment::new(
             tenant_id,
-            lesson_id,
+            Some(lesson_id),
             "Tugas Geometri".to_string(),
             None,
             None,
@@ -301,7 +301,7 @@ mod tests {
         )
         .unwrap();
 
-        let publish_res = assignment.publish("published", &clock);
+        let publish_res = assignment.publish(Some("published"), &clock);
         assert!(publish_res.is_ok());
         assert_eq!(assignment.status, "published");
 
@@ -325,7 +325,7 @@ mod tests {
 
         let mut assignment = Assignment::new(
             tenant_id,
-            lesson_id,
+            Some(lesson_id),
             "Tugas Vektor".to_string(),
             None,
             None,
@@ -336,7 +336,7 @@ mod tests {
         )
         .unwrap();
 
-        let _ = assignment.publish("published", &clock);
+        let _ = assignment.publish(Some("published"), &clock);
         let _ = assignment.close(&clock);
 
         let update_res = assignment.update(
@@ -461,7 +461,7 @@ mod tests {
 
         let mut quiz = Quiz::new(
             tenant_id,
-            lesson_id,
+            Some(lesson_id),
             "Kuis Matematika".to_string(),
             None,
             30,
@@ -475,7 +475,7 @@ mod tests {
         )
         .unwrap();
 
-        let publish_res = quiz.publish("published", &clock);
+        let publish_res = quiz.publish(Some("published"), &clock);
         assert!(publish_res.is_err());
     }
 
@@ -491,7 +491,7 @@ mod tests {
 
         let mut quiz = Quiz::new(
             tenant_id,
-            lesson_id,
+            Some(lesson_id),
             "Kuis Fisika".to_string(),
             None,
             45,
@@ -522,7 +522,7 @@ mod tests {
         assert_eq!(quiz.questions_count, 1);
         assert_eq!(quiz.max_score, 10);
 
-        let publish_res = quiz.publish("published", &clock);
+        let publish_res = quiz.publish(Some("published"), &clock);
         assert!(publish_res.is_ok());
         assert_eq!(quiz.status, "published");
     }
@@ -542,7 +542,7 @@ mod tests {
 
         let mut quiz = Quiz::new(
             tenant_id,
-            lesson_id,
+            Some(lesson_id),
             "Kuis Biologi".to_string(),
             None,
             30,
@@ -569,7 +569,7 @@ mod tests {
         );
 
         let _ = quiz.add_question(q1.clone(), &clock);
-        let _ = quiz.publish("published", &clock);
+        let _ = quiz.publish(Some("published"), &clock);
 
         let mut attempt = QuizAttempt::start_new(tenant_id, &quiz, student_id, 0, &clock).unwrap();
 
