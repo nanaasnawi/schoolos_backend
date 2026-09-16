@@ -170,7 +170,15 @@ async fn list(
 
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
     let is_teacher = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Guru")).unwrap_or(false);
-    let is_student = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Siswa")).unwrap_or(false);
+    let is_parent = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| a.roles.iter().any(|r| {
+            let n = r.name.to_lowercase();
+            n.contains("wali") || n.contains("parent") || n.contains("guardian") || n.contains("ortu")
+        }))
+        .unwrap_or(false);
+    let is_student = !is_parent && req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Siswa")).unwrap_or(false);
 
     let items: Vec<QuizResponse> = if is_teacher {
         let rows = sqlx::query!(
@@ -230,7 +238,7 @@ async fn list(
             subject_name: r.subject_name,
             teacher_name: r.teacher_name,
         }).collect()
-    } else if is_student {
+    } else if is_student || is_parent {
         let rows = sqlx::query!(
             r#"
             SELECT 
@@ -255,6 +263,12 @@ async fn list(
                       FROM students s
                       JOIN enrollments en ON en.student_id = s.id
                       WHERE s.user_id = $2 AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                      UNION
+                      SELECT en.class_id 
+                      FROM guardians g
+                      JOIN students s ON s.guardian_id = g.id
+                      JOIN enrollments en ON en.student_id = s.id
+                      WHERE g.user_id = $2 AND (en.status = 'Active' OR en.status = 'ACTIVE')
                   )
               )
             ORDER BY q.created_at DESC
@@ -365,6 +379,42 @@ async fn get_by_id(
         )
     })?;
 
+    let meta = sqlx::query!(
+        "SELECT tenant_id, class_id, teacher_id, created_by FROM quizzes WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+        id,
+        req_ctx.tenant_id
+    )
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?
+    .ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::NotFound(
+                school_core::common::error_code::ErrorCode::QuizNotFound,
+                format!("Quiz {} not found", id),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    // Strict Cross-Class and Multi-Tenant Access Verification
+    crate::authorization_helpers::AuthorizationScope::verify_learning_resource_access(
+        &ctx.pool,
+        &req_ctx,
+        meta.tenant_id,
+        meta.class_id,
+        meta.teacher_id,
+        meta.created_by,
+    )
+    .await?;
+
     let query = GetQuizQuery { quiz_id: id };
     let quiz = ctx
         .get_quiz
@@ -426,10 +476,63 @@ async fn start_attempt(
         )
     })?;
 
+    let meta = sqlx::query!(
+        "SELECT tenant_id, class_id, teacher_id, created_by FROM quizzes WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+        id,
+        req_ctx.tenant_id
+    )
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?
+    .ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::NotFound(
+                school_core::common::error_code::ErrorCode::QuizNotFound,
+                format!("Quiz {} not found", id),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    // Verify student belongs to the class of this quiz
+    crate::authorization_helpers::AuthorizationScope::verify_learning_resource_access(
+        &ctx.pool,
+        &req_ctx,
+        meta.tenant_id,
+        meta.class_id,
+        meta.teacher_id,
+        meta.created_by,
+    )
+    .await?;
+
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
+    let effective_student_id = crate::authorization_helpers::AuthorizationScope::resolve_student_id(
+        &ctx.pool,
+        req_ctx.tenant_id,
+        actor_id,
+    )
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?
+    .unwrap_or(payload.student_id);
+
     let command = StartAttemptCommand {
         tenant_id: req_ctx.tenant_id,
         quiz_id: id,
-        student_id: payload.student_id,
+        student_id: effective_student_id,
     };
     let attempt = ctx
         .start_attempt
@@ -460,6 +563,66 @@ async fn submit_attempt(
             &req_ctx.request_id,
         )
     })?;
+
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
+    let is_student = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| a.roles.iter().any(|r| r.name == "Siswa"))
+        .unwrap_or(false);
+
+    if is_student {
+        let student_id = crate::authorization_helpers::AuthorizationScope::resolve_student_id(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            actor_id,
+        )
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?
+        .unwrap_or(actor_id);
+
+        let attempt_owner = sqlx::query!(
+            "SELECT student_id FROM quiz_attempts WHERE id = $1 AND tenant_id = $2",
+            attempt_id,
+            req_ctx.tenant_id
+        )
+        .fetch_optional(&ctx.pool)
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?
+        .ok_or_else(|| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::NotFound(
+                    school_core::common::error_code::ErrorCode::AttemptNotFound,
+                    format!("Attempt {} not found", attempt_id),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+
+        if attempt_owner.student_id != student_id {
+            return Err(ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Anda tidak berhak mengumpulkan jawaban untuk pengerjaan kuis ini".to_string(),
+                ),
+                &req_ctx.request_id,
+            ));
+        }
+    }
 
     let answers = payload
         .answers

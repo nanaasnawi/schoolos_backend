@@ -1,3 +1,4 @@
+pub mod authorization_helpers;
 pub mod bootstrap;
 pub mod error;
 pub mod extractors;

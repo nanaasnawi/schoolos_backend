@@ -10,7 +10,7 @@ use tower::ServiceExt;
 async fn test_openapi_spec_structure() {
     use utoipa::OpenApi;
     let openapi = api_server::ApiDoc::openapi();
-    assert_eq!(openapi.info.title, "ApiDoc");
+    assert_eq!(openapi.info.title, "api-server");
     let json = openapi.to_json().expect("OpenAPI must serialize to JSON");
     let parsed: Value = serde_json::from_str(&json).expect("Must be valid JSON");
     assert!(parsed.get("paths").is_some());

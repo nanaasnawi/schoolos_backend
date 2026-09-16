@@ -69,7 +69,7 @@ impl NotificationRepository for PgNotificationRepository {
     ) -> Result<Vec<Notification>, InfrastructureError> {
         let records = sqlx::query(
             r#"SELECT id, tenant_id, user_id, title, body, notification_type, channel, reference_type, reference_id, is_read, read_at, created_at
-               FROM notifications WHERE user_id = $1 AND tenant_id = $2
+               FROM notifications WHERE user_id = $1 AND tenant_id = $2 AND scheduled_at <= NOW()
                ORDER BY created_at DESC
                LIMIT $3 OFFSET $4"#
         )
@@ -114,7 +114,7 @@ impl NotificationRepository for PgNotificationRepository {
         tenant_id: Uuid,
     ) -> Result<i64, InfrastructureError> {
         let record = sqlx::query(
-            "SELECT COUNT(*) as count FROM notifications WHERE user_id = $1 AND tenant_id = $2",
+            "SELECT COUNT(*) as count FROM notifications WHERE user_id = $1 AND tenant_id = $2 AND scheduled_at <= NOW()",
         )
         .bind(user_id)
         .bind(tenant_id)
@@ -130,7 +130,7 @@ impl NotificationRepository for PgNotificationRepository {
         tenant_id: Uuid,
     ) -> Result<i64, InfrastructureError> {
         let record = sqlx::query(
-            "SELECT COUNT(*) as count FROM notifications WHERE user_id = $1 AND tenant_id = $2 AND is_read = FALSE"
+            "SELECT COUNT(*) as count FROM notifications WHERE user_id = $1 AND tenant_id = $2 AND is_read = FALSE AND scheduled_at <= NOW()"
         )
         .bind(user_id)
         .bind(tenant_id)

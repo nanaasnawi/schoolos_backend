@@ -7,10 +7,18 @@ use metrics::{counter, histogram};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use std::time::Instant;
 
+use std::sync::OnceLock;
+
+static RECORDER_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
+
 pub fn setup_metrics_recorder() -> PrometheusHandle {
-    PrometheusBuilder::new()
-        .install_recorder()
-        .expect("Failed to install Prometheus recorder")
+    RECORDER_HANDLE
+        .get_or_init(|| {
+            PrometheusBuilder::new()
+                .install_recorder()
+                .expect("Failed to install Prometheus recorder")
+        })
+        .clone()
 }
 
 pub async fn metrics_handler(handle: axum::extract::State<PrometheusHandle>) -> impl IntoResponse {

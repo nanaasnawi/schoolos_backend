@@ -77,6 +77,7 @@ pub struct CreateInquiryRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct SendInquiryMessageRequest {
+    pub client_message_id: Option<Uuid>,
     pub sender_id: Option<String>,
     pub sender_name: Option<String>,
     pub sender_role: String, // "TEACHER" or "STUDENT"
@@ -86,8 +87,10 @@ pub struct SendInquiryMessageRequest {
 pub fn inquiry_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/", get(list_inquiries).post(create_inquiry))
+        .route("/unread-count", get(get_inquiries_unread_count))
         .route("/{id}", get(get_inquiry_detail))
         .route("/{id}/messages", post(send_message))
+        .route("/{id}/read", post(mark_inquiry_read))
         .route("/{id}/resolve", post(resolve_inquiry))
 }
 
@@ -204,9 +207,10 @@ async fn get_inquiry_detail(
             t.last_message_content, t.last_message_at, t.created_at,
             (SELECT COUNT(*)::bigint FROM inquiry_messages m WHERE m.thread_id = t.id) as "message_count!"
         FROM inquiry_threads t
-        WHERE t.id = $1
+        WHERE t.id = $1 AND t.tenant_id = $2
         "#,
-        id
+        id,
+        req_ctx.tenant_id
     )
     .fetch_optional(&ctx.pool)
     .await
@@ -227,6 +231,54 @@ async fn get_inquiry_detail(
             &req_ctx.request_id,
         )
     })?;
+
+    // Cross-user access control check
+    if let Some(ref actor) = req_ctx.actor {
+        let is_admin = actor.roles.iter().any(|r| {
+            let n = r.name.to_lowercase();
+            n.contains("admin") || n.contains("kepala") || n.contains("operator") || n.contains("staf")
+        });
+
+        if !is_admin {
+            let is_teacher = actor.roles.iter().any(|r| r.name == "Guru");
+            let is_student = actor.roles.iter().any(|r| r.name == "Siswa");
+
+            if is_teacher {
+                let teacher_id = crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(
+                    &ctx.pool,
+                    req_ctx.tenant_id,
+                    actor.id,
+                ).await.ok().flatten();
+
+                let is_assigned_teacher = teacher_id.is_some() && thread.teacher_id == teacher_id;
+                if !is_assigned_teacher && thread.teacher_id.is_some() {
+                    return Err(ApiError::new(
+                        ApplicationError::Unauthorized(
+                            school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                            "Anda bukan guru pengampu percakapan ini".to_string(),
+                        ),
+                        &req_ctx.request_id,
+                    ));
+                }
+            } else if is_student {
+                let student_id = crate::authorization_helpers::AuthorizationScope::resolve_student_id(
+                    &ctx.pool,
+                    req_ctx.tenant_id,
+                    actor.id,
+                ).await.ok().flatten();
+
+                if student_id != Some(thread.student_id) {
+                    return Err(ApiError::new(
+                        ApplicationError::Unauthorized(
+                            school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                            "Percakapan ini bukan milik Anda".to_string(),
+                        ),
+                        &req_ctx.request_id,
+                    ));
+                }
+            }
+        }
+    }
 
     let messages = sqlx::query!(
         r#"
@@ -591,8 +643,9 @@ async fn send_message(
     }
 
     let thread = sqlx::query!(
-        "SELECT tenant_id FROM inquiry_threads WHERE id = $1",
-        id
+        "SELECT tenant_id FROM inquiry_threads WHERE id = $1 AND tenant_id = $2",
+        id,
+        req_ctx.tenant_id
     )
     .fetch_optional(&ctx.pool)
     .await
@@ -615,6 +668,37 @@ async fn send_message(
     })?;
 
     let effective_tenant_id = thread.tenant_id;
+
+    // Idempotent retry check: if client_message_id exists, return previously saved message
+    if let Some(cid) = payload.client_message_id {
+        let existing = sqlx::query(
+            "SELECT id, thread_id, sender_id, sender_name, sender_role, content, is_from_teacher, created_at FROM inquiry_messages WHERE client_message_id = $1 AND tenant_id = $2 LIMIT 1"
+        )
+        .bind(cid)
+        .bind(effective_tenant_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten();
+
+        if let Some(row) = existing {
+            use sqlx::Row;
+            return Ok(Json(ApiResponse::success(
+                InquiryMessageDto {
+                    id: row.get("id"),
+                    thread_id: row.get("thread_id"),
+                    sender_id: row.get("sender_id"),
+                    sender_name: row.get("sender_name"),
+                    sender_role: row.get("sender_role"),
+                    content: row.get("content"),
+                    is_from_teacher: row.get("is_from_teacher"),
+                    created_at: row.get("created_at"),
+                },
+                req_ctx.request_id,
+            )));
+        }
+    }
+
     let is_teacher = payload.sender_role.eq_ignore_ascii_case("TEACHER");
     let sender_id = payload.sender_id.unwrap_or_else(|| {
         req_ctx.actor.as_ref().map(|a| a.id.to_string()).unwrap_or_else(|| "user-1".to_string())
@@ -626,21 +710,22 @@ async fn send_message(
     let message_id = Uuid::new_v4();
     let content = payload.content.trim().to_string();
 
-    let msg = sqlx::query!(
+    let msg_row = sqlx::query(
         r#"
-        INSERT INTO inquiry_messages (id, tenant_id, thread_id, sender_id, sender_name, sender_role, content, is_from_teacher, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+        INSERT INTO inquiry_messages (id, tenant_id, thread_id, sender_id, sender_name, sender_role, content, is_from_teacher, client_message_id, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
         RETURNING id, thread_id, sender_id, sender_name, sender_role, content, is_from_teacher, created_at
-        "#,
-        message_id,
-        effective_tenant_id,
-        id,
-        sender_id,
-        sender_name,
-        payload.sender_role.to_uppercase(),
-        content,
-        is_teacher
+        "#
     )
+    .bind(message_id)
+    .bind(effective_tenant_id)
+    .bind(id)
+    .bind(&sender_id)
+    .bind(&sender_name)
+    .bind(payload.sender_role.to_uppercase())
+    .bind(&content)
+    .bind(is_teacher)
+    .bind(payload.client_message_id)
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| {
@@ -651,6 +736,18 @@ async fn send_message(
             &req_ctx.request_id,
         )
     })?;
+
+    use sqlx::Row;
+    let msg = InquiryMessageDto {
+        id: msg_row.get("id"),
+        thread_id: msg_row.get("thread_id"),
+        sender_id: msg_row.get("sender_id"),
+        sender_name: msg_row.get("sender_name"),
+        sender_role: msg_row.get("sender_role"),
+        content: msg_row.get("content"),
+        is_from_teacher: msg_row.get("is_from_teacher"),
+        created_at: msg_row.get("created_at"),
+    };
 
     // Update thread status & timestamp
     let new_status = if is_teacher { "ANSWERED" } else { "WAITING_REPLY" };
@@ -784,3 +881,133 @@ async fn resolve_inquiry(
 
     Ok(Json(ApiResponse::success(true, req_ctx.request_id)))
 }
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct InquiryUnreadCountResponse {
+    pub unread_count: i64,
+}
+
+async fn mark_inquiry_read(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ApiResponse<bool>>, ApiError> {
+    let actor = req_ctx.actor.as_ref().ok_or_else(|| {
+        ApiError::new(
+            ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Autentikasi diperlukan".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let is_teacher = actor.roles.iter().any(|r| r.name == "Guru");
+    if is_teacher {
+        let _ = sqlx::query(
+            "UPDATE inquiry_threads SET teacher_last_read_at = NOW() WHERE id = $1 AND tenant_id = $2"
+        )
+        .bind(id)
+        .bind(req_ctx.tenant_id)
+        .execute(&ctx.pool)
+        .await;
+    } else {
+        let _ = sqlx::query(
+            "UPDATE inquiry_threads SET student_last_read_at = NOW() WHERE id = $1 AND tenant_id = $2"
+        )
+        .bind(id)
+        .bind(req_ctx.tenant_id)
+        .execute(&ctx.pool)
+        .await;
+    }
+
+    Ok(Json(ApiResponse::success(true, req_ctx.request_id)))
+}
+
+async fn get_inquiries_unread_count(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+) -> Result<Json<ApiResponse<InquiryUnreadCountResponse>>, ApiError> {
+    let actor = req_ctx.actor.as_ref().ok_or_else(|| {
+        ApiError::new(
+            ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Autentikasi diperlukan".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let is_teacher = actor.roles.iter().any(|r| r.name == "Guru");
+    let unread_count: i64 = if is_teacher {
+        let teacher_id = crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            actor.id,
+        )
+        .await
+        .ok()
+        .flatten();
+
+        if let Some(tid) = teacher_id {
+            let count_row = sqlx::query(
+                r#"
+                SELECT COUNT(*)::bigint as unread_count
+                FROM inquiry_messages m
+                JOIN inquiry_threads t ON t.id = m.thread_id
+                WHERE t.tenant_id = $1 
+                  AND t.teacher_id = $2
+                  AND m.is_from_teacher = false
+                  AND m.created_at > COALESCE(t.teacher_last_read_at, '1970-01-01'::timestamptz)
+                "#
+            )
+            .bind(req_ctx.tenant_id)
+            .bind(tid)
+            .fetch_one(&ctx.pool)
+            .await;
+
+            use sqlx::Row;
+            count_row.map(|r| r.try_get("unread_count").unwrap_or(0)).unwrap_or(0)
+        } else {
+            0
+        }
+    } else {
+        let student_id = crate::authorization_helpers::AuthorizationScope::resolve_student_id(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            actor.id,
+        )
+        .await
+        .ok()
+        .flatten();
+
+        if let Some(sid) = student_id {
+            let count_row = sqlx::query(
+                r#"
+                SELECT COUNT(*)::bigint as unread_count
+                FROM inquiry_messages m
+                JOIN inquiry_threads t ON t.id = m.thread_id
+                WHERE t.tenant_id = $1 
+                  AND t.student_id = $2
+                  AND m.is_from_teacher = true
+                  AND m.created_at > COALESCE(t.student_last_read_at, '1970-01-01'::timestamptz)
+                "#
+            )
+            .bind(req_ctx.tenant_id)
+            .bind(sid)
+            .fetch_one(&ctx.pool)
+            .await;
+
+            use sqlx::Row;
+            count_row.map(|r| r.try_get("unread_count").unwrap_or(0)).unwrap_or(0)
+        } else {
+            0
+        }
+    };
+
+    Ok(Json(ApiResponse::success(
+        InquiryUnreadCountResponse { unread_count },
+        req_ctx.request_id,
+    )))
+}
+

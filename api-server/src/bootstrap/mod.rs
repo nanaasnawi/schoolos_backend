@@ -176,6 +176,7 @@ use crate::presentation::{
     learning::sessions::controller::session_routes,
     learning::syllabuses::controller::syllabus_routes,
     learning::inquiries::controller::inquiry_routes,
+    learning::library::controller::library_routes,
     notifications::controller::notification_routes, announcements::controller::announcement_routes,
     people::guardian::controller::guardian_routes,
     people::staff::controller::staff_routes, people::students::controller::student_routes,
@@ -935,6 +936,14 @@ impl Bootstrap {
             .nest(
                 "/api/v1/learning/inquiries",
                 inquiry_routes(),
+            )
+            .nest(
+                "/api/v1/learning/library",
+                library_routes()
+                    .layer(axum::middleware::from_fn_with_state(
+                        context.clone(),
+                        auth_middleware,
+                    )),
             )
             .nest(
                 "/api/v1/notifications",

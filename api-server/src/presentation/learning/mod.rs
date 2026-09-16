@@ -9,4 +9,5 @@ pub mod progress;
 pub mod quizzes;
 pub mod sessions;
 pub mod inquiries;
+pub mod library;
 pub mod syllabuses;

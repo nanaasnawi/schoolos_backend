@@ -414,7 +414,7 @@ async fn get_by_id(
             a.id, a.tenant_id, a.lesson_id, a.title, a.description, a.instructions,
             a.max_score, a.due_at, a.assignment_type, a.status, a.is_active,
             a.created_at, a.updated_at,
-            a.class_id,
+            a.class_id, a.teacher_id, a.created_by,
             c.name as "class_name?",
             sub.name as "subject_name?",
             t.full_name as "teacher_name?"
@@ -441,6 +441,17 @@ async fn get_by_id(
 
     match row {
         Some(r) => {
+            // Strict Cross-Class and Multi-Tenant Access Verification
+            crate::authorization_helpers::AuthorizationScope::verify_learning_resource_access(
+                &ctx.pool,
+                &req_ctx,
+                r.tenant_id,
+                r.class_id,
+                r.teacher_id,
+                r.created_by,
+            )
+            .await?;
+
             let resp = AssignmentResponse {
                 id: r.id,
                 tenant_id: r.tenant_id,
@@ -664,7 +675,58 @@ async fn submit(
         )
     })?;
 
-    let student_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
+    let assignment = sqlx::query!(
+        "SELECT tenant_id, class_id, teacher_id, created_by FROM assignments WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+        id,
+        req_ctx.tenant_id
+    )
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?
+    .ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::NotFound(
+                school_core::common::error_code::ErrorCode::AssignmentNotFound,
+                format!("Assignment {} not found", id),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    // Verify student belongs to the class of this assignment
+    crate::authorization_helpers::AuthorizationScope::verify_learning_resource_access(
+        &ctx.pool,
+        &req_ctx,
+        assignment.tenant_id,
+        assignment.class_id,
+        assignment.teacher_id,
+        assignment.created_by,
+    )
+    .await?;
+
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
+    let student_id = crate::authorization_helpers::AuthorizationScope::resolve_student_id(
+        &ctx.pool,
+        req_ctx.tenant_id,
+        actor_id,
+    )
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?
+    .unwrap_or(actor_id);
 
     let command = SubmitAssignmentCommand {
         tenant_id: req_ctx.tenant_id,
