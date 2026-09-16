@@ -5,6 +5,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sqlx::Row;
 use uuid::Uuid;
 
 use crate::{
@@ -198,20 +199,20 @@ async fn get_inquiry_detail(
     req_ctx: RequestContext,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<InquiryDetailDto>>, ApiError> {
-    let thread = sqlx::query!(
+    let thread_row = sqlx::query(
         r#"
         SELECT 
             t.id, t.student_id, t.student_name, t.student_class,
             t.teacher_id, t.teacher_name, t.subject_name, t.inquiry_type,
             t.reference_title, t.reference_id, t.status,
             t.last_message_content, t.last_message_at, t.created_at,
-            (SELECT COUNT(*)::bigint FROM inquiry_messages m WHERE m.thread_id = t.id) as "message_count!"
+            (SELECT COUNT(*)::bigint FROM inquiry_messages m WHERE m.thread_id = t.id) as message_count
         FROM inquiry_threads t
         WHERE t.id = $1 AND t.tenant_id = $2
         "#,
-        id,
-        req_ctx.tenant_id
     )
+    .bind(id)
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| {
@@ -231,6 +232,24 @@ async fn get_inquiry_detail(
             &req_ctx.request_id,
         )
     })?;
+
+    let thread = InquiryThreadDto {
+        id: thread_row.get("id"),
+        student_id: thread_row.get("student_id"),
+        student_name: thread_row.get("student_name"),
+        student_class: thread_row.get("student_class"),
+        teacher_id: thread_row.get("teacher_id"),
+        teacher_name: thread_row.get("teacher_name"),
+        subject_name: thread_row.get("subject_name"),
+        inquiry_type: thread_row.get("inquiry_type"),
+        reference_title: thread_row.get("reference_title"),
+        reference_id: thread_row.get("reference_id"),
+        status: thread_row.get("status"),
+        last_message_content: thread_row.get("last_message_content"),
+        last_message_at: thread_row.get("last_message_at"),
+        created_at: thread_row.get("created_at"),
+        message_count: thread_row.get("message_count"),
+    };
 
     // Cross-user access control check
     if let Some(ref actor) = req_ctx.actor {
@@ -642,11 +661,11 @@ async fn send_message(
         ));
     }
 
-    let thread = sqlx::query!(
+    let thread = sqlx::query(
         "SELECT tenant_id FROM inquiry_threads WHERE id = $1 AND tenant_id = $2",
-        id,
-        req_ctx.tenant_id
     )
+    .bind(id)
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| {
@@ -667,7 +686,7 @@ async fn send_message(
         )
     })?;
 
-    let effective_tenant_id = thread.tenant_id;
+    let effective_tenant_id: Uuid = thread.get("tenant_id");
 
     // Idempotent retry check: if client_message_id exists, return previously saved message
     if let Some(cid) = payload.client_message_id {

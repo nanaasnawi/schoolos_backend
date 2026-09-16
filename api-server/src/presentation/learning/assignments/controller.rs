@@ -3,6 +3,7 @@ use axum::{
     extract::{Path, State},
     routing::{get, post},
 };
+use sqlx::Row;
 use uuid::Uuid;
 
 use super::dto::{
@@ -408,16 +409,16 @@ async fn get_by_id(
         )
     })?;
 
-    let row = sqlx::query!(
+    let row = sqlx::query(
         r#"
         SELECT 
             a.id, a.tenant_id, a.lesson_id, a.title, a.description, a.instructions,
             a.max_score, a.due_at, a.assignment_type, a.status, a.is_active,
             a.created_at, a.updated_at,
             a.class_id, a.teacher_id, a.created_by,
-            c.name as "class_name?",
-            sub.name as "subject_name?",
-            t.full_name as "teacher_name?"
+            c.name as class_name,
+            sub.name as subject_name,
+            t.full_name as teacher_name
         FROM assignments a
         LEFT JOIN classes c ON c.id = a.class_id
         LEFT JOIN subjects sub ON sub.id = a.subject_id
@@ -425,9 +426,9 @@ async fn get_by_id(
         WHERE a.id = $1 AND a.tenant_id = $2 AND a.deleted_at IS NULL
         LIMIT 1
         "#,
-        id,
-        req_ctx.tenant_id
     )
+    .bind(id)
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| {
@@ -441,35 +442,40 @@ async fn get_by_id(
 
     match row {
         Some(r) => {
+            let tenant_id: Uuid = r.get("tenant_id");
+            let class_id: Option<Uuid> = r.get("class_id");
+            let teacher_id: Option<Uuid> = r.get("teacher_id");
+            let created_by: Option<Uuid> = r.get("created_by");
+
             // Strict Cross-Class and Multi-Tenant Access Verification
             crate::authorization_helpers::AuthorizationScope::verify_learning_resource_access(
                 &ctx.pool,
                 &req_ctx,
-                r.tenant_id,
-                r.class_id,
-                r.teacher_id,
-                r.created_by,
+                tenant_id,
+                class_id,
+                teacher_id,
+                created_by,
             )
             .await?;
 
             let resp = AssignmentResponse {
-                id: r.id,
-                tenant_id: r.tenant_id,
-                lesson_id: r.lesson_id,
-                title: r.title,
-                description: r.description,
-                instructions: r.instructions,
-                max_score: r.max_score,
-                due_at: r.due_at,
-                assignment_type: r.assignment_type,
-                status: r.status,
-                is_active: r.is_active,
-                created_at: r.created_at,
-                updated_at: r.updated_at,
-                class_id: r.class_id,
-                class_name: r.class_name,
-                subject_name: r.subject_name,
-                teacher_name: r.teacher_name,
+                id: r.get("id"),
+                tenant_id,
+                lesson_id: r.get("lesson_id"),
+                title: r.get("title"),
+                description: r.get("description"),
+                instructions: r.get("instructions"),
+                max_score: r.get("max_score"),
+                due_at: r.get("due_at"),
+                assignment_type: r.get("assignment_type"),
+                status: r.get("status"),
+                is_active: r.get("is_active"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+                class_id,
+                class_name: r.get("class_name"),
+                subject_name: r.get("subject_name"),
+                teacher_name: r.get("teacher_name"),
             };
             Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
         }
@@ -675,11 +681,11 @@ async fn submit(
         )
     })?;
 
-    let assignment = sqlx::query!(
-        "SELECT tenant_id, class_id, teacher_id, created_by FROM assignments WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
-        id,
-        req_ctx.tenant_id
+    let assignment = sqlx::query(
+        "SELECT tenant_id, class_id, teacher_id, created_by FROM assignments WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL"
     )
+    .bind(id)
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| {
@@ -700,14 +706,19 @@ async fn submit(
         )
     })?;
 
+    let assignment_tenant_id: Uuid = assignment.get("tenant_id");
+    let assignment_class_id: Option<Uuid> = assignment.get("class_id");
+    let assignment_teacher_id: Option<Uuid> = assignment.get("teacher_id");
+    let assignment_created_by: Option<Uuid> = assignment.get("created_by");
+
     // Verify student belongs to the class of this assignment
     crate::authorization_helpers::AuthorizationScope::verify_learning_resource_access(
         &ctx.pool,
         &req_ctx,
-        assignment.tenant_id,
-        assignment.class_id,
-        assignment.teacher_id,
-        assignment.created_by,
+        assignment_tenant_id,
+        assignment_class_id,
+        assignment_teacher_id,
+        assignment_created_by,
     )
     .await?;
 

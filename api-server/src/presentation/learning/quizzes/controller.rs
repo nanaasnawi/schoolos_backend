@@ -3,6 +3,7 @@ use axum::{
     extract::{Path, State},
     routing::{get, post},
 };
+use sqlx::Row;
 use uuid::Uuid;
 
 use super::dto::{
@@ -239,7 +240,7 @@ async fn list(
             teacher_name: r.teacher_name,
         }).collect()
     } else if is_student || is_parent {
-        let rows = sqlx::query!(
+        let rows = sqlx::query(
             r#"
             SELECT 
                 q.id, q.tenant_id, q.lesson_id, q.title, q.description, q.time_limit_minutes,
@@ -247,9 +248,9 @@ async fn list(
                 q.start_at, q.end_at, q.status, q.questions_count, q.is_active,
                 q.created_at, q.updated_at,
                 q.class_id,
-                c.name as "class_name?",
-                sub.name as "subject_name?",
-                t.full_name as "teacher_name?"
+                c.name as class_name,
+                sub.name as subject_name,
+                t.full_name as teacher_name
             FROM quizzes q
             LEFT JOIN classes c ON c.id = q.class_id
             LEFT JOIN subjects sub ON sub.id = q.subject_id
@@ -273,9 +274,9 @@ async fn list(
               )
             ORDER BY q.created_at DESC
             "#,
-            req_ctx.tenant_id,
-            actor_id
         )
+        .bind(req_ctx.tenant_id)
+        .bind(actor_id)
         .fetch_all(&ctx.pool)
         .await
         .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
@@ -283,28 +284,28 @@ async fn list(
         ), &req_ctx.request_id))?;
 
         rows.into_iter().map(|r| QuizResponse {
-            id: r.id,
-            tenant_id: r.tenant_id,
-            lesson_id: r.lesson_id,
-            title: r.title,
-            description: r.description,
-            duration_minutes: r.time_limit_minutes.unwrap_or(30),
-            passing_score: r.passing_score,
-            max_score: r.max_score,
-            max_attempts: r.max_attempts,
-            shuffle_questions: r.shuffle_questions,
-            shuffle_choices: r.shuffle_choices,
-            start_at: r.start_at,
-            end_at: r.end_at,
-            status: r.status,
-            questions_count: r.questions_count,
-            is_active: r.is_active,
-            created_at: r.created_at,
-            updated_at: r.updated_at,
-            class_id: r.class_id,
-            class_name: r.class_name,
-            subject_name: r.subject_name,
-            teacher_name: r.teacher_name,
+            id: r.get("id"),
+            tenant_id: r.get("tenant_id"),
+            lesson_id: r.get("lesson_id"),
+            title: r.get("title"),
+            description: r.get("description"),
+            duration_minutes: r.get::<Option<i32>, _>("time_limit_minutes").unwrap_or(30),
+            passing_score: r.get("passing_score"),
+            max_score: r.get("max_score"),
+            max_attempts: r.get("max_attempts"),
+            shuffle_questions: r.get("shuffle_questions"),
+            shuffle_choices: r.get("shuffle_choices"),
+            start_at: r.get("start_at"),
+            end_at: r.get("end_at"),
+            status: r.get("status"),
+            questions_count: r.get("questions_count"),
+            is_active: r.get("is_active"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
+            class_id: r.get("class_id"),
+            class_name: r.get("class_name"),
+            subject_name: r.get("subject_name"),
+            teacher_name: r.get("teacher_name"),
         }).collect()
     } else {
         let rows = sqlx::query!(
@@ -379,11 +380,11 @@ async fn get_by_id(
         )
     })?;
 
-    let meta = sqlx::query!(
+    let meta = sqlx::query(
         "SELECT tenant_id, class_id, teacher_id, created_by FROM quizzes WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
-        id,
-        req_ctx.tenant_id
     )
+    .bind(id)
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| {
@@ -404,14 +405,19 @@ async fn get_by_id(
         )
     })?;
 
+    let meta_tenant_id: Uuid = meta.get("tenant_id");
+    let meta_class_id: Option<Uuid> = meta.get("class_id");
+    let meta_teacher_id: Option<Uuid> = meta.get("teacher_id");
+    let meta_created_by: Option<Uuid> = meta.get("created_by");
+
     // Strict Cross-Class and Multi-Tenant Access Verification
     crate::authorization_helpers::AuthorizationScope::verify_learning_resource_access(
         &ctx.pool,
         &req_ctx,
-        meta.tenant_id,
-        meta.class_id,
-        meta.teacher_id,
-        meta.created_by,
+        meta_tenant_id,
+        meta_class_id,
+        meta_teacher_id,
+        meta_created_by,
     )
     .await?;
 
@@ -476,11 +482,11 @@ async fn start_attempt(
         )
     })?;
 
-    let meta = sqlx::query!(
+    let meta = sqlx::query(
         "SELECT tenant_id, class_id, teacher_id, created_by FROM quizzes WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
-        id,
-        req_ctx.tenant_id
     )
+    .bind(id)
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| {
@@ -501,14 +507,19 @@ async fn start_attempt(
         )
     })?;
 
+    let meta_tenant_id: Uuid = meta.get("tenant_id");
+    let meta_class_id: Option<Uuid> = meta.get("class_id");
+    let meta_teacher_id: Option<Uuid> = meta.get("teacher_id");
+    let meta_created_by: Option<Uuid> = meta.get("created_by");
+
     // Verify student belongs to the class of this quiz
     crate::authorization_helpers::AuthorizationScope::verify_learning_resource_access(
         &ctx.pool,
         &req_ctx,
-        meta.tenant_id,
-        meta.class_id,
-        meta.teacher_id,
-        meta.created_by,
+        meta_tenant_id,
+        meta_class_id,
+        meta_teacher_id,
+        meta_created_by,
     )
     .await?;
 
@@ -588,11 +599,11 @@ async fn submit_attempt(
         })?
         .unwrap_or(actor_id);
 
-        let attempt_owner = sqlx::query!(
+        let attempt_owner = sqlx::query(
             "SELECT student_id FROM quiz_attempts WHERE id = $1 AND tenant_id = $2",
-            attempt_id,
-            req_ctx.tenant_id
         )
+        .bind(attempt_id)
+        .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await
         .map_err(|e| {
@@ -613,7 +624,8 @@ async fn submit_attempt(
             )
         })?;
 
-        if attempt_owner.student_id != student_id {
+        let attempt_owner_id: Uuid = attempt_owner.get("student_id");
+        if attempt_owner_id != student_id {
             return Err(ApiError::new(
                 school_core::common::error::ApplicationError::Unauthorized(
                     school_core::common::error_code::ErrorCode::AuthPermissionDenied,
