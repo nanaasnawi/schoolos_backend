@@ -451,29 +451,20 @@ fn trigger_fcm_push_notification(title: String, content: String, category: Strin
             }
         };
 
-        // 2. Send High-Priority FCM Push Message
+        // 2. Send High-Priority FCM Push Message (Data-Only for Guaranteed Background Wakeup & Custom Lockscreen Banner)
         let fcm_url = format!("https://fcm.googleapis.com/v1/projects/{}/messages:send", project_id);
         let payload = serde_json::json!({
             "message": {
                 "topic": "school_announcements",
-                "notification": {
-                    "title": format!("📢 {}", title),
-                    "body": content
-                },
                 "data": {
                     "id": announcement_id.to_string(),
-                    "title": title,
+                    "title": format!("📢 {}", title),
                     "body": content,
                     "category": category
                 },
                 "android": {
                     "priority": "high",
-                    "notification": {
-                        "channel_id": "school_os_announcements",
-                        "sound": "default",
-                        "default_sound": true,
-                        "default_vibrate_timings": true
-                    }
+                    "ttl": "86400s"
                 }
             }
         });
