@@ -276,14 +276,15 @@ async fn assign_reading_material(
         payload.instructions.as_deref().unwrap_or("")
     );
 
-    let book_file_url = sqlx::query_scalar!(
-        "SELECT file_url FROM library_books WHERE id = $1",
-        payload.book_id
+    let book_file_url: Option<String> = sqlx::query_scalar::<_, String>(
+        "SELECT COALESCE(file_url, '') FROM library_books WHERE id = $1"
     )
+    .bind(payload.book_id)
     .fetch_optional(&ctx.pool)
     .await
     .ok()
-    .flatten();
+    .flatten()
+    .filter(|s| !s.is_empty());
 
     sqlx::query(
         r#"
@@ -320,10 +321,10 @@ async fn assign_reading_material(
 
     // Fetch teacher & class names for notifications
     let teacher_name = if let Some(aid) = actor_id {
-        sqlx::query_scalar!(
-            "SELECT full_name FROM users WHERE id = $1",
-            aid
+        sqlx::query_scalar::<_, String>(
+            "SELECT full_name FROM users WHERE id = $1"
         )
+        .bind(aid)
         .fetch_optional(&ctx.pool)
         .await
         .ok()
@@ -333,11 +334,11 @@ async fn assign_reading_material(
         "Guru Pengampu".to_string()
     };
 
-    let class_name = sqlx::query_scalar!(
-        "SELECT name FROM classes WHERE id = $1 AND tenant_id = $2",
-        payload.class_id,
-        req_ctx.tenant_id
+    let class_name = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM classes WHERE id = $1 AND tenant_id = $2"
     )
+    .bind(payload.class_id)
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .ok()
@@ -351,7 +352,7 @@ async fn assign_reading_material(
     );
 
     // Insert in-app notifications for all active enrolled students in this class
-    let _ = sqlx::query!(
+    let _ = sqlx::query(
         r#"
         INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, is_read, created_at)
         SELECT 
@@ -367,11 +368,11 @@ async fn assign_reading_material(
         FROM students s
         JOIN enrollments en ON en.student_id = s.id
         WHERE en.class_id = $3 AND (en.status = 'Active' OR en.status = 'ACTIVE')
-        "#,
-        notif_title,
-        notif_body,
-        payload.class_id
+        "#
     )
+    .bind(&notif_title)
+    .bind(&notif_body)
+    .bind(payload.class_id)
     .execute(&ctx.pool)
     .await;
 

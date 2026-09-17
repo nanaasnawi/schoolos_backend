@@ -136,10 +136,10 @@ async fn create(
 
     // Trigger in-app and FCM push notifications to enrolled students
     let teacher_name = if let Some(aid) = actor_id {
-        sqlx::query_scalar!(
-            "SELECT full_name FROM users WHERE id = $1",
-            aid
+        sqlx::query_scalar::<_, String>(
+            "SELECT full_name FROM users WHERE id = $1"
         )
+        .bind(aid)
         .fetch_optional(&ctx.pool)
         .await
         .ok()
@@ -152,11 +152,11 @@ async fn create(
     let notif_title = format!("📚 Materi Baru: {}", material.title);
 
     if let Some(cid) = target_class_id {
-        let class_name = sqlx::query_scalar!(
-            "SELECT name FROM classes WHERE id = $1 AND tenant_id = $2",
-            cid,
-            req_ctx.tenant_id
+        let class_name = sqlx::query_scalar::<_, String>(
+            "SELECT name FROM classes WHERE id = $1 AND tenant_id = $2"
         )
+        .bind(cid)
+        .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await
         .ok()
@@ -168,7 +168,7 @@ async fn create(
             teacher_name, class_name
         );
 
-        let _ = sqlx::query!(
+        let _ = sqlx::query(
             r#"
             INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, is_read, created_at)
             SELECT 
@@ -184,11 +184,11 @@ async fn create(
             FROM students s
             JOIN enrollments en ON en.student_id = s.id
             WHERE en.class_id = $3 AND (en.status = 'Active' OR en.status = 'ACTIVE')
-            "#,
-            notif_title,
-            notif_body,
-            cid
+            "#
         )
+        .bind(&notif_title)
+        .bind(&notif_body)
+        .bind(cid)
         .execute(&ctx.pool)
         .await;
 
@@ -204,7 +204,7 @@ async fn create(
             teacher_name, material.title
         );
 
-        let _ = sqlx::query!(
+        let _ = sqlx::query(
             r#"
             INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, is_read, created_at)
             SELECT 
@@ -219,11 +219,11 @@ async fn create(
                 NOW()
             FROM students s
             WHERE s.tenant_id = $3
-            "#,
-            notif_title,
-            notif_body,
-            req_ctx.tenant_id
+            "#
         )
+        .bind(&notif_title)
+        .bind(&notif_body)
+        .bind(req_ctx.tenant_id)
         .execute(&ctx.pool)
         .await;
 
