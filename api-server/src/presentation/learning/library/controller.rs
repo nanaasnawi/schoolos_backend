@@ -276,14 +276,23 @@ async fn assign_reading_material(
         payload.instructions.as_deref().unwrap_or("")
     );
 
+    let book_file_url = sqlx::query_scalar!(
+        "SELECT file_url FROM library_books WHERE id = $1",
+        payload.book_id
+    )
+    .fetch_optional(&ctx.pool)
+    .await
+    .ok()
+    .flatten();
+
     sqlx::query(
         r#"
         INSERT INTO learning_materials (
             id, tenant_id, class_id, subject_id, teacher_id, created_by,
-            material_type, title, description, is_active, source_type,
+            material_type, title, description, external_url, is_active, source_type,
             library_book_id, start_page, end_page, created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, 'document', $7, $8, true, 'LIBRARY', $9, $10, $11, NOW(), NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, 'document', $7, $8, $9, true, 'LIBRARY', $10, $11, $12, NOW(), NOW())
         "#
     )
     .bind(material_id)
@@ -294,6 +303,7 @@ async fn assign_reading_material(
     .bind(actor_id)
     .bind(&payload.title)
     .bind(&description)
+    .bind(&book_file_url)
     .bind(payload.book_id)
     .bind(payload.start_page)
     .bind(payload.end_page)
@@ -307,6 +317,71 @@ async fn assign_reading_material(
             &req_ctx.request_id,
         )
     })?;
+
+    // Fetch teacher & class names for notifications
+    let teacher_name = if let Some(aid) = actor_id {
+        sqlx::query_scalar!(
+            "SELECT full_name FROM users WHERE id = $1",
+            aid
+        )
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "Guru Pengampu".to_string())
+    } else {
+        "Guru Pengampu".to_string()
+    };
+
+    let class_name = sqlx::query_scalar!(
+        "SELECT name FROM classes WHERE id = $1 AND tenant_id = $2",
+        payload.class_id,
+        req_ctx.tenant_id
+    )
+    .fetch_optional(&ctx.pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| "Kelas".to_string());
+
+    let notif_title = format!("📚 Materi Baru: {}", payload.title);
+    let notif_body = format!(
+        "{} telah menugaskan materi bacaan baru untuk kelas {}. Buka dan pelajari sekarang!",
+        teacher_name, class_name
+    );
+
+    // Insert in-app notifications for all active enrolled students in this class
+    let _ = sqlx::query!(
+        r#"
+        INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, is_read, created_at)
+        SELECT 
+            gen_random_uuid(),
+            s.tenant_id,
+            s.user_id,
+            $1,
+            $2,
+            'LEARNING_MATERIAL',
+            'in_app',
+            FALSE,
+            NOW()
+        FROM students s
+        JOIN enrollments en ON en.student_id = s.id
+        WHERE en.class_id = $3 AND (en.status = 'Active' OR en.status = 'ACTIVE')
+        "#,
+        notif_title,
+        notif_body,
+        payload.class_id
+    )
+    .execute(&ctx.pool)
+    .await;
+
+    // Trigger high-priority FCM push notification (wakes up lockscreen & alerts students)
+    crate::infrastructure::fcm::trigger_fcm_push_notification(
+        notif_title,
+        notif_body,
+        "Materi Pembelajaran".to_string(),
+        material_id,
+    );
 
     Ok(Json(ApiResponse::success(material_id, req_ctx.request_id)))
 }

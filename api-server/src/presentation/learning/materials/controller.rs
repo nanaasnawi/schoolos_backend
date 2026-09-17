@@ -3,6 +3,7 @@ use axum::{
     extract::{Path, State, Multipart, DefaultBodyLimit},
     routing::{get, post},
 };
+use sqlx::Row;
 use uuid::Uuid;
 
 
@@ -18,7 +19,6 @@ use crate::{
 use school_core::learning::application::learning_material::{
     create_learning_material::CreateLearningMaterialCommand,
     delete_learning_material::DeleteLearningMaterialCommand,
-    get_learning_material::GetLearningMaterialQuery,
     update_learning_material::UpdateLearningMaterialCommand,
 };
 
@@ -134,6 +134,107 @@ async fn create(
     .execute(&ctx.pool)
     .await;
 
+    // Trigger in-app and FCM push notifications to enrolled students
+    let teacher_name = if let Some(aid) = actor_id {
+        sqlx::query_scalar!(
+            "SELECT full_name FROM users WHERE id = $1",
+            aid
+        )
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "Guru Pengampu".to_string())
+    } else {
+        "Guru Pengampu".to_string()
+    };
+
+    let notif_title = format!("📚 Materi Baru: {}", material.title);
+
+    if let Some(cid) = target_class_id {
+        let class_name = sqlx::query_scalar!(
+            "SELECT name FROM classes WHERE id = $1 AND tenant_id = $2",
+            cid,
+            req_ctx.tenant_id
+        )
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "Kelas".to_string());
+
+        let notif_body = format!(
+            "{} telah menambahkan modul pembelajaran baru untuk kelas {}. Pelajari sekarang!",
+            teacher_name, class_name
+        );
+
+        let _ = sqlx::query!(
+            r#"
+            INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, is_read, created_at)
+            SELECT 
+                gen_random_uuid(),
+                s.tenant_id,
+                s.user_id,
+                $1,
+                $2,
+                'LEARNING_MATERIAL',
+                'in_app',
+                FALSE,
+                NOW()
+            FROM students s
+            JOIN enrollments en ON en.student_id = s.id
+            WHERE en.class_id = $3 AND (en.status = 'Active' OR en.status = 'ACTIVE')
+            "#,
+            notif_title,
+            notif_body,
+            cid
+        )
+        .execute(&ctx.pool)
+        .await;
+
+        crate::infrastructure::fcm::trigger_fcm_push_notification(
+            notif_title,
+            notif_body,
+            "Materi Pembelajaran".to_string(),
+            material.id,
+        );
+    } else {
+        let notif_body = format!(
+            "{} telah menambahkan modul pembelajaran baru: {}. Pelajari sekarang!",
+            teacher_name, material.title
+        );
+
+        let _ = sqlx::query!(
+            r#"
+            INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, is_read, created_at)
+            SELECT 
+                gen_random_uuid(),
+                s.tenant_id,
+                s.user_id,
+                $1,
+                $2,
+                'LEARNING_MATERIAL',
+                'in_app',
+                FALSE,
+                NOW()
+            FROM students s
+            WHERE s.tenant_id = $3
+            "#,
+            notif_title,
+            notif_body,
+            req_ctx.tenant_id
+        )
+        .execute(&ctx.pool)
+        .await;
+
+        crate::infrastructure::fcm::trigger_fcm_push_notification(
+            notif_title,
+            notif_body,
+            "Materi Pembelajaran".to_string(),
+            material.id,
+        );
+    }
+
     Ok(Json(ApiResponse::success(
         LearningMaterialResponse::from(material),
         req_ctx.request_id,
@@ -180,14 +281,26 @@ async fn list(
 
     let items: Vec<LearningMaterialResponse> = if is_teacher {
         // Teacher strictly sees ONLY materials they created or are assigned to them
-        let rows = sqlx::query!(
+        let rows = sqlx::query(
             r#"
             SELECT 
                 m.id, m.tenant_id, m.lesson_id, m.material_type, m.title, m.description, 
-                m.storage_key, m.external_url, m.order_index, m.visibility, m.is_active, 
+                m.storage_key, COALESCE(m.external_url, lb.file_url) as external_url,
+                m.order_index, m.visibility, m.is_active, 
                 m.created_at, m.updated_at,
-                (SELECT COUNT(*)::bigint FROM student_material_completions smc WHERE smc.material_id = m.id) as "completed_count!"
+                m.class_id, c.name as class_name,
+                m.teacher_id,
+                COALESCE(ut.full_name, uc.full_name, 'Guru Pengampu') as teacher_name,
+                COALESCE(s.name, lb.subject_name, 'Umum') as subject_name,
+                m.start_page, m.end_page,
+                (SELECT COUNT(*)::bigint FROM student_material_completions smc WHERE smc.material_id = m.id) as completed_count
             FROM learning_materials m
+            LEFT JOIN classes c ON c.id = m.class_id
+            LEFT JOIN subjects s ON s.id = m.subject_id
+            LEFT JOIN teachers t ON t.id = m.teacher_id
+            LEFT JOIN users ut ON ut.id = t.user_id
+            LEFT JOIN users uc ON uc.id = m.created_by
+            LEFT JOIN library_books lb ON lb.id = m.library_book_id
             WHERE m.tenant_id = $1 
               AND m.deleted_at IS NULL
               AND (
@@ -195,10 +308,10 @@ async fn list(
                   OR m.teacher_id IN (SELECT id FROM teachers WHERE user_id = $2)
               )
             ORDER BY m.created_at DESC
-            "#,
-            req_ctx.tenant_id,
-            actor_id
+            "#
         )
+        .bind(req_ctx.tenant_id)
+        .bind(actor_id)
         .fetch_all(&ctx.pool)
         .await
         .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
@@ -206,32 +319,51 @@ async fn list(
         ), &req_ctx.request_id))?;
 
         rows.into_iter().map(|r| LearningMaterialResponse {
-            id: r.id,
-            tenant_id: r.tenant_id,
-            lesson_id: r.lesson_id,
-            material_type: r.material_type,
-            title: r.title,
-            description: r.description,
-            storage_key: r.storage_key,
-            external_url: r.external_url,
-            order_index: r.order_index,
-            visibility: r.visibility,
-            is_active: r.is_active,
-            created_at: r.created_at,
-            updated_at: r.updated_at,
+            id: r.get("id"),
+            tenant_id: r.get("tenant_id"),
+            lesson_id: r.get("lesson_id"),
+            material_type: r.get("material_type"),
+            title: r.get("title"),
+            description: r.get("description"),
+            storage_key: r.get("storage_key"),
+            external_url: r.get("external_url"),
+            order_index: r.get("order_index"),
+            visibility: r.get("visibility"),
+            is_active: r.get("is_active"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
             is_completed: None,
-            completed_count: Some(r.completed_count),
+            completed_count: r.get("completed_count"),
+            teacher_name: r.get("teacher_name"),
+            teacher_id: r.get("teacher_id"),
+            class_name: r.get("class_name"),
+            class_id: r.get("class_id"),
+            subject_name: r.get("subject_name"),
+            start_page: r.get("start_page"),
+            end_page: r.get("end_page"),
         }).collect()
     } else if is_student && !is_admin {
         // Student sees materials ONLY for their active enrolled classes (Paket A / B / C strictly isolated)
-        let rows = sqlx::query!(
+        let rows = sqlx::query(
             r#"
             SELECT 
                 m.id, m.tenant_id, m.lesson_id, m.material_type, m.title, m.description, 
-                m.storage_key, m.external_url, m.order_index, m.visibility, m.is_active, 
+                m.storage_key, COALESCE(m.external_url, lb.file_url) as external_url,
+                m.order_index, m.visibility, m.is_active, 
                 m.created_at, m.updated_at,
-                (smc.id IS NOT NULL) as "is_completed!"
+                m.class_id, c.name as class_name,
+                m.teacher_id,
+                COALESCE(ut.full_name, uc.full_name, 'Guru Pengampu') as teacher_name,
+                COALESCE(s.name, lb.subject_name, 'Umum') as subject_name,
+                m.start_page, m.end_page,
+                (smc.id IS NOT NULL) as is_completed
             FROM learning_materials m
+            LEFT JOIN classes c ON c.id = m.class_id
+            LEFT JOIN subjects s ON s.id = m.subject_id
+            LEFT JOIN teachers t ON t.id = m.teacher_id
+            LEFT JOIN users ut ON ut.id = t.user_id
+            LEFT JOIN users uc ON uc.id = m.created_by
+            LEFT JOIN library_books lb ON lb.id = m.library_book_id
             LEFT JOIN student_material_completions smc 
                 ON smc.material_id = m.id 
                 AND smc.student_id IN (SELECT id FROM students WHERE user_id = $2)
@@ -245,10 +377,10 @@ async fn list(
                   WHERE s.user_id = $2 AND (en.status = 'Active' OR en.status = 'ACTIVE')
               )
             ORDER BY m.created_at DESC
-            "#,
-            req_ctx.tenant_id,
-            actor_id
+            "#
         )
+        .bind(req_ctx.tenant_id)
+        .bind(actor_id)
         .fetch_all(&ctx.pool)
         .await
         .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
@@ -256,37 +388,56 @@ async fn list(
         ), &req_ctx.request_id))?;
 
         rows.into_iter().map(|r| LearningMaterialResponse {
-            id: r.id,
-            tenant_id: r.tenant_id,
-            lesson_id: r.lesson_id,
-            material_type: r.material_type,
-            title: r.title,
-            description: r.description,
-            storage_key: r.storage_key,
-            external_url: r.external_url,
-            order_index: r.order_index,
-            visibility: r.visibility,
-            is_active: r.is_active,
-            created_at: r.created_at,
-            updated_at: r.updated_at,
-            is_completed: Some(r.is_completed),
+            id: r.get("id"),
+            tenant_id: r.get("tenant_id"),
+            lesson_id: r.get("lesson_id"),
+            material_type: r.get("material_type"),
+            title: r.get("title"),
+            description: r.get("description"),
+            storage_key: r.get("storage_key"),
+            external_url: r.get("external_url"),
+            order_index: r.get("order_index"),
+            visibility: r.get("visibility"),
+            is_active: r.get("is_active"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
+            is_completed: Some(r.get("is_completed")),
             completed_count: None,
+            teacher_name: r.get("teacher_name"),
+            teacher_id: r.get("teacher_id"),
+            class_name: r.get("class_name"),
+            class_id: r.get("class_id"),
+            subject_name: r.get("subject_name"),
+            start_page: r.get("start_page"),
+            end_page: r.get("end_page"),
         }).collect()
     } else if is_admin {
         // Super Admin / Kepala Sekolah / Staf sees all materials in tenant
-        let rows = sqlx::query!(
+        let rows = sqlx::query(
             r#"
             SELECT 
                 m.id, m.tenant_id, m.lesson_id, m.material_type, m.title, m.description, 
-                m.storage_key, m.external_url, m.order_index, m.visibility, m.is_active, 
+                m.storage_key, COALESCE(m.external_url, lb.file_url) as external_url,
+                m.order_index, m.visibility, m.is_active, 
                 m.created_at, m.updated_at,
-                (SELECT COUNT(*)::bigint FROM student_material_completions smc WHERE smc.material_id = m.id) as "completed_count!"
+                m.class_id, c.name as class_name,
+                m.teacher_id,
+                COALESCE(ut.full_name, uc.full_name, 'Guru Pengampu') as teacher_name,
+                COALESCE(s.name, lb.subject_name, 'Umum') as subject_name,
+                m.start_page, m.end_page,
+                (SELECT COUNT(*)::bigint FROM student_material_completions smc WHERE smc.material_id = m.id) as completed_count
             FROM learning_materials m
+            LEFT JOIN classes c ON c.id = m.class_id
+            LEFT JOIN subjects s ON s.id = m.subject_id
+            LEFT JOIN teachers t ON t.id = m.teacher_id
+            LEFT JOIN users ut ON ut.id = t.user_id
+            LEFT JOIN users uc ON uc.id = m.created_by
+            LEFT JOIN library_books lb ON lb.id = m.library_book_id
             WHERE m.tenant_id = $1 AND m.deleted_at IS NULL
             ORDER BY m.created_at DESC
-            "#,
-            req_ctx.tenant_id
+            "#
         )
+        .bind(req_ctx.tenant_id)
         .fetch_all(&ctx.pool)
         .await
         .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
@@ -294,21 +445,28 @@ async fn list(
         ), &req_ctx.request_id))?;
 
         rows.into_iter().map(|r| LearningMaterialResponse {
-            id: r.id,
-            tenant_id: r.tenant_id,
-            lesson_id: r.lesson_id,
-            material_type: r.material_type,
-            title: r.title,
-            description: r.description,
-            storage_key: r.storage_key,
-            external_url: r.external_url,
-            order_index: r.order_index,
-            visibility: r.visibility,
-            is_active: r.is_active,
-            created_at: r.created_at,
-            updated_at: r.updated_at,
+            id: r.get("id"),
+            tenant_id: r.get("tenant_id"),
+            lesson_id: r.get("lesson_id"),
+            material_type: r.get("material_type"),
+            title: r.get("title"),
+            description: r.get("description"),
+            storage_key: r.get("storage_key"),
+            external_url: r.get("external_url"),
+            order_index: r.get("order_index"),
+            visibility: r.get("visibility"),
+            is_active: r.get("is_active"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
             is_completed: None,
-            completed_count: Some(r.completed_count),
+            completed_count: r.get("completed_count"),
+            teacher_name: r.get("teacher_name"),
+            teacher_id: r.get("teacher_id"),
+            class_name: r.get("class_name"),
+            class_id: r.get("class_id"),
+            subject_name: r.get("subject_name"),
+            start_page: r.get("start_page"),
+            end_page: r.get("end_page"),
         }).collect()
     } else {
         vec![]
@@ -414,16 +572,45 @@ async fn get_by_id(
         }
     }
 
-    let query = GetLearningMaterialQuery {
-        tenant_id: req_ctx.tenant_id,
-        material_id: id,
-    };
+    let row_opt = sqlx::query(
+        r#"
+        SELECT 
+            m.id, m.tenant_id, m.lesson_id, m.material_type, m.title, m.description, 
+            m.storage_key, COALESCE(m.external_url, lb.file_url) as external_url,
+            m.order_index, m.visibility, m.is_active, 
+            m.created_at, m.updated_at,
+            m.class_id, c.name as class_name,
+            m.teacher_id,
+            COALESCE(ut.full_name, uc.full_name, 'Guru Pengampu') as teacher_name,
+            COALESCE(s.name, lb.subject_name, 'Umum') as subject_name,
+            m.start_page, m.end_page
+        FROM learning_materials m
+        LEFT JOIN classes c ON c.id = m.class_id
+        LEFT JOIN subjects s ON s.id = m.subject_id
+        LEFT JOIN teachers t ON t.id = m.teacher_id
+        LEFT JOIN users ut ON ut.id = t.user_id
+        LEFT JOIN users uc ON uc.id = m.created_by
+        LEFT JOIN library_books lb ON lb.id = m.library_book_id
+        WHERE m.id = $1 AND m.tenant_id = $2 AND m.deleted_at IS NULL
+        "#
+    )
+    .bind(id)
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
+        school_core::common::error::InfrastructureError::Database(e)
+    ), &req_ctx.request_id))?;
 
-    let material = ctx
-        .get_learning_material
-        .execute(query)
-        .await
-        .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
+    let row = row_opt.ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::NotFound(
+                school_core::common::error_code::ErrorCode::LearningMaterialNotFound,
+                format!("Learning material {} not found", id),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
 
     let is_completed = if is_student {
         sqlx::query_scalar!(
@@ -449,9 +636,30 @@ async fn get_by_id(
     .await
     .ok();
 
-    let mut resp = LearningMaterialResponse::from(material);
-    resp.is_completed = is_completed;
-    resp.completed_count = completed_count;
+    let resp = LearningMaterialResponse {
+        id: row.get("id"),
+        tenant_id: row.get("tenant_id"),
+        lesson_id: row.get("lesson_id"),
+        material_type: row.get("material_type"),
+        title: row.get("title"),
+        description: row.get("description"),
+        storage_key: row.get("storage_key"),
+        external_url: row.get("external_url"),
+        order_index: row.get("order_index"),
+        visibility: row.get("visibility"),
+        is_active: row.get("is_active"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        is_completed,
+        completed_count,
+        teacher_name: row.get("teacher_name"),
+        teacher_id: row.get("teacher_id"),
+        class_name: row.get("class_name"),
+        class_id: row.get("class_id"),
+        subject_name: row.get("subject_name"),
+        start_page: row.get("start_page"),
+        end_page: row.get("end_page"),
+    };
 
     Ok(Json(ApiResponse::success(
         resp,

@@ -23,6 +23,20 @@ pub struct LearningMaterialResponse {
     pub is_completed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub teacher_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub teacher_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_page: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_page: Option<i32>,
 }
 
 impl From<LearningMaterial> for LearningMaterialResponse {
@@ -43,6 +57,13 @@ impl From<LearningMaterial> for LearningMaterialResponse {
             updated_at: m.updated_at,
             is_completed: None,
             completed_count: None,
+            teacher_name: None,
+            teacher_id: None,
+            class_name: None,
+            class_id: None,
+            subject_name: None,
+            start_page: None,
+            end_page: None,
         }
     }
 }
