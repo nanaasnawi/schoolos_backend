@@ -74,7 +74,7 @@ async fn create(
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
-    let teacher_id = if let Some(aid) = actor_id {
+    let resolved_actor_teacher_id = if let Some(aid) = actor_id {
         sqlx::query_scalar!(r#"SELECT id FROM teachers WHERE user_id = $1 LIMIT 1"#, aid)
             .fetch_optional(&ctx.pool)
             .await
@@ -83,6 +83,7 @@ async fn create(
     } else {
         None
     };
+    let teacher_id = payload.teacher_id.or(resolved_actor_teacher_id);
 
     // Resolve class_id from UUID or class name string (e.g. "PAKET C10")
     let target_class_id: Option<Uuid> = match payload.class_id {
@@ -135,7 +136,17 @@ async fn create(
     .await;
 
     // Trigger in-app and FCM push notifications to enrolled students
-    let teacher_name = if let Some(aid) = actor_id {
+    let teacher_name = if let Some(tid) = teacher_id {
+        sqlx::query_scalar::<_, String>(
+            "SELECT u.full_name FROM teachers t JOIN users u ON u.id = t.user_id WHERE t.id = $1"
+        )
+        .bind(tid)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "Guru Pengampu".to_string())
+    } else if let Some(aid) = actor_id {
         sqlx::query_scalar::<_, String>(
             "SELECT full_name FROM users WHERE id = $1"
         )

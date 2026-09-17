@@ -13,4 +13,6 @@ pub struct CreateLearningMaterialRequest {
     pub order_index: i32,
     pub visibility: String,
     pub class_id: Option<String>,
+    #[serde(default)]
+    pub teacher_id: Option<Uuid>,
 }
