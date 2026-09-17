@@ -91,18 +91,56 @@ async fn list_books(
         r#"
         SELECT 
             b.id, b.title, b.author, b.publisher, b.subject_id,
-            sub.name as subject_name,
+            COALESCE(sub.name, b.subject_name) as subject_name,
             b.grade_level_id,
-            gl.name as grade_level_name,
+            COALESCE(gl.name, CASE WHEN b.class_level IS NOT NULL THEN 'Kelas ' || b.class_level ELSE NULL END) as grade_level_name,
             b.total_pages, b.cover_url, b.file_url
         FROM library_books b
-        LEFT JOIN subjects sub ON sub.id = b.subject_id
-        LEFT JOIN grade_levels gl ON gl.id = b.grade_level_id
-        WHERE b.tenant_id = $1
-          AND ($2::uuid IS NULL OR b.subject_id = $2)
-          AND ($3::uuid IS NULL OR b.grade_level_id = $3)
+        LEFT JOIN subjects sub ON sub.id = b.subject_id AND sub.tenant_id = $1
+        LEFT JOIN grade_levels gl ON gl.id = b.grade_level_id AND gl.tenant_id = $1
+        WHERE (b.tenant_id = $1 OR b.tenant_id IS NULL)
+          AND (
+            $2::uuid IS NULL 
+            OR b.subject_id = $2
+            OR (
+                b.canonical_subject IS NOT NULL 
+                AND EXISTS (
+                    SELECT 1 FROM subjects s 
+                    WHERE s.id = $2 AND s.tenant_id = $1 
+                      AND (
+                        (b.canonical_subject = 'MATEMATIKA' AND (s.code LIKE '4010%' OR s.name ILIKE '%Matematika%'))
+                        OR (b.canonical_subject = 'BAHASA_INDONESIA' AND (s.code LIKE '3001%' OR s.name ILIKE '%Indonesia%'))
+                        OR (b.canonical_subject = 'BAHASA_INGGRIS' AND (s.code LIKE '3002%' OR s.name ILIKE '%Inggris%'))
+                        OR (b.canonical_subject = 'FISIKA' AND (s.name ILIKE '%Fisika%'))
+                        OR (b.canonical_subject = 'BIOLOGI' AND (s.name ILIKE '%Biologi%'))
+                        OR (b.canonical_subject = 'KIMIA' AND (s.name ILIKE '%Kimia%'))
+                        OR (b.canonical_subject = 'INFORMATIKA' AND (s.code LIKE '700%' OR s.name ILIKE '%Informatika%' OR s.name ILIKE '%Komputer%'))
+                        OR (b.canonical_subject = 'PENDIDIKAN_PANCASILA' AND (s.code LIKE '200%' OR s.name ILIKE '%Pancasila%' OR s.name ILIKE '%PPKn%'))
+                        OR (b.canonical_subject = 'PJOK' AND (s.code LIKE '500%' OR s.name ILIKE '%Jasmani%' OR s.name ILIKE '%PJOK%'))
+                        OR (b.canonical_subject = 'PENDIDIKAN_AGAMA_ISLAM' AND (s.code LIKE '100%' OR s.name ILIKE '%Agama Islam%'))
+                        OR (b.canonical_subject = 'SEJARAH' AND (s.name ILIKE '%Sejarah%'))
+                        OR (b.canonical_subject = 'GEOGRAFI' AND (s.name ILIKE '%Geografi%'))
+                        OR (b.canonical_subject = 'EKONOMI' AND (s.name ILIKE '%Ekonomi%'))
+                        OR (b.canonical_subject = 'SOSIOLOGI' AND (s.name ILIKE '%Sosiologi%'))
+                        OR (b.canonical_subject = 'SENI_BUDAYA' AND (s.code LIKE '843%' OR s.name ILIKE '%Seni%'))
+                        OR (b.subject_name IS NOT NULL AND (s.name ILIKE '%' || b.subject_name || '%' OR b.subject_name ILIKE '%' || s.name || '%'))
+                      )
+                )
+            )
+          )
+          AND (
+            $3::uuid IS NULL 
+            OR b.grade_level_id = $3
+            OR (
+                b.class_level IS NOT NULL 
+                AND EXISTS (
+                    SELECT 1 FROM grade_levels g 
+                    WHERE g.id = $3 AND g.tenant_id = $1 AND g.level = b.class_level
+                )
+            )
+          )
           AND ($4::text IS NULL OR b.title ILIKE '%' || $4 || '%' OR b.author ILIKE '%' || $4 || '%')
-        ORDER BY b.title ASC
+        ORDER BY (b.tenant_id IS NOT NULL) DESC, b.title ASC
         "#
     )
     .bind(req_ctx.tenant_id)
@@ -149,14 +187,14 @@ async fn get_book_detail(
         r#"
         SELECT 
             b.id, b.title, b.author, b.publisher, b.subject_id,
-            sub.name as subject_name,
+            COALESCE(sub.name, b.subject_name) as subject_name,
             b.grade_level_id,
-            gl.name as grade_level_name,
+            COALESCE(gl.name, CASE WHEN b.class_level IS NOT NULL THEN 'Kelas ' || b.class_level ELSE NULL END) as grade_level_name,
             b.total_pages, b.cover_url, b.file_url
         FROM library_books b
-        LEFT JOIN subjects sub ON sub.id = b.subject_id
-        LEFT JOIN grade_levels gl ON gl.id = b.grade_level_id
-        WHERE b.id = $1 AND b.tenant_id = $2
+        LEFT JOIN subjects sub ON sub.id = b.subject_id AND sub.tenant_id = $2
+        LEFT JOIN grade_levels gl ON gl.id = b.grade_level_id AND gl.tenant_id = $2
+        WHERE b.id = $1 AND (b.tenant_id = $2 OR b.tenant_id IS NULL)
         LIMIT 1
         "#
     )
