@@ -191,33 +191,41 @@ async fn list(
     let is_teacher = req_ctx
         .actor
         .as_ref()
-        .map(|a| a.roles.iter().any(|r| r.name == "Guru"))
-        .unwrap_or(false);
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("guru") || n.contains("teacher") || n.contains("pengajar")
+            })
+        })
+        .unwrap_or(false)
+        || crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(&ctx.pool, req_ctx.tenant_id, actor_id.unwrap_or_default()).await.ok().flatten().is_some();
     let is_parent = req_ctx
         .actor
         .as_ref()
-        .map(|a| a.roles.iter().any(|r| {
-            let n = r.name.to_lowercase();
-            n.contains("wali") || n.contains("parent") || n.contains("guardian") || n.contains("ortu")
-        }))
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("wali") || n.contains("parent") || n.contains("guardian") || n.contains("ortu")
+            })
+        })
         .unwrap_or(false);
-    let is_student = !is_parent && req_ctx
+    let is_student = !is_parent && !is_teacher && req_ctx
         .actor
         .as_ref()
         .map(|a| a.roles.iter().any(|r| r.name == "Siswa"))
         .unwrap_or(false);
 
     let items: Vec<AssignmentResponse> = if is_teacher {
-        let rows = sqlx::query!(
+        let rows = sqlx::query(
             r#"
             SELECT 
                 a.id, a.tenant_id, a.lesson_id, a.title, a.description, a.instructions,
                 a.max_score, a.due_at, a.assignment_type, a.status, a.is_active,
                 a.created_at, a.updated_at,
                 a.class_id,
-                c.name as "class_name?",
-                sub.name as "subject_name?",
-                t.full_name as "teacher_name?"
+                c.name as class_name,
+                sub.name as subject_name,
+                t.full_name as teacher_name
             FROM assignments a
             LEFT JOIN classes c ON c.id = a.class_id
             LEFT JOIN subjects sub ON sub.id = a.subject_id
@@ -226,14 +234,13 @@ async fn list(
               AND a.deleted_at IS NULL
               AND (
                   a.created_by = $2 
-                  OR a.teacher_id IN (SELECT id FROM teachers WHERE user_id = $2)
-                  OR a.teacher_id IS NULL
+                  OR a.teacher_id IN (SELECT id FROM teachers WHERE user_id = $2 AND tenant_id = $1)
               )
             ORDER BY a.created_at DESC
             "#,
-            req_ctx.tenant_id,
-            actor_id
         )
+        .bind(req_ctx.tenant_id)
+        .bind(actor_id)
         .fetch_all(&ctx.pool)
         .await
         .map_err(|e| {
@@ -247,23 +254,23 @@ async fn list(
 
         rows.into_iter()
             .map(|r| AssignmentResponse {
-                id: r.id,
-                tenant_id: r.tenant_id,
-                lesson_id: r.lesson_id,
-                title: r.title,
-                description: r.description,
-                instructions: r.instructions,
-                max_score: r.max_score,
-                due_at: r.due_at,
-                assignment_type: r.assignment_type,
-                status: r.status,
-                is_active: r.is_active,
-                created_at: r.created_at,
-                updated_at: r.updated_at,
-                class_id: r.class_id,
-                class_name: r.class_name,
-                subject_name: r.subject_name,
-                teacher_name: r.teacher_name,
+                id: r.get("id"),
+                tenant_id: r.get("tenant_id"),
+                lesson_id: r.get("lesson_id"),
+                title: r.get("title"),
+                description: r.get("description"),
+                instructions: r.get("instructions"),
+                max_score: r.get("max_score"),
+                due_at: r.get("due_at"),
+                assignment_type: r.get("assignment_type"),
+                status: r.get("status"),
+                is_active: r.get("is_active"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+                class_id: r.get("class_id"),
+                class_name: r.get("class_name"),
+                subject_name: r.get("subject_name"),
+                teacher_name: r.get("teacher_name"),
             })
             .collect()
     } else if is_student || is_parent {
@@ -775,6 +782,41 @@ async fn get_submissions(
             &req_ctx.request_id,
         )
     })?;
+
+    let asg_row = sqlx::query(
+        "SELECT tenant_id, class_id, teacher_id, created_by FROM assignments WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?
+    .ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::NotFound(
+                school_core::common::error_code::ErrorCode::AssignmentNotFound,
+                format!("Assignment {} not found", id),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    crate::authorization_helpers::AuthorizationScope::verify_learning_resource_access(
+        &ctx.pool,
+        &req_ctx,
+        asg_row.get("tenant_id"),
+        asg_row.get("class_id"),
+        asg_row.get("teacher_id"),
+        asg_row.get("created_by"),
+    )
+    .await?;
 
     let query = GetSubmissionsQuery { assignment_id: id };
 

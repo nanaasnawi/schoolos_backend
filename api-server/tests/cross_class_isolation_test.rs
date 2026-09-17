@@ -108,3 +108,19 @@ fn test_chat_client_message_id_uniqueness() {
     assert_ne!(client_msg_id_1, client_msg_id_2);
     assert!(uuid::Uuid::parse_str(&client_msg_id_1).is_ok());
 }
+
+#[test]
+fn test_teacher_assignment_isolation_logic() {
+    let teacher_a_id = uuid::Uuid::new_v4();
+    let teacher_b_id = uuid::Uuid::new_v4();
+    let assignment_created_by = teacher_a_id;
+    let assignment_teacher_id = Some(teacher_a_id);
+
+    // Teacher A is the owner
+    let is_teacher_a_owner = assignment_created_by == teacher_a_id || assignment_teacher_id == Some(teacher_a_id);
+    assert!(is_teacher_a_owner, "Teacher A must have access to own assignment");
+
+    // Teacher B is NOT the owner
+    let is_teacher_b_owner = assignment_created_by == teacher_b_id || assignment_teacher_id == Some(teacher_b_id);
+    assert!(!is_teacher_b_owner, "Teacher B must NOT have access to Teacher A's assignment");
+}

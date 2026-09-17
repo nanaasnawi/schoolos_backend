@@ -173,14 +173,17 @@ impl AuthorizationScope {
             return Ok(());
         }
 
-        let is_teacher = actor.roles.iter().any(|r| r.name == "Guru");
+        let is_teacher = actor.roles.iter().any(|r| {
+            let n = r.name.to_lowercase();
+            n.contains("guru") || n.contains("teacher") || n.contains("pengajar")
+        }) || Self::resolve_teacher_id(pool, req_ctx.tenant_id, actor.id).await.ok().flatten().is_some();
         let is_parent = actor.roles.iter().any(|r| {
             let n = r.name.to_lowercase();
             n.contains("wali") || n.contains("parent") || n.contains("guardian") || n.contains("ortu")
         });
-        let is_student = !is_parent && actor.roles.iter().any(|r| r.name == "Siswa");
+        let is_student = !is_parent && !is_teacher && actor.roles.iter().any(|r| r.name == "Siswa");
 
-        // 3. Teacher Access Check
+        // 3. Teacher Access Check (Strict Cross-Teacher Isolation)
         if is_teacher {
             // If creator, allow
             if resource_created_by == Some(actor.id) {
@@ -203,30 +206,12 @@ impl AuthorizationScope {
                 if resource_teacher_id == Some(tid) {
                     return Ok(());
                 }
-
-                // If resource belongs to a class the teacher teaches
-                if let Some(cid) = resource_class_id {
-                    let assigned = Self::is_teacher_assigned_to_class(pool, req_ctx.tenant_id, tid, cid)
-                        .await
-                        .map_err(|e| {
-                            ApiError::new(
-                                ApplicationError::Infrastructure(
-                                    school_core::common::error::InfrastructureError::Database(e),
-                                ),
-                                &req_ctx.request_id,
-                            )
-                        })?;
-
-                    if assigned {
-                        return Ok(());
-                    }
-                }
             }
 
             return Err(ApiError::new(
                 ApplicationError::Unauthorized(
                     ErrorCode::AuthPermissionDenied,
-                    "Anda tidak memiliki izin mengelola atau melihat materi/tugas kelas ini".to_string(),
+                    "Tugas atau materi ini milik guru lain. Anda hanya dapat mengakses tugas milik Anda sendiri.".to_string(),
                 ),
                 &req_ctx.request_id,
             ));
