@@ -235,6 +235,16 @@ async fn list(
               AND (
                   a.created_by = $2 
                   OR a.teacher_id IN (SELECT id FROM teachers WHERE user_id = $2 AND tenant_id = $1)
+                  OR a.class_id IN (
+                      SELECT cs.class_id FROM class_schedules cs 
+                      JOIN teachers t ON t.id = cs.teacher_id 
+                      WHERE t.user_id = $2 AND cs.tenant_id = $1
+                  )
+                  OR a.class_id IN (
+                      SELECT c.id FROM classes c 
+                      JOIN teachers t ON t.id = c.homeroom_teacher_id 
+                      WHERE t.user_id = $2 AND c.tenant_id = $1
+                  )
               )
             ORDER BY a.created_at DESC
             "#,
