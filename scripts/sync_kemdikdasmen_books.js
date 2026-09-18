@@ -98,10 +98,63 @@ async function fetchSibiCatalog() {
   return rawBooks;
 }
 
+// Daftar lampiran yang ditarik / berstatus 404 pada SIBI Kemendikdasmen
+const knownBrokenAttachments = new Set([
+  'Bahasa-Indonesia-BS-KLS-VI.pdf',
+  'Bahasa-Indonesia-BG-KLS-VI.pdf',
+  'Bahasa-Indonesia-BS-KLS-III.pdf',
+  'Bahasa-Indonesia-BG-KLS-III.pdf',
+  'Bahasa-Indonesia-BS-KLS-VIII.pdf',
+  'Bahasa-Indonesia-BG-KLS-IX.pdf',
+  'Bahasa-Indonesia-BS-KLS-IX.pdf',
+  'Bahasa_Indonesia_Lanjut_BS_KLS_XII.pdf',
+  'Bahasa-Indonesia-Lanjut-BG-KLS-XII.pdf',
+  'Bahasa-Indonesia-Tingkat-Lanjut-BS-KLS-XI.pdf',
+  'Indonesia_BS_KLS_XII.pdf',
+  'Indonesia_BG_KLS_XII.pdf',
+  'Inggris_FN_BG_KLS_III.pdf',
+  'Matematika-BS-KLS-XII.pdf',
+  'Matematika_BG_KLS_XII.pdf',
+  'Matematika-Lanjut-BS-KLS-XII.pdf',
+  'Matematika_Lanjut_BG_KLS_XII.pdf',
+  'IPAS-BS-KLS-III.pdf',
+  'IPAS-BG-KLS-III.pdf',
+  'Informatika-BS-KLS-IX.pdf',
+  'Informatika-BG-KLS-IX.pdf',
+  'Informatika-BS-KLS-XI.pdf',
+  'Informatika-BG-KLS-XI.pdf',
+  'Smk-Informatika-BG-KLS-X.pdf',
+  'IPS-BS-KLS-IX.pdf',
+  'IPS-BG-KLS-IX.pdf',
+  'Sejarah-BS-KLS-XI.pdf',
+  'Geografi-BS-KLS-XI.pdf',
+  'Ekonomi-BS-KLS-XI.pdf',
+  'Biologi_BS_KLS_XII.pdf',
+  'PPKN-BS-KLS-VIII.pdf',
+  'PPKN-BS-KLS-XI.pdf',
+  'Pendidikan-Pancasila-BS-KLS-VI.pdf',
+  'Pendidikan-Pancasila-BS-KLS-XI.pdf',
+  'Bahasa-Inggris-Tingkat-Lanjut-BS-KLS-XI.pdf',
+  'Rupa_BG_KLS_VI.pdf',
+  'Rupa_BG_KLS_XII.pdf',
+  'Seni-Rupa-BG-KLS-III.pdf',
+  'Seni-Musik-BG-KLS-IX.pdf',
+  'Seni-Musik-BG-KLS-XII.pdf',
+  'Seni-Teater-BG-KLS-VI.pdf',
+  'Seni-Teater-BG-KLS-IX.pdf',
+  'Seni-Teater-BG-KLS-XII.pdf',
+  'Teater_BG_KLS_III.pdf'
+]);
+
 function filterBooks(rawBooks) {
   return rawBooks.filter(book => {
-    // Validasi URL unduhan PDF
+    // Validasi URL unduhan PDF resmi
     if (!book.attachment) return false;
+    const cleanUrl = book.attachment.trim();
+    if (!cleanUrl.toLowerCase().endsWith('.pdf')) return false;
+    if (cleanUrl.includes('pesonaedu') || cleanUrl.includes('buku_elektronik_kurmer')) return false;
+    const fileName = cleanUrl.split('/').pop();
+    if (knownBrokenAttachments.has(fileName)) return false;
 
     // Filter Jenjang
     if (levelArg) {
