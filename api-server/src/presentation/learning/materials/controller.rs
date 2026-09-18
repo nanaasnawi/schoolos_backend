@@ -3,6 +3,7 @@ use axum::{
     extract::{Path, State, Multipart, DefaultBodyLimit},
     routing::{get, post},
 };
+use chrono::{DateTime, Utc};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -32,6 +33,7 @@ pub fn material_routes() -> Router<ApplicationContext> {
         .route("/completed", get(get_completed_materials))
         .route("/{id}", get(get_by_id).patch(update).delete(delete))
         .route("/{id}/toggle-complete", post(toggle_complete))
+        .route("/{id}/completions", get(get_material_completions))
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
 }
 
@@ -796,6 +798,120 @@ async fn get_completed_materials(
     .unwrap_or_default();
 
     Ok(Json(ApiResponse::success(rows, req_ctx.request_id)))
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct MaterialStudentCompletionDto {
+    pub student_id: Uuid,
+    pub student_name: String,
+    pub nisn: Option<String>,
+    pub gender: Option<String>,
+    pub class_name: Option<String>,
+    pub is_completed: bool,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub current_page: Option<i32>,
+    pub last_read_at: Option<DateTime<Utc>>,
+}
+
+async fn get_material_completions(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ApiResponse<Vec<MaterialStudentCompletionDto>>>, ApiError> {
+    // 1. Ambil material untuk mengetahui tenant_id dan class_id rombel
+    let mat_row = sqlx::query(
+        r#"
+        SELECT tenant_id, class_id FROM learning_materials
+        WHERE id = $1 AND deleted_at IS NULL
+        "#
+    )
+    .bind(id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
+        school_core::common::error::InfrastructureError::Database(e)
+    ), &req_ctx.request_id))?
+    .ok_or_else(|| ApiError::new(school_core::common::error::ApplicationError::NotFound(
+        school_core::common::error_code::ErrorCode::LearningMaterialNotFound,
+        format!("Learning material {} not found", id)
+    ), &req_ctx.request_id))?;
+
+    let mat_class_id: Option<Uuid> = mat_row.get("class_id");
+
+    // 2. Query siswa:
+    // Jika materi terafiliasi dengan kelas tertentu, tampilkan semua siswa rombel tersebut dengan status selesai / progres bacanya.
+    // Jika tidak terafiliasi dengan kelas spesifik, tampilkan seluruh siswa yang telah menyelesaikan atau membaca materi ini.
+    let rows = if let Some(class_id) = mat_class_id {
+        sqlx::query(
+            r#"
+            SELECT 
+                s.id as student_id,
+                s.full_name as student_name,
+                s.nisn,
+                s.gender,
+                c.name as class_name,
+                (smc.id IS NOT NULL OR COALESCE(rp.is_completed, false) = true) as is_completed,
+                COALESCE(smc.completed_at, rp.updated_at) as completed_at,
+                rp.current_page,
+                rp.last_read_at
+            FROM students s
+            JOIN enrollments en ON en.student_id = s.id AND en.class_id = $2
+            JOIN classes c ON c.id = en.class_id
+            LEFT JOIN student_material_completions smc ON smc.student_id = s.id AND smc.material_id = $1
+            LEFT JOIN reading_progress rp ON rp.student_id = s.id AND rp.material_id = $1
+            WHERE s.tenant_id = $3
+            ORDER BY is_completed DESC, s.full_name ASC
+            "#
+        )
+        .bind(id)
+        .bind(class_id)
+        .bind(req_ctx.tenant_id)
+        .fetch_all(&ctx.pool)
+        .await
+    } else {
+        sqlx::query(
+            r#"
+            SELECT 
+                s.id as student_id,
+                s.full_name as student_name,
+                s.nisn,
+                s.gender,
+                c.name as class_name,
+                (smc.id IS NOT NULL OR COALESCE(rp.is_completed, false) = true) as is_completed,
+                COALESCE(smc.completed_at, rp.updated_at) as completed_at,
+                rp.current_page,
+                rp.last_read_at
+            FROM students s
+            LEFT JOIN enrollments en ON en.student_id = s.id
+            LEFT JOIN classes c ON c.id = en.class_id
+            LEFT JOIN student_material_completions smc ON smc.student_id = s.id AND smc.material_id = $1
+            LEFT JOIN reading_progress rp ON rp.student_id = s.id AND rp.material_id = $1
+            WHERE s.tenant_id = $2 AND (smc.id IS NOT NULL OR rp.id IS NOT NULL)
+            ORDER BY is_completed DESC, s.full_name ASC
+            "#
+        )
+        .bind(id)
+        .bind(req_ctx.tenant_id)
+        .fetch_all(&ctx.pool)
+        .await
+    }
+    .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
+        school_core::common::error::InfrastructureError::Database(e)
+    ), &req_ctx.request_id))?;
+
+    let dtos: Vec<MaterialStudentCompletionDto> = rows.into_iter().map(|r| MaterialStudentCompletionDto {
+        student_id: r.get("student_id"),
+        student_name: r.get("student_name"),
+        nisn: r.get("nisn"),
+        gender: r.get("gender"),
+        class_name: r.get("class_name"),
+        is_completed: r.get("is_completed"),
+        completed_at: r.get("completed_at"),
+        current_page: r.get("current_page"),
+        last_read_at: r.get("last_read_at"),
+    }).collect();
+
+    Ok(Json(ApiResponse::success(dtos, req_ctx.request_id)))
 }
 
 async fn update(
