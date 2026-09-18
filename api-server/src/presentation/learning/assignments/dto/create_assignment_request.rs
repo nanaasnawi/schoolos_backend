@@ -15,6 +15,7 @@ pub struct CreateAssignmentRequest {
     #[serde(default = "default_assignment_type")]
     pub assignment_type: String,
     pub class_id: Option<String>,
+    pub questions: Option<Vec<super::assignment_question_dto::AssignmentQuestionDto>>,
 }
 
 fn default_lesson_id() -> Option<Uuid> {

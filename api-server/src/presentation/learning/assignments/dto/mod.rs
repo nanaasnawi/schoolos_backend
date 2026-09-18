@@ -1,3 +1,4 @@
+pub mod assignment_question_dto;
 pub mod assignment_response;
 pub mod create_assignment_request;
 pub mod grade_submission_request;

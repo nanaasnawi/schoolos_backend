@@ -4,6 +4,8 @@ use serde::Serialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use super::assignment_question_dto::AssignmentQuestionDto;
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AssignmentResponse {
     pub id: Uuid,
@@ -27,6 +29,8 @@ pub struct AssignmentResponse {
     pub subject_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub teacher_name: Option<String>,
+    #[serde(default)]
+    pub questions: Vec<AssignmentQuestionDto>,
 }
 
 impl From<Assignment> for AssignmentResponse {
@@ -49,6 +53,8 @@ impl From<Assignment> for AssignmentResponse {
             class_name: None,
             subject_name: None,
             teacher_name: None,
+            questions: Vec::new(),
         }
     }
 }
+

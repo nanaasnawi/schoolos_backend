@@ -4,6 +4,8 @@ use serde::Serialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use super::assignment_question_dto::SubmissionAnswerDetailDto;
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SubmissionResponse {
     pub id: Uuid,
@@ -18,6 +20,12 @@ pub struct SubmissionResponse {
     pub feedback: Option<String>,
     pub graded_at: Option<DateTime<Utc>>,
     pub graded_by: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub student_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub student_nisn: Option<String>,
+    #[serde(default)]
+    pub answers: Vec<SubmissionAnswerDetailDto>,
 }
 
 impl From<AssignmentSubmission> for SubmissionResponse {
@@ -35,6 +43,10 @@ impl From<AssignmentSubmission> for SubmissionResponse {
             feedback: s.feedback,
             graded_at: s.graded_at,
             graded_by: s.graded_by,
+            student_name: None,
+            student_nisn: None,
+            answers: Vec::new(),
         }
     }
 }
+

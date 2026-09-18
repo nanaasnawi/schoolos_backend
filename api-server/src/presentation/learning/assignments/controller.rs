@@ -7,11 +7,17 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use super::dto::{
-    assignment_response::AssignmentResponse, create_assignment_request::CreateAssignmentRequest,
-    grade_submission_request::GradeSubmissionRequest, submission_response::SubmissionResponse,
+    assignment_question_dto::{
+        AssignmentChoiceDto, AssignmentQuestionDto, SubmissionAnswerDetailDto,
+    },
+    assignment_response::AssignmentResponse,
+    create_assignment_request::CreateAssignmentRequest,
+    grade_submission_request::GradeSubmissionRequest,
+    submission_response::SubmissionResponse,
     submit_assignment_request::SubmitAssignmentRequest,
     update_assignment_request::UpdateAssignmentRequest,
 };
+
 use crate::{
     bootstrap::ApplicationContext, error::ApiError, extractors::RequestContext,
     response::ApiResponse,
@@ -19,10 +25,10 @@ use crate::{
 use school_core::learning::application::assignment::{
     archive_assignment::ArchiveAssignmentCommand, close_assignment::CloseAssignmentCommand,
     create_assignment::CreateAssignmentCommand, delete_assignment::DeleteAssignmentCommand,
-    get_submissions::GetSubmissionsQuery,
     grade_submission::GradeSubmissionCommand, publish_assignment::PublishAssignmentCommand,
     submit_assignment::SubmitAssignmentCommand, update_assignment::UpdateAssignmentCommand,
 };
+
 
 pub fn assignment_routes() -> Router<ApplicationContext> {
     Router::new()
@@ -34,6 +40,71 @@ pub fn assignment_routes() -> Router<ApplicationContext> {
         .route("/{id}/submit", post(submit))
         .route("/{id}/submissions", get(get_submissions))
         .route("/{id}/submissions/{submission_id}/grade", post(grade))
+}
+
+async fn fetch_assignment_questions(
+    pool: &sqlx::PgPool,
+    assignment_id: Uuid,
+    hide_correct_answers: bool,
+) -> Result<Vec<AssignmentQuestionDto>, sqlx::Error> {
+    let q_rows = sqlx::query(
+        r#"
+        SELECT id, question_text, question_type, points, order_index
+        FROM assignment_questions
+        WHERE assignment_id = $1
+        ORDER BY order_index ASC, created_at ASC
+        "#,
+    )
+    .bind(assignment_id)
+    .fetch_all(pool)
+    .await?;
+
+    if q_rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let q_ids: Vec<Uuid> = q_rows.iter().map(|r| r.get::<Uuid, _>("id")).collect();
+    let c_rows = sqlx::query(
+        r#"
+        SELECT id, question_id, choice_text, is_correct, order_index
+        FROM assignment_question_choices
+        WHERE question_id = ANY($1)
+        ORDER BY order_index ASC, created_at ASC
+        "#,
+    )
+    .bind(&q_ids)
+    .fetch_all(pool)
+    .await?;
+
+    let mut questions = Vec::new();
+    for q in q_rows {
+        let q_id: Uuid = q.get("id");
+        let choices = c_rows
+            .iter()
+            .filter(|c| c.get::<Uuid, _>("question_id") == q_id)
+            .map(|c| AssignmentChoiceDto {
+                id: Some(c.get("id")),
+                choice_text: c.get("choice_text"),
+                is_correct: if hide_correct_answers {
+                    None
+                } else {
+                    Some(c.get("is_correct"))
+                },
+                order_index: Some(c.get("order_index")),
+            })
+            .collect();
+
+        questions.push(AssignmentQuestionDto {
+            id: Some(q_id),
+            question_text: q.get("question_text"),
+            question_type: q.get("question_type"),
+            points: Some(q.get("points")),
+            order_index: Some(q.get("order_index")),
+            choices,
+        });
+    }
+
+    Ok(questions)
 }
 
 async fn create(
@@ -159,17 +230,82 @@ async fn create(
         },
     );
 
+    let questions_to_return = if let Some(questions) = payload.questions {
+        let mut created_questions = Vec::new();
+        for (q_idx, q) in questions.into_iter().enumerate() {
+            let question_id = q.id.unwrap_or_else(Uuid::new_v4);
+            let order_idx = q.order_index.unwrap_or(q_idx as i32);
+            let points = q.points.unwrap_or(10);
+            let _ = sqlx::query(
+                r#"
+                INSERT INTO assignment_questions (id, tenant_id, assignment_id, question_text, question_type, points, order_index)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                "#,
+            )
+            .bind(question_id)
+            .bind(req_ctx.tenant_id)
+            .bind(assignment.id)
+            .bind(&q.question_text)
+            .bind(&q.question_type)
+            .bind(points)
+            .bind(order_idx)
+            .execute(&ctx.pool)
+            .await;
+
+            let mut created_choices = Vec::new();
+            for (c_idx, c) in q.choices.into_iter().enumerate() {
+                let choice_id = c.id.unwrap_or_else(Uuid::new_v4);
+                let c_order_idx = c.order_index.unwrap_or(c_idx as i32);
+                let is_correct = c.is_correct.unwrap_or(false);
+                let _ = sqlx::query(
+                    r#"
+                    INSERT INTO assignment_question_choices (id, question_id, choice_text, is_correct, order_index)
+                    VALUES ($1, $2, $3, $4, $5)
+                    "#,
+                )
+                .bind(choice_id)
+                .bind(question_id)
+                .bind(&c.choice_text)
+                .bind(is_correct)
+                .bind(c_order_idx)
+                .execute(&ctx.pool)
+                .await;
+
+                created_choices.push(AssignmentChoiceDto {
+                    id: Some(choice_id),
+                    choice_text: c.choice_text,
+                    is_correct: Some(is_correct),
+                    order_index: Some(c_order_idx),
+                });
+            }
+
+            created_questions.push(AssignmentQuestionDto {
+                id: Some(question_id),
+                question_text: q.question_text,
+                question_type: q.question_type,
+                points: Some(points),
+                order_index: Some(order_idx),
+                choices: created_choices,
+            });
+        }
+        created_questions
+    } else {
+        Vec::new()
+    };
+
     let mut resp = AssignmentResponse::from(assignment);
     resp.class_id = target_class_id;
     resp.class_name = class_name;
     resp.subject_name = subject_name;
     resp.teacher_name = teacher_name;
+    resp.questions = questions_to_return;
 
     Ok(Json(ApiResponse::success(
         resp,
         req_ctx.request_id,
     )))
 }
+
 
 async fn list(
     State(ctx): State<ApplicationContext>,
@@ -281,6 +417,7 @@ async fn list(
                 class_name: r.get("class_name"),
                 subject_name: r.get("subject_name"),
                 teacher_name: r.get("teacher_name"),
+                questions: Vec::new(),
             })
             .collect()
     } else if is_student || is_parent {
@@ -350,6 +487,7 @@ async fn list(
                 class_name: r.class_name,
                 subject_name: r.subject_name,
                 teacher_name: r.teacher_name,
+                questions: Vec::new(),
             })
             .collect()
     } else {
@@ -402,6 +540,7 @@ async fn list(
                 class_name: r.class_name,
                 subject_name: r.subject_name,
                 teacher_name: r.teacher_name,
+                questions: Vec::new(),
             })
             .collect()
     };
@@ -475,6 +614,16 @@ async fn get_by_id(
             )
             .await?;
 
+            let is_student = req_ctx
+                .actor
+                .as_ref()
+                .map(|a| a.roles.iter().any(|r| r.name == "Siswa"))
+                .unwrap_or(false);
+
+            let questions = fetch_assignment_questions(&ctx.pool, id, is_student)
+                .await
+                .unwrap_or_default();
+
             let resp = AssignmentResponse {
                 id: r.get("id"),
                 tenant_id,
@@ -493,6 +642,7 @@ async fn get_by_id(
                 class_name: r.get("class_name"),
                 subject_name: r.get("subject_name"),
                 teacher_name: r.get("teacher_name"),
+                questions,
             };
             Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
         }
@@ -540,8 +690,59 @@ async fn update(
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
+    if let Some(questions) = payload.questions {
+        let _ = sqlx::query("DELETE FROM assignment_questions WHERE assignment_id = $1")
+            .bind(id)
+            .execute(&ctx.pool)
+            .await;
+
+        for (q_idx, q) in questions.into_iter().enumerate() {
+            let question_id = q.id.unwrap_or_else(Uuid::new_v4);
+            let order_idx = q.order_index.unwrap_or(q_idx as i32);
+            let points = q.points.unwrap_or(10);
+            let _ = sqlx::query(
+                r#"
+                INSERT INTO assignment_questions (id, tenant_id, assignment_id, question_text, question_type, points, order_index)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                "#,
+            )
+            .bind(question_id)
+            .bind(req_ctx.tenant_id)
+            .bind(id)
+            .bind(&q.question_text)
+            .bind(&q.question_type)
+            .bind(points)
+            .bind(order_idx)
+            .execute(&ctx.pool)
+            .await;
+
+            for (c_idx, c) in q.choices.into_iter().enumerate() {
+                let choice_id = c.id.unwrap_or_else(Uuid::new_v4);
+                let c_order_idx = c.order_index.unwrap_or(c_idx as i32);
+                let is_correct = c.is_correct.unwrap_or(false);
+                let _ = sqlx::query(
+                    r#"
+                    INSERT INTO assignment_question_choices (id, question_id, choice_text, is_correct, order_index)
+                    VALUES ($1, $2, $3, $4, $5)
+                    "#,
+                )
+                .bind(choice_id)
+                .bind(question_id)
+                .bind(&c.choice_text)
+                .bind(is_correct)
+                .bind(c_order_idx)
+                .execute(&ctx.pool)
+                .await;
+            }
+        }
+    }
+
+    let questions = fetch_assignment_questions(&ctx.pool, id, false).await.unwrap_or_default();
+    let mut resp = AssignmentResponse::from(assignment);
+    resp.questions = questions;
+
     Ok(Json(ApiResponse::success(
-        AssignmentResponse::from(assignment),
+        resp,
         req_ctx.request_id,
     )))
 }
@@ -760,8 +961,8 @@ async fn submit(
         tenant_id: req_ctx.tenant_id,
         assignment_id: id,
         student_id,
-        content: payload.content,
-        file_url: payload.file_url,
+        content: payload.content.clone(),
+        file_url: payload.file_url.clone(),
     };
 
     let submission = ctx
@@ -770,8 +971,136 @@ async fn submit(
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
+    let mut auto_score: i32 = 0;
+    let mut has_essay = false;
+    let mut answered_any = false;
+
+    if let Some(answers) = payload.answers {
+        for ans in answers {
+            answered_any = true;
+            let q_info = sqlx::query(
+                r#"
+                SELECT q.question_type, q.points, c.is_correct
+                FROM assignment_questions q
+                LEFT JOIN assignment_question_choices c ON c.id = $2 AND c.question_id = q.id
+                WHERE q.id = $1
+                "#,
+            )
+            .bind(ans.question_id)
+            .bind(ans.chosen_choice_id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .ok()
+            .flatten();
+
+            let points_earned: i32 = if let Some(ref info) = q_info {
+                let q_type: String = info.get("question_type");
+                let pts: i32 = info.get("points");
+                let is_corr: Option<bool> = info.get("is_correct");
+                if q_type == "MULTIPLE_CHOICE" {
+                    if is_corr.unwrap_or(false) {
+                        pts
+                    } else {
+                        0
+                    }
+                } else {
+                    has_essay = true;
+                    0
+                }
+            } else {
+                0
+            };
+
+            auto_score += points_earned;
+
+            let _ = sqlx::query(
+                r#"
+                INSERT INTO assignment_submission_answers (
+                    submission_id, question_id, chosen_choice_id, text_answer, points_earned
+                )
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (submission_id, question_id) DO UPDATE SET
+                    chosen_choice_id = EXCLUDED.chosen_choice_id,
+                    text_answer = EXCLUDED.text_answer,
+                    points_earned = EXCLUDED.points_earned
+                "#,
+            )
+            .bind(submission.id)
+            .bind(ans.question_id)
+            .bind(ans.chosen_choice_id)
+            .bind(&ans.text_answer)
+            .bind(points_earned)
+            .execute(&ctx.pool)
+            .await;
+        }
+    }
+
+    let final_submission = if answered_any && !has_essay && payload.file_url.is_none() {
+        let _ = sqlx::query(
+            r#"
+            UPDATE assignment_submissions
+            SET score = $1, status = 'Graded', graded_at = NOW()
+            WHERE id = $2
+            "#,
+        )
+        .bind(auto_score)
+        .bind(submission.id)
+        .execute(&ctx.pool)
+        .await;
+
+        let mut s = submission;
+        s.score = Some(auto_score);
+        s.status = "Graded".to_string();
+        s
+    } else {
+        submission
+    };
+
+    let mut resp = SubmissionResponse::from(final_submission);
+
+    let answer_rows = sqlx::query(
+        r#"
+        SELECT 
+            ans.question_id,
+            q.question_text,
+            q.question_type,
+            q.points as max_points,
+            ans.chosen_choice_id,
+            c.choice_text as chosen_choice_text,
+            c.is_correct as is_correct,
+            ans.text_answer,
+            ans.points_earned,
+            ans.teacher_feedback
+        FROM assignment_submission_answers ans
+        JOIN assignment_questions q ON q.id = ans.question_id
+        LEFT JOIN assignment_question_choices c ON c.id = ans.chosen_choice_id
+        WHERE ans.submission_id = $1
+        ORDER BY q.order_index ASC, ans.created_at ASC
+        "#,
+    )
+    .bind(resp.id)
+    .fetch_all(&ctx.pool)
+    .await
+    .unwrap_or_default();
+
+    resp.answers = answer_rows
+        .into_iter()
+        .map(|a| SubmissionAnswerDetailDto {
+            question_id: a.get("question_id"),
+            question_text: a.get("question_text"),
+            question_type: a.get("question_type"),
+            max_points: a.get("max_points"),
+            chosen_choice_id: a.get("chosen_choice_id"),
+            chosen_choice_text: a.get("chosen_choice_text"),
+            is_correct: a.get("is_correct"),
+            text_answer: a.get("text_answer"),
+            points_earned: a.get::<Option<i32>, _>("points_earned").unwrap_or(0),
+            teacher_feedback: a.get("teacher_feedback"),
+        })
+        .collect();
+
     Ok(Json(ApiResponse::success(
-        SubmissionResponse::from(submission),
+        resp,
         req_ctx.request_id,
     )))
 }
@@ -828,17 +1157,104 @@ async fn get_submissions(
     )
     .await?;
 
-    let query = GetSubmissionsQuery { assignment_id: id };
+    let rows = sqlx::query(
+        r#"
+        SELECT 
+            sub.id, sub.tenant_id, sub.assignment_id, sub.student_id,
+            sub.content, sub.file_url, sub.submitted_at, sub.status,
+            sub.score, sub.feedback, sub.graded_at, sub.graded_by,
+            COALESCE(s.full_name, u.full_name, 'Siswa') as student_name,
+            COALESCE(s.nisn, u.username, '-') as student_nisn
+        FROM assignment_submissions sub
+        LEFT JOIN students s ON s.id = sub.student_id OR s.user_id = sub.student_id
+        LEFT JOIN users u ON u.id = sub.student_id
+        WHERE sub.assignment_id = $1
+        ORDER BY sub.submitted_at DESC
+        "#,
+    )
+    .bind(id)
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
 
-    let submissions = ctx
-        .get_submissions
-        .execute(query)
+    let sub_ids: Vec<Uuid> = rows.iter().map(|r| r.get::<Uuid, _>("id")).collect();
+
+    let answer_rows = if !sub_ids.is_empty() {
+        sqlx::query(
+            r#"
+            SELECT 
+                ans.submission_id,
+                ans.question_id,
+                q.question_text,
+                q.question_type,
+                q.points as max_points,
+                ans.chosen_choice_id,
+                c.choice_text as chosen_choice_text,
+                c.is_correct as is_correct,
+                ans.text_answer,
+                ans.points_earned,
+                ans.teacher_feedback
+            FROM assignment_submission_answers ans
+            JOIN assignment_questions q ON q.id = ans.question_id
+            LEFT JOIN assignment_question_choices c ON c.id = ans.chosen_choice_id
+            WHERE ans.submission_id = ANY($1)
+            ORDER BY q.order_index ASC, ans.created_at ASC
+            "#,
+        )
+        .bind(&sub_ids)
+        .fetch_all(&ctx.pool)
         .await
-        .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
+        .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
-    let items = submissions
+    let items = rows
         .into_iter()
-        .map(SubmissionResponse::from)
+        .map(|r| {
+            let sub_id: Uuid = r.get("id");
+            let answers = answer_rows
+                .iter()
+                .filter(|a| a.get::<Uuid, _>("submission_id") == sub_id)
+                .map(|a| SubmissionAnswerDetailDto {
+                    question_id: a.get("question_id"),
+                    question_text: a.get("question_text"),
+                    question_type: a.get("question_type"),
+                    max_points: a.get("max_points"),
+                    chosen_choice_id: a.get("chosen_choice_id"),
+                    chosen_choice_text: a.get("chosen_choice_text"),
+                    is_correct: a.get("is_correct"),
+                    text_answer: a.get("text_answer"),
+                    points_earned: a.get::<Option<i32>, _>("points_earned").unwrap_or(0),
+                    teacher_feedback: a.get("teacher_feedback"),
+                })
+                .collect();
+
+            SubmissionResponse {
+                id: sub_id,
+                tenant_id: r.get("tenant_id"),
+                assignment_id: r.get("assignment_id"),
+                student_id: r.get("student_id"),
+                content: r.get("content"),
+                file_url: r.get("file_url"),
+                submitted_at: r.get("submitted_at"),
+                status: r.get("status"),
+                score: r.get("score"),
+                feedback: r.get("feedback"),
+                graded_at: r.get("graded_at"),
+                graded_by: r.get("graded_by"),
+                student_name: r.get("student_name"),
+                student_nisn: r.get("student_nisn"),
+                answers,
+            }
+        })
         .collect();
 
     Ok(Json(ApiResponse::success(items, req_ctx.request_id)))
@@ -864,11 +1280,30 @@ async fn grade(
 
     let grader_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
 
+    if let Some(ref answer_grades) = payload.answer_grades {
+        for ag in answer_grades {
+            let _ = sqlx::query(
+                r#"
+                UPDATE assignment_submission_answers
+                SET points_earned = $1, teacher_feedback = $2, graded_at = NOW(), graded_by = $3
+                WHERE submission_id = $4 AND question_id = $5
+                "#,
+            )
+            .bind(ag.points_earned)
+            .bind(&ag.teacher_feedback)
+            .bind(grader_id)
+            .bind(submission_id)
+            .bind(ag.question_id)
+            .execute(&ctx.pool)
+            .await;
+        }
+    }
+
     let command = GradeSubmissionCommand {
         tenant_id: req_ctx.tenant_id,
         submission_id,
         score: payload.score,
-        feedback: payload.feedback,
+        feedback: payload.feedback.clone(),
         graded_by: grader_id,
     };
 
@@ -878,8 +1313,75 @@ async fn grade(
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
+    let student_info = sqlx::query(
+        r#"
+        SELECT 
+            COALESCE(s.full_name, u.full_name, 'Siswa') as student_name,
+            COALESCE(s.nisn, u.username, '-') as student_nisn
+        FROM assignment_submissions sub
+        LEFT JOIN students s ON s.id = sub.student_id OR s.user_id = sub.student_id
+        LEFT JOIN users u ON u.id = sub.student_id
+        WHERE sub.id = $1
+        LIMIT 1
+        "#,
+    )
+    .bind(submission_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .ok()
+    .flatten();
+
+    let answer_rows = sqlx::query(
+        r#"
+        SELECT 
+            ans.question_id,
+            q.question_text,
+            q.question_type,
+            q.points as max_points,
+            ans.chosen_choice_id,
+            c.choice_text as chosen_choice_text,
+            c.is_correct as is_correct,
+            ans.text_answer,
+            ans.points_earned,
+            ans.teacher_feedback
+        FROM assignment_submission_answers ans
+        JOIN assignment_questions q ON q.id = ans.question_id
+        LEFT JOIN assignment_question_choices c ON c.id = ans.chosen_choice_id
+        WHERE ans.submission_id = $1
+        ORDER BY q.order_index ASC, ans.created_at ASC
+        "#,
+    )
+    .bind(submission_id)
+    .fetch_all(&ctx.pool)
+    .await
+    .unwrap_or_default();
+
+    let answers = answer_rows
+        .into_iter()
+        .map(|a| SubmissionAnswerDetailDto {
+            question_id: a.get("question_id"),
+            question_text: a.get("question_text"),
+            question_type: a.get("question_type"),
+            max_points: a.get("max_points"),
+            chosen_choice_id: a.get("chosen_choice_id"),
+            chosen_choice_text: a.get("chosen_choice_text"),
+            is_correct: a.get("is_correct"),
+            text_answer: a.get("text_answer"),
+            points_earned: a.get::<Option<i32>, _>("points_earned").unwrap_or(0),
+            teacher_feedback: a.get("teacher_feedback"),
+        })
+        .collect();
+
+    let mut resp = SubmissionResponse::from(submission);
+    if let Some(si) = student_info {
+        resp.student_name = si.get("student_name");
+        resp.student_nisn = si.get("student_nisn");
+    }
+    resp.answers = answers;
+
     Ok(Json(ApiResponse::success(
-        SubmissionResponse::from(submission),
+        resp,
         req_ctx.request_id,
     )))
 }
+
