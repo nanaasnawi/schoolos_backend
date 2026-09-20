@@ -1,9 +1,188 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Deserialize)]
 struct GoogleTokenResponse {
     access_token: String,
+}
+
+#[derive(Serialize)]
+struct GoogleJwtClaims<'a> {
+    iss: &'a str,
+    scope: &'a str,
+    aud: &'a str,
+    exp: i64,
+    iat: i64,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ServiceAccountKey {
+    #[serde(default)]
+    pub project_id: String,
+    #[serde(default)]
+    pub client_email: String,
+    #[serde(default)]
+    pub private_key: String,
+}
+
+fn load_service_account() -> Option<ServiceAccountKey> {
+    // 1. Try FIREBASE_SERVICE_ACCOUNT environment variable (JSON string)
+    if let Ok(json_str) = std::env::var("FIREBASE_SERVICE_ACCOUNT") {
+        let trimmed = json_str.trim();
+        if !trimmed.is_empty() {
+            if let Ok(sa) = serde_json::from_str::<ServiceAccountKey>(trimmed) {
+                if !sa.private_key.is_empty() {
+                    return Some(sa);
+                }
+            }
+        }
+    }
+
+    // 2. Try GOOGLE_APPLICATION_CREDENTIALS (file path or inline JSON)
+    if let Ok(val) = std::env::var("GOOGLE_APPLICATION_CREDENTIALS") {
+        let trimmed = val.trim();
+        if trimmed.starts_with('{') {
+            if let Ok(sa) = serde_json::from_str::<ServiceAccountKey>(trimmed) {
+                if !sa.private_key.is_empty() {
+                    return Some(sa);
+                }
+            }
+        } else if let Ok(content) = std::fs::read_to_string(trimmed) {
+            if let Ok(sa) = serde_json::from_str::<ServiceAccountKey>(&content) {
+                if !sa.private_key.is_empty() {
+                    return Some(sa);
+                }
+            }
+        }
+    }
+
+    // 3. Try FIREBASE_PRIVATE_KEY or FCM_PRIVATE_KEY or PRIVATE_KEY
+    for env_key in &["FIREBASE_PRIVATE_KEY", "FCM_PRIVATE_KEY", "PRIVATE_KEY"] {
+        if let Ok(val) = std::env::var(env_key) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                // Check if user pasted the whole service account JSON
+                if trimmed.starts_with('{') {
+                    if let Ok(sa) = serde_json::from_str::<ServiceAccountKey>(trimmed) {
+                        if !sa.private_key.is_empty() {
+                            return Some(sa);
+                        }
+                    }
+                }
+                let private_key = trimmed.replace("\\n", "\n");
+                let client_email = std::env::var("FIREBASE_CLIENT_EMAIL")
+                    .or_else(|_| std::env::var("FCM_CLIENT_EMAIL"))
+                    .unwrap_or_else(|_| "firebase-adminsdk-fbsvc@akselerasi-edu.iam.gserviceaccount.com".to_string());
+                let project_id = std::env::var("FCM_PROJECT_ID")
+                    .or_else(|_| std::env::var("FIREBASE_PROJECT_ID"))
+                    .unwrap_or_else(|_| "akselerasi-edu".to_string());
+                return Some(ServiceAccountKey {
+                    project_id,
+                    client_email,
+                    private_key,
+                });
+            }
+        }
+    }
+
+    // 4. Try local file paths
+    let candidate_paths = [
+        "firebase-service-account.json",
+        "api-server/firebase-service-account.json",
+        "../android/akselerasi-edu-firebase-adminsdk-fbsvc-42d4e6306a.json",
+        "c:/Users/USER/Documents/School Os/android/akselerasi-edu-firebase-adminsdk-fbsvc-42d4e6306a.json",
+    ];
+
+    for path in &candidate_paths {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if let Ok(sa) = serde_json::from_str::<ServiceAccountKey>(&content) {
+                if !sa.private_key.is_empty() {
+                    return Some(sa);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+async fn get_access_token(client: &reqwest::Client) -> Result<(String, String), String> {
+    // Check if we have a service account key
+    if let Some(mut sa) = load_service_account() {
+        if sa.project_id.is_empty() {
+            sa.project_id = "akselerasi-edu".to_string();
+        }
+        let now = chrono::Utc::now().timestamp();
+        let claims = GoogleJwtClaims {
+            iss: &sa.client_email,
+            scope: "https://www.googleapis.com/auth/firebase.messaging",
+            aud: "https://oauth2.googleapis.com/token",
+            exp: now + 3600,
+            iat: now,
+        };
+
+        let key = jsonwebtoken::EncodingKey::from_rsa_pem(sa.private_key.as_bytes())
+            .map_err(|e| format!("Invalid RSA private key: {}", e))?;
+
+        let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+        let jwt = jsonwebtoken::encode(&header, &claims, &key)
+            .map_err(|e| format!("Failed to encode JWT assertion: {}", e))?;
+
+        let params = [
+            ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+            ("assertion", &jwt),
+        ];
+
+        let token_res = client
+            .post("https://oauth2.googleapis.com/token")
+            .form(&params)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to send OAuth2 JWT token request: {}", e))?;
+
+        if !token_res.status().is_success() {
+            let status = token_res.status();
+            let err_text = token_res.text().await.unwrap_or_default();
+            return Err(format!("OAuth2 token endpoint returned {}: {}", status, err_text));
+        }
+
+        let token_data = token_res
+            .json::<GoogleTokenResponse>()
+            .await
+            .map_err(|e| format!("Failed to parse Google OAuth2 token response: {}", e))?;
+
+        return Ok((token_data.access_token, sa.project_id));
+    }
+
+    // Fallback: OAuth2 refresh token flow
+    let client_id = std::env::var("FCM_CLIENT_ID")
+        .map_err(|_| "Neither Service Account nor FCM_CLIENT_ID configured".to_string())?;
+    let client_secret = std::env::var("FCM_CLIENT_SECRET")
+        .map_err(|_| "FCM_CLIENT_SECRET not set".to_string())?;
+    let refresh_token = std::env::var("FCM_REFRESH_TOKEN")
+        .map_err(|_| "FCM_REFRESH_TOKEN not set".to_string())?;
+    let project_id = std::env::var("FCM_PROJECT_ID").unwrap_or_else(|_| "akselerasi-edu".to_string());
+
+    let params = [
+        ("client_id", client_id.as_str()),
+        ("client_secret", client_secret.as_str()),
+        ("refresh_token", refresh_token.as_str()),
+        ("grant_type", "refresh_token"),
+    ];
+
+    let token_res = client
+        .post("https://oauth2.googleapis.com/token")
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to request FCM OAuth2 token via refresh_token: {}", e))?;
+
+    let token_data = token_res
+        .json::<GoogleTokenResponse>()
+        .await
+        .map_err(|e| format!("Failed to parse FCM OAuth2 token response: {}", e))?;
+
+    Ok((token_data.access_token, project_id))
 }
 
 /// Kategori notifikasi → dipakai untuk click-action, channel ringan, dan deep-link Android.
@@ -91,68 +270,22 @@ pub fn trigger_fcm_push_notification(title: String, content: String, category: S
 pub fn trigger_fcm_push_categorized(title: String, content: String, category: FcmCategory, reference_id: Uuid) {
     tokio::spawn(async move {
         let client = reqwest::Client::new();
-        let client_id = match std::env::var("FCM_CLIENT_ID") {
-            Ok(v) if !v.trim().is_empty() => v,
-            _ => {
-                tracing::warn!("FCM_CLIENT_ID not set, skipping FCM push");
-                return;
-            }
-        };
-        let client_secret = match std::env::var("FCM_CLIENT_SECRET") {
-            Ok(v) if !v.trim().is_empty() => v,
-            _ => {
-                tracing::warn!("FCM_CLIENT_SECRET not set, skipping FCM push");
-                return;
-            }
-        };
-        let refresh_token = match std::env::var("FCM_REFRESH_TOKEN") {
-            Ok(v) if !v.trim().is_empty() => v,
-            _ => {
-                tracing::warn!("FCM_REFRESH_TOKEN not set, skipping FCM push");
-                return;
-            }
-        };
-        let project_id = std::env::var("FCM_PROJECT_ID").unwrap_or_else(|_| {
-            "school-os-678a5".to_string()
-        });
-
-        // 1. Exchange refresh_token for Google access_token
-        let params = [
-            ("client_id", client_id.as_str()),
-            ("client_secret", client_secret.as_str()),
-            ("refresh_token", refresh_token.as_str()),
-            ("grant_type", "refresh_token"),
-        ];
-
-        let token_res = match client
-            .post("https://oauth2.googleapis.com/token")
-            .form(&params)
-            .send()
-            .await
-        {
-            Ok(res) => res,
+        let (access_token, project_id) = match get_access_token(&client).await {
+            Ok(v) => v,
             Err(e) => {
-                tracing::warn!("Failed to request FCM OAuth2 token: {}", e);
+                tracing::warn!("FCM authentication skipped or failed: {}", e);
                 return;
             }
         };
 
-        let token_data = match token_res.json::<GoogleTokenResponse>().await {
-            Ok(data) => data,
-            Err(e) => {
-                tracing::warn!("Failed to parse FCM OAuth2 token response: {}", e);
-                return;
-            }
-        };
-
-        // 2. DATA-ONLY High-Priority FCM Push — PENTING untuk idle/standby/Doze.
-        //    Payload `notification` sengaja DIHAPUS karena saat ada key `notification`,
-        //    Android menyerahkan render ke System Tray dan onMessageReceived() TIDAK
-        //    dipanggil saat app background/killed → helper kustom (dedup, wake, deep-link)
-        //    tidak jalan dan notifikasi sering hilang di HP idle.
-        //    Dengan data-only + android.priority=HIGH, FCM membangunkan aplikasi via
-        //    com.google.firebase.MESSAGING_EVENT walau Doze, lalu helper menampilkan
-        //    notifikasi PRIORITY_MAX + WakeLock sehingga muncul di lock screen.
+        // DATA-ONLY High-Priority FCM Push — PENTING untuk idle/standby/Doze.
+        // Payload `notification` sengaja DIHAPUS karena saat ada key `notification`,
+        // Android menyerahkan render ke System Tray dan onMessageReceived() TIDAK
+        // dipanggil saat app background/killed → helper kustom (dedup, wake, deep-link)
+        // tidak jalan dan notifikasi sering hilang di HP idle.
+        // Dengan data-only + android.priority=HIGH, FCM membangunkan aplikasi via
+        // com.google.firebase.MESSAGING_EVENT walau Doze, lalu helper menampilkan
+        // notifikasi PRIORITY_MAX + WakeLock sehingga muncul di lock screen.
         let fcm_url = format!("https://fcm.googleapis.com/v1/projects/{}/messages:send", project_id);
         let channel_id = category.channel_id();
         let category_str = category.as_str();
@@ -194,7 +327,7 @@ pub fn trigger_fcm_push_categorized(title: String, content: String, category: Fc
 
         match client
             .post(&fcm_url)
-            .bearer_auth(token_data.access_token)
+            .bearer_auth(access_token)
             .json(&payload)
             .send()
             .await
@@ -213,3 +346,4 @@ pub fn trigger_fcm_push_categorized(title: String, content: String, category: Fc
         }
     });
 }
+

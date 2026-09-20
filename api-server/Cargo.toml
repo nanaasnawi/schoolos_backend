@@ -13,7 +13,7 @@ bytes = "1.12.1"
 chrono = "0.4.45"
 dotenvy = "0.15.7"
 hex = "0.4.3"
-jsonwebtoken = { version = "10.4.0", default-features = false, features = ["rust_crypto"] }
+jsonwebtoken = { version = "10.4.0", default-features = false, features = ["rust_crypto", "use_pem"] }
 metrics = "0.24.6"
 metrics-exporter-prometheus = "0.18.3"
 school-core = { version = "0.1.0", path = "../school-core" }
