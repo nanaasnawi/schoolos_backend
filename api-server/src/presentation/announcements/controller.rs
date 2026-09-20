@@ -113,6 +113,8 @@ pub struct AnnouncementBroadcastEvent {
     pub author: String,
     pub date: String,
     pub is_pinned: bool,
+    #[serde(default)]
+    pub action: Option<String>,
 }
 
 static ANNOUNCEMENT_BROADCAST: LazyLock<broadcast::Sender<AnnouncementBroadcastEvent>> =
@@ -138,7 +140,11 @@ async fn stream_announcements(
     let stream = BroadcastStream::new(rx).filter_map(move |item| match item {
         Ok(event) if event.tenant_id == tenant_id => {
             let json = serde_json::to_string(&event).unwrap_or_default();
-            Some(Ok(Event::default().event("announcement").data(json)))
+            let event_name = match event.action.as_deref() {
+                Some("delete") => "announcement_deleted",
+                _ => "announcement",
+            };
+            Some(Ok(Event::default().event(event_name).data(json)))
         }
         _ => None,
     });
@@ -250,7 +256,7 @@ async fn create(
 
         let insert_result = sqlx::query!(
             r#"
-            INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, is_read, created_at)
+            INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, reference_type, reference_id, is_read, created_at)
             SELECT 
                 gen_random_uuid(),
                 u.tenant_id,
@@ -259,6 +265,8 @@ async fn create(
                 $3 as body,
                 'ANNOUNCEMENT',
                 'in_app',
+                'announcement',
+                $5,
                 FALSE,
                 NOW()
             FROM users u
@@ -283,7 +291,8 @@ async fn create(
             req_ctx.tenant_id,
             row.title,
             row.content,
-            target_filter
+            target_filter,
+            row.id
         )
         .execute(&ctx.pool)
         .await;
@@ -306,6 +315,7 @@ async fn create(
         author: row.author.clone(),
         date: date_str.clone(),
         is_pinned: row.is_pinned,
+        action: Some("create".to_string()),
     };
     let _ = ANNOUNCEMENT_BROADCAST.send(broadcast_event);
 
@@ -367,15 +377,17 @@ async fn delete_announcement(
     req_ctx: RequestContext,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<bool>>, ApiError> {
-    sqlx::query!(
+    // 1. Dapatkan info pengumuman sebelum dihapus untuk pembersihan notifikasi
+    let announcement = sqlx::query!(
         r#"
-        DELETE FROM announcements
+        SELECT id, title, content, tenant_id
+        FROM announcements
         WHERE id = $1 AND tenant_id = $2
         "#,
         id,
         req_ctx.tenant_id
     )
-    .execute(&ctx.pool)
+    .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| {
         ApiError::new(
@@ -385,6 +397,60 @@ async fn delete_announcement(
             &req_ctx.request_id,
         )
     })?;
+
+    if let Some(ann) = announcement {
+        // 2. Cascade delete: Hapus semua baris notifikasi terkait pengumuman ini dari tabel notifications
+        let _ = sqlx::query!(
+            r#"
+            DELETE FROM notifications
+            WHERE tenant_id = $1
+              AND (
+                reference_id = $2
+                OR (notification_type = 'ANNOUNCEMENT' AND (title = $3 OR title = ('📢 ' || $3)))
+              )
+            "#,
+            req_ctx.tenant_id,
+            ann.id,
+            ann.title
+        )
+        .execute(&ctx.pool)
+        .await;
+
+        // 3. Hapus pengumuman dari tabel announcements
+        sqlx::query!(
+            r#"
+            DELETE FROM announcements
+            WHERE id = $1 AND tenant_id = $2
+            "#,
+            id,
+            req_ctx.tenant_id
+        )
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+
+        // 4. Broadcast recall event ke client yang sedang mendengarkan SSE agar notifikasi di HP/Web langsung dicancel
+        let delete_event = AnnouncementBroadcastEvent {
+            id: ann.id,
+            tenant_id: ann.tenant_id,
+            title: ann.title,
+            content: ann.content,
+            category: "DELETED".to_string(),
+            target: "ALL".to_string(),
+            author: "".to_string(),
+            date: "".to_string(),
+            is_pinned: false,
+            action: Some("delete".to_string()),
+        };
+        let _ = ANNOUNCEMENT_BROADCAST.send(delete_event);
+    }
 
     Ok(Json(ApiResponse::success(true, req_ctx.request_id)))
 }
