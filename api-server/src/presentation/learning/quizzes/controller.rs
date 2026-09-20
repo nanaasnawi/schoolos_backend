@@ -467,6 +467,55 @@ async fn publish(
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
+    // ── FCM + in-app untuk KUIS/CBT yang di-publish ──
+    {
+        let meta = sqlx::query(
+            "SELECT tenant_id, class_id FROM quizzes WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten();
+        let (q_tenant, q_class): (Option<uuid::Uuid>, Option<uuid::Uuid>) = match meta {
+            Some(r) => {
+                use sqlx::Row;
+                (r.try_get("tenant_id").ok(), r.try_get("class_id").ok())
+            }
+            None => (None, None),
+        };
+        let t = format!("💻 Kuis/CBT Baru: {}", quiz.title);
+        let b = "Kuis/CBT baru sudah dipublish. Buka aplikasi untuk mengerjakan sebelum batas waktu!".to_string();
+        if let Some(tid) = q_tenant.or(Some(req_ctx.tenant_id)) {
+            let cid = q_class;
+            let _ = sqlx::query(
+                r#"
+                INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, reference_type, reference_id, is_read, created_at)
+                SELECT
+                    gen_random_uuid(), s.tenant_id, s.user_id, $1, $2,
+                    'QUIZ', 'in_app', 'quiz', $4, FALSE, NOW()
+                FROM students s
+                JOIN enrollments en ON en.student_id = s.id
+                WHERE s.tenant_id = $3
+                  AND ($5::uuid IS NULL OR en.class_id = $5)
+                  AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                "#,
+            )
+            .bind(&t)
+            .bind(&b)
+            .bind(tid)
+            .bind(id)
+            .bind(cid)
+            .execute(&ctx.pool)
+            .await;
+        }
+        crate::infrastructure::fcm::trigger_fcm_push_categorized(
+            t, b,
+            crate::infrastructure::fcm::FcmCategory::Quiz,
+            id,
+        );
+    }
+
     Ok(Json(ApiResponse::success(
         QuizResponse::from(quiz),
         req_ctx.request_id,
@@ -694,6 +743,43 @@ async fn grade_attempt(
         .execute(command)
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
+
+    // ── FCM update NILAI kuis ke siswa pemilik attempt ──
+    {
+        use sqlx::Row;
+        if let Some(row) = sqlx::query(
+            "SELECT q.tenant_id AS tenant_id, q.title AS title, s.user_id AS user_id, st.full_name AS sname, a.score AS score FROM quiz_attempts a JOIN quizzes q ON q.id = a.quiz_id JOIN students s ON s.id = a.student_id JOIN students st ON st.id = a.student_id WHERE a.id = $1 LIMIT 1",
+        )
+        .bind(attempt_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten()
+        {
+            let tid: Option<Uuid> = row.try_get("tenant_id").ok();
+            let user_id: Option<Uuid> = row.try_get("user_id").ok();
+            let qtitle: String = row.try_get("title").unwrap_or_else(|_| "Kuis".to_string());
+            let score: Option<f64> = row.try_get::<Option<f64>, _>("score").ok().flatten()
+                .or_else(|| row.try_get::<Option<i32>, _>("score").ok().flatten().map(|v| v as f64));
+            let t = format!("🏆 Nilai Keluar: {}", qtitle);
+            let b = match score {
+                Some(v) => format!("Nilai kuismu sudah dinilai: {}. Cek detail di aplikasi!", v),
+                None => "Nilai kuismu sudah dinilai. Cek detail di aplikasi!".to_string(),
+            };
+            if let (Some(tid_v), Some(uid)) = (tid.or(Some(req_ctx.tenant_id)), user_id) {
+                let _ = sqlx::query(
+                    "INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, reference_type, reference_id, is_read, created_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, 'GRADE_UPDATE', 'in_app', 'grade', $5, FALSE, NOW())",
+                )
+                .bind(tid_v).bind(uid).bind(&t).bind(&b).bind(attempt_id)
+                .execute(&ctx.pool).await;
+            }
+            crate::infrastructure::fcm::trigger_fcm_push_categorized(
+                t, b,
+                crate::infrastructure::fcm::FcmCategory::Grade,
+                attempt_id,
+            );
+        }
+    }
 
     Ok(Json(ApiResponse::success(
         AttemptResponse::from(attempt),

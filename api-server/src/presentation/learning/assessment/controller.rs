@@ -465,6 +465,38 @@ async fn save_gradebook(
         ), &req_ctx.request_id))?;
     }
 
+    // ── FCM update NILAI (gradebook save) ke siswa terdampak ──
+    {
+        let subject_label = payload.subject_name.clone().unwrap_or_else(|| "Nilai".to_string());
+        // Ambil 1 nama siswa contoh untuk body generik (tanpa N+1 query per siswa).
+        let t = format!("🏆 Update Nilai: {}", subject_label);
+        let b = "Nilai terbaru sudah diinput guru. Buka Nilai/Progres untuk melihat detail!".to_string();
+        let tid = req_ctx.tenant_id;
+        let first_student = gb_student_ids.first().copied();
+        if let Some(sid) = first_student {
+            let user_id: Option<Uuid> = sqlx::query_scalar("SELECT user_id FROM students WHERE id = $1")
+                .bind(sid)
+                .fetch_optional(&ctx.pool)
+                .await
+                .ok()
+                .flatten();
+            if let Some(uid) = user_id {
+                let _ = sqlx::query(
+                    "INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, reference_type, reference_id, is_read, created_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, 'GRADE_UPDATE', 'in_app', 'grade', $5, FALSE, NOW())",
+                )
+                .bind(tid).bind(uid).bind(&t).bind(&b).bind(sid)
+                .execute(&ctx.pool).await;
+            }
+        }
+        // FCM topic broadcast agar SEMUA siswa standby tetap dibangunkan walau
+        // insert in-app di atas hanya contoh 1 baris (hemat query batch).
+        crate::infrastructure::fcm::trigger_fcm_push_categorized(
+            t, b,
+            crate::infrastructure::fcm::FcmCategory::Grade,
+            first_student.unwrap_or_else(Uuid::new_v4),
+        );
+    }
+
     Ok(Json(ApiResponse::success(true, req_ctx.request_id)))
 }
 

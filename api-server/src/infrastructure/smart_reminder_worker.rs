@@ -144,8 +144,8 @@ impl SmartReminderWorker {
             .bind(notif_id)
             .bind(tenant_id)
             .bind(target_user_id)
-            .bind(title)
-            .bind(body)
+            .bind(title.clone())
+            .bind(body.clone())
             .bind(schedule_id)
             .bind(&dedup_key)
             .bind(scheduled_at)
@@ -154,6 +154,17 @@ impl SmartReminderWorker {
 
             if result.rows_affected() > 0 {
                 sent_count += 1;
+                // FCM untuk SMART REMINDER guru (jadwal 15 mnt lagi) agar bunyi walau idle.
+                // Best-effort: reference = schedule_id (UUID sudah ada).
+                // Clone sebelum move ke trigger agar title/body masih bisa dipakai log.
+                let fcm_title = title.clone();
+                let fcm_body = body.clone();
+                crate::infrastructure::fcm::trigger_fcm_push_categorized(
+                    fcm_title,
+                    fcm_body,
+                    crate::infrastructure::fcm::FcmCategory::Reminder,
+                    schedule_id,
+                );
             }
         }
 

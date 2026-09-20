@@ -141,6 +141,10 @@ async fn create(
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
+    // ── FCM + in-app untuk TUGAS baru (agar masuk walau HP idle) ──
+    let assignment_id_for_notif = assignment.id;
+    let assignment_title_for_notif = assignment.title.clone();
+
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
     let teacher_id = if let Some(aid) = actor_id {
         sqlx::query_scalar!(r#"SELECT id FROM teachers WHERE user_id = $1 LIMIT 1"#, aid)
@@ -299,6 +303,45 @@ async fn create(
     resp.subject_name = subject_name;
     resp.teacher_name = teacher_name;
     resp.questions = questions_to_return;
+
+    // Kirim push TUGAS baru ke siswa rombel target (atau semua siswa bila tanpa kelas).
+    {
+        let t = format!("📝 Tugas Baru: {}", assignment_title_for_notif);
+        let b = match (&resp.class_name, &resp.teacher_name) {
+            (Some(c), Some(g)) => format!("{} memberi tugas baru untuk kelas {}. Kerjakan sebelum tenggat!", g, c),
+            (Some(c), None) => format!("Ada tugas baru untuk kelas {}. Kerjakan sebelum tenggat!", c),
+            _ => format!("Ada tugas baru: {}. Kerjakan sebelum tenggat!", assignment_title_for_notif),
+        };
+        let tid = req_ctx.tenant_id;
+        let cid = target_class_id;
+        let title_c = t.clone();
+        let body_c = b.clone();
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, reference_type, reference_id, is_read, created_at)
+            SELECT
+                gen_random_uuid(), s.tenant_id, s.user_id, $1, $2,
+                'ASSIGNMENT', 'in_app', 'assignment', $4, FALSE, NOW()
+            FROM students s
+            JOIN enrollments en ON en.student_id = s.id
+            WHERE s.tenant_id = $3
+              AND ($5::uuid IS NULL OR en.class_id = $5)
+              AND (en.status = 'Active' OR en.status = 'ACTIVE')
+            "#,
+        )
+        .bind(&title_c)
+        .bind(&body_c)
+        .bind(tid)
+        .bind(assignment_id_for_notif)
+        .bind(cid)
+        .execute(&ctx.pool)
+        .await;
+        crate::infrastructure::fcm::trigger_fcm_push_categorized(
+            t, b,
+            crate::infrastructure::fcm::FcmCategory::Assignment,
+            assignment_id_for_notif,
+        );
+    }
 
     Ok(Json(ApiResponse::success(
         resp,
@@ -774,6 +817,17 @@ async fn publish(
         .execute(command)
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
+
+    // FCM saat tugas di-PUBLISH (kasus guru buat draft lalu publish).
+    {
+        let t = format!("📝 Tugas Dipublish: {}", assignment.title);
+        crate::infrastructure::fcm::trigger_fcm_push_categorized(
+            t,
+            "Tugas baru sudah dipublish. Buka aplikasi untuk mengerjakan.".to_string(),
+            crate::infrastructure::fcm::FcmCategory::Assignment,
+            assignment.id,
+        );
+    }
 
     Ok(Json(ApiResponse::success(
         AssignmentResponse::from(assignment),

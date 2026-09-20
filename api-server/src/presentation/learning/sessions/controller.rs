@@ -62,6 +62,46 @@ async fn start(
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
+    // ── FCM JADWAL dimulai ke siswa rombel sesi ──
+    {
+        let tid = req_ctx.tenant_id;
+        let class_id = payload.class_id;
+        let cname: String = sqlx::query_scalar("SELECT name FROM classes WHERE id = $1")
+            .bind(class_id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "Kelas".to_string());
+        let t = format!("🎓 Jadwal Dimulai: {}", cname);
+        let b = "Jadwal pelajaran dimulai. Presensi dibuka — segera bergabung!".to_string();
+        let title_c = t.clone();
+        let body_c = b.clone();
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, reference_type, reference_id, is_read, created_at)
+            SELECT gen_random_uuid(), s.tenant_id, s.user_id, $1, $2,
+                   'SESSION_STARTED', 'in_app', 'session', $4, FALSE, NOW()
+            FROM students s
+            JOIN enrollments en ON en.student_id = s.id
+            WHERE s.tenant_id = $3 AND en.class_id = $5
+              AND (en.status = 'Active' OR en.status = 'ACTIVE')
+            "#,
+        )
+        .bind(&title_c)
+        .bind(&body_c)
+        .bind(tid)
+        .bind(session.id)
+        .bind(class_id)
+        .execute(&ctx.pool)
+        .await;
+        crate::infrastructure::fcm::trigger_fcm_push_categorized(
+            t, b,
+            crate::infrastructure::fcm::FcmCategory::Session,
+            session.id,
+        );
+    }
+
     Ok(Json(ApiResponse::success(
         SessionResponse::from(session),
         req_ctx.request_id,
