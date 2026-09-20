@@ -309,18 +309,7 @@ pub fn trigger_fcm_push_categorized(title: String, content: String, category: Fc
                 "android": {
                     "priority": "HIGH",
                     "ttl": "86400s",
-                    "direct_boot_ok": true,
-                    "notification": {
-                        "channel_id": channel_id,
-                        "notification_priority": "PRIORITY_MAX",
-                        "visibility": "PUBLIC",
-                        "sound": "notification",
-                        "default_sound": false,
-                        "default_vibrate_timings": true,
-                        "default_light_settings": true,
-                        "icon": "ic_launcher",
-                        "click_action": click_action
-                    }
+                    "direct_boot_ok": true
                 }
             }
         });
