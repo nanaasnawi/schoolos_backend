@@ -490,7 +490,7 @@ async fn get_dashboard(
         FROM announcements
         WHERE tenant_id = $1
         ORDER BY is_pinned DESC, created_at DESC
-        LIMIT 6
+        LIMIT 3
         "#
     )
     .bind(tid)
