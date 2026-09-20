@@ -18,6 +18,7 @@ use crate::{
     response::ApiResponse,
 };
 use school_core::common::error::ApplicationError;
+use sqlx::Row;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -254,7 +255,7 @@ async fn create(
     if send_push {
         let target_filter = target_enum.to_filter_str();
 
-        let insert_result = sqlx::query!(
+        let insert_result = sqlx::query(
             r#"
             INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, reference_type, reference_id, is_read, created_at)
             SELECT 
@@ -288,12 +289,12 @@ async fn create(
                 ))
               )
             "#,
-            req_ctx.tenant_id,
-            row.title,
-            row.content,
-            target_filter,
-            row.id
         )
+        .bind(req_ctx.tenant_id)
+        .bind(&row.title)
+        .bind(&row.content)
+        .bind(target_filter)
+        .bind(row.id)
         .execute(&ctx.pool)
         .await;
 
@@ -378,15 +379,15 @@ async fn delete_announcement(
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<bool>>, ApiError> {
     // 1. Dapatkan info pengumuman sebelum dihapus untuk pembersihan notifikasi
-    let announcement = sqlx::query!(
+    let announcement = sqlx::query(
         r#"
         SELECT id, title, content, tenant_id
         FROM announcements
         WHERE id = $1 AND tenant_id = $2
         "#,
-        id,
-        req_ctx.tenant_id
     )
+    .bind(id)
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| {
@@ -399,8 +400,13 @@ async fn delete_announcement(
     })?;
 
     if let Some(ann) = announcement {
+        let ann_id: Uuid = ann.get("id");
+        let ann_title: String = ann.get("title");
+        let ann_content: String = ann.get("content");
+        let ann_tenant_id: Uuid = ann.get("tenant_id");
+
         // 2. Cascade delete: Hapus semua baris notifikasi terkait pengumuman ini dari tabel notifications
-        let _ = sqlx::query!(
+        let _ = sqlx::query(
             r#"
             DELETE FROM notifications
             WHERE tenant_id = $1
@@ -409,22 +415,22 @@ async fn delete_announcement(
                 OR (notification_type = 'ANNOUNCEMENT' AND (title = $3 OR title = ('📢 ' || $3)))
               )
             "#,
-            req_ctx.tenant_id,
-            ann.id,
-            ann.title
         )
+        .bind(req_ctx.tenant_id)
+        .bind(ann_id)
+        .bind(&ann_title)
         .execute(&ctx.pool)
         .await;
 
         // 3. Hapus pengumuman dari tabel announcements
-        sqlx::query!(
+        sqlx::query(
             r#"
             DELETE FROM announcements
             WHERE id = $1 AND tenant_id = $2
             "#,
-            id,
-            req_ctx.tenant_id
         )
+        .bind(id)
+        .bind(req_ctx.tenant_id)
         .execute(&ctx.pool)
         .await
         .map_err(|e| {
@@ -438,10 +444,10 @@ async fn delete_announcement(
 
         // 4. Broadcast recall event ke client yang sedang mendengarkan SSE agar notifikasi di HP/Web langsung dicancel
         let delete_event = AnnouncementBroadcastEvent {
-            id: ann.id,
-            tenant_id: ann.tenant_id,
-            title: ann.title,
-            content: ann.content,
+            id: ann_id,
+            tenant_id: ann_tenant_id,
+            title: ann_title,
+            content: ann_content,
             category: "DELETED".to_string(),
             target: "ALL".to_string(),
             author: "".to_string(),
