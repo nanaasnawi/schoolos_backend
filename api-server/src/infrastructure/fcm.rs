@@ -33,8 +33,8 @@ impl FcmCategory {
 
     fn channel_id(&self) -> &'static str {
         match self {
-            FcmCategory::Announcement => "school_os_announcements_v3",
-            _ => "school_os_learning_v1",
+            FcmCategory::Announcement => "school_os_announcements_v4",
+            _ => "school_os_learning_v2",
         }
     }
 
@@ -181,7 +181,8 @@ pub fn trigger_fcm_push_categorized(title: String, content: String, category: Fc
                         "channel_id": channel_id,
                         "notification_priority": "PRIORITY_MAX",
                         "visibility": "PUBLIC",
-                        "default_sound": true,
+                        "sound": "notification",
+                        "default_sound": false,
                         "default_vibrate_timings": true,
                         "default_light_settings": true,
                         "icon": "ic_launcher",
