@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id FROM classes WHERE tenant_id = $1 AND (name = $2 OR name ILIKE $2 OR name ILIKE '%' || $2 || '%') LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "289ed4d45d4029e36adc4c0461bc880273e591f062ae4d2afc0dedab8a0f0ede"
+}

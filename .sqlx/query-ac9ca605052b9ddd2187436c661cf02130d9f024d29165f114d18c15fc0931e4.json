@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE assignments a\n        SET teacher_id = COALESCE(\n            (SELECT cs.teacher_id FROM class_schedules cs WHERE cs.class_id = a.class_id AND cs.subject_id = a.subject_id AND cs.tenant_id = a.tenant_id LIMIT 1),\n            (SELECT c.homeroom_teacher_id FROM classes c WHERE c.id = a.class_id AND c.tenant_id = a.tenant_id LIMIT 1),\n            (SELECT t.id FROM teachers t WHERE t.user_id = a.created_by AND t.tenant_id = a.tenant_id LIMIT 1),\n            (SELECT t.id FROM teachers t WHERE t.tenant_id = a.tenant_id ORDER BY t.created_at ASC LIMIT 1)\n        )\n        WHERE a.tenant_id = $1 AND a.teacher_id IS NULL AND a.deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ac9ca605052b9ddd2187436c661cf02130d9f024d29165f114d18c15fc0931e4"
+}

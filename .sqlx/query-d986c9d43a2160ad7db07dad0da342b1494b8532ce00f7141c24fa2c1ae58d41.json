@@ -1,16 +1,17 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT class_id FROM enrollments WHERE student_id = $1 AND (status = 'Active' OR status = 'ACTIVE') LIMIT 1",
+  "query": "SELECT id FROM students WHERE (id = $1 OR user_id = $1) AND tenant_id = $2 LIMIT 1",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "class_id",
+        "name": "id",
         "type_info": "Uuid"
       }
     ],
     "parameters": {
       "Left": [
+        "Uuid",
         "Uuid"
       ]
     },
@@ -18,5 +19,5 @@
       false
     ]
   },
-  "hash": "a4b640c17e1b71948dd60466bfb97f3297ace382ec33a6994bba6757181fab3c"
+  "hash": "d986c9d43a2160ad7db07dad0da342b1494b8532ce00f7141c24fa2c1ae58d41"
 }

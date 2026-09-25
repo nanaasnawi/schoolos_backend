@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE assignments SET class_id = $1, subject_id = $2, teacher_id = $3, created_by = $4, status = 'published', is_active = true WHERE id = $5",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f88689cf9d69ce161e1e3349585831d4b3a4dd21f5e4a46b67bd0cd7b01138a3"
+}

@@ -154,31 +154,33 @@ async fn list_inquiries(
     };
 
     // Auto-repair any inquiry thread where teacher_name is "Guru Pengampu" or null
-    let _ = sqlx::query!(
+    let _ = sqlx::query(
         r#"
         UPDATE inquiry_threads it
         SET 
             teacher_name = COALESCE(
-                (SELECT t.full_name FROM assignments a JOIN teachers t ON t.id = a.teacher_id WHERE a.id::text = it.reference_id LIMIT 1),
-                (SELECT t2.full_name FROM assignments a JOIN class_schedules cs ON cs.class_id = a.class_id AND cs.subject_id = a.subject_id JOIN teachers t2 ON t2.id = cs.teacher_id WHERE a.id::text = it.reference_id LIMIT 1),
+                (SELECT t.full_name FROM assignments a JOIN teachers t ON t.id = a.teacher_id WHERE a.id::text = it.reference_id OR a.title = it.reference_title LIMIT 1),
+                (SELECT t2.full_name FROM assignments a JOIN class_schedules cs ON cs.class_id = a.class_id AND cs.subject_id = a.subject_id JOIN teachers t2 ON t2.id = cs.teacher_id WHERE a.id::text = it.reference_id OR a.title = it.reference_title LIMIT 1),
+                (SELECT t2b.full_name FROM class_schedules cs JOIN teachers t2b ON t2b.id = cs.teacher_id JOIN classes c ON c.id = cs.class_id JOIN subjects sub ON sub.id = cs.subject_id WHERE c.name = it.student_class AND (sub.name ILIKE '%' || it.subject_name || '%' OR it.subject_name ILIKE '%' || sub.name || '%' OR it.reference_title ILIKE '%' || sub.name || '%') LIMIT 1),
                 (SELECT t3.full_name FROM teachers t3 WHERE t3.id = it.teacher_id LIMIT 1),
-                (SELECT t4.full_name FROM teachers t4 WHERE t4.user_id = (SELECT a.created_by FROM assignments a WHERE a.id::text = it.reference_id) LIMIT 1),
+                (SELECT t4.full_name FROM teachers t4 WHERE t4.user_id = (SELECT a.created_by FROM assignments a WHERE a.id::text = it.reference_id OR a.title = it.reference_title LIMIT 1) LIMIT 1),
                 (SELECT t5.full_name FROM teachers t5 WHERE t5.tenant_id = it.tenant_id AND (t5.subject ILIKE '%' || it.subject_name || '%' OR it.subject_name ILIKE '%' || t5.subject || '%') LIMIT 1),
                 (SELECT t6.full_name FROM teachers t6 WHERE t6.tenant_id = it.tenant_id ORDER BY t6.created_at ASC LIMIT 1),
                 it.teacher_name
             ),
             teacher_id = COALESCE(
                 it.teacher_id,
-                (SELECT a.teacher_id FROM assignments a WHERE a.id::text = it.reference_id LIMIT 1),
-                (SELECT cs.teacher_id FROM assignments a JOIN class_schedules cs ON cs.class_id = a.class_id AND cs.subject_id = a.subject_id WHERE a.id::text = it.reference_id LIMIT 1),
+                (SELECT a.teacher_id FROM assignments a WHERE a.id::text = it.reference_id OR a.title = it.reference_title LIMIT 1),
+                (SELECT cs.teacher_id FROM assignments a JOIN class_schedules cs ON cs.class_id = a.class_id AND cs.subject_id = a.subject_id WHERE a.id::text = it.reference_id OR a.title = it.reference_title LIMIT 1),
+                (SELECT t2b.id FROM class_schedules cs JOIN teachers t2b ON t2b.id = cs.teacher_id JOIN classes c ON c.id = cs.class_id JOIN subjects sub ON sub.id = cs.subject_id WHERE c.name = it.student_class AND (sub.name ILIKE '%' || it.subject_name || '%' OR it.subject_name ILIKE '%' || sub.name || '%' OR it.reference_title ILIKE '%' || sub.name || '%') LIMIT 1),
                 (SELECT t5.id FROM teachers t5 WHERE t5.tenant_id = it.tenant_id AND (t5.subject ILIKE '%' || it.subject_name || '%' OR it.subject_name ILIKE '%' || t5.subject || '%') LIMIT 1),
                 (SELECT t6.id FROM teachers t6 WHERE t6.tenant_id = it.tenant_id ORDER BY t6.created_at ASC LIMIT 1)
             )
         WHERE it.tenant_id = $1 
           AND (it.teacher_name = 'Guru Pengampu' OR it.teacher_name IS NULL OR it.teacher_name = '' OR it.teacher_id IS NULL)
-        "#,
-        tenant_id
+        "#
     )
+    .bind(tenant_id)
     .execute(&ctx.pool)
     .await;
 
@@ -624,7 +626,85 @@ async fn create_inquiry(
         }
     }
 
-    // If teacher is still unresolved or generic, resolve by subject name in the same tenant
+    // If teacher is still unresolved or generic, resolve via schedule, title, subject, or tenant
+    if resolved_teacher_id.is_none() || resolved_teacher_name.trim().is_empty() || resolved_teacher_name.eq_ignore_ascii_case("Guru Pengampu") {
+        // 1. Try class_schedules matching student class and subject
+        if !resolved_class_name.trim().is_empty() && !resolved_subject_name.trim().is_empty() {
+            if let Ok(Some(cs_tch)) = sqlx::query(
+                r#"
+                SELECT t.id as teacher_id, t.full_name as teacher_name
+                FROM class_schedules cs
+                JOIN classes c ON c.id = cs.class_id
+                JOIN subjects sub ON sub.id = cs.subject_id
+                JOIN teachers t ON t.id = cs.teacher_id
+                WHERE cs.tenant_id = $1
+                  AND (c.name ILIKE $2 OR c.id::text = $2)
+                  AND (sub.name ILIKE '%' || $3 || '%' OR $3 ILIKE '%' || sub.name || '%')
+                LIMIT 1
+                "#,
+            )
+            .bind(resolved_tenant_id)
+            .bind(&resolved_class_name)
+            .bind(&resolved_subject_name)
+            .fetch_optional(&ctx.pool)
+            .await
+            {
+                if let Some(tid) = cs_tch.get::<Option<Uuid>, _>("teacher_id") {
+                    resolved_teacher_id = Some(tid);
+                }
+                if let Some(tn) = cs_tch.get::<Option<String>, _>("teacher_name") {
+                    if !tn.trim().is_empty() && !tn.eq_ignore_ascii_case("Guru Pengampu") {
+                        resolved_teacher_name = tn;
+                    }
+                }
+            }
+        }
+    }
+
+    if resolved_teacher_id.is_none() || resolved_teacher_name.trim().is_empty() || resolved_teacher_name.eq_ignore_ascii_case("Guru Pengampu") {
+        // 2. Try assignments matching reference_title
+        if !payload.reference_title.trim().is_empty() {
+            if let Ok(Some(asg_tch)) = sqlx::query(
+                r#"
+                SELECT 
+                    COALESCE(
+                        a.teacher_id,
+                        (SELECT cs.teacher_id FROM class_schedules cs WHERE cs.class_id = a.class_id AND cs.subject_id = a.subject_id LIMIT 1),
+                        (SELECT t.id FROM teachers t WHERE t.user_id = a.created_by LIMIT 1)
+                    ) as teacher_id,
+                    COALESCE(
+                        t.full_name,
+                        (SELECT t2.full_name FROM class_schedules cs JOIN teachers t2 ON t2.id = cs.teacher_id WHERE cs.class_id = a.class_id AND cs.subject_id = a.subject_id LIMIT 1),
+                        (SELECT t3.full_name FROM teachers t3 WHERE t3.user_id = a.created_by LIMIT 1)
+                    ) as teacher_name,
+                    sub.name as subject_name
+                FROM assignments a
+                LEFT JOIN teachers t ON t.id = a.teacher_id
+                LEFT JOIN subjects sub ON sub.id = a.subject_id
+                WHERE a.tenant_id = $1 AND a.title ILIKE '%' || $2 || '%'
+                LIMIT 1
+                "#,
+            )
+            .bind(resolved_tenant_id)
+            .bind(payload.reference_title.trim())
+            .fetch_optional(&ctx.pool)
+            .await
+            {
+                if let Some(tid) = asg_tch.get::<Option<Uuid>, _>("teacher_id") {
+                    resolved_teacher_id = Some(tid);
+                }
+                if let Some(tn) = asg_tch.get::<Option<String>, _>("teacher_name") {
+                    if !tn.trim().is_empty() && !tn.eq_ignore_ascii_case("Guru Pengampu") {
+                        resolved_teacher_name = tn;
+                    }
+                }
+                if let Some(sn) = asg_tch.get::<Option<String>, _>("subject_name") {
+                    resolved_subject_name = sn;
+                }
+            }
+        }
+    }
+
     if resolved_teacher_id.is_none() || resolved_teacher_name.trim().is_empty() || resolved_teacher_name.eq_ignore_ascii_case("Guru Pengampu") {
         if let Ok(Some(tch)) = sqlx::query!(
             r#"

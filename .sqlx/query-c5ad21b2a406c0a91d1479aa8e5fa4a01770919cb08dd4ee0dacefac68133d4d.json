@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE assignments\n        SET status = 'published'\n        WHERE tenant_id = $1 \n          AND status = 'draft' \n          AND class_id IS NOT NULL \n          AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c5ad21b2a406c0a91d1479aa8e5fa4a01770919cb08dd4ee0dacefac68133d4d"
+}

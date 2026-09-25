@@ -696,9 +696,16 @@ async fn get_by_id(
 
     let _ = sqlx::query(
         r#"
-        UPDATE assignments
-        SET status = 'published'
-        WHERE id = $1 AND tenant_id = $2 AND status = 'draft' AND class_id IS NOT NULL AND deleted_at IS NULL
+        UPDATE assignments a
+        SET status = 'published',
+            teacher_id = COALESCE(
+                a.teacher_id,
+                (SELECT cs.teacher_id FROM class_schedules cs WHERE cs.class_id = a.class_id AND cs.subject_id = a.subject_id AND cs.tenant_id = a.tenant_id LIMIT 1),
+                (SELECT c.homeroom_teacher_id FROM classes c WHERE c.id = a.class_id AND c.tenant_id = a.tenant_id LIMIT 1),
+                (SELECT t.id FROM teachers t WHERE t.user_id = a.created_by AND t.tenant_id = a.tenant_id LIMIT 1),
+                (SELECT t.id FROM teachers t WHERE t.tenant_id = a.tenant_id ORDER BY t.created_at ASC LIMIT 1)
+            )
+        WHERE a.id = $1 AND a.tenant_id = $2 AND a.deleted_at IS NULL
         "#
     )
     .bind(id)
@@ -775,6 +782,22 @@ async fn get_by_id(
                 .await
                 .unwrap_or_default();
 
+            let raw_teacher_name = r.get::<Option<String>, _>("teacher_name");
+            let resolved_teacher_name = match raw_teacher_name {
+                Some(ref tn) if !tn.trim().is_empty() && !tn.eq_ignore_ascii_case("Guru Pengampu") => Some(tn.clone()),
+                _ => {
+                    sqlx::query_scalar!(
+                        "SELECT full_name FROM teachers WHERE tenant_id = $1 ORDER BY created_at ASC LIMIT 1",
+                        tenant_id
+                    )
+                    .fetch_optional(&ctx.pool)
+                    .await
+                    .ok()
+                    .flatten()
+                    .or_else(|| Some("Guru Mata Pelajaran".to_string()))
+                }
+            };
+
             let resp = AssignmentResponse {
                 id: r.get("id"),
                 tenant_id,
@@ -792,7 +815,7 @@ async fn get_by_id(
                 class_id,
                 class_name: r.get("class_name"),
                 subject_name: r.get("subject_name"),
-                teacher_name: r.get("teacher_name"),
+                teacher_name: resolved_teacher_name,
                 questions,
             };
             Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
