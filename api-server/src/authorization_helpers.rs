@@ -52,11 +52,17 @@ impl AuthorizationScope {
         let row = sqlx::query(
             r#"
             SELECT EXISTS(
+                SELECT 1 FROM students
+                WHERE tenant_id = $1 
+                  AND id = $2 
+                  AND class_id = $3
+                  AND deleted_at IS NULL
+                UNION
                 SELECT 1 FROM enrollments 
                 WHERE tenant_id = $1 
                   AND student_id = $2 
                   AND class_id = $3 
-                  AND (status = 'Active' OR status = 'ACTIVE')
+                  AND (status ILIKE 'active')
             ) as is_enrolled
             "#,
         )
@@ -82,11 +88,19 @@ impl AuthorizationScope {
                 SELECT 1 
                 FROM guardians g
                 JOIN students s ON s.guardian_id = g.id
+                WHERE g.user_id = $1 
+                  AND g.tenant_id = $2
+                  AND s.class_id = $3
+                  AND s.deleted_at IS NULL
+                UNION
+                SELECT 1 
+                FROM guardians g
+                JOIN students s ON s.guardian_id = g.id
                 JOIN enrollments en ON en.student_id = s.id
                 WHERE g.user_id = $1 
                   AND g.tenant_id = $2
                   AND en.class_id = $3
-                  AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                  AND (en.status ILIKE 'active')
             ) as is_parent
             "#,
         )
@@ -181,7 +195,12 @@ impl AuthorizationScope {
             let n = r.name.to_lowercase();
             n.contains("wali") || n.contains("parent") || n.contains("guardian") || n.contains("ortu")
         });
-        let is_student = !is_parent && !is_teacher && actor.roles.iter().any(|r| r.name == "Siswa");
+        let is_student = !is_parent && !is_teacher && (
+            actor.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n == "siswa" || n == "student" || n == "murid" || n.contains("siswa")
+            }) || Self::resolve_student_id(pool, req_ctx.tenant_id, actor.id).await.ok().flatten().is_some()
+        );
 
         // 3. Teacher Access Check (Strict Cross-Teacher Isolation)
         if is_teacher {

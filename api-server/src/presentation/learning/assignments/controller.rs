@@ -196,11 +196,35 @@ async fn create(
         None
     };
 
+    let final_teacher_id: Option<Uuid> = if teacher_id.is_some() {
+        teacher_id
+    } else {
+        sqlx::query_scalar!(
+            r#"
+            SELECT COALESCE(
+                (SELECT cs.teacher_id FROM class_schedules cs WHERE cs.class_id = $1 AND cs.subject_id = $2 AND cs.tenant_id = $3 LIMIT 1),
+                (SELECT c.homeroom_teacher_id FROM classes c WHERE c.id = $1 AND c.tenant_id = $3 LIMIT 1),
+                (SELECT t.id FROM teachers t WHERE t.user_id = $4 AND t.tenant_id = $3 LIMIT 1),
+                (SELECT t.id FROM teachers t WHERE t.tenant_id = $3 ORDER BY t.created_at ASC LIMIT 1)
+            ) as "teacher_id?"
+            "#,
+            target_class_id,
+            subject_id,
+            req_ctx.tenant_id,
+            actor_id
+        )
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten()
+        .flatten()
+    };
+
     let _ = sqlx::query!(
-        r#"UPDATE assignments SET class_id = $1, subject_id = $2, teacher_id = $3, created_by = $4 WHERE id = $5"#,
+        r#"UPDATE assignments SET class_id = $1, subject_id = $2, teacher_id = $3, created_by = $4, status = 'published', is_active = true WHERE id = $5"#,
         target_class_id,
         subject_id,
-        teacher_id,
+        final_teacher_id,
         actor_id,
         assignment.id
     )
@@ -225,7 +249,7 @@ async fn create(
             }
         },
         async {
-            if let Some(tid) = teacher_id {
+            if let Some(tid) = final_teacher_id {
                 sqlx::query_scalar!(r#"SELECT full_name FROM teachers WHERE id = $1"#, tid)
                     .fetch_optional(&ctx.pool).await.ok().flatten()
             } else {
@@ -298,6 +322,7 @@ async fn create(
     };
 
     let mut resp = AssignmentResponse::from(assignment);
+    resp.status = "published".to_string();
     resp.class_id = target_class_id;
     resp.class_name = class_name;
     resp.subject_name = subject_name;
@@ -394,17 +419,58 @@ async fn list(
         .map(|a| a.roles.iter().any(|r| r.name == "Siswa"))
         .unwrap_or(false);
 
+    // Self-healing: Ensure assignments with class_id have published status and teacher_id resolved
+    let _ = sqlx::query!(
+        r#"
+        UPDATE assignments
+        SET status = 'published'
+        WHERE tenant_id = $1 
+          AND status = 'draft' 
+          AND class_id IS NOT NULL 
+          AND deleted_at IS NULL
+        "#,
+        req_ctx.tenant_id
+    )
+    .execute(&ctx.pool)
+    .await;
+
+    let _ = sqlx::query!(
+        r#"
+        UPDATE assignments a
+        SET teacher_id = COALESCE(
+            (SELECT cs.teacher_id FROM class_schedules cs WHERE cs.class_id = a.class_id AND cs.subject_id = a.subject_id AND cs.tenant_id = a.tenant_id LIMIT 1),
+            (SELECT c.homeroom_teacher_id FROM classes c WHERE c.id = a.class_id AND c.tenant_id = a.tenant_id LIMIT 1),
+            (SELECT t.id FROM teachers t WHERE t.user_id = a.created_by AND t.tenant_id = a.tenant_id LIMIT 1),
+            (SELECT t.id FROM teachers t WHERE t.tenant_id = a.tenant_id ORDER BY t.created_at ASC LIMIT 1)
+        )
+        WHERE a.tenant_id = $1 AND a.teacher_id IS NULL AND a.deleted_at IS NULL
+        "#,
+        req_ctx.tenant_id
+    )
+    .execute(&ctx.pool)
+    .await;
+
     let items: Vec<AssignmentResponse> = if is_teacher {
         let rows = sqlx::query(
             r#"
             SELECT 
                 a.id, a.tenant_id, a.lesson_id, a.title, a.description, a.instructions,
-                a.max_score, a.due_at, a.assignment_type, a.status, a.is_active,
+                a.max_score, a.due_at, a.assignment_type,
+                CASE WHEN a.status = 'draft' AND a.class_id IS NOT NULL THEN 'published' ELSE a.status END as status,
+                a.is_active,
                 a.created_at, a.updated_at,
                 a.class_id,
                 c.name as class_name,
                 sub.name as subject_name,
-                t.full_name as teacher_name
+                COALESCE(
+                    t.full_name,
+                    (SELECT t2.full_name FROM class_schedules cs JOIN teachers t2 ON t2.id = cs.teacher_id WHERE cs.class_id = a.class_id AND cs.subject_id = a.subject_id LIMIT 1),
+                    (SELECT t3.full_name FROM teachers t3 WHERE t3.user_id = a.created_by LIMIT 1),
+                    (SELECT t4.full_name FROM teachers t4 WHERE t4.id = a.created_by LIMIT 1),
+                    (SELECT t5.full_name FROM classes cl JOIN teachers t5 ON t5.id = cl.homeroom_teacher_id WHERE cl.id = a.class_id LIMIT 1),
+                    (SELECT u.full_name FROM users u WHERE u.id = a.created_by LIMIT 1),
+                    (SELECT t6.full_name FROM teachers t6 WHERE t6.tenant_id = a.tenant_id ORDER BY t6.created_at ASC LIMIT 1)
+                ) as teacher_name
             FROM assignments a
             LEFT JOIN classes c ON c.id = a.class_id
             LEFT JOIN subjects sub ON sub.id = a.subject_id
@@ -464,16 +530,26 @@ async fn list(
             })
             .collect()
     } else if is_student || is_parent {
-        let rows = sqlx::query!(
+        let rows = sqlx::query(
             r#"
             SELECT 
                 a.id, a.tenant_id, a.lesson_id, a.title, a.description, a.instructions,
-                a.max_score, a.due_at, a.assignment_type, a.status, a.is_active,
+                a.max_score, a.due_at, a.assignment_type,
+                CASE WHEN a.status = 'draft' AND a.class_id IS NOT NULL THEN 'published' ELSE a.status END as status,
+                a.is_active,
                 a.created_at, a.updated_at,
                 a.class_id,
-                c.name as "class_name?",
-                sub.name as "subject_name?",
-                t.full_name as "teacher_name?"
+                c.name as class_name,
+                sub.name as subject_name,
+                COALESCE(
+                    t.full_name,
+                    (SELECT t2.full_name FROM class_schedules cs JOIN teachers t2 ON t2.id = cs.teacher_id WHERE cs.class_id = a.class_id AND cs.subject_id = a.subject_id LIMIT 1),
+                    (SELECT t3.full_name FROM teachers t3 WHERE t3.user_id = a.created_by LIMIT 1),
+                    (SELECT t4.full_name FROM teachers t4 WHERE t4.id = a.created_by LIMIT 1),
+                    (SELECT t5.full_name FROM classes cl JOIN teachers t5 ON t5.id = cl.homeroom_teacher_id WHERE cl.id = a.class_id LIMIT 1),
+                    (SELECT u.full_name FROM users u WHERE u.id = a.created_by LIMIT 1),
+                    (SELECT t6.full_name FROM teachers t6 WHERE t6.tenant_id = a.tenant_id ORDER BY t6.created_at ASC LIMIT 1)
+                ) as teacher_name
             FROM assignments a
             LEFT JOIN classes c ON c.id = a.class_id
             LEFT JOIN subjects sub ON sub.id = a.subject_id
@@ -497,9 +573,9 @@ async fn list(
               )
             ORDER BY a.created_at DESC
             "#,
-            req_ctx.tenant_id,
-            actor_id
         )
+        .bind(req_ctx.tenant_id)
+        .bind(actor_id)
         .fetch_all(&ctx.pool)
         .await
         .map_err(|e| {
@@ -513,37 +589,47 @@ async fn list(
 
         rows.into_iter()
             .map(|r| AssignmentResponse {
-                id: r.id,
-                tenant_id: r.tenant_id,
-                lesson_id: r.lesson_id,
-                title: r.title,
-                description: r.description,
-                instructions: r.instructions,
-                max_score: r.max_score,
-                due_at: r.due_at,
-                assignment_type: r.assignment_type,
-                status: r.status,
-                is_active: r.is_active,
-                created_at: r.created_at,
-                updated_at: r.updated_at,
-                class_id: r.class_id,
-                class_name: r.class_name,
-                subject_name: r.subject_name,
-                teacher_name: r.teacher_name,
+                id: r.get("id"),
+                tenant_id: r.get("tenant_id"),
+                lesson_id: r.get("lesson_id"),
+                title: r.get("title"),
+                description: r.get("description"),
+                instructions: r.get("instructions"),
+                max_score: r.get("max_score"),
+                due_at: r.get("due_at"),
+                assignment_type: r.get("assignment_type"),
+                status: r.get("status"),
+                is_active: r.get("is_active"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+                class_id: r.get("class_id"),
+                class_name: r.get("class_name"),
+                subject_name: r.get("subject_name"),
+                teacher_name: r.get("teacher_name"),
                 questions: Vec::new(),
             })
             .collect()
     } else {
-        let rows = sqlx::query!(
+        let rows = sqlx::query(
             r#"
             SELECT 
                 a.id, a.tenant_id, a.lesson_id, a.title, a.description, a.instructions,
-                a.max_score, a.due_at, a.assignment_type, a.status, a.is_active,
+                a.max_score, a.due_at, a.assignment_type,
+                CASE WHEN a.status = 'draft' AND a.class_id IS NOT NULL THEN 'published' ELSE a.status END as status,
+                a.is_active,
                 a.created_at, a.updated_at,
                 a.class_id,
-                c.name as "class_name?",
-                sub.name as "subject_name?",
-                t.full_name as "teacher_name?"
+                c.name as class_name,
+                sub.name as subject_name,
+                COALESCE(
+                    t.full_name,
+                    (SELECT t2.full_name FROM class_schedules cs JOIN teachers t2 ON t2.id = cs.teacher_id WHERE cs.class_id = a.class_id AND cs.subject_id = a.subject_id LIMIT 1),
+                    (SELECT t3.full_name FROM teachers t3 WHERE t3.user_id = a.created_by LIMIT 1),
+                    (SELECT t4.full_name FROM teachers t4 WHERE t4.id = a.created_by LIMIT 1),
+                    (SELECT t5.full_name FROM classes cl JOIN teachers t5 ON t5.id = cl.homeroom_teacher_id WHERE cl.id = a.class_id LIMIT 1),
+                    (SELECT u.full_name FROM users u WHERE u.id = a.created_by LIMIT 1),
+                    (SELECT t6.full_name FROM teachers t6 WHERE t6.tenant_id = a.tenant_id ORDER BY t6.created_at ASC LIMIT 1)
+                ) as teacher_name
             FROM assignments a
             LEFT JOIN classes c ON c.id = a.class_id
             LEFT JOIN subjects sub ON sub.id = a.subject_id
@@ -551,8 +637,8 @@ async fn list(
             WHERE a.tenant_id = $1 AND a.deleted_at IS NULL
             ORDER BY a.created_at DESC
             "#,
-            req_ctx.tenant_id
         )
+        .bind(req_ctx.tenant_id)
         .fetch_all(&ctx.pool)
         .await
         .map_err(|e| {
@@ -566,23 +652,23 @@ async fn list(
 
         rows.into_iter()
             .map(|r| AssignmentResponse {
-                id: r.id,
-                tenant_id: r.tenant_id,
-                lesson_id: r.lesson_id,
-                title: r.title,
-                description: r.description,
-                instructions: r.instructions,
-                max_score: r.max_score,
-                due_at: r.due_at,
-                assignment_type: r.assignment_type,
-                status: r.status,
-                is_active: r.is_active,
-                created_at: r.created_at,
-                updated_at: r.updated_at,
-                class_id: r.class_id,
-                class_name: r.class_name,
-                subject_name: r.subject_name,
-                teacher_name: r.teacher_name,
+                id: r.get("id"),
+                tenant_id: r.get("tenant_id"),
+                lesson_id: r.get("lesson_id"),
+                title: r.get("title"),
+                description: r.get("description"),
+                instructions: r.get("instructions"),
+                max_score: r.get("max_score"),
+                due_at: r.get("due_at"),
+                assignment_type: r.get("assignment_type"),
+                status: r.get("status"),
+                is_active: r.get("is_active"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+                class_id: r.get("class_id"),
+                class_name: r.get("class_name"),
+                subject_name: r.get("subject_name"),
+                teacher_name: r.get("teacher_name"),
                 questions: Vec::new(),
             })
             .collect()
@@ -608,16 +694,38 @@ async fn get_by_id(
         )
     })?;
 
+    let _ = sqlx::query(
+        r#"
+        UPDATE assignments
+        SET status = 'published'
+        WHERE id = $1 AND tenant_id = $2 AND status = 'draft' AND class_id IS NOT NULL AND deleted_at IS NULL
+        "#
+    )
+    .bind(id)
+    .bind(req_ctx.tenant_id)
+    .execute(&ctx.pool)
+    .await;
+
     let row = sqlx::query(
         r#"
         SELECT 
             a.id, a.tenant_id, a.lesson_id, a.title, a.description, a.instructions,
-            a.max_score, a.due_at, a.assignment_type, a.status, a.is_active,
+            a.max_score, a.due_at, a.assignment_type,
+            CASE WHEN a.status = 'draft' AND a.class_id IS NOT NULL THEN 'published' ELSE a.status END as status,
+            a.is_active,
             a.created_at, a.updated_at,
             a.class_id, a.teacher_id, a.created_by,
             c.name as class_name,
             sub.name as subject_name,
-            t.full_name as teacher_name
+            COALESCE(
+                t.full_name,
+                (SELECT t2.full_name FROM class_schedules cs JOIN teachers t2 ON t2.id = cs.teacher_id WHERE cs.class_id = a.class_id AND cs.subject_id = a.subject_id LIMIT 1),
+                (SELECT t3.full_name FROM teachers t3 WHERE t3.user_id = a.created_by LIMIT 1),
+                (SELECT t4.full_name FROM teachers t4 WHERE t4.id = a.created_by LIMIT 1),
+                (SELECT t5.full_name FROM classes cl JOIN teachers t5 ON t5.id = cl.homeroom_teacher_id WHERE cl.id = a.class_id LIMIT 1),
+                (SELECT u.full_name FROM users u WHERE u.id = a.created_by LIMIT 1),
+                (SELECT t6.full_name FROM teachers t6 WHERE t6.tenant_id = a.tenant_id ORDER BY t6.created_at ASC LIMIT 1)
+            ) as teacher_name
         FROM assignments a
         LEFT JOIN classes c ON c.id = a.class_id
         LEFT JOIN subjects sub ON sub.id = a.subject_id

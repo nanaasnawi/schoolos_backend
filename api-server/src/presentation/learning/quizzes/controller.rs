@@ -98,7 +98,28 @@ async fn create(
                 .flatten()
             }
         }
-        _ => None,
+        _ => {
+            // Try resolving class from description second part: "Subject • Class • ..."
+            if let Some(ref desc) = payload.description {
+                let parts: Vec<&str> = desc.split('•').map(|s| s.trim()).collect();
+                if parts.len() >= 2 && !parts[1].is_empty() {
+                    let class_part = parts[1];
+                    sqlx::query_scalar!(
+                        r#"SELECT id FROM classes WHERE tenant_id = $1 AND (name = $2 OR name ILIKE $2 OR name ILIKE '%' || $2 || '%') LIMIT 1"#,
+                        req_ctx.tenant_id,
+                        class_part
+                    )
+                    .fetch_optional(&ctx.pool)
+                    .await
+                    .ok()
+                    .flatten()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
     };
 
     // Resolve subject_id from description first part (e.g. "Ilmu Pengetahuan Alam dan Sosial (IPAS) • ...")
@@ -189,7 +210,32 @@ async fn list(
             n.contains("wali") || n.contains("parent") || n.contains("guardian") || n.contains("ortu")
         }))
         .unwrap_or(false);
-    let is_student = !is_parent && !is_teacher && req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Siswa")).unwrap_or(false);
+    let is_student = !is_parent && !is_teacher && (
+        req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| {
+            let n = r.name.to_lowercase();
+            n == "siswa" || n == "student" || n == "murid" || n.contains("siswa")
+        })).unwrap_or(false)
+        || crate::authorization_helpers::AuthorizationScope::resolve_student_id(&ctx.pool, req_ctx.tenant_id, actor_id.unwrap_or_default()).await.ok().flatten().is_some()
+    );
+
+    // Auto-link any orphan quizzes with class_id IS NULL if their description or title contains the class name
+    let _ = sqlx::query(
+        r#"
+        UPDATE quizzes q
+        SET class_id = c.id
+        FROM classes c
+        WHERE q.tenant_id = $1 
+          AND q.class_id IS NULL
+          AND c.tenant_id = $1
+          AND (
+              q.description ILIKE '%' || c.name || '%' 
+              OR q.title ILIKE '%' || c.name || '%'
+          )
+        "#
+    )
+    .bind(req_ctx.tenant_id)
+    .execute(&ctx.pool)
+    .await;
 
     let items: Vec<QuizResponse> = if is_teacher {
         let rows = sqlx::query(
@@ -267,18 +313,56 @@ async fn list(
             WHERE q.tenant_id = $1 
               AND q.deleted_at IS NULL
               AND (
-                  q.class_id IS NULL
-                  OR q.class_id IN (
+                  q.class_id IN (
+                      SELECT s.class_id 
+                      FROM students s 
+                      WHERE s.user_id = $2 AND s.class_id IS NOT NULL AND s.deleted_at IS NULL
+                      UNION
                       SELECT en.class_id 
                       FROM students s
                       JOIN enrollments en ON en.student_id = s.id
-                      WHERE s.user_id = $2 AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                      WHERE s.user_id = $2 AND (en.status ILIKE 'active')
+                      UNION
+                      SELECT s.class_id 
+                      FROM guardians g
+                      JOIN students s ON s.guardian_id = g.id
+                      WHERE g.user_id = $2 AND s.class_id IS NOT NULL AND s.deleted_at IS NULL
                       UNION
                       SELECT en.class_id 
                       FROM guardians g
                       JOIN students s ON s.guardian_id = g.id
                       JOIN enrollments en ON en.student_id = s.id
-                      WHERE g.user_id = $2 AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                      WHERE g.user_id = $2 AND (en.status ILIKE 'active')
+                  )
+                  OR (
+                      q.class_id IS NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM classes other_c
+                          WHERE other_c.tenant_id = q.tenant_id
+                            AND (q.description ILIKE '%' || other_c.name || '%' OR q.title ILIKE '%' || other_c.name || '%')
+                            AND other_c.id NOT IN (
+                                SELECT s.class_id FROM students s WHERE s.user_id = $2 AND s.class_id IS NOT NULL
+                                UNION
+                                SELECT en.class_id FROM students s JOIN enrollments en ON en.student_id = s.id WHERE s.user_id = $2 AND en.status ILIKE 'active'
+                            )
+                      )
+                      AND (
+                          CASE 
+                              WHEN EXISTS (
+                                  SELECT 1 FROM students s 
+                                  LEFT JOIN classes sc ON sc.id = s.class_id
+                                  WHERE s.user_id = $2 AND (sc.name ILIKE '%PAKET A%' OR sc.name ILIKE '%SD%')
+                              ) THEN (
+                                  q.title NOT ILIKE '%PAKET B%' AND q.title NOT ILIKE '%PAKET C%' 
+                                  AND q.title NOT ILIKE '%SMP%' AND q.title NOT ILIKE '%SMA%' 
+                                  AND (q.description IS NULL OR (
+                                      q.description NOT ILIKE '%PAKET B%' AND q.description NOT ILIKE '%PAKET C%' 
+                                      AND q.description NOT ILIKE '%SMP%' AND q.description NOT ILIKE '%SMA%'
+                                  ))
+                              )
+                              ELSE true
+                          END
+                      )
                   )
               )
             ORDER BY q.created_at DESC
@@ -637,8 +721,12 @@ async fn submit_attempt(
     let is_student = req_ctx
         .actor
         .as_ref()
-        .map(|a| a.roles.iter().any(|r| r.name == "Siswa"))
-        .unwrap_or(false);
+        .map(|a| a.roles.iter().any(|r| {
+            let n = r.name.to_lowercase();
+            n == "siswa" || n == "student" || n == "murid" || n.contains("siswa")
+        }))
+        .unwrap_or(false)
+        || crate::authorization_helpers::AuthorizationScope::resolve_student_id(&ctx.pool, req_ctx.tenant_id, actor_id).await.ok().flatten().is_some();
 
     if is_student {
         let student_id = crate::authorization_helpers::AuthorizationScope::resolve_student_id(

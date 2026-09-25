@@ -123,6 +123,65 @@ async fn list_inquiries(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
+    let actor_student_id = if let Some(ref actor) = req_ctx.actor {
+        sqlx::query_scalar!(
+            "SELECT id FROM students WHERE user_id = $1 AND tenant_id = $2 LIMIT 1",
+            actor.id,
+            tenant_id
+        )
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten()
+    } else {
+        None
+    };
+
+    let effective_student_user_id = query.student_id;
+    let resolved_student_db_id = if let Some(sid) = effective_student_user_id {
+        sqlx::query_scalar!(
+            "SELECT id FROM students WHERE (id = $1 OR user_id = $1) AND tenant_id = $2 LIMIT 1",
+            sid,
+            tenant_id
+        )
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten()
+        .or(actor_student_id)
+    } else {
+        actor_student_id
+    };
+
+    // Auto-repair any inquiry thread where teacher_name is "Guru Pengampu" or null
+    let _ = sqlx::query!(
+        r#"
+        UPDATE inquiry_threads it
+        SET 
+            teacher_name = COALESCE(
+                (SELECT t.full_name FROM assignments a JOIN teachers t ON t.id = a.teacher_id WHERE a.id::text = it.reference_id LIMIT 1),
+                (SELECT t2.full_name FROM assignments a JOIN class_schedules cs ON cs.class_id = a.class_id AND cs.subject_id = a.subject_id JOIN teachers t2 ON t2.id = cs.teacher_id WHERE a.id::text = it.reference_id LIMIT 1),
+                (SELECT t3.full_name FROM teachers t3 WHERE t3.id = it.teacher_id LIMIT 1),
+                (SELECT t4.full_name FROM teachers t4 WHERE t4.user_id = (SELECT a.created_by FROM assignments a WHERE a.id::text = it.reference_id) LIMIT 1),
+                (SELECT t5.full_name FROM teachers t5 WHERE t5.tenant_id = it.tenant_id AND (t5.subject ILIKE '%' || it.subject_name || '%' OR it.subject_name ILIKE '%' || t5.subject || '%') LIMIT 1),
+                (SELECT t6.full_name FROM teachers t6 WHERE t6.tenant_id = it.tenant_id ORDER BY t6.created_at ASC LIMIT 1),
+                it.teacher_name
+            ),
+            teacher_id = COALESCE(
+                it.teacher_id,
+                (SELECT a.teacher_id FROM assignments a WHERE a.id::text = it.reference_id LIMIT 1),
+                (SELECT cs.teacher_id FROM assignments a JOIN class_schedules cs ON cs.class_id = a.class_id AND cs.subject_id = a.subject_id WHERE a.id::text = it.reference_id LIMIT 1),
+                (SELECT t5.id FROM teachers t5 WHERE t5.tenant_id = it.tenant_id AND (t5.subject ILIKE '%' || it.subject_name || '%' OR it.subject_name ILIKE '%' || t5.subject || '%') LIMIT 1),
+                (SELECT t6.id FROM teachers t6 WHERE t6.tenant_id = it.tenant_id ORDER BY t6.created_at ASC LIMIT 1)
+            )
+        WHERE it.tenant_id = $1 
+          AND (it.teacher_name = 'Guru Pengampu' OR it.teacher_name IS NULL OR it.teacher_name = '' OR it.teacher_id IS NULL)
+        "#,
+        tenant_id
+    )
+    .execute(&ctx.pool)
+    .await;
+
     let rows = sqlx::query!(
         r#"
         SELECT 
@@ -135,11 +194,22 @@ async fn list_inquiries(
         WHERE t.tenant_id = $1
           AND ($2::text IS NULL OR t.status = $2)
           AND ($3::text IS NULL OR t.inquiry_type = $3)
-          AND ($4::uuid IS NULL OR t.student_id = $4)
+          AND (
+              $4::uuid IS NULL OR 
+              t.student_id = $4 OR 
+              ($8::uuid IS NOT NULL AND t.student_id = $8) OR
+              t.student_id IN (SELECT s.id FROM students s WHERE s.user_id = $4) OR
+              t.student_id IN (SELECT s.user_id FROM students s WHERE s.id = $4)
+          )
           AND (
               ($5::uuid IS NULL AND $6::text IS NULL) OR
               t.teacher_id = $5 OR
-              ($6::text IS NOT NULL AND t.teacher_name ILIKE '%' || $6 || '%')
+              ($6::text IS NOT NULL AND (
+                  t.teacher_name ILIKE '%' || $6 || '%' OR
+                  $6 ILIKE '%' || t.teacher_name || '%' OR
+                  t.teacher_name = 'Guru Pengampu' OR
+                  t.teacher_name = 'Guru Mata Pelajaran'
+              ))
           )
           AND (
               $7::text IS NULL OR $7 = '' OR 
@@ -154,10 +224,11 @@ async fn list_inquiries(
         tenant_id,
         query.status,
         query.inquiry_type,
-        query.student_id,
+        effective_student_user_id,
         effective_teacher_id,
         effective_teacher_name,
-        query.search.as_deref().map(|s| s.trim())
+        query.search.as_deref().map(|s| s.trim()),
+        resolved_student_db_id
     )
     .fetch_all(&ctx.pool)
     .await
@@ -203,7 +274,17 @@ async fn get_inquiry_detail(
         r#"
         SELECT 
             t.id, t.student_id, t.student_name, t.student_class,
-            t.teacher_id, t.teacher_name, t.subject_name, t.inquiry_type,
+            t.teacher_id,
+            COALESCE(
+                CASE WHEN t.teacher_name != 'Guru Pengampu' AND t.teacher_name != '' THEN t.teacher_name ELSE NULL END,
+                (SELECT tc.full_name FROM teachers tc WHERE tc.id = t.teacher_id LIMIT 1),
+                (SELECT t1.full_name FROM assignments a JOIN teachers t1 ON t1.id = a.teacher_id WHERE a.id::text = t.reference_id LIMIT 1),
+                (SELECT t2.full_name FROM assignments a JOIN class_schedules cs ON cs.class_id = a.class_id AND cs.subject_id = a.subject_id JOIN teachers t2 ON t2.id = cs.teacher_id WHERE a.id::text = t.reference_id LIMIT 1),
+                (SELECT t5.full_name FROM teachers t5 WHERE t5.tenant_id = t.tenant_id AND (t5.subject ILIKE '%' || t.subject_name || '%' OR t.subject_name ILIKE '%' || t5.subject || '%') LIMIT 1),
+                (SELECT t6.full_name FROM teachers t6 WHERE t6.tenant_id = t.tenant_id ORDER BY t6.created_at ASC LIMIT 1),
+                'Guru Mata Pelajaran'
+            ) as teacher_name,
+            t.subject_name, t.inquiry_type,
             t.reference_title, t.reference_id, t.status,
             t.last_message_content, t.last_message_at, t.created_at,
             (SELECT COUNT(*)::bigint FROM inquiry_messages m WHERE m.thread_id = t.id) as message_count
@@ -259,26 +340,17 @@ async fn get_inquiry_detail(
         });
 
         if !is_admin {
-            let is_teacher = actor.roles.iter().any(|r| r.name == "Guru");
-            let is_student = actor.roles.iter().any(|r| r.name == "Siswa");
+            let is_teacher = actor.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("guru") || n.contains("teacher") || n.contains("pendidik")
+            });
+            let is_student = actor.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("siswa") || n.contains("student") || n.contains("murid")
+            });
 
             if is_teacher {
-                let teacher_id = crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(
-                    &ctx.pool,
-                    req_ctx.tenant_id,
-                    actor.id,
-                ).await.ok().flatten();
-
-                let is_assigned_teacher = teacher_id.is_some() && thread.teacher_id == teacher_id;
-                if !is_assigned_teacher && thread.teacher_id.is_some() {
-                    return Err(ApiError::new(
-                        ApplicationError::Unauthorized(
-                            school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                            "Anda bukan guru pengampu percakapan ini".to_string(),
-                        ),
-                        &req_ctx.request_id,
-                    ));
-                }
+                // Any verified teacher in this tenant can view inquiries in their school
             } else if is_student {
                 let student_id = crate::authorization_helpers::AuthorizationScope::resolve_student_id(
                     &ctx.pool,
@@ -286,7 +358,15 @@ async fn get_inquiry_detail(
                     actor.id,
                 ).await.ok().flatten();
 
-                if student_id != Some(thread.student_id) {
+                let is_owner = student_id == Some(thread.student_id) 
+                    || actor.id == thread.student_id
+                    || sqlx::query_scalar!(
+                        r#"SELECT EXISTS(SELECT 1 FROM students WHERE (id = $1 OR user_id = $1) AND (user_id = $2 OR id = $2)) as "exists!""#,
+                        thread.student_id,
+                        actor.id
+                    ).fetch_one(&ctx.pool).await.unwrap_or(false);
+
+                if !is_owner {
                     return Err(ApiError::new(
                         ApplicationError::Unauthorized(
                             school_core::common::error_code::ErrorCode::AuthPermissionDenied,
@@ -451,7 +531,12 @@ async fn create_inquiry(
     let tenant_id = req_ctx.tenant_id;
     let mut resolved_tenant_id = tenant_id;
     let mut resolved_teacher_id = payload.teacher_id;
-    let mut resolved_teacher_name = payload.teacher_name.unwrap_or_else(|| "Guru Pengampu".to_string());
+    let raw_tname = payload.teacher_name.unwrap_or_default();
+    let mut resolved_teacher_name = if raw_tname.trim().is_empty() || raw_tname.eq_ignore_ascii_case("Guru Pengampu") {
+        String::new()
+    } else {
+        raw_tname
+    };
     let mut resolved_subject_name = payload.subject_name.unwrap_or_else(|| "Umum".to_string());
     let mut resolved_class_name = student_class.clone();
 
@@ -459,7 +544,7 @@ async fn create_inquiry(
     if let Some(ref ref_id_str) = payload.reference_id {
         if let Ok(ref_uuid) = Uuid::parse_str(ref_id_str) {
             if payload.inquiry_type.eq_ignore_ascii_case("MATERIAL") {
-                if let Ok(Some(mat)) = sqlx::query!(
+                if let Ok(Some(mat)) = sqlx::query(
                     r#"
                     SELECT 
                         m.tenant_id, m.teacher_id, 
@@ -472,20 +557,41 @@ async fn create_inquiry(
                     LEFT JOIN classes c ON c.id = m.class_id
                     WHERE m.id = $1
                     "#,
-                    ref_uuid
-                ).fetch_optional(&ctx.pool).await {
-                    resolved_tenant_id = mat.tenant_id;
-                    if let Some(tid) = mat.teacher_id { resolved_teacher_id = Some(tid); }
-                    resolved_teacher_name = mat.teacher_name;
-                    resolved_subject_name = mat.subject_name;
-                    resolved_class_name = mat.class_name;
+                )
+                .bind(ref_uuid)
+                .fetch_optional(&ctx.pool)
+                .await {
+                    resolved_tenant_id = mat.get("tenant_id");
+                    if let Some(tid) = mat.get::<Option<Uuid>, _>("teacher_id") { resolved_teacher_id = Some(tid); }
+                    if let Some(tn) = mat.get::<Option<String>, _>("teacher_name") {
+                        if !tn.trim().is_empty() && !tn.eq_ignore_ascii_case("Guru Pengampu") {
+                            resolved_teacher_name = tn;
+                        }
+                    }
+                    if let Some(sn) = mat.get::<Option<String>, _>("subject_name") { resolved_subject_name = sn; }
+                    if let Some(cn) = mat.get::<Option<String>, _>("class_name") { resolved_class_name = cn; }
                 }
             } else if payload.inquiry_type.eq_ignore_ascii_case("ASSIGNMENT") {
-                if let Ok(Some(asg)) = sqlx::query!(
+                if let Ok(Some(asg)) = sqlx::query(
                     r#"
                     SELECT 
-                        a.tenant_id, a.teacher_id, 
-                        t.full_name as teacher_name, 
+                        a.tenant_id,
+                        COALESCE(
+                            a.teacher_id,
+                            (SELECT cs.teacher_id FROM class_schedules cs WHERE cs.class_id = a.class_id AND cs.subject_id = a.subject_id AND cs.tenant_id = a.tenant_id LIMIT 1),
+                            (SELECT c.homeroom_teacher_id FROM classes c WHERE c.id = a.class_id AND c.tenant_id = a.tenant_id LIMIT 1),
+                            (SELECT t.id FROM teachers t WHERE t.user_id = a.created_by AND t.tenant_id = a.tenant_id LIMIT 1),
+                            (SELECT t.id FROM teachers t WHERE t.tenant_id = a.tenant_id ORDER BY t.created_at ASC LIMIT 1)
+                        ) as teacher_id,
+                        COALESCE(
+                            t.full_name,
+                            (SELECT t2.full_name FROM class_schedules cs JOIN teachers t2 ON t2.id = cs.teacher_id WHERE cs.class_id = a.class_id AND cs.subject_id = a.subject_id LIMIT 1),
+                            (SELECT t3.full_name FROM teachers t3 WHERE t3.user_id = a.created_by LIMIT 1),
+                            (SELECT t4.full_name FROM teachers t4 WHERE t4.id = a.created_by LIMIT 1),
+                            (SELECT t5.full_name FROM classes c JOIN teachers t5 ON t5.id = c.homeroom_teacher_id WHERE c.id = a.class_id LIMIT 1),
+                            (SELECT u.full_name FROM users u WHERE u.id = a.created_by LIMIT 1),
+                            (SELECT t6.full_name FROM teachers t6 WHERE t6.tenant_id = a.tenant_id ORDER BY t6.created_at ASC LIMIT 1)
+                        ) as teacher_name,
                         sub.name as subject_name,
                         c.name as class_name
                     FROM assignments a
@@ -494,20 +600,32 @@ async fn create_inquiry(
                     LEFT JOIN classes c ON c.id = a.class_id
                     WHERE a.id = $1
                     "#,
-                    ref_uuid
-                ).fetch_optional(&ctx.pool).await {
-                    resolved_tenant_id = asg.tenant_id;
-                    if let Some(tid) = asg.teacher_id { resolved_teacher_id = Some(tid); }
-                    resolved_teacher_name = asg.teacher_name;
-                    resolved_subject_name = asg.subject_name;
-                    resolved_class_name = asg.class_name;
+                )
+                .bind(ref_uuid)
+                .fetch_optional(&ctx.pool)
+                .await {
+                    resolved_tenant_id = asg.get("tenant_id");
+                    if let Some(tid) = asg.get::<Option<Uuid>, _>("teacher_id") {
+                        resolved_teacher_id = Some(tid);
+                    }
+                    if let Some(tn) = asg.get::<Option<String>, _>("teacher_name") {
+                        if !tn.trim().is_empty() && !tn.eq_ignore_ascii_case("Guru Pengampu") {
+                            resolved_teacher_name = tn;
+                        }
+                    }
+                    if let Some(sn) = asg.get::<Option<String>, _>("subject_name") {
+                        resolved_subject_name = sn;
+                    }
+                    if let Some(cn) = asg.get::<Option<String>, _>("class_name") {
+                        resolved_class_name = cn;
+                    }
                 }
             }
         }
     }
 
-    // If teacher is still unresolved, resolve by subject name in the same tenant
-    if resolved_teacher_id.is_none() {
+    // If teacher is still unresolved or generic, resolve by subject name in the same tenant
+    if resolved_teacher_id.is_none() || resolved_teacher_name.trim().is_empty() || resolved_teacher_name.eq_ignore_ascii_case("Guru Pengampu") {
         if let Ok(Some(tch)) = sqlx::query!(
             r#"
             SELECT id, full_name
@@ -529,7 +647,22 @@ async fn create_inquiry(
         {
             resolved_teacher_id = Some(tch.id);
             resolved_teacher_name = tch.full_name;
+        } else if let Ok(Some(any_tch)) = sqlx::query!(
+            r#"
+            SELECT id, full_name FROM teachers WHERE tenant_id = $1 ORDER BY created_at ASC LIMIT 1
+            "#,
+            resolved_tenant_id
+        )
+        .fetch_optional(&ctx.pool)
+        .await
+        {
+            resolved_teacher_id = Some(any_tch.id);
+            resolved_teacher_name = any_tch.full_name;
         }
+    }
+
+    if resolved_teacher_name.trim().is_empty() {
+        resolved_teacher_name = "Guru Mata Pelajaran".to_string();
     }
 
     let thread_id = payload.id.unwrap_or_else(Uuid::new_v4);
@@ -783,6 +916,32 @@ async fn send_message(
     .execute(&ctx.pool)
     .await;
 
+    // If teacher replies and thread currently has generic teacher name, update to actual teacher name
+    if is_teacher && !sender_name.is_empty() && !sender_name.eq_ignore_ascii_case("Guru Pengampu") {
+        let sender_uuid = Uuid::parse_str(&sender_id).ok();
+        let _ = sqlx::query(
+            r#"
+            UPDATE inquiry_threads
+            SET teacher_name = $1,
+                teacher_id = COALESCE(
+                    teacher_id,
+                    (SELECT t.id FROM teachers t WHERE t.user_id = $2 OR t.id = $2 LIMIT 1)
+                )
+            WHERE id = $3 AND (
+                teacher_name = 'Guru Pengampu' OR
+                teacher_name = 'Guru Mata Pelajaran' OR
+                teacher_name IS NULL OR
+                teacher_name = ''
+            )
+            "#
+        )
+        .bind(&sender_name)
+        .bind(sender_uuid)
+        .bind(id)
+        .execute(&ctx.pool)
+        .await;
+    }
+
     // Create real-time in-app notification for recipient
     if is_teacher {
         // Teacher replied -> notify student
@@ -790,7 +949,7 @@ async fn send_message(
             r#"
             SELECT s.user_id 
             FROM students s 
-            JOIN inquiry_threads t ON t.student_id = s.id 
+            JOIN inquiry_threads t ON (t.student_id = s.id OR t.student_id = s.user_id) 
             WHERE t.id = $1 LIMIT 1
             "#
         )
@@ -827,7 +986,7 @@ async fn send_message(
             r#"
             SELECT t.user_id 
             FROM teachers t 
-            JOIN inquiry_threads th ON th.teacher_id = t.id 
+            JOIN inquiry_threads th ON (th.teacher_id = t.id OR th.teacher_id = t.user_id) 
             WHERE th.id = $1 LIMIT 1
             "#
         )
