@@ -530,7 +530,7 @@ async fn start_attempt(
 ) -> Result<Json<ApiResponse<AttemptResponse>>, ApiError> {
     use crate::middleware::require_permission;
     use school_core::permission::domain::permission_registry::Permission;
-    require_permission(&req_ctx.actor, Permission::LearningQuizUpdate).map_err(|_| {
+    require_permission(&req_ctx.actor, Permission::LearningQuizRead).map_err(|_| {
         ApiError::new(
             school_core::common::error::ApplicationError::Unauthorized(
                 school_core::common::error_code::ErrorCode::AuthPermissionDenied,
@@ -623,7 +623,7 @@ async fn submit_attempt(
 ) -> Result<Json<ApiResponse<AttemptResponse>>, ApiError> {
     use crate::middleware::require_permission;
     use school_core::permission::domain::permission_registry::Permission;
-    require_permission(&req_ctx.actor, Permission::LearningQuizUpdate).map_err(|_| {
+    require_permission(&req_ctx.actor, Permission::LearningQuizRead).map_err(|_| {
         ApiError::new(
             school_core::common::error::ApplicationError::Unauthorized(
                 school_core::common::error_code::ErrorCode::AuthPermissionDenied,
