@@ -32,25 +32,39 @@ fn load_service_account() -> Option<ServiceAccountKey> {
         if !trimmed.is_empty() {
             if let Ok(sa) = serde_json::from_str::<ServiceAccountKey>(trimmed) {
                 if !sa.private_key.is_empty() {
+                    tracing::info!("Loaded Firebase service account from FIREBASE_SERVICE_ACCOUNT env");
                     return Some(sa);
                 }
             }
         }
     }
 
-    // 2. Try GOOGLE_APPLICATION_CREDENTIALS (file path or inline JSON)
-    if let Ok(val) = std::env::var("GOOGLE_APPLICATION_CREDENTIALS") {
-        let trimmed = val.trim();
-        if trimmed.starts_with('{') {
-            if let Ok(sa) = serde_json::from_str::<ServiceAccountKey>(trimmed) {
-                if !sa.private_key.is_empty() {
-                    return Some(sa);
+    // 2. Try GOOGLE_APPLICATION_CREDENTIALS or FIREBASE_SERVICE_ACCOUNT_PATH (file path or inline JSON)
+    for env_key in &["GOOGLE_APPLICATION_CREDENTIALS", "FIREBASE_SERVICE_ACCOUNT_PATH"] {
+        if let Ok(val) = std::env::var(env_key) {
+            let trimmed = val.trim();
+            if trimmed.starts_with('{') {
+                if let Ok(sa) = serde_json::from_str::<ServiceAccountKey>(trimmed) {
+                    if !sa.private_key.is_empty() {
+                        tracing::info!("Loaded Firebase service account from {} (inline JSON)", env_key);
+                        return Some(sa);
+                    }
                 }
-            }
-        } else if let Ok(content) = std::fs::read_to_string(trimmed) {
-            if let Ok(sa) = serde_json::from_str::<ServiceAccountKey>(&content) {
-                if !sa.private_key.is_empty() {
-                    return Some(sa);
+            } else {
+                let paths_to_try = [
+                    std::path::PathBuf::from(trimmed),
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(trimmed),
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap_or(std::path::Path::new(".")).join(trimmed),
+                ];
+                for p in &paths_to_try {
+                    if let Ok(content) = std::fs::read_to_string(p) {
+                        if let Ok(sa) = serde_json::from_str::<ServiceAccountKey>(&content) {
+                            if !sa.private_key.is_empty() {
+                                tracing::info!("Loaded Firebase service account from {} at {:?}", env_key, p);
+                                return Some(sa);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -65,6 +79,7 @@ fn load_service_account() -> Option<ServiceAccountKey> {
                 if trimmed.starts_with('{') {
                     if let Ok(sa) = serde_json::from_str::<ServiceAccountKey>(trimmed) {
                         if !sa.private_key.is_empty() {
+                            tracing::info!("Loaded Firebase service account from {}", env_key);
                             return Some(sa);
                         }
                     }
@@ -89,20 +104,25 @@ fn load_service_account() -> Option<ServiceAccountKey> {
     let candidate_paths = [
         "firebase-service-account.json",
         "api-server/firebase-service-account.json",
-        "../android/akselerasi-edu-firebase-adminsdk-fbsvc-42d4e6306a.json",
-        "c:/Users/USER/Documents/School Os/android/akselerasi-edu-firebase-adminsdk-fbsvc-42d4e6306a.json",
+        "backend/api-server/firebase-service-account.json",
+        "../firebase-service-account.json",
+        "../api-server/firebase-service-account.json",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/firebase-service-account.json"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../firebase-service-account.json"),
     ];
 
     for path in &candidate_paths {
         if let Ok(content) = std::fs::read_to_string(path) {
             if let Ok(sa) = serde_json::from_str::<ServiceAccountKey>(&content) {
                 if !sa.private_key.is_empty() {
+                    tracing::info!("Loaded Firebase service account from file: {}", path);
                     return Some(sa);
                 }
             }
         }
     }
 
+    tracing::warn!("No Firebase service account key found in env or candidate paths");
     None
 }
 
@@ -278,14 +298,13 @@ pub fn trigger_fcm_push_categorized(title: String, content: String, category: Fc
             }
         };
 
-        // DATA-ONLY High-Priority FCM Push — PENTING untuk idle/standby/Doze.
-        // Payload `notification` sengaja DIHAPUS karena saat ada key `notification`,
-        // Android menyerahkan render ke System Tray dan onMessageReceived() TIDAK
-        // dipanggil saat app background/killed → helper kustom (dedup, wake, deep-link)
-        // tidak jalan dan notifikasi sering hilang di HP idle.
-        // Dengan data-only + android.priority=HIGH, FCM membangunkan aplikasi via
-        // com.google.firebase.MESSAGING_EVENT walau Doze, lalu helper menampilkan
-        // notifikasi PRIORITY_MAX + WakeLock sehingga muncul di lock screen.
+        // HYBRID FCM PAYLOAD (Notification + Data) Sesuai Standar Resmi Google Play:
+        // Saat aplikasi dalam kondisi CLOSED/KILLED/BACKGROUND:
+        // Google Play Services di level OS Android langsung merender notifikasi ke System Tray
+        // dan LOCKSCREEN dengan VISIBILITY_PUBLIC tanpa perlu membangunkan process aplikasi,
+        // sehingga 100% patuh Google Play Policy dan tidak terblokir oleh batasan OS Android 12+/OEM.
+        // Saat notifikasi ditap di lockscreen, payload `data` otomatis diteruskan ke MainActivity via intent extras.
+        // Saat aplikasi FOREGROUND: onMessageReceived() tetap dipanggil untuk handle in-app update.
         let fcm_url = format!("https://fcm.googleapis.com/v1/projects/{}/messages:send", project_id);
         let channel_id = category.channel_id();
         let category_str = category.as_str();
@@ -294,6 +313,10 @@ pub fn trigger_fcm_push_categorized(title: String, content: String, category: Fc
         let payload = serde_json::json!({
             "message": {
                 "topic": "school_announcements",
+                "notification": {
+                    "title": &title,
+                    "body": &content
+                },
                 "data": {
                     "id": reference_id.to_string(),
                     "title": &title,
@@ -309,7 +332,16 @@ pub fn trigger_fcm_push_categorized(title: String, content: String, category: Fc
                 "android": {
                     "priority": "HIGH",
                     "ttl": "86400s",
-                    "direct_boot_ok": true
+                    "direct_boot_ok": true,
+                    "notification": {
+                        "channel_id": channel_id,
+                        "visibility": "PUBLIC",
+                        "notification_priority": "PRIORITY_MAX",
+                        "default_sound": true,
+                        "default_vibrate_timings": true,
+                        "default_light_settings": true,
+                        "click_action": click_action
+                    }
                 }
             }
         });
@@ -334,5 +366,78 @@ pub fn trigger_fcm_push_categorized(title: String, content: String, category: Fc
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_load_service_account() {
+        let sa = load_service_account();
+        assert!(sa.is_some(), "Service account key must be successfully loaded!");
+        let sa = sa.unwrap();
+        assert_eq!(sa.project_id, "akselerasi-edu");
+        assert!(!sa.private_key.is_empty(), "Private key should not be empty");
+        assert_eq!(sa.client_email, "firebase-adminsdk-fbsvc@akselerasi-edu.iam.gserviceaccount.com");
+    }
+
+    #[tokio::test]
+    async fn test_fcm_oauth_token_acquisition() {
+        let client = reqwest::Client::new();
+        let res = get_access_token(&client).await;
+        assert!(res.is_ok(), "Failed to get FCM OAuth2 access token: {:?}", res.err());
+        let (token, project_id) = res.unwrap();
+        assert!(!token.is_empty(), "Access token should not be empty");
+        assert_eq!(project_id, "akselerasi-edu");
+    }
+
+    #[tokio::test]
+    async fn test_fcm_send_validate_only() {
+        let client = reqwest::Client::new();
+        let (token, project_id) = get_access_token(&client).await.expect("Failed to get token");
+        let fcm_url = format!("https://fcm.googleapis.com/v1/projects/{}/messages:send", project_id);
+        let payload = serde_json::json!({
+            "validate_only": true,
+            "message": {
+                "topic": "school_announcements",
+                "notification": {
+                    "title": "Test Title",
+                    "body": "Test Body"
+                },
+                "data": {
+                    "id": uuid::Uuid::new_v4().to_string(),
+                    "title": "Test Title",
+                    "body": "Test Body",
+                    "category": "ANNOUNCEMENT"
+                },
+                "android": {
+                    "priority": "HIGH",
+                    "ttl": "86400s",
+                    "direct_boot_ok": true,
+                    "notification": {
+                        "channel_id": "school_os_announcements_v4",
+                        "visibility": "PUBLIC",
+                        "notification_priority": "PRIORITY_MAX",
+                        "default_sound": true,
+                        "default_vibrate_timings": true,
+                        "default_light_settings": true
+                    }
+                }
+            }
+        });
+
+        let res = client
+            .post(&fcm_url)
+            .bearer_auth(token)
+            .json(&payload)
+            .send()
+            .await
+            .expect("Request failed");
+
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        assert!(status.is_success(), "FCM API error (status {}): {}", status, body);
+    }
 }
 
