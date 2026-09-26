@@ -70,7 +70,7 @@ pub fn register_windows_autostart(exe_path: &Path) -> Result<(), Box<dyn std::er
     {
         let exe_str = format!("\"{}\" --daemon", exe_path.to_string_lossy());
         let status = Command::new("reg")
-            .args(&[
+            .args([
                 "add",
                 "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
                 "/v",
@@ -96,7 +96,7 @@ pub fn unregister_windows_autostart() -> Result<(), Box<dyn std::error::Error>> 
     #[cfg(target_os = "windows")]
     {
         let _ = Command::new("reg")
-            .args(&[
+            .args([
                 "delete",
                 "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
                 "/v",
@@ -108,11 +108,11 @@ pub fn unregister_windows_autostart() -> Result<(), Box<dyn std::error::Error>> 
 
         // Kill any existing daemon instances
         let _ = Command::new("taskkill")
-            .args(&["/F", "/IM", "schoolos-bridge.exe"])
+            .args(["/F", "/IM", "schoolos-bridge.exe"])
             .creation_flags(0x08000000)
             .status();
         let _ = Command::new("taskkill")
-            .args(&["/F", "/IM", "schoolos-sync.exe"])
+            .args(["/F", "/IM", "schoolos-sync.exe"])
             .creation_flags(0x08000000)
             .status();
     }
@@ -153,7 +153,7 @@ pub fn perform_self_install(current_exe: &Path) -> Result<(), Box<dyn std::error
             current_pid
         );
         let _ = Command::new("powershell")
-            .args(&["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
             .creation_flags(0x08000000)
             .status();
         std::thread::sleep(std::time::Duration::from_millis(600));

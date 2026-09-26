@@ -255,7 +255,7 @@ async fn impersonate_tenant(
     let token = encode(
         &Header::default(),
         &claims,
-        &EncodingKey::from_secret("super_secret_jwt_key_123".as_ref()),
+        &EncodingKey::from_secret(ctx.jwt_secret.as_bytes()),
     )
     .map_err(|e| {
         ApiError::new(
@@ -690,12 +690,14 @@ async fn reset_credentials(
     if let Some(pwd) = payload.new_password {
         if !pwd.is_empty() {
             let salt = SaltString::generate(&mut OsRng);
-            let argon2 = Argon2::default();
-            password_hash = Some(
-                argon2.hash_password(pwd.as_bytes(), &salt)
-                .unwrap()
-                .to_string()
-            );
+            let hashed = Argon2::default()
+                .hash_password(pwd.as_bytes(), &salt)
+                .map_err(|e| ApiError::new(
+                    school_core::common::error::ApplicationError::Internal(e.to_string()),
+                    &req_ctx.request_id,
+                ))?
+                .to_string();
+            password_hash = Some(hashed);
         }
     }
 
@@ -753,7 +755,7 @@ pub struct SystemLoginRequest {
     tag = "SystemAdmin"
 )]
 async fn system_login(
-    State(_ctx): State<ApplicationContext>,
+    State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
     Json(payload): Json<SystemLoginRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
@@ -777,9 +779,14 @@ async fn system_login(
         let token = encode(
             &Header::default(),
             &claims,
-            &EncodingKey::from_secret("super_secret_jwt_key_123".as_ref()),
+            &EncodingKey::from_secret(ctx.jwt_secret.as_bytes()),
         )
-        .unwrap();
+        .map_err(|e| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Internal(e.to_string()),
+                &req_ctx.request_id,
+            )
+        })?;
 
         Ok(Json(ApiResponse::success(
             serde_json::json!({

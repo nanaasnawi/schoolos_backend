@@ -122,6 +122,7 @@ pub struct ApplicationContext {
     pub pool: PgPool,
     pub event_bus: SharedEventBus,
     pub clock: Arc<dyn Clock>,
+    pub jwt_secret: String,
 
     pub authenticate_user: Arc<AuthenticateUserUseCase>,
     pub authenticate_qr_token: Arc<AuthenticateQrTokenUseCase>,

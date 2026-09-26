@@ -214,10 +214,26 @@ impl Bootstrap {
             }
         }
 
+        let jwt_secret = match std::env::var("JWT_SECRET") {
+            Ok(val) if !val.trim().is_empty() => {
+                if val.trim() == "super_secret_jwt_key_123" {
+                    tracing::warn!("SECURITY WARNING: Using default development JWT secret key. DO NOT USE IN PRODUCTION!");
+                }
+                val.trim().to_string()
+            }
+            _ => {
+                let is_prod = std::env::var("APP_ENV").map(|e| e.eq_ignore_ascii_case("production")).unwrap_or(false);
+                if is_prod {
+                    panic!("CRITICAL SECURITY ERROR: JWT_SECRET environment variable is required in production!");
+                }
+                tracing::warn!("JWT_SECRET not set, falling back to local development secret key.");
+                "dev_jwt_secret_school_os_local_only_123456789".to_string()
+            }
+        };
+
         Self {
             database_url: db_url,
-            jwt_secret: std::env::var("JWT_SECRET")
-                .unwrap_or_else(|_| "super_secret_jwt_key_123".to_string()),
+            jwt_secret,
             outbox_poll_interval: Duration::from_millis(500),
             event_bus_capacity: 100,
         }
@@ -391,6 +407,7 @@ impl Bootstrap {
             pool: pool.clone(),
             event_bus,
             clock: clock.clone(),
+            jwt_secret: self.jwt_secret.clone(),
             authenticate_user: Arc::new(AuthenticateUserUseCase::new(
                 user_repo.clone(),
                 self.jwt_secret.clone(),

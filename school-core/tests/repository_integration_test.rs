@@ -13,7 +13,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 // NOTE: To run this test, you need to set up a PostgreSQL database and provide DATABASE_URL.
-#[sqlx::test]
+#[sqlx::test(migrations = "../migrations")]
 async fn test_create_and_find_teacher(pool: PgPool) {
     let repo = PgPeopleRepository::new(pool.clone());
 
@@ -46,7 +46,7 @@ async fn test_create_and_find_teacher(pool: PgPool) {
     assert_eq!(found.unwrap().full_name, "Bapak Budi");
 }
 
-#[sqlx::test]
+#[sqlx::test(migrations = "../migrations")]
 async fn test_constraint_duplicate_nisn(pool: PgPool) {
     let repo = PgPeopleRepository::new(pool.clone());
 
@@ -116,7 +116,7 @@ async fn test_constraint_duplicate_nisn(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
+#[sqlx::test(migrations = "../migrations")]
 async fn test_constraint_duplicate_enrollment(pool: PgPool) {
     let people_repo = PgPeopleRepository::new(pool.clone());
     let academic_repo = PgAcademicRepository::new(pool.clone());
@@ -198,7 +198,7 @@ async fn test_constraint_duplicate_enrollment(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
+#[sqlx::test(migrations = "../migrations")]
 async fn test_constraint_delete_homeroom_teacher(pool: PgPool) {
     let repo = PgPeopleRepository::new(pool.clone());
 

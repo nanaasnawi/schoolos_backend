@@ -247,7 +247,7 @@ async fn login(
     let refresh_token = jsonwebtoken::encode(
         &jsonwebtoken::Header::default(),
         &refresh_claims,
-        &jsonwebtoken::EncodingKey::from_secret("super_secret_jwt_key_123".as_ref()),
+        &jsonwebtoken::EncodingKey::from_secret(ctx.jwt_secret.as_bytes()),
     ).ok();
 
     let response_data = LoginResponse {
@@ -853,7 +853,7 @@ async fn qr_login(
     let refresh_token = jsonwebtoken::encode(
         &jsonwebtoken::Header::default(),
         &refresh_claims,
-        &jsonwebtoken::EncodingKey::from_secret("super_secret_jwt_key_123".as_ref()),
+        &jsonwebtoken::EncodingKey::from_secret(ctx.jwt_secret.as_bytes()),
     ).ok();
 
     let response_data = LoginResponse {
@@ -1213,6 +1213,7 @@ pub struct RefreshCombinedResponse {
 }
 
 async fn refresh(
+    State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
     Json(payload): Json<RefreshTokenRequest>,
 ) -> Result<Json<RefreshCombinedResponse>, ApiError> {
@@ -1224,7 +1225,7 @@ async fn refresh(
 
     let token_data = decode::<Claims>(
         &payload.refresh_token,
-        &DecodingKey::from_secret("super_secret_jwt_key_123".as_ref()),
+        &DecodingKey::from_secret(ctx.jwt_secret.as_bytes()),
         &validation,
     )
     .map_err(|_| {
@@ -1248,7 +1249,7 @@ async fn refresh(
     let new_access_token = jsonwebtoken::encode(
         &jsonwebtoken::Header::default(),
         &new_access_claims,
-        &jsonwebtoken::EncodingKey::from_secret("super_secret_jwt_key_123".as_ref()),
+        &jsonwebtoken::EncodingKey::from_secret(ctx.jwt_secret.as_bytes()),
     )
     .map_err(|e| {
         ApiError::new(
@@ -1268,7 +1269,7 @@ async fn refresh(
     let new_refresh_token = jsonwebtoken::encode(
         &jsonwebtoken::Header::default(),
         &new_refresh_claims,
-        &jsonwebtoken::EncodingKey::from_secret("super_secret_jwt_key_123".as_ref()),
+        &jsonwebtoken::EncodingKey::from_secret(ctx.jwt_secret.as_bytes()),
     )
     .map_err(|e| {
         ApiError::new(

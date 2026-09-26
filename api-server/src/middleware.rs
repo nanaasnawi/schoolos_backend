@@ -28,11 +28,9 @@ pub async fn auth_middleware(
             let token_opt = auth_str.strip_prefix("Bearer ");
             tracing::info!("token stripped: {}", token_opt.is_some());
             if let Some(token) = token_opt {
-                let jwt_secret = "super_secret_jwt_key_123";
-
                 let token_data = decode::<Claims>(
                     token,
-                    &DecodingKey::from_secret(jwt_secret.as_ref()),
+                    &DecodingKey::from_secret(ctx.jwt_secret.as_bytes()),
                     &Validation::default(),
                 );
 
