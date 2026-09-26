@@ -197,10 +197,25 @@ pub struct Bootstrap {
 
 impl Bootstrap {
     pub fn new() -> Self {
+        let raw_db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://school_admin:secretpassword@localhost:5432/school_os".to_string()
+        });
+
+        let mut db_url = raw_db_url.trim().to_string();
+        if db_url.starts_with("DATABASE_URL=") {
+            db_url = db_url.trim_start_matches("DATABASE_URL=").trim().to_string();
+        }
+        if (db_url.starts_with('"') && db_url.ends_with('"')) || (db_url.starts_with('\'') && db_url.ends_with('\'')) {
+            db_url = db_url[1..db_url.len() - 1].trim().to_string();
+        }
+        if !db_url.starts_with("postgres://") && !db_url.starts_with("postgresql://") {
+            if db_url.contains('@') {
+                db_url = format!("postgresql://{}", db_url);
+            }
+        }
+
         Self {
-            database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-                "postgres://school_admin:secretpassword@localhost:5432/school_os".to_string()
-            }),
+            database_url: db_url,
             jwt_secret: std::env::var("JWT_SECRET")
                 .unwrap_or_else(|_| "super_secret_jwt_key_123".to_string()),
             outbox_poll_interval: Duration::from_millis(500),
@@ -226,10 +241,27 @@ impl Bootstrap {
     pub async fn build(self) -> Result<Router, Box<dyn std::error::Error>> {
         let prometheus_handle = setup_metrics_recorder();
 
-        let pool = PgPoolOptions::new()
+        tracing::info!(
+            "Connecting to database at {}...",
+            self.database_url.split('@').last().unwrap_or("unknown")
+        );
+
+        let pool = match PgPoolOptions::new()
             .max_connections(5)
             .connect(&self.database_url)
-            .await?;
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to connect to database (URL scheme: '{}', length: {}): {:?}",
+                    self.database_url.split(':').next().unwrap_or(""),
+                    self.database_url.len(),
+                    e
+                );
+                return Err(e.into());
+            }
+        };
 
         // Run database schema migrations automatically on startup
         if let Err(e) = sqlx::migrate!("../migrations").run(&pool).await {
