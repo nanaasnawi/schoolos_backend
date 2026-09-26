@@ -24,6 +24,8 @@ pub struct SubmissionResponse {
     pub student_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub student_nisn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub student_user_id: Option<Uuid>,
     #[serde(default)]
     pub answers: Vec<SubmissionAnswerDetailDto>,
 }
@@ -45,6 +47,7 @@ impl From<AssignmentSubmission> for SubmissionResponse {
             graded_by: s.graded_by,
             student_name: None,
             student_nisn: None,
+            student_user_id: None,
             answers: Vec::new(),
         }
     }

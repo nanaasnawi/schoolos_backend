@@ -110,7 +110,7 @@ async fn login(
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
-    let user_row = sqlx::query!(
+    let user_row = sqlx::query(
         r#"
         SELECT u.id, u.tenant_id, u.email, u.full_name,
                COALESCE(
@@ -123,7 +123,7 @@ async fn login(
                  (SELECT NULLIF(g.phone_number, '') FROM guardians g WHERE g.user_id = u.id ORDER BY g.updated_at DESC LIMIT 1),
                  (SELECT CONCAT('WALI-', s.nisn) FROM guardians g JOIN students s ON s.guardian_id = g.id WHERE g.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),
                  ''
-               ) as "identifier!",
+               ) as identifier,
                COALESCE(
                  (
                    SELECT c.name 
@@ -152,7 +152,7 @@ async fn login(
                    ORDER BY en.enrolled_at DESC 
                    LIMIT 1
                  )
-               ) as "class_name?",
+               ) as class_name,
                (
                  SELECT s.full_name 
                  FROM guardians g 
@@ -160,42 +160,56 @@ async fn login(
                  WHERE g.user_id = u.id
                  ORDER BY s.created_at ASC
                  LIMIT 1
-               ) as "child_name?",
-               (
-                 SELECT s.id::text 
-                 FROM guardians g 
-                 JOIN students s ON s.guardian_id = g.id
-                 WHERE g.user_id = u.id
-                 ORDER BY s.created_at ASC
-                 LIMIT 1
-               ) as "child_id?"
+               ) as child_name,
+               COALESCE(
+                 (
+                   SELECT s.id::text 
+                   FROM guardians g 
+                   JOIN students s ON s.guardian_id = g.id
+                   WHERE g.user_id = u.id
+                   ORDER BY s.created_at ASC
+                   LIMIT 1
+                 ),
+                 (
+                   SELECT s.id::text
+                   FROM students s
+                   WHERE s.user_id = u.id
+                   LIMIT 1
+                 )
+               ) as child_id
         FROM users u
         WHERE u.id = $1
         LIMIT 1
         "#,
-        auth_user.id
     )
+    .bind(auth_user.id)
     .fetch_optional(&ctx.pool)
     .await
     .ok()
     .flatten();
 
     let (user_id, tenant_id, name, email, role, user_identifier, class_name, child_name, child_id) = if let Some(u) = &user_row {
+        let u_id: uuid::Uuid = u.get("id");
+        let u_tenant_id: Option<uuid::Uuid> = u.get("tenant_id");
+        let u_full_name: String = u.get("full_name");
+        let u_email: String = u.get("email");
+        let u_role: Option<String> = u.get("role_name");
+        let u_ident: String = u.get("identifier");
         (
-            Some(u.id.to_string()),
-            u.tenant_id,
-            Some(u.full_name.clone()),
-            Some(u.email.clone()),
-            Some(u.role_name.clone().unwrap_or_else(|| "Siswa".to_string())),
-            if u.identifier.is_empty() { None } else { Some(u.identifier.clone()) },
-            u.class_name.clone(),
-            u.child_name.clone(),
-            u.child_id.clone(),
+            Some(u_id.to_string()),
+            u_tenant_id,
+            Some(u_full_name),
+            Some(u_email),
+            Some(u_role.unwrap_or_else(|| "Siswa".to_string())),
+            if u_ident.is_empty() { None } else { Some(u_ident) },
+            u.get::<Option<String>, _>("class_name"),
+            u.get::<Option<String>, _>("child_name"),
+            u.get::<Option<String>, _>("child_id"),
         )
     } else {
         (
             Some(auth_user.id.to_string()),
-            auth_user.tenant_id,
+            Some(auth_user.tenant_id),
             Some(auth_user.full_name.clone()),
             Some(auth_user.email.clone()),
             Some("Siswa".to_string()),
@@ -206,18 +220,25 @@ async fn login(
         )
     };
 
-    let school_info = sqlx::query!(
-        "SELECT name, logo_url FROM schools WHERE tenant_id = $1 AND deleted_at IS NULL LIMIT 1",
-        tenant_id
-    )
-    .fetch_optional(&ctx.pool)
-    .await
-    .ok()
-    .flatten();
+    let school_info = if let Some(t_id) = tenant_id {
+        sqlx::query(
+            "SELECT name, logo_url FROM schools WHERE tenant_id = $1 AND deleted_at IS NULL LIMIT 1",
+        )
+        .bind(t_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten()
+    } else {
+        None
+    };
+
+    let school_name: Option<String> = school_info.as_ref().map(|s| s.get("name"));
+    let school_logo_url: Option<String> = school_info.as_ref().and_then(|s| s.get("logo_url"));
 
     let refresh_claims = school_core::identity::application::auth::authenticate_user::Claims {
         sub: auth_user.id.to_string(),
-        tenant_id: tenant_id.to_string(),
+        tenant_id: tenant_id.map(|t| t.to_string()).unwrap_or_default(),
         email: Some(auth_user.email.clone()),
         full_name: Some(auth_user.full_name.clone()),
         role: role.clone(),
@@ -235,12 +256,12 @@ async fn login(
         expires_in: 86400,
         refresh_token,
         user_id,
-        tenant_id: Some(tenant_id.to_string()),
+        tenant_id: tenant_id.map(|t| t.to_string()),
         name,
         email,
         role,
-        school_name: school_info.as_ref().map(|s| s.name.clone()),
-        school_logo_url: school_info.and_then(|s| s.logo_url),
+        school_name,
+        school_logo_url,
         identifier: user_identifier,
         class_name,
         child_name,
@@ -564,7 +585,7 @@ async fn get_me(
         )));
     }
 
-    let record = sqlx::query!(
+    let record = sqlx::query(
         r#"
         SELECT u.id, u.email, u.full_name, u.is_active, u.created_at,
                COALESCE(r.name, 'Administrator') as role_name,
@@ -574,7 +595,7 @@ async fn get_me(
                  (SELECT NULLIF(g.phone_number, '') FROM guardians g WHERE g.user_id = u.id ORDER BY g.updated_at DESC LIMIT 1),
                  (SELECT CONCAT('WALI-', s.nisn) FROM guardians g JOIN students s ON s.guardian_id = g.id WHERE g.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),
                  ''
-               ) as "identifier!",
+               ) as identifier,
                COALESCE(
                  (
                    SELECT c.name 
@@ -603,7 +624,7 @@ async fn get_me(
                    ORDER BY en.enrolled_at DESC 
                    LIMIT 1
                  )
-               ) as "class_name?",
+               ) as class_name,
                (
                  SELECT s.full_name 
                  FROM guardians g 
@@ -611,42 +632,53 @@ async fn get_me(
                  WHERE g.user_id = u.id
                  ORDER BY s.created_at ASC
                  LIMIT 1
-               ) as "child_name?",
-               (
-                 SELECT s.id::text 
-                 FROM guardians g 
-                 JOIN students s ON s.guardian_id = g.id
-                 WHERE g.user_id = u.id
-                 ORDER BY s.created_at ASC
-                 LIMIT 1
-               ) as "child_id?"
+               ) as child_name,
+               COALESCE(
+                 (
+                   SELECT s.id::text 
+                   FROM guardians g 
+                   JOIN students s ON s.guardian_id = g.id
+                   WHERE g.user_id = u.id
+                   ORDER BY s.created_at ASC
+                   LIMIT 1
+                 ),
+                 (
+                   SELECT s.id::text
+                   FROM students s
+                   WHERE s.user_id = u.id
+                   LIMIT 1
+                 )
+               ) as child_id
         FROM users u
         LEFT JOIN user_roles ur ON u.id = ur.user_id
         LEFT JOIN roles r ON ur.role_id = r.id
         WHERE u.id = $1
         LIMIT 1
         "#,
-        actor_id
     )
+    .bind(actor_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
 
     let dto = match record {
-        Some(r) => AuthUserDto {
-            id: r.id,
-            email: r.email,
-            full_name: r.full_name,
-            role: r.role_name.unwrap_or_else(|| "Administrator".to_string()),
-            is_active: r.is_active,
-            created_at: r.created_at,
-            school_name: school_info.as_ref().map(|s| s.name.clone()),
-            school_logo_url: school_info.and_then(|s| s.logo_url),
-            identifier: if r.identifier.is_empty() { None } else { Some(r.identifier) },
-            class_name: r.class_name,
-            child_name: r.child_name,
-            child_id: r.child_id,
-            username: None,
+        Some(r) => {
+            let ident: String = r.get("identifier");
+            AuthUserDto {
+                id: r.get("id"),
+                email: r.get("email"),
+                full_name: r.get("full_name"),
+                role: r.get::<Option<String>, _>("role_name").unwrap_or_else(|| "Administrator".to_string()),
+                is_active: r.get("is_active"),
+                created_at: r.get("created_at"),
+                school_name: school_info.as_ref().map(|s| s.name.clone()),
+                school_logo_url: school_info.and_then(|s| s.logo_url),
+                identifier: if ident.is_empty() { None } else { Some(ident) },
+                class_name: r.get("class_name"),
+                child_name: r.get("child_name"),
+                child_id: r.get("child_id"),
+                username: None,
+            }
         },
         None => AuthUserDto {
             id: actor_id,
@@ -727,7 +759,7 @@ async fn qr_login(
     .ok()
     .flatten();
 
-    let user_extra = sqlx::query!(
+    let user_extra = sqlx::query(
         r#"
         SELECT 
             COALESCE(
@@ -736,7 +768,7 @@ async fn qr_login(
                 (SELECT NULLIF(g.phone_number, '') FROM guardians g WHERE g.user_id = $1 ORDER BY g.updated_at DESC LIMIT 1),
                 (SELECT CONCAT('WALI-', s.nisn) FROM guardians g JOIN students s ON s.guardian_id = g.id WHERE g.user_id = $1 ORDER BY s.updated_at DESC LIMIT 1),
                 ''
-            ) as "identifier!",
+            ) as identifier,
             COALESCE(
                 (
                     SELECT c.name 
@@ -765,7 +797,7 @@ async fn qr_login(
                     ORDER BY en.enrolled_at DESC 
                     LIMIT 1
                 )
-            ) as "class_name?",
+            ) as class_name,
             (
                 SELECT s.full_name 
                 FROM guardians g 
@@ -773,29 +805,38 @@ async fn qr_login(
                 WHERE g.user_id = $1
                 ORDER BY s.created_at ASC
                 LIMIT 1
-            ) as "child_name?",
-            (
-                SELECT s.id::text 
-                FROM guardians g 
-                JOIN students s ON s.guardian_id = g.id
-                WHERE g.user_id = $1
-                ORDER BY s.created_at ASC
-                LIMIT 1
-            ) as "child_id?"
-        "#,
-        result.user_id
+            ) as child_name,
+            COALESCE(
+                (
+                    SELECT s.id::text 
+                    FROM guardians g 
+                    JOIN students s ON s.guardian_id = g.id
+                    WHERE g.user_id = $1
+                    ORDER BY s.created_at ASC
+                    LIMIT 1
+                ),
+                (
+                    SELECT s.id::text
+                    FROM students s
+                    WHERE s.user_id = $1
+                    LIMIT 1
+                )
+            ) as child_id
+        "#
     )
+    .bind(result.user_id)
     .fetch_optional(&ctx.pool)
     .await
     .ok()
     .flatten();
 
     let (user_identifier, class_name, child_name, child_id) = if let Some(e) = user_extra {
+        let ident: String = e.get("identifier");
         (
-            if e.identifier.is_empty() { None } else { Some(e.identifier) },
-            e.class_name,
-            e.child_name,
-            e.child_id,
+            if ident.is_empty() { None } else { Some(ident) },
+            e.get("class_name"),
+            e.get("child_name"),
+            e.get("child_id"),
         )
     } else {
         (None, None, None, None)

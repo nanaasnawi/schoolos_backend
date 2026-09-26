@@ -147,7 +147,8 @@ async fn create(
 
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
     let teacher_id = if let Some(aid) = actor_id {
-        sqlx::query_scalar!(r#"SELECT id FROM teachers WHERE user_id = $1 LIMIT 1"#, aid)
+        sqlx::query_scalar::<_, Uuid>(r#"SELECT id FROM teachers WHERE user_id = $1 LIMIT 1"#)
+            .bind(aid)
             .fetch_optional(&ctx.pool)
             .await
             .ok()
@@ -162,11 +163,11 @@ async fn create(
             if let Ok(u) = Uuid::parse_str(cid_str.trim()) {
                 Some(u)
             } else {
-                sqlx::query_scalar!(
+                sqlx::query_scalar::<_, Uuid>(
                     r#"SELECT id FROM classes WHERE tenant_id = $1 AND (name = $2 OR name ILIKE $2) LIMIT 1"#,
-                    req_ctx.tenant_id,
-                    cid_str.trim()
                 )
+                .bind(req_ctx.tenant_id)
+                .bind(cid_str.trim())
                 .fetch_optional(&ctx.pool)
                 .await
                 .ok()
@@ -180,11 +181,11 @@ async fn create(
     let subject_id: Option<Uuid> = if let Some(ref desc) = payload.description {
         let first_part = desc.split('•').next().map(|s| s.trim()).unwrap_or("");
         if !first_part.is_empty() {
-            sqlx::query_scalar!(
+            sqlx::query_scalar::<_, Uuid>(
                 r#"SELECT id FROM subjects WHERE tenant_id = $1 AND (name = $2 OR name ILIKE $2) LIMIT 1"#,
-                req_ctx.tenant_id,
-                first_part
             )
+            .bind(req_ctx.tenant_id)
+            .bind(first_part)
             .fetch_optional(&ctx.pool)
             .await
             .ok()
@@ -199,20 +200,20 @@ async fn create(
     let final_teacher_id: Option<Uuid> = if teacher_id.is_some() {
         teacher_id
     } else {
-        sqlx::query_scalar!(
+        sqlx::query_scalar::<_, Option<Uuid>>(
             r#"
             SELECT COALESCE(
                 (SELECT cs.teacher_id FROM class_schedules cs WHERE cs.class_id = $1 AND cs.subject_id = $2 AND cs.tenant_id = $3 LIMIT 1),
                 (SELECT c.homeroom_teacher_id FROM classes c WHERE c.id = $1 AND c.tenant_id = $3 LIMIT 1),
                 (SELECT t.id FROM teachers t WHERE t.user_id = $4 AND t.tenant_id = $3 LIMIT 1),
                 (SELECT t.id FROM teachers t WHERE t.tenant_id = $3 ORDER BY t.created_at ASC LIMIT 1)
-            ) as "teacher_id?"
+            ) as "teacher_id"
             "#,
-            target_class_id,
-            subject_id,
-            req_ctx.tenant_id,
-            actor_id
         )
+        .bind(target_class_id)
+        .bind(subject_id)
+        .bind(req_ctx.tenant_id)
+        .bind(actor_id)
         .fetch_optional(&ctx.pool)
         .await
         .ok()
@@ -220,21 +221,22 @@ async fn create(
         .flatten()
     };
 
-    let _ = sqlx::query!(
+    let _ = sqlx::query(
         r#"UPDATE assignments SET class_id = $1, subject_id = $2, teacher_id = $3, created_by = $4, status = 'published', is_active = true WHERE id = $5"#,
-        target_class_id,
-        subject_id,
-        final_teacher_id,
-        actor_id,
-        assignment.id
     )
+    .bind(target_class_id)
+    .bind(subject_id)
+    .bind(final_teacher_id)
+    .bind(actor_id)
+    .bind(assignment.id)
     .execute(&ctx.pool)
     .await;
 
     let (class_name, subject_name, teacher_name) = tokio::join!(
         async {
             if let Some(cid) = target_class_id {
-                sqlx::query_scalar!(r#"SELECT name FROM classes WHERE id = $1"#, cid)
+                sqlx::query_scalar::<_, String>(r#"SELECT name FROM classes WHERE id = $1"#)
+                    .bind(cid)
                     .fetch_optional(&ctx.pool).await.ok().flatten()
             } else {
                 None
@@ -242,7 +244,8 @@ async fn create(
         },
         async {
             if let Some(sid) = subject_id {
-                sqlx::query_scalar!(r#"SELECT name FROM subjects WHERE id = $1"#, sid)
+                sqlx::query_scalar::<_, String>(r#"SELECT name FROM subjects WHERE id = $1"#)
+                    .bind(sid)
                     .fetch_optional(&ctx.pool).await.ok().flatten()
             } else {
                 None
@@ -250,7 +253,8 @@ async fn create(
         },
         async {
             if let Some(tid) = final_teacher_id {
-                sqlx::query_scalar!(r#"SELECT full_name FROM teachers WHERE id = $1"#, tid)
+                sqlx::query_scalar::<_, String>(r#"SELECT full_name FROM teachers WHERE id = $1"#)
+                    .bind(tid)
                     .fetch_optional(&ctx.pool).await.ok().flatten()
             } else {
                 None
@@ -420,7 +424,7 @@ async fn list(
         .unwrap_or(false);
 
     // Self-healing: Ensure assignments with class_id have published status and teacher_id resolved
-    let _ = sqlx::query!(
+    let _ = sqlx::query(
         r#"
         UPDATE assignments
         SET status = 'published'
@@ -429,12 +433,12 @@ async fn list(
           AND class_id IS NOT NULL 
           AND deleted_at IS NULL
         "#,
-        req_ctx.tenant_id
     )
+    .bind(req_ctx.tenant_id)
     .execute(&ctx.pool)
     .await;
 
-    let _ = sqlx::query!(
+    let _ = sqlx::query(
         r#"
         UPDATE assignments a
         SET teacher_id = COALESCE(
@@ -445,8 +449,8 @@ async fn list(
         )
         WHERE a.tenant_id = $1 AND a.teacher_id IS NULL AND a.deleted_at IS NULL
         "#,
-        req_ctx.tenant_id
     )
+    .bind(req_ctx.tenant_id)
     .execute(&ctx.pool)
     .await;
 
@@ -786,10 +790,10 @@ async fn get_by_id(
             let resolved_teacher_name = match raw_teacher_name {
                 Some(ref tn) if !tn.trim().is_empty() && !tn.eq_ignore_ascii_case("Guru Pengampu") => Some(tn.clone()),
                 _ => {
-                    sqlx::query_scalar!(
+                    sqlx::query_scalar::<_, String>(
                         "SELECT full_name FROM teachers WHERE tenant_id = $1 ORDER BY created_at ASC LIMIT 1",
-                        tenant_id
                     )
+                    .bind(tenant_id)
                     .fetch_optional(&ctx.pool)
                     .await
                     .ok()
@@ -1342,24 +1346,74 @@ async fn get_submissions(
     )
     .await?;
 
-    let rows = sqlx::query(
-        r#"
-        SELECT 
-            sub.id, sub.tenant_id, sub.assignment_id, sub.student_id,
-            sub.content, sub.file_url, sub.submitted_at, sub.status,
-            sub.score, sub.feedback, sub.graded_at, sub.graded_by,
-            COALESCE(s.full_name, u.full_name, 'Siswa') as student_name,
-            COALESCE(s.nisn, u.username, '-') as student_nisn
-        FROM assignment_submissions sub
-        LEFT JOIN students s ON s.id = sub.student_id OR s.user_id = sub.student_id
-        LEFT JOIN users u ON u.id = sub.student_id
-        WHERE sub.assignment_id = $1
-        ORDER BY sub.submitted_at DESC
-        "#,
-    )
-    .bind(id)
-    .fetch_all(&ctx.pool)
-    .await
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
+    let is_student = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| a.roles.iter().any(|r| r.name == "Siswa"))
+        .unwrap_or(false);
+    let is_parent = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| a.roles.iter().any(|r| r.name == "Wali Murid" || r.name == "Orang Tua"))
+        .unwrap_or(false);
+
+    let rows = if is_student || is_parent {
+        let student_db_id = crate::authorization_helpers::AuthorizationScope::resolve_student_id(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            actor_id,
+        )
+        .await
+        .unwrap_or(None);
+
+        sqlx::query(
+            r#"
+            SELECT 
+                sub.id, sub.tenant_id, sub.assignment_id, sub.student_id,
+                sub.content, sub.file_url, sub.submitted_at, sub.status,
+                sub.score, sub.feedback, sub.graded_at, sub.graded_by,
+                COALESCE(s.full_name, u.full_name, 'Siswa') as student_name,
+                COALESCE(s.nisn, u.username, '-') as student_nisn,
+                COALESCE(s.user_id, u.id) as student_user_id
+            FROM assignment_submissions sub
+            LEFT JOIN students s ON s.id = sub.student_id OR s.user_id = sub.student_id
+            LEFT JOIN users u ON u.id = sub.student_id OR u.id = s.user_id
+            WHERE sub.assignment_id = $1
+              AND (
+                  sub.student_id = $2
+                  OR s.user_id = $2
+                  OR ($3::uuid IS NOT NULL AND sub.student_id = $3)
+              )
+            ORDER BY sub.submitted_at DESC
+            "#,
+        )
+        .bind(id)
+        .bind(actor_id)
+        .bind(student_db_id)
+        .fetch_all(&ctx.pool)
+        .await
+    } else {
+        sqlx::query(
+            r#"
+            SELECT 
+                sub.id, sub.tenant_id, sub.assignment_id, sub.student_id,
+                sub.content, sub.file_url, sub.submitted_at, sub.status,
+                sub.score, sub.feedback, sub.graded_at, sub.graded_by,
+                COALESCE(s.full_name, u.full_name, 'Siswa') as student_name,
+                COALESCE(s.nisn, u.username, '-') as student_nisn,
+                COALESCE(s.user_id, u.id) as student_user_id
+            FROM assignment_submissions sub
+            LEFT JOIN students s ON s.id = sub.student_id OR s.user_id = sub.student_id
+            LEFT JOIN users u ON u.id = sub.student_id OR u.id = s.user_id
+            WHERE sub.assignment_id = $1
+            ORDER BY sub.submitted_at DESC
+            "#,
+        )
+        .bind(id)
+        .fetch_all(&ctx.pool)
+        .await
+    }
     .map_err(|e| {
         ApiError::new(
             school_core::common::error::ApplicationError::Infrastructure(
@@ -1437,6 +1491,7 @@ async fn get_submissions(
                 graded_by: r.get("graded_by"),
                 student_name: r.get("student_name"),
                 student_nisn: r.get("student_nisn"),
+                student_user_id: r.get("student_user_id"),
                 answers,
             }
         })
