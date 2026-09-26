@@ -88,7 +88,7 @@ pub async fn get_current_school_profile(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
 ) -> Result<Json<ApiResponse<SchoolResponse>>, ApiError> {
-    tracing::error!("get_current_school_profile CALLED WITH tenant_id: {}", req_ctx.tenant_id);
+    tracing::debug!("get_current_school_profile called with tenant_id: {}", req_ctx.tenant_id);
     let row = sqlx::query!(
         r#"
         SELECT id, tenant_id, name, npsn, address, phone_number, email, logo_url, status, dapodik_url, dapodik_token, accreditation, created_at, updated_at
