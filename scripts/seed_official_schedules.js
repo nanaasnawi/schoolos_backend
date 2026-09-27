@@ -8,7 +8,7 @@ async function main() {
   await client.connect();
   console.log('Connected to PostgreSQL...');
 
-  const TENANT_ID = 'e3c4d8da-ff44-4d87-bb13-759a54f49bd0'; // PKBM As-Salafiyah
+  const TENANT_ID = 'e3c4d8da-ff44-4d87-bb13-759a54f49bd0'; // Default Tenant ID
 
   // 1. Get Academic Year
   const yearRes = await client.query('SELECT id, name FROM academic_years WHERE tenant_id = $1 LIMIT 1', [TENANT_ID]);

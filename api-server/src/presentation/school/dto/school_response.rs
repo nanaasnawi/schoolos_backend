@@ -7,10 +7,10 @@ pub struct SchoolResponse {
     #[schema(example = "00000000-0000-0000-0000-000000000001")]
     pub id: Uuid,
 
-    #[schema(example = "PKBM AS-SALAFIYAH")]
+    #[schema(example = "SMA Garuda Pratama")]
     pub name: String,
 
-    #[schema(example = "P2962010")]
+    #[schema(example = "12345678")]
     pub npsn: Option<String>,
 
     #[schema(example = "https://example.com/logo.png")]
