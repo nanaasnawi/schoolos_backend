@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
 use crate::common::domain::event::{DomainEvent, EventMetadata};
-use crate::integration::contracts::{TeacherSyncRecord, ClassSyncRecord};
+use crate::integration::contracts::{ClassSyncRecord, TeacherSyncRecord};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeacherImportedEvent {

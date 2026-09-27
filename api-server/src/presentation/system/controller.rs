@@ -1,7 +1,7 @@
 use axum::{
-    Router,
     extract::{Json, Path, State},
     routing::{get, post},
+    Router,
 };
 use uuid::Uuid;
 
@@ -21,8 +21,8 @@ use super::dto::{
     },
 };
 
-use axum::middleware;
 use crate::middleware::auth_middleware;
+use axum::middleware;
 
 pub fn system_routes(context: ApplicationContext) -> Router<ApplicationContext> {
     Router::new()
@@ -33,13 +33,16 @@ pub fn system_routes(context: ApplicationContext) -> Router<ApplicationContext> 
             Router::new()
                 .route("/overview", get(get_system_overview))
                 .route("/audit-logs", get(get_system_audit_logs))
-                .route("/settings", get(get_system_settings).post(update_system_settings))
+                .route(
+                    "/settings",
+                    get(get_system_settings).post(update_system_settings),
+                )
                 .route("/tenants", get(list_tenants).post(create_tenant))
                 .route("/tenants/{id}/activate-master", post(activate_master))
                 .route("/tenants/{id}/reset-credentials", post(reset_credentials))
                 .route("/tenants/{id}/toggle-status", post(toggle_tenant_status))
                 .route("/tenants/{id}/impersonate", post(impersonate_tenant))
-                .layer(middleware::from_fn_with_state(context, auth_middleware))
+                .layer(middleware::from_fn_with_state(context, auth_middleware)),
         )
 }
 
@@ -64,11 +67,12 @@ async fn get_system_overview(
         .unwrap_or(Some(0))
         .unwrap_or(0);
 
-    let active_tenants: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM tenants WHERE is_active = true")
-        .fetch_one(&ctx.pool)
-        .await
-        .unwrap_or(Some(0))
-        .unwrap_or(0);
+    let active_tenants: i64 =
+        sqlx::query_scalar!("SELECT COUNT(*) FROM tenants WHERE is_active = true")
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap_or(Some(0))
+            .unwrap_or(0);
 
     let total_students: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM students")
         .fetch_one(&ctx.pool)
@@ -94,13 +98,12 @@ async fn get_system_overview(
         .unwrap_or(Some(0))
         .unwrap_or(0);
 
-    let outbox_pending_events: i64 = sqlx::query_scalar!(
-        "SELECT COUNT(*) FROM outbox_events WHERE processed_at IS NULL"
-    )
-    .fetch_one(&ctx.pool)
-    .await
-    .unwrap_or(Some(0))
-    .unwrap_or(0);
+    let outbox_pending_events: i64 =
+        sqlx::query_scalar!("SELECT COUNT(*) FROM outbox_events WHERE processed_at IS NULL")
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap_or(Some(0))
+            .unwrap_or(0);
 
     Ok(Json(ApiResponse::success(
         SystemOverviewResponse {
@@ -185,12 +188,14 @@ async fn toggle_tenant_status(
     )
     .fetch_one(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(
-        school_core::common::error::ApplicationError::Infrastructure(
-            school_core::common::error::InfrastructureError::Database(e),
-        ),
-        &req_ctx.request_id,
-    ))?;
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
 
     Ok(Json(ApiResponse::success(updated, req_ctx.request_id)))
 }
@@ -231,7 +236,12 @@ async fn impersonate_tenant(
     .unwrap_or(None);
 
     let (user_id, email, full_name, role_name) = match user_opt {
-        Some(u) => (u.id, u.email, u.full_name, u.role_name.unwrap_or_else(|| "Admin".to_string())),
+        Some(u) => (
+            u.id,
+            u.email,
+            u.full_name,
+            u.role_name.unwrap_or_else(|| "Admin".to_string()),
+        ),
         None => {
             return Err(ApiError::new(
                 school_core::common::error::ApplicationError::NotFound(
@@ -318,14 +328,22 @@ async fn list_tenants(
     )
     .fetch_all(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(
-        school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)),
-        &req_ctx.request_id
-    ))?;
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
 
     let mut response_data = Vec::new();
     for row in records {
-        let is_dapodik = row.dapodik_token.as_ref().map(|t| !t.trim().is_empty()).unwrap_or(false);
+        let is_dapodik = row
+            .dapodik_token
+            .as_ref()
+            .map(|t| !t.trim().is_empty())
+            .unwrap_or(false);
         response_data.push(TenantSummaryResponse {
             tenant_id: row.tenant_id,
             tenant_name: row.tenant_name,
@@ -333,7 +351,11 @@ async fn list_tenants(
             npsn: row.npsn,
             is_active: row.is_active,
             created_at: row.created_at,
-            server_status: if row.is_active { "🟢 Lancar".to_string() } else { "🔴 Suspend".to_string() },
+            server_status: if row.is_active {
+                "🟢 Lancar".to_string()
+            } else {
+                "🔴 Suspend".to_string()
+            },
             student_count: row.student_count,
             teacher_count: row.teacher_count,
             class_count: row.class_count,
@@ -347,7 +369,10 @@ async fn list_tenants(
     )))
 }
 
-async fn seed_tenant_standard_roles(pool: &sqlx::PgPool, tenant_id: Uuid) -> Result<(), sqlx::Error> {
+async fn seed_tenant_standard_roles(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         INSERT INTO roles (id, tenant_id, name, description, allowed_platforms, is_system_default)
@@ -428,7 +453,7 @@ async fn create_tenant(
         return Err(ApiError::new(
             school_core::common::error::ApplicationError::Unauthorized(
                 school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                "Access denied. System Admin only.".to_string()
+                "Access denied. System Admin only.".to_string(),
             ),
             &req_ctx.request_id,
         ));
@@ -443,10 +468,14 @@ async fn create_tenant(
         .bind(&payload.school_name)
         .execute(&ctx.pool)
         .await
-        .map_err(|e| ApiError::new(
-            school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)),
-            &req_ctx.request_id
-        ))?;
+        .map_err(|e| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
 
     // 2. Insert school
     sqlx::query("INSERT INTO schools (id, tenant_id, name, npsn) VALUES ($1, $2, $3, $4)")
@@ -456,18 +485,26 @@ async fn create_tenant(
         .bind(&payload.npsn)
         .execute(&ctx.pool)
         .await
-        .map_err(|e| ApiError::new(
-            school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)),
-            &req_ctx.request_id
-        ))?;
+        .map_err(|e| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
 
     // 3. Seed roles
     seed_tenant_standard_roles(&ctx.pool, tenant_id)
         .await
-        .map_err(|e| ApiError::new(
-            school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)),
-            &req_ctx.request_id
-        ))?;
+        .map_err(|e| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
 
     // 4. Register master user
     let command = RegisterUserCommand {
@@ -484,30 +521,42 @@ async fn create_tenant(
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
     // 5. Assign role
-    let target_role_name = payload.master_role.unwrap_or_else(|| "Kepala Sekolah".to_string());
+    let target_role_name = payload
+        .master_role
+        .unwrap_or_else(|| "Kepala Sekolah".to_string());
     let role_id = sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM roles WHERE tenant_id = $1 AND name = $2 LIMIT 1"
+        "SELECT id FROM roles WHERE tenant_id = $1 AND name = $2 LIMIT 1",
     )
     .bind(tenant_id)
     .bind(&target_role_name)
     .fetch_optional(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(
-        school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)),
-        &req_ctx.request_id
-    ))?;
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
 
     let mut assigned_role = "None".to_string();
     if let Some(r_id) = role_id {
-        sqlx::query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
-            .bind(user.id)
-            .bind(r_id)
-            .execute(&ctx.pool)
-            .await
-            .map_err(|e| ApiError::new(
-                school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)),
-                &req_ctx.request_id
-            ))?;
+        sqlx::query(
+            "INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(user.id)
+        .bind(r_id)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
         assigned_role = target_role_name;
     }
 
@@ -516,7 +565,10 @@ async fn create_tenant(
         email: payload.master_email,
         full_name: payload.master_full_name,
         assigned_role,
-        message: format!("Tenant & akun master untuk {} berhasil dibuat.", payload.school_name),
+        message: format!(
+            "Tenant & akun master untuk {} berhasil dibuat.",
+            payload.school_name
+        ),
     };
 
     Ok(Json(ApiResponse::success(
@@ -552,7 +604,7 @@ async fn activate_master(
         return Err(ApiError::new(
             school_core::common::error::ApplicationError::Unauthorized(
                 school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                "Access denied. System Admin only.".to_string()
+                "Access denied. System Admin only.".to_string(),
             ),
             &req_ctx.request_id,
         ));
@@ -576,32 +628,44 @@ async fn activate_master(
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
     // 3. Find target role
-    let target_role_name = payload.role_name.unwrap_or_else(|| "Kepala Sekolah".to_string());
+    let target_role_name = payload
+        .role_name
+        .unwrap_or_else(|| "Kepala Sekolah".to_string());
     let role_id = sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM roles WHERE tenant_id = $1 AND name = $2 LIMIT 1"
+        "SELECT id FROM roles WHERE tenant_id = $1 AND name = $2 LIMIT 1",
     )
     .bind(tenant_id)
     .bind(&target_role_name)
     .fetch_optional(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(
-        school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)),
-        &req_ctx.request_id
-    ))?;
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
 
     let mut assigned_role = "None (Role missing)".to_string();
 
     if let Some(r_id) = role_id {
-        sqlx::query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
-            .bind(user.id)
-            .bind(r_id)
-            .execute(&ctx.pool)
-            .await
-            .map_err(|e| ApiError::new(
-                school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)),
-                &req_ctx.request_id
-            ))?;
-        
+        sqlx::query(
+            "INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(user.id)
+        .bind(r_id)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+
         assigned_role = target_role_name;
     }
 
@@ -651,24 +715,27 @@ async fn reset_credentials(
         return Err(ApiError::new(
             school_core::common::error::ApplicationError::Unauthorized(
                 school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                "Access denied. System Admin only.".to_string()
+                "Access denied. System Admin only.".to_string(),
             ),
             &req_ctx.request_id,
         ));
     }
 
     // Check if user exists
-    let user_id = sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM users WHERE tenant_id = $1 AND email = $2"
-    )
-    .bind(tenant_id)
-    .bind(&payload.current_email)
-    .fetch_optional(&ctx.pool)
-    .await
-    .map_err(|e| ApiError::new(
-        school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)),
-        &req_ctx.request_id
-    ))?;
+    let user_id =
+        sqlx::query_scalar::<_, Uuid>("SELECT id FROM users WHERE tenant_id = $1 AND email = $2")
+            .bind(tenant_id)
+            .bind(&payload.current_email)
+            .fetch_optional(&ctx.pool)
+            .await
+            .map_err(|e| {
+                ApiError::new(
+                    school_core::common::error::ApplicationError::Infrastructure(
+                        school_core::common::error::InfrastructureError::Database(e),
+                    ),
+                    &req_ctx.request_id,
+                )
+            })?;
 
     let user_id = match user_id {
         Some(id) => id,
@@ -676,8 +743,8 @@ async fn reset_credentials(
             return Err(ApiError::new(
                 school_core::common::error::ApplicationError::Domain(
                     school_core::common::error::DomainError::Validation(
-                        "User not found for the provided email in this tenant".to_string()
-                    )
+                        "User not found for the provided email in this tenant".to_string(),
+                    ),
                 ),
                 &req_ctx.request_id,
             ));
@@ -685,34 +752,53 @@ async fn reset_credentials(
     };
 
     let new_email = payload.new_email.unwrap_or(payload.current_email.clone());
-    
+
     let mut password_hash = None;
     if let Some(pwd) = payload.new_password {
         if !pwd.is_empty() {
-            let salt = SaltString::generate(&mut OsRng);
-            let hashed = Argon2::default()
-                .hash_password(pwd.as_bytes(), &salt)
-                .map_err(|e| ApiError::new(
+            let pwd_bytes = pwd.into_bytes();
+            let hashed = tokio::task::spawn_blocking(move || {
+                let salt = SaltString::generate(&mut OsRng);
+                Argon2::default()
+                    .hash_password(&pwd_bytes, &salt)
+                    .map(|h| h.to_string())
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .map_err(|e| {
+                ApiError::new(
                     school_core::common::error::ApplicationError::Internal(e.to_string()),
                     &req_ctx.request_id,
-                ))?
-                .to_string();
+                )
+            })?
+            .map_err(|e| {
+                ApiError::new(
+                    school_core::common::error::ApplicationError::Internal(e),
+                    &req_ctx.request_id,
+                )
+            })?;
             password_hash = Some(hashed);
         }
     }
 
     if let Some(hash) = password_hash {
-        sqlx::query("UPDATE users SET email = $1, password_hash = $2 WHERE id = $3 AND tenant_id = $4")
-            .bind(&new_email)
-            .bind(hash)
-            .bind(user_id)
-            .bind(tenant_id)
-            .execute(&ctx.pool)
-            .await
-            .map_err(|e| ApiError::new(
-                school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)),
-                &req_ctx.request_id
-            ))?;
+        sqlx::query(
+            "UPDATE users SET email = $1, password_hash = $2 WHERE id = $3 AND tenant_id = $4",
+        )
+        .bind(&new_email)
+        .bind(hash)
+        .bind(user_id)
+        .bind(tenant_id)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
     } else {
         sqlx::query("UPDATE users SET email = $1 WHERE id = $2 AND tenant_id = $3")
             .bind(&new_email)
@@ -720,10 +806,14 @@ async fn reset_credentials(
             .bind(tenant_id)
             .execute(&ctx.pool)
             .await
-            .map_err(|e| ApiError::new(
-                school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)),
-                &req_ctx.request_id
-            ))?;
+            .map_err(|e| {
+                ApiError::new(
+                    school_core::common::error::ApplicationError::Infrastructure(
+                        school_core::common::error::InfrastructureError::Database(e),
+                    ),
+                    &req_ctx.request_id,
+                )
+            })?;
     }
 
     Ok(Json(ApiResponse::success(
@@ -759,14 +849,18 @@ async fn system_login(
     req_ctx: RequestContext,
     Json(payload): Json<SystemLoginRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    let expected_email = std::env::var("SYSADMIN_EMAIL").unwrap_or_else(|_| "sysadmin@schoolos.com".to_string());
-    let expected_password = std::env::var("SYSADMIN_PASSWORD").unwrap_or_else(|_| "sysadmin123".to_string());
+    let expected_email =
+        std::env::var("SYSADMIN_EMAIL").unwrap_or_else(|_| "sysadmin@schoolos.com".to_string());
+    let expected_password =
+        std::env::var("SYSADMIN_PASSWORD").unwrap_or_else(|_| "sysadmin123".to_string());
 
     let input_email = payload.email.trim();
     let input_password = payload.password.trim();
 
-    if (input_email.eq_ignore_ascii_case(&expected_email) || input_email.eq_ignore_ascii_case("sysadmin@schoolos.com"))
-        && (input_password == expected_password || input_password == "sysadmin123") {
+    if (input_email.eq_ignore_ascii_case(&expected_email)
+        || input_email.eq_ignore_ascii_case("sysadmin@schoolos.com"))
+        && (input_password == expected_password || input_password == "sysadmin123")
+    {
         let claims = Claims {
             sub: Uuid::nil().to_string(),
             tenant_id: Uuid::nil().to_string(),
@@ -803,7 +897,7 @@ async fn system_login(
         Err(ApiError::new(
             school_core::common::error::ApplicationError::Unauthorized(
                 school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                "Invalid sysadmin credentials".to_string()
+                "Invalid sysadmin credentials".to_string(),
             ),
             &req_ctx.request_id,
         ))
@@ -815,13 +909,11 @@ async fn get_maintenance_status(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    let row = sqlx::query!(
-        "SELECT value FROM system_settings WHERE key = 'maintenance'"
-    )
-    .fetch_optional(&ctx.pool)
-    .await
-    .ok()
-    .flatten();
+    let row = sqlx::query!("SELECT value FROM system_settings WHERE key = 'maintenance'")
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten();
 
     let val = row.map(|r| r.value).unwrap_or_else(|| {
         serde_json::json!({
@@ -838,13 +930,11 @@ async fn get_mobile_config(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    let row = sqlx::query!(
-        "SELECT value FROM system_settings WHERE key = 'mobile'"
-    )
-    .fetch_optional(&ctx.pool)
-    .await
-    .ok()
-    .flatten();
+    let row = sqlx::query!("SELECT value FROM system_settings WHERE key = 'mobile'")
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten();
 
     let val = row.map(|r| r.value).unwrap_or_else(|| {
         serde_json::json!({
@@ -883,7 +973,10 @@ async fn get_system_settings(
         map.insert(r.key, r.value);
     }
 
-    Ok(Json(ApiResponse::success(serde_json::Value::Object(map), req_ctx.request_id)))
+    Ok(Json(ApiResponse::success(
+        serde_json::Value::Object(map),
+        req_ctx.request_id,
+    )))
 }
 
 /// Update global system settings (Super Admin only)
@@ -935,6 +1028,8 @@ async fn update_system_settings(
     .execute(&ctx.pool)
     .await;
 
-    Ok(Json(ApiResponse::success(serde_json::json!({ "status": "updated" }), req_ctx.request_id)))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({ "status": "updated" }),
+        req_ctx.request_id,
+    )))
 }
-

@@ -1,12 +1,11 @@
 use axum::{
-    Json, Router,
     extract::{Path, State},
     routing::{get, post},
+    Json, Router,
 };
 use uuid::Uuid;
 
 use super::dto::{create_subject_request::CreateSubjectRequest, subject_response::SubjectResponse};
-use sqlx::Row;
 use crate::{
     bootstrap::ApplicationContext, error::ApiError, extractors::RequestContext,
     response::ApiResponse,
@@ -16,6 +15,7 @@ use school_core::academic::application::subject::{
     list_subjects::ListSubjectsQuery,
 };
 use school_core::permission::domain::permission_registry::Permission;
+use sqlx::Row;
 
 pub fn subject_routes() -> Router<ApplicationContext> {
     Router::new()
@@ -63,8 +63,24 @@ async fn list(
     req_ctx: RequestContext,
 ) -> Result<Json<ApiResponse<Vec<SubjectResponse>>>, ApiError> {
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
-    let is_teacher = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Guru" || r.name == "Teacher")).unwrap_or(false);
-    let is_student = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Siswa" || r.name == "Student")).unwrap_or(false);
+    let is_teacher = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles
+                .iter()
+                .any(|r| r.name == "Guru" || r.name == "Teacher")
+        })
+        .unwrap_or(false);
+    let is_student = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles
+                .iter()
+                .any(|r| r.name == "Siswa" || r.name == "Student")
+        })
+        .unwrap_or(false);
 
     if !is_teacher && !is_student {
         use crate::middleware::require_permission;
@@ -98,15 +114,17 @@ async fn list(
         .await
         .unwrap_or_default();
 
-        rows.into_iter().map(|r| SubjectResponse {
-            id: r.get("id"),
-            tenant_id: r.get("tenant_id"),
-            code: r.get("code"),
-            name: r.get("name"),
-            is_active: r.get("is_active"),
-            created_at: r.get("created_at"),
-            updated_at: r.get("updated_at"),
-        }).collect()
+        rows.into_iter()
+            .map(|r| SubjectResponse {
+                id: r.get("id"),
+                tenant_id: r.get("tenant_id"),
+                code: r.get("code"),
+                name: r.get("name"),
+                is_active: r.get("is_active"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+            })
+            .collect()
     } else if is_student {
         // Student sees subjects that have materials for their active enrolled classes,
         // or all active tenant subjects if none yet
@@ -135,15 +153,17 @@ async fn list(
         .unwrap_or_default();
 
         if !rows.is_empty() {
-            rows.into_iter().map(|r| SubjectResponse {
-                id: r.get("id"),
-                tenant_id: r.get("tenant_id"),
-                code: r.get("code"),
-                name: r.get("name"),
-                is_active: r.get("is_active"),
-                created_at: r.get("created_at"),
-                updated_at: r.get("updated_at"),
-            }).collect()
+            rows.into_iter()
+                .map(|r| SubjectResponse {
+                    id: r.get("id"),
+                    tenant_id: r.get("tenant_id"),
+                    code: r.get("code"),
+                    name: r.get("name"),
+                    is_active: r.get("is_active"),
+                    created_at: r.get("created_at"),
+                    updated_at: r.get("updated_at"),
+                })
+                .collect()
         } else {
             let fallback_rows = sqlx::query(
                 r#"
@@ -158,15 +178,18 @@ async fn list(
             .await
             .unwrap_or_default();
 
-            fallback_rows.into_iter().map(|r| SubjectResponse {
-                id: r.get("id"),
-                tenant_id: r.get("tenant_id"),
-                code: r.get("code"),
-                name: r.get("name"),
-                is_active: r.get("is_active"),
-                created_at: r.get("created_at"),
-                updated_at: r.get("updated_at"),
-            }).collect()
+            fallback_rows
+                .into_iter()
+                .map(|r| SubjectResponse {
+                    id: r.get("id"),
+                    tenant_id: r.get("tenant_id"),
+                    code: r.get("code"),
+                    name: r.get("name"),
+                    is_active: r.get("is_active"),
+                    created_at: r.get("created_at"),
+                    updated_at: r.get("updated_at"),
+                })
+                .collect()
         }
     } else {
         // Super Admin / Kepala Sekolah / Staf sees all subjects in tenant
@@ -207,8 +230,24 @@ async fn get_by_id(
         })?;
 
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
-    let is_teacher = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Guru" || r.name == "Teacher")).unwrap_or(false);
-    let is_student = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Siswa" || r.name == "Student")).unwrap_or(false);
+    let is_teacher = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles
+                .iter()
+                .any(|r| r.name == "Guru" || r.name == "Teacher")
+        })
+        .unwrap_or(false);
+    let is_student = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles
+                .iter()
+                .any(|r| r.name == "Siswa" || r.name == "Student")
+        })
+        .unwrap_or(false);
 
     // Access control: teachers and students can only see subjects tied to them
     if is_teacher || is_student {

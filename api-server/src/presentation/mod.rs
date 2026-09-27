@@ -1,7 +1,7 @@
 pub mod academic;
 pub mod analytics;
-pub mod auth;
 pub mod announcements;
+pub mod auth;
 pub mod dapodik;
 pub mod health;
 pub mod learning;

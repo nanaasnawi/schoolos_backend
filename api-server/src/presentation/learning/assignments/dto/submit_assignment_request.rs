@@ -14,4 +14,3 @@ pub struct SubmitAssignmentRequest {
     #[serde(default)]
     pub answers: Option<Vec<SubmitAnswerDto>>,
 }
-

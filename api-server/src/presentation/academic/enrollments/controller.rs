@@ -1,7 +1,7 @@
 use axum::{
-    Json, Router,
     extract::{Query, State},
     routing::post,
+    Json, Router,
 };
 use school_core::academic::application::enrollment::{
     enroll_student::EnrollStudentCommand, list_enrollments::ListEnrollmentsQuery,

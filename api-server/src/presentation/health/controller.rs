@@ -1,4 +1,4 @@
-use axum::{Router, extract::State, http::StatusCode, routing::get};
+use axum::{extract::State, http::StatusCode, routing::get, Router};
 
 use crate::bootstrap::ApplicationContext;
 

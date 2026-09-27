@@ -75,7 +75,8 @@ impl UpdateStudentUseCase {
         }
 
         if let Some(date_of_birth_str) = command.date_of_birth {
-            student.date_of_birth = chrono::NaiveDate::parse_from_str(&date_of_birth_str, "%Y-%m-%d").ok();
+            student.date_of_birth =
+                chrono::NaiveDate::parse_from_str(&date_of_birth_str, "%Y-%m-%d").ok();
         }
 
         if let Some(religion) = command.religion {

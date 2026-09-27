@@ -1,7 +1,7 @@
 use axum::{
-    Json, Router,
     extract::{Path, Query, State},
     routing::{get, post},
+    Json, Router,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -95,7 +95,6 @@ pub fn inquiry_routes() -> Router<ApplicationContext> {
         .route("/{id}/resolve", post(resolve_inquiry))
 }
 
-
 async fn list_inquiries(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
@@ -104,12 +103,18 @@ async fn list_inquiries(
     let tenant_id = req_ctx.tenant_id;
 
     let actor = req_ctx.actor.as_ref();
-    let is_admin = actor.map(|a| {
-        a.roles.iter().any(|r| {
-            let n = r.name.to_lowercase();
-            n.contains("admin") || n.contains("kepala") || n.contains("operator") || n.contains("staf") || n.contains("super")
+    let is_admin = actor
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("admin")
+                    || n.contains("kepala")
+                    || n.contains("operator")
+                    || n.contains("staf")
+                    || n.contains("super")
+            })
         })
-    }).unwrap_or(false);
+        .unwrap_or(false);
 
     let is_teacher = if is_admin {
         false
@@ -274,14 +279,19 @@ async fn list_inquiries(
     let effective_teacher_id = if is_admin {
         query.teacher_id
     } else {
-        query.teacher_id.or(actor_teacher.as_ref().map(|t| t.get::<Uuid, _>("id")))
+        query
+            .teacher_id
+            .or(actor_teacher.as_ref().map(|t| t.get::<Uuid, _>("id")))
     };
 
     let effective_teacher_name = if is_admin {
         query.teacher_name
     } else {
-        query.teacher_name
-            .or(actor_teacher.as_ref().map(|t| t.get::<String, _>("full_name")))
+        query
+            .teacher_name
+            .or(actor_teacher
+                .as_ref()
+                .map(|t| t.get::<String, _>("full_name")))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
     };
@@ -438,7 +448,10 @@ async fn get_inquiry_detail(
     if let Some(ref actor) = req_ctx.actor {
         let is_admin = actor.roles.iter().any(|r| {
             let n = r.name.to_lowercase();
-            n.contains("admin") || n.contains("kepala") || n.contains("operator") || n.contains("staf")
+            n.contains("admin")
+                || n.contains("kepala")
+                || n.contains("operator")
+                || n.contains("staf")
         });
 
         if !is_admin {
@@ -455,13 +468,17 @@ async fn get_inquiry_detail(
             .unwrap_or(false);
 
             if !is_teacher {
-                let student_id = crate::authorization_helpers::AuthorizationScope::resolve_student_id(
-                    &ctx.pool,
-                    req_ctx.tenant_id,
-                    actor.id,
-                ).await.ok().flatten();
+                let student_id =
+                    crate::authorization_helpers::AuthorizationScope::resolve_student_id(
+                        &ctx.pool,
+                        req_ctx.tenant_id,
+                        actor.id,
+                    )
+                    .await
+                    .ok()
+                    .flatten();
 
-                let is_owner = student_id == Some(thread.student_id) 
+                let is_owner = student_id == Some(thread.student_id)
                     || actor.id == thread.student_id
                     || sqlx::query_scalar::<_, bool>(
                         r#"SELECT EXISTS(SELECT 1 FROM students WHERE (id = $1 OR user_id = $1) AND (user_id = $2 OR id = $2))"#,
@@ -567,7 +584,11 @@ async fn create_inquiry(
 
     let is_admin = actor.roles.iter().any(|r| {
         let n = r.name.to_lowercase();
-        n.contains("admin") || n.contains("kepala") || n.contains("operator") || n.contains("staf") || n.contains("super")
+        n.contains("admin")
+            || n.contains("kepala")
+            || n.contains("operator")
+            || n.contains("staf")
+            || n.contains("super")
     });
 
     let is_teacher = if is_admin {
@@ -656,11 +677,12 @@ async fn create_inquiry(
     let mut resolved_tenant_id = tenant_id;
     let mut resolved_teacher_id = payload.teacher_id;
     let raw_tname = payload.teacher_name.unwrap_or_default();
-    let mut resolved_teacher_name = if raw_tname.trim().is_empty() || raw_tname.eq_ignore_ascii_case("Guru Pengampu") {
-        String::new()
-    } else {
-        raw_tname
-    };
+    let mut resolved_teacher_name =
+        if raw_tname.trim().is_empty() || raw_tname.eq_ignore_ascii_case("Guru Pengampu") {
+            String::new()
+        } else {
+            raw_tname
+        };
     let mut resolved_subject_name = payload.subject_name.unwrap_or_else(|| "Umum".to_string());
     let mut resolved_class_name = student_class.clone();
 
@@ -684,16 +706,23 @@ async fn create_inquiry(
                 )
                 .bind(ref_uuid)
                 .fetch_optional(&ctx.pool)
-                .await {
+                .await
+                {
                     resolved_tenant_id = mat.get("tenant_id");
-                    if let Some(tid) = mat.get::<Option<Uuid>, _>("teacher_id") { resolved_teacher_id = Some(tid); }
+                    if let Some(tid) = mat.get::<Option<Uuid>, _>("teacher_id") {
+                        resolved_teacher_id = Some(tid);
+                    }
                     if let Some(tn) = mat.get::<Option<String>, _>("teacher_name") {
                         if !tn.trim().is_empty() && !tn.eq_ignore_ascii_case("Guru Pengampu") {
                             resolved_teacher_name = tn;
                         }
                     }
-                    if let Some(sn) = mat.get::<Option<String>, _>("subject_name") { resolved_subject_name = sn; }
-                    if let Some(cn) = mat.get::<Option<String>, _>("class_name") { resolved_class_name = cn; }
+                    if let Some(sn) = mat.get::<Option<String>, _>("subject_name") {
+                        resolved_subject_name = sn;
+                    }
+                    if let Some(cn) = mat.get::<Option<String>, _>("class_name") {
+                        resolved_class_name = cn;
+                    }
                 }
             } else if payload.inquiry_type.eq_ignore_ascii_case("ASSIGNMENT") {
                 if let Ok(Some(asg)) = sqlx::query(
@@ -749,7 +778,10 @@ async fn create_inquiry(
     }
 
     // If teacher is still unresolved or generic, resolve via schedule, title, subject, or tenant
-    if resolved_teacher_id.is_none() || resolved_teacher_name.trim().is_empty() || resolved_teacher_name.eq_ignore_ascii_case("Guru Pengampu") {
+    if resolved_teacher_id.is_none()
+        || resolved_teacher_name.trim().is_empty()
+        || resolved_teacher_name.eq_ignore_ascii_case("Guru Pengampu")
+    {
         // 1. Try class_schedules matching student class and subject
         if !resolved_class_name.trim().is_empty() && !resolved_subject_name.trim().is_empty() {
             if let Ok(Some(cs_tch)) = sqlx::query(
@@ -783,7 +815,10 @@ async fn create_inquiry(
         }
     }
 
-    if resolved_teacher_id.is_none() || resolved_teacher_name.trim().is_empty() || resolved_teacher_name.eq_ignore_ascii_case("Guru Pengampu") {
+    if resolved_teacher_id.is_none()
+        || resolved_teacher_name.trim().is_empty()
+        || resolved_teacher_name.eq_ignore_ascii_case("Guru Pengampu")
+    {
         // 2. Try assignments matching reference_title
         if !payload.reference_title.trim().is_empty() {
             if let Ok(Some(asg_tch)) = sqlx::query(
@@ -827,7 +862,10 @@ async fn create_inquiry(
         }
     }
 
-    if resolved_teacher_id.is_none() || resolved_teacher_name.trim().is_empty() || resolved_teacher_name.eq_ignore_ascii_case("Guru Pengampu") {
+    if resolved_teacher_id.is_none()
+        || resolved_teacher_name.trim().is_empty()
+        || resolved_teacher_name.eq_ignore_ascii_case("Guru Pengampu")
+    {
         if let Ok(Some(tch)) = sqlx::query(
             r#"
             SELECT id, full_name
@@ -926,7 +964,7 @@ async fn create_inquiry(
     // Create real-time in-app notification for Teacher
     if let Some(tid) = resolved_teacher_id {
         if let Ok(Some(teacher_user_id)) = sqlx::query_scalar::<_, Option<Uuid>>(
-            "SELECT user_id FROM teachers WHERE id = $1 LIMIT 1"
+            "SELECT user_id FROM teachers WHERE id = $1 LIMIT 1",
         )
         .bind(tid)
         .fetch_optional(&ctx.pool)
@@ -946,7 +984,7 @@ async fn create_inquiry(
                         reference_type, reference_id, is_read, created_at
                     )
                     VALUES ($1, $2, $3, $4, $5, 'INQUIRY', 'in_app', 'inquiry', $6, false, NOW())
-                    "#
+                    "#,
                 )
                 .bind(notif_id)
                 .bind(resolved_tenant_id)
@@ -1037,7 +1075,11 @@ async fn send_message(
 
     let is_admin = actor.roles.iter().any(|r| {
         let n = r.name.to_lowercase();
-        n.contains("admin") || n.contains("kepala") || n.contains("operator") || n.contains("staf") || n.contains("super")
+        n.contains("admin")
+            || n.contains("kepala")
+            || n.contains("operator")
+            || n.contains("staf")
+            || n.contains("super")
     });
 
     let is_teacher = if is_admin {
@@ -1121,13 +1163,21 @@ async fn send_message(
     }
 
     let is_from_teacher = is_teacher;
-    let sender_role = if is_from_teacher { "TEACHER" } else { "STUDENT" };
+    let sender_role = if is_from_teacher {
+        "TEACHER"
+    } else {
+        "STUDENT"
+    };
     let sender_id = actor.id.to_string();
     let sender_name = if is_from_teacher {
-        payload.sender_name.filter(|s| !s.trim().is_empty() && !s.eq_ignore_ascii_case("Guru Pengampu"))
+        payload
+            .sender_name
+            .filter(|s| !s.trim().is_empty() && !s.eq_ignore_ascii_case("Guru Pengampu"))
             .unwrap_or(thread_teacher_name)
     } else {
-        payload.sender_name.filter(|s| !s.trim().is_empty())
+        payload
+            .sender_name
+            .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "Siswa".to_string())
     };
 
@@ -1174,7 +1224,11 @@ async fn send_message(
     };
 
     // Update thread status & timestamp
-    let new_status = if is_teacher { "ANSWERED" } else { "WAITING_REPLY" };
+    let new_status = if is_teacher {
+        "ANSWERED"
+    } else {
+        "WAITING_REPLY"
+    };
     let _ = sqlx::query!(
         r#"
         UPDATE inquiry_threads
@@ -1205,7 +1259,7 @@ async fn send_message(
                 teacher_name IS NULL OR
                 teacher_name = ''
             )
-            "#
+            "#,
         )
         .bind(&sender_name)
         .bind(sender_uuid)
@@ -1223,7 +1277,7 @@ async fn send_message(
             FROM students s 
             JOIN inquiry_threads t ON (t.student_id = s.id OR t.student_id = s.user_id) 
             WHERE t.id = $1 LIMIT 1
-            "#
+            "#,
         )
         .bind(id)
         .fetch_optional(&ctx.pool)
@@ -1260,7 +1314,7 @@ async fn send_message(
             FROM teachers t 
             JOIN inquiry_threads th ON (th.teacher_id = t.id OR th.teacher_id = t.user_id) 
             WHERE th.id = $1 LIMIT 1
-            "#
+            "#,
         )
         .bind(id)
         .fetch_optional(&ctx.pool)
@@ -1451,7 +1505,7 @@ async fn get_inquiries_unread_count(
                   AND t.teacher_id = $2
                   AND m.is_from_teacher = false
                   AND m.created_at > COALESCE(t.teacher_last_read_at, '1970-01-01'::timestamptz)
-                "#
+                "#,
             )
             .bind(req_ctx.tenant_id)
             .bind(tid)
@@ -1459,7 +1513,9 @@ async fn get_inquiries_unread_count(
             .await;
 
             use sqlx::Row;
-            count_row.map(|r| r.try_get("unread_count").unwrap_or(0)).unwrap_or(0)
+            count_row
+                .map(|r| r.try_get("unread_count").unwrap_or(0))
+                .unwrap_or(0)
         } else {
             0
         }
@@ -1496,7 +1552,9 @@ async fn get_inquiries_unread_count(
         .await;
 
         use sqlx::Row;
-        count_row.map(|r| r.try_get("unread_count").unwrap_or(0)).unwrap_or(0)
+        count_row
+            .map(|r| r.try_get("unread_count").unwrap_or(0))
+            .unwrap_or(0)
     };
 
     Ok(Json(ApiResponse::success(
@@ -1504,4 +1562,3 @@ async fn get_inquiries_unread_count(
         req_ctx.request_id,
     )))
 }
-

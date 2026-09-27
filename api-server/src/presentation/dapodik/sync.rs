@@ -382,7 +382,9 @@ async fn safe_upsert_user(
 
     // 2. Insert with savepoint protection against unique constraint abort
     let new_uid = Uuid::now_v7();
-    let _ = sqlx::query("SAVEPOINT sp_upsert_user").execute(&mut **tx).await;
+    let _ = sqlx::query("SAVEPOINT sp_upsert_user")
+        .execute(&mut **tx)
+        .await;
 
     let insert_res = sqlx::query_scalar::<_, Uuid>(
         r#"
@@ -406,11 +408,15 @@ async fn safe_upsert_user(
 
     match insert_res {
         Ok(uid) => {
-            let _ = sqlx::query("RELEASE SAVEPOINT sp_upsert_user").execute(&mut **tx).await;
+            let _ = sqlx::query("RELEASE SAVEPOINT sp_upsert_user")
+                .execute(&mut **tx)
+                .await;
             Ok(uid)
         }
         Err(e) => {
-            let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_upsert_user").execute(&mut **tx).await;
+            let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_upsert_user")
+                .execute(&mut **tx)
+                .await;
             tracing::warn!(
                 "User insert conflict for '{}' / '{}': {}. Falling back to fetch/dedup...",
                 clean_uname,
@@ -436,7 +442,9 @@ async fn safe_upsert_user(
                 let fallback_username = format!("{}_{}", clean_uname, suffix);
                 let fallback_uid = Uuid::now_v7();
 
-                let _ = sqlx::query("SAVEPOINT sp_upsert_user_fb").execute(&mut **tx).await;
+                let _ = sqlx::query("SAVEPOINT sp_upsert_user_fb")
+                    .execute(&mut **tx)
+                    .await;
                 let fb_res = sqlx::query_scalar::<_, Uuid>(
                     r#"
                     INSERT INTO users (id, tenant_id, username, email, password_hash, full_name, is_active, created_at, updated_at)
@@ -455,11 +463,15 @@ async fn safe_upsert_user(
 
                 match fb_res {
                     Ok(uid) => {
-                        let _ = sqlx::query("RELEASE SAVEPOINT sp_upsert_user_fb").execute(&mut **tx).await;
+                        let _ = sqlx::query("RELEASE SAVEPOINT sp_upsert_user_fb")
+                            .execute(&mut **tx)
+                            .await;
                         Ok(uid)
                     }
                     Err(fb_err) => {
-                        let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_upsert_user_fb").execute(&mut **tx).await;
+                        let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_upsert_user_fb")
+                            .execute(&mut **tx)
+                            .await;
                         Err(fb_err)
                     }
                 }
@@ -653,30 +665,32 @@ pub async fn get_agent_info(
     .ok()
     .flatten();
 
-    let (school_name, npsn, dapodik_url, dapodik_token, last_synced_at, last_synced_by) = if let Some(s) = school {
-        let synced_at: Option<chrono::DateTime<Utc>> = s.try_get("dapodik_last_synced_at").ok().flatten();
-        let synced_by: Option<String> = s.try_get("dapodik_last_synced_by").ok().flatten();
-        let final_synced_at = synced_at.or(db_latest_sync).map(|dt| dt.to_rfc3339());
-        (
-            s.get::<String, _>("name"),
-            s.get::<Option<String>, _>("npsn").unwrap_or_default(),
-            s.get::<Option<String>, _>("dapodik_url")
-                .unwrap_or_else(|| "http://127.0.0.1:5774".to_string()),
-            s.get::<Option<String>, _>("dapodik_token")
-                .unwrap_or_default(),
-            final_synced_at,
-            synced_by,
-        )
-    } else {
-        (
-            "School OS".into(),
-            String::new(),
-            "http://127.0.0.1:5774".to_string(),
-            String::new(),
-            db_latest_sync.map(|dt| dt.to_rfc3339()),
-            None,
-        )
-    };
+    let (school_name, npsn, dapodik_url, dapodik_token, last_synced_at, last_synced_by) =
+        if let Some(s) = school {
+            let synced_at: Option<chrono::DateTime<Utc>> =
+                s.try_get("dapodik_last_synced_at").ok().flatten();
+            let synced_by: Option<String> = s.try_get("dapodik_last_synced_by").ok().flatten();
+            let final_synced_at = synced_at.or(db_latest_sync).map(|dt| dt.to_rfc3339());
+            (
+                s.get::<String, _>("name"),
+                s.get::<Option<String>, _>("npsn").unwrap_or_default(),
+                s.get::<Option<String>, _>("dapodik_url")
+                    .unwrap_or_else(|| "http://127.0.0.1:5774".to_string()),
+                s.get::<Option<String>, _>("dapodik_token")
+                    .unwrap_or_default(),
+                final_synced_at,
+                synced_by,
+            )
+        } else {
+            (
+                "School OS".into(),
+                String::new(),
+                "http://127.0.0.1:5774".to_string(),
+                String::new(),
+                db_latest_sync.map(|dt| dt.to_rfc3339()),
+                None,
+            )
+        };
 
     let info = AgentInfoResponse {
         tenant_id: ctx.tenant_id.to_string(),
@@ -1139,23 +1153,33 @@ pub async fn pull_dapodik_records(
             .await;
 
             if update_school_res.is_err() {
-                let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_sekolah").execute(&mut *tx).await;
+                let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_sekolah")
+                    .execute(&mut *tx)
+                    .await;
             } else {
-                let _ = sqlx::query("RELEASE SAVEPOINT sp_sekolah").execute(&mut *tx).await;
+                let _ = sqlx::query("RELEASE SAVEPOINT sp_sekolah")
+                    .execute(&mut *tx)
+                    .await;
             }
 
             if let Some(ref s_name) = clean_sek_nama {
                 if !s_name.trim().is_empty() {
                     let _ = sqlx::query("SAVEPOINT sp_tenant").execute(&mut *tx).await;
-                    let t_res = sqlx::query("UPDATE tenants SET name = $1, updated_at = NOW() WHERE id = $2")
-                        .bind(s_name.trim())
-                        .bind(ctx.tenant_id)
-                        .execute(&mut *tx)
-                        .await;
+                    let t_res = sqlx::query(
+                        "UPDATE tenants SET name = $1, updated_at = NOW() WHERE id = $2",
+                    )
+                    .bind(s_name.trim())
+                    .bind(ctx.tenant_id)
+                    .execute(&mut *tx)
+                    .await;
                     if t_res.is_err() {
-                        let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_tenant").execute(&mut *tx).await;
+                        let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_tenant")
+                            .execute(&mut *tx)
+                            .await;
                     } else {
-                        let _ = sqlx::query("RELEASE SAVEPOINT sp_tenant").execute(&mut *tx).await;
+                        let _ = sqlx::query("RELEASE SAVEPOINT sp_tenant")
+                            .execute(&mut *tx)
+                            .await;
                     }
                 }
             }
@@ -1205,7 +1229,9 @@ pub async fn pull_dapodik_records(
     if let Some(teachers) = extracted_gtk {
         for (idx, gtk) in teachers.into_iter().enumerate() {
             let sp_gtk = format!("sp_gtk_{}", idx);
-            let _ = sqlx::query(&format!("SAVEPOINT {}", sp_gtk)).execute(&mut *tx).await;
+            let _ = sqlx::query(&format!("SAVEPOINT {}", sp_gtk))
+                .execute(&mut *tx)
+                .await;
 
             let ptk_id = gtk.ptk_id.clone().unwrap_or_else(|| format!("ptk-{}", idx));
             let clean_ptk: String = ptk_id.chars().filter(|c| c.is_alphanumeric()).collect();
@@ -1215,7 +1241,8 @@ pub async fn pull_dapodik_records(
                 clean_ptk.chars().take(8).collect::<String>()
             };
 
-            let nip = sanitize_clean_code(gtk.nip.as_deref().or(gtk.nik.as_deref())).map(|s| truncate_str(&s, 50));
+            let nip = sanitize_clean_code(gtk.nip.as_deref().or(gtk.nik.as_deref()))
+                .map(|s| truncate_str(&s, 50));
             let nuptk = sanitize_clean_code(gtk.nuptk.as_deref()).map(|s| truncate_str(&s, 50));
             let raw_nama = gtk
                 .nama
@@ -1241,20 +1268,15 @@ pub async fn pull_dapodik_records(
                 .or_else(|| nuptk.as_ref().cloned())
                 .unwrap_or_else(|| format!("guru_{}", ptk_prefix));
 
-            let user_res = safe_upsert_user(
-                &mut tx,
-                ctx.tenant_id,
-                &username,
-                &email,
-                &nama,
-                now,
-            )
-            .await;
+            let user_res =
+                safe_upsert_user(&mut tx, ctx.tenant_id, &username, &email, &nama, now).await;
 
             let actual_user_id = match user_res {
                 Ok(uid) => uid,
                 Err(e) => {
-                    let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_gtk)).execute(&mut *tx).await;
+                    let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_gtk))
+                        .execute(&mut *tx)
+                        .await;
                     tracing::warn!("Failed to upsert user for teacher {}: {}", nama, e);
                     continue;
                 }
@@ -1281,7 +1303,11 @@ pub async fn pull_dapodik_records(
             if !has_active_qr {
                 let token_id = Uuid::now_v7();
                 let entropy = Uuid::now_v7().to_string().replace('-', "");
-                let raw_token = format!("sch_qr_v1_{}_{}", token_id.to_string().replace('-', ""), &entropy[0..16]);
+                let raw_token = format!(
+                    "sch_qr_v1_{}_{}",
+                    token_id.to_string().replace('-', ""),
+                    &entropy[0..16]
+                );
                 let mut hasher = Sha256::new();
                 hasher.update(raw_token.as_bytes());
                 let token_hash = hasher.finalize().encode_hex::<String>();
@@ -1333,7 +1359,9 @@ pub async fn pull_dapodik_records(
                         .await;
 
                     if let Err(e) = staff_update {
-                        let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_gtk)).execute(&mut *tx).await;
+                        let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_gtk))
+                            .execute(&mut *tx)
+                            .await;
                         tracing::warn!("Failed to update staff {}: {}", nama, e);
                         continue;
                     }
@@ -1358,7 +1386,9 @@ pub async fn pull_dapodik_records(
                     .await;
 
                     if let Err(e) = staff_insert {
-                        let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_gtk)).execute(&mut *tx).await;
+                        let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_gtk))
+                            .execute(&mut *tx)
+                            .await;
                         tracing::warn!("Failed to insert staff {}: {}", nama, e);
                         continue;
                     }
@@ -1367,7 +1397,9 @@ pub async fn pull_dapodik_records(
                 }
 
                 let nip_str = nip.clone().unwrap_or_else(|| "-".to_string());
-                let _ = sqlx::query(&format!("RELEASE SAVEPOINT {}", sp_gtk)).execute(&mut *tx).await;
+                let _ = sqlx::query(&format!("RELEASE SAVEPOINT {}", sp_gtk))
+                    .execute(&mut *tx)
+                    .await;
                 imported_records.push(DapodikSyncRecordDto {
                     id: new_id.to_string(),
                     nisn: nip_str.clone(),
@@ -1415,7 +1447,9 @@ pub async fn pull_dapodik_records(
                     .await;
 
                     if let Err(e) = teacher_update {
-                        let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_gtk)).execute(&mut *tx).await;
+                        let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_gtk))
+                            .execute(&mut *tx)
+                            .await;
                         tracing::warn!("Failed to update teacher {}: {}", nama, e);
                         continue;
                     }
@@ -1438,7 +1472,9 @@ pub async fn pull_dapodik_records(
                     .await;
 
                     if let Err(e) = teacher_insert {
-                        let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_gtk)).execute(&mut *tx).await;
+                        let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_gtk))
+                            .execute(&mut *tx)
+                            .await;
                         tracing::warn!("Failed to insert teacher {}: {}", nama, e);
                         continue;
                     }
@@ -1453,7 +1489,9 @@ pub async fn pull_dapodik_records(
                 }
 
                 let nip_str = nip.unwrap_or_else(|| "-".to_string());
-                let _ = sqlx::query(&format!("RELEASE SAVEPOINT {}", sp_gtk)).execute(&mut *tx).await;
+                let _ = sqlx::query(&format!("RELEASE SAVEPOINT {}", sp_gtk))
+                    .execute(&mut *tx)
+                    .await;
                 imported_records.push(DapodikSyncRecordDto {
                     id: new_id.to_string(),
                     nisn: nip_str.clone(),
@@ -1524,9 +1562,13 @@ pub async fn pull_dapodik_records(
         .await;
 
         if kka_del.is_err() {
-            let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_kka").execute(&mut *tx).await;
+            let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_kka")
+                .execute(&mut *tx)
+                .await;
         } else {
-            let _ = sqlx::query("RELEASE SAVEPOINT sp_kka").execute(&mut *tx).await;
+            let _ = sqlx::query("RELEASE SAVEPOINT sp_kka")
+                .execute(&mut *tx)
+                .await;
         }
 
         // Refresh class_map setelah pembersihan KKA
@@ -1538,7 +1580,9 @@ pub async fn pull_dapodik_records(
 
         for (r_idx, rmbl) in rombels.into_iter().enumerate() {
             let sp_rmbl = format!("sp_rmbl_{}", r_idx);
-            let _ = sqlx::query(&format!("SAVEPOINT {}", sp_rmbl)).execute(&mut *tx).await;
+            let _ = sqlx::query(&format!("SAVEPOINT {}", sp_rmbl))
+                .execute(&mut *tx)
+                .await;
 
             let raw_nama_rombel = rmbl.nama.unwrap_or_else(|| "ROMBEL DAPODIK".to_string());
             let nama_rombel = truncate_str(&raw_nama_rombel, 100);
@@ -1557,7 +1601,9 @@ pub async fn pull_dapodik_records(
                     .unwrap_or(false);
 
             if is_kka {
-                let _ = sqlx::query(&format!("RELEASE SAVEPOINT {}", sp_rmbl)).execute(&mut *tx).await;
+                let _ = sqlx::query(&format!("RELEASE SAVEPOINT {}", sp_rmbl))
+                    .execute(&mut *tx)
+                    .await;
                 tracing::info!(
                     "Mengabaikan rombel non-reguler / KKA dari Dapodik: {}",
                     nama_rombel
@@ -1617,7 +1663,9 @@ pub async fn pull_dapodik_records(
             };
 
             if let Err(e) = class_upsert_res {
-                let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_rmbl)).execute(&mut *tx).await;
+                let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_rmbl))
+                    .execute(&mut *tx)
+                    .await;
                 tracing::warn!("Failed to upsert class {}: {}", nama_rombel, e);
                 continue;
             }
@@ -1669,9 +1717,13 @@ pub async fn pull_dapodik_records(
                         .await;
 
                         if subj_res.is_err() {
-                            let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_subj").execute(&mut *tx).await;
+                            let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_subj")
+                                .execute(&mut *tx)
+                                .await;
                         } else {
-                            let _ = sqlx::query("RELEASE SAVEPOINT sp_subj").execute(&mut *tx).await;
+                            let _ = sqlx::query("RELEASE SAVEPOINT sp_subj")
+                                .execute(&mut *tx)
+                                .await;
 
                             imported_records.push(DapodikSyncRecordDto {
                                 id: subject_new_id.to_string(),
@@ -1683,7 +1735,9 @@ pub async fn pull_dapodik_records(
                                 identity_state: "ACTIVE".into(),
                                 mobility_case: "NONE".into(),
                                 classification: "MATCH".into(),
-                                action_recommended: "Pulled Pembelajaran (Mata Pelajaran) Real-Time from Dapodik".into(),
+                                action_recommended:
+                                    "Pulled Pembelajaran (Mata Pelajaran) Real-Time from Dapodik"
+                                        .into(),
                                 stage: "VERIFIED".into(),
                                 last_synced_at: now.to_rfc3339(),
                             });
@@ -1692,7 +1746,9 @@ pub async fn pull_dapodik_records(
                 }
             }
 
-            let _ = sqlx::query(&format!("RELEASE SAVEPOINT {}", sp_rmbl)).execute(&mut *tx).await;
+            let _ = sqlx::query(&format!("RELEASE SAVEPOINT {}", sp_rmbl))
+                .execute(&mut *tx)
+                .await;
 
             imported_records.push(DapodikSyncRecordDto {
                 id: new_id.to_string(),
@@ -1773,7 +1829,9 @@ pub async fn pull_dapodik_records(
 
         for (idx, std) in students.into_iter().enumerate() {
             let sp_std = format!("sp_std_{}", idx);
-            let _ = sqlx::query(&format!("SAVEPOINT {}", sp_std)).execute(&mut *tx).await;
+            let _ = sqlx::query(&format!("SAVEPOINT {}", sp_std))
+                .execute(&mut *tx)
+                .await;
 
             // Check status aktif siswa dari field keluar / status
             let is_keluar = std.jenis_keluar_id.is_some()
@@ -1802,7 +1860,9 @@ pub async fn pull_dapodik_records(
                 .unwrap_or(false);
 
             if is_keluar || is_explicitly_inactive {
-                let _ = sqlx::query(&format!("RELEASE SAVEPOINT {}", sp_std)).execute(&mut *tx).await;
+                let _ = sqlx::query(&format!("RELEASE SAVEPOINT {}", sp_std))
+                    .execute(&mut *tx)
+                    .await;
                 tracing::info!(
                     "Melewati siswa non-aktif/keluar/lulus dari Dapodik: {:?}",
                     std.nama
@@ -1815,14 +1875,17 @@ pub async fn pull_dapodik_records(
                 .clone()
                 .unwrap_or_else(|| format!("pd-{}", idx));
             let raw_nisn = sanitize_clean_code(std.nisn.as_deref());
-            let final_nisn = truncate_str(&raw_nisn.unwrap_or_else(|| {
-                let clean_id: String = pd_id.chars().filter(|c| c.is_alphanumeric()).collect();
-                if clean_id.len() >= 10 {
-                    clean_id[..10].to_string()
-                } else {
-                    format!("{:0>10}", clean_id)
-                }
-            }), 50);
+            let final_nisn = truncate_str(
+                &raw_nisn.unwrap_or_else(|| {
+                    let clean_id: String = pd_id.chars().filter(|c| c.is_alphanumeric()).collect();
+                    if clean_id.len() >= 10 {
+                        clean_id[..10].to_string()
+                    } else {
+                        format!("{:0>10}", clean_id)
+                    }
+                }),
+                50,
+            );
 
             let raw_nama = std
                 .nama
@@ -1837,10 +1900,12 @@ pub async fn pull_dapodik_records(
 
             // Filter out KKA dari rombel siswa
             let raw_rombel = std.rombel.clone().or(std.nama_rombel.clone());
-            let valid_rombel = raw_rombel.filter(|r| {
-                let u = r.trim().to_uppercase();
-                !u.starts_with("KKA") && !u.contains("KKA")
-            }).map(|s| truncate_str(&s, 100));
+            let valid_rombel = raw_rombel
+                .filter(|r| {
+                    let u = r.trim().to_uppercase();
+                    !u.starts_with("KKA") && !u.contains("KKA")
+                })
+                .map(|s| truncate_str(&s, 100));
             let sync_rombel_label = valid_rombel
                 .as_ref()
                 .cloned()
@@ -1849,15 +1914,8 @@ pub async fn pull_dapodik_records(
             let email = format!("{}@siswa.schoolos.id", final_nisn);
             let username = final_nisn.clone();
 
-            let user_res = safe_upsert_user(
-                &mut tx,
-                ctx.tenant_id,
-                &username,
-                &email,
-                &nama_upper,
-                now,
-            )
-            .await;
+            let user_res =
+                safe_upsert_user(&mut tx, ctx.tenant_id, &username, &email, &nama_upper, now).await;
 
             let actual_user_id = match user_res {
                 Ok(uid) => Some(uid),
@@ -1889,7 +1947,11 @@ pub async fn pull_dapodik_records(
                 if !has_active_qr {
                     let token_id = Uuid::now_v7();
                     let entropy = Uuid::now_v7().to_string().replace('-', "");
-                    let raw_token = format!("sch_qr_v1_{}_{}", token_id.to_string().replace('-', ""), &entropy[0..16]);
+                    let raw_token = format!(
+                        "sch_qr_v1_{}_{}",
+                        token_id.to_string().replace('-', ""),
+                        &entropy[0..16]
+                    );
                     let mut hasher = Sha256::new();
                     hasher.update(raw_token.as_bytes());
                     let token_hash = hasher.finalize().encode_hex::<String>();
@@ -1917,9 +1979,12 @@ pub async fn pull_dapodik_records(
             }
 
             // ── Guardian / Orang Tua Synchronization ────────────────
-            let nama_ibu = sanitize_clean_code(std.nama_ibu.as_deref()).map(|s| truncate_str(&s, 255));
-            let nama_ayah = sanitize_clean_code(std.nama_ayah.as_deref()).map(|s| truncate_str(&s, 255));
-            let nama_wali = sanitize_clean_code(std.nama_wali.as_deref()).map(|s| truncate_str(&s, 255));
+            let nama_ibu =
+                sanitize_clean_code(std.nama_ibu.as_deref()).map(|s| truncate_str(&s, 255));
+            let nama_ayah =
+                sanitize_clean_code(std.nama_ayah.as_deref()).map(|s| truncate_str(&s, 255));
+            let nama_wali =
+                sanitize_clean_code(std.nama_wali.as_deref()).map(|s| truncate_str(&s, 255));
 
             // Priority akun login wali murid adalah IBU
             let (guardian_name, relationship) = if let Some(ref ibu) = nama_ibu {
@@ -1962,7 +2027,8 @@ pub async fn pull_dapodik_records(
                         &g_upper,
                         now,
                     )
-                    .await {
+                    .await
+                    {
                         Ok(uid) => Some(uid),
                         Err(e) => {
                             tracing::warn!("Failed to upsert user for guardian {}: {}", g_upper, e);
@@ -1992,7 +2058,11 @@ pub async fn pull_dapodik_records(
                         if !has_active_qr {
                             let token_id = Uuid::now_v7();
                             let entropy = Uuid::now_v7().to_string().replace('-', "");
-                            let raw_token = format!("sch_qr_v1_{}_{}", token_id.to_string().replace('-', ""), &entropy[0..16]);
+                            let raw_token = format!(
+                                "sch_qr_v1_{}_{}",
+                                token_id.to_string().replace('-', ""),
+                                &entropy[0..16]
+                            );
                             let mut hasher = Sha256::new();
                             hasher.update(raw_token.as_bytes());
                             let token_hash = hasher.finalize().encode_hex::<String>();
@@ -2040,19 +2110,16 @@ pub async fn pull_dapodik_records(
 
             // Resolution student ID MUTLAK berdasarkan NISN -> NIK valid.
             // DILARANG KERAS menggunakan string nama untuk deduplikasi atau pencarian siswa!
-            let existing_student_id = student_by_nisn
-                .get(&final_nisn)
-                .copied()
-                .or_else(|| {
-                    nik.as_ref().and_then(|n| {
-                        let trimmed = n.trim();
-                        if trimmed.len() >= 10 && !trimmed.chars().all(|c| c == '0' || c == '-') {
-                            student_by_nik.get(trimmed).copied()
-                        } else {
-                            None
-                        }
-                    })
-                });
+            let existing_student_id = student_by_nisn.get(&final_nisn).copied().or_else(|| {
+                nik.as_ref().and_then(|n| {
+                    let trimmed = n.trim();
+                    if trimmed.len() >= 10 && !trimmed.chars().all(|c| c == '0' || c == '-') {
+                        student_by_nik.get(trimmed).copied()
+                    } else {
+                        None
+                    }
+                })
+            });
 
             let new_id = Uuid::now_v7();
             let student_db_id = if let Some(sid) = existing_student_id {
@@ -2078,8 +2145,15 @@ pub async fn pull_dapodik_records(
                 .execute(&mut *tx).await;
 
                 if let Err(e) = update_res {
-                    let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_std)).execute(&mut *tx).await;
-                    tracing::warn!("Failed to update student (NISN: {}, Name: {}): {}", final_nisn, nama, e);
+                    let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_std))
+                        .execute(&mut *tx)
+                        .await;
+                    tracing::warn!(
+                        "Failed to update student (NISN: {}, Name: {}): {}",
+                        final_nisn,
+                        nama,
+                        e
+                    );
                     continue;
                 }
 
@@ -2129,8 +2203,15 @@ pub async fn pull_dapodik_records(
                 let inserted_id = match insert_res {
                     Ok(id) => id,
                     Err(e) => {
-                        let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_std)).execute(&mut *tx).await;
-                        tracing::warn!("Failed to insert student (NISN: {}, Name: {}): {}", final_nisn, nama, e);
+                        let _ = sqlx::query(&format!("ROLLBACK TO SAVEPOINT {}", sp_std))
+                            .execute(&mut *tx)
+                            .await;
+                        tracing::warn!(
+                            "Failed to insert student (NISN: {}, Name: {}): {}",
+                            final_nisn,
+                            nama,
+                            e
+                        );
                         continue;
                     }
                 };
@@ -2194,7 +2275,9 @@ pub async fn pull_dapodik_records(
 
             let nisn_str = final_nisn.clone();
             let nik_str = nik.clone().unwrap_or_else(|| "-".to_string());
-            let _ = sqlx::query(&format!("RELEASE SAVEPOINT {}", sp_std)).execute(&mut *tx).await;
+            let _ = sqlx::query(&format!("RELEASE SAVEPOINT {}", sp_std))
+                .execute(&mut *tx)
+                .await;
 
             imported_records.push(DapodikSyncRecordDto {
                 id: new_id.to_string(),
@@ -2224,7 +2307,9 @@ pub async fn pull_dapodik_records(
                 nisn: String,
             }
 
-            let _ = sqlx::query("SAVEPOINT sp_cleanup_students").execute(&mut *tx).await;
+            let _ = sqlx::query("SAVEPOINT sp_cleanup_students")
+                .execute(&mut *tx)
+                .await;
 
             // Cari siswa di PostgreSQL yang sudah tidak ada lagi di data aktif Dapodik (termutasi / keluar / lulus)
             let removed_students = sqlx::query_as::<_, RemovedStudentRow>(
@@ -2247,32 +2332,36 @@ pub async fn pull_dapodik_records(
                     .map(|s| s.full_name.clone())
                     .collect();
 
-                let del_std_res = sqlx::query("DELETE FROM students WHERE tenant_id = $1 AND id = ANY($2)")
-                    .bind(ctx.tenant_id)
-                    .bind(&removed_ids)
-                    .execute(&mut *tx)
-                    .await;
+                let del_std_res =
+                    sqlx::query("DELETE FROM students WHERE tenant_id = $1 AND id = ANY($2)")
+                        .bind(ctx.tenant_id)
+                        .bind(&removed_ids)
+                        .execute(&mut *tx)
+                        .await;
 
                 if del_std_res.is_ok() {
                     // 2. Hapus akun login siswa jika ada
                     if !removed_user_ids.is_empty() {
-                        let _ = sqlx::query("DELETE FROM users WHERE tenant_id = $1 AND id = ANY($2)")
-                            .bind(ctx.tenant_id)
-                            .bind(&removed_user_ids)
-                            .execute(&mut *tx)
-                            .await;
+                        let _ =
+                            sqlx::query("DELETE FROM users WHERE tenant_id = $1 AND id = ANY($2)")
+                                .bind(ctx.tenant_id)
+                                .bind(&removed_user_ids)
+                                .execute(&mut *tx)
+                                .await;
                     }
 
                     // 3. Hapus dari dapodik_sync_records MUTLAK menggunakan NISN (tidak boleh pakai nama agar siswa lain dengan nama serupa tidak ikut terhapus)
                     let _ = sqlx::query(
-                        "DELETE FROM dapodik_sync_records WHERE tenant_id = $1 AND nisn = ANY($2)"
+                        "DELETE FROM dapodik_sync_records WHERE tenant_id = $1 AND nisn = ANY($2)",
                     )
                     .bind(ctx.tenant_id)
                     .bind(&removed_nisns)
                     .execute(&mut *tx)
                     .await;
 
-                    let _ = sqlx::query("RELEASE SAVEPOINT sp_cleanup_students").execute(&mut *tx).await;
+                    let _ = sqlx::query("RELEASE SAVEPOINT sp_cleanup_students")
+                        .execute(&mut *tx)
+                        .await;
 
                     tracing::info!(
                         "Otomatis menghapus {} siswa termutasi/keluar/lulus dari PostgreSQL: {:?}",
@@ -2280,11 +2369,17 @@ pub async fn pull_dapodik_records(
                         removed_names
                     );
                 } else {
-                    let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_cleanup_students").execute(&mut *tx).await;
-                    tracing::warn!("Cleanup of removed students skipped due to constraint dependency");
+                    let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_cleanup_students")
+                        .execute(&mut *tx)
+                        .await;
+                    tracing::warn!(
+                        "Cleanup of removed students skipped due to constraint dependency"
+                    );
                 }
             } else {
-                let _ = sqlx::query("RELEASE SAVEPOINT sp_cleanup_students").execute(&mut *tx).await;
+                let _ = sqlx::query("RELEASE SAVEPOINT sp_cleanup_students")
+                    .execute(&mut *tx)
+                    .await;
             }
         }
 
@@ -2295,7 +2390,9 @@ pub async fn pull_dapodik_records(
             name: String,
         }
 
-        let _ = sqlx::query("SAVEPOINT sp_cleanup_classes").execute(&mut *tx).await;
+        let _ = sqlx::query("SAVEPOINT sp_cleanup_classes")
+            .execute(&mut *tx)
+            .await;
 
         let empty_classes = sqlx::query_as::<_, EmptyClassRow>(
             r#"
@@ -2320,11 +2417,12 @@ pub async fn pull_dapodik_records(
             let empty_class_names: Vec<String> =
                 empty_classes.iter().map(|c| c.name.clone()).collect();
 
-            let del_cls_res = sqlx::query("DELETE FROM classes WHERE tenant_id = $1 AND id = ANY($2)")
-                .bind(ctx.tenant_id)
-                .bind(&empty_class_ids)
-                .execute(&mut *tx)
-                .await;
+            let del_cls_res =
+                sqlx::query("DELETE FROM classes WHERE tenant_id = $1 AND id = ANY($2)")
+                    .bind(ctx.tenant_id)
+                    .bind(&empty_class_ids)
+                    .execute(&mut *tx)
+                    .await;
 
             if del_cls_res.is_ok() {
                 let _ = sqlx::query(
@@ -2335,7 +2433,9 @@ pub async fn pull_dapodik_records(
                 .execute(&mut *tx)
                 .await;
 
-                let _ = sqlx::query("RELEASE SAVEPOINT sp_cleanup_classes").execute(&mut *tx).await;
+                let _ = sqlx::query("RELEASE SAVEPOINT sp_cleanup_classes")
+                    .execute(&mut *tx)
+                    .await;
 
                 tracing::info!(
                     "Otomatis menghapus {} kelas kosong (0 siswa) dari PostgreSQL: {:?}",
@@ -2343,11 +2443,15 @@ pub async fn pull_dapodik_records(
                     empty_class_names
                 );
             } else {
-                let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_cleanup_classes").execute(&mut *tx).await;
+                let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_cleanup_classes")
+                    .execute(&mut *tx)
+                    .await;
                 tracing::warn!("Cleanup of empty classes skipped due to constraint dependency");
             }
         } else {
-            let _ = sqlx::query("RELEASE SAVEPOINT sp_cleanup_classes").execute(&mut *tx).await;
+            let _ = sqlx::query("RELEASE SAVEPOINT sp_cleanup_classes")
+                .execute(&mut *tx)
+                .await;
         }
     }
 
@@ -2359,13 +2463,15 @@ pub async fn pull_dapodik_records(
         Some(name) if !name.trim().is_empty() => name.trim().to_string(),
         _ => {
             if let Some(aid) = actor_id {
-                sqlx::query_scalar::<_, String>("SELECT COALESCE(full_name, email) FROM users WHERE id = $1")
-                    .bind(aid)
-                    .fetch_optional(&state.pool)
-                    .await
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(|| "Administrator".to_string())
+                sqlx::query_scalar::<_, String>(
+                    "SELECT COALESCE(full_name, email) FROM users WHERE id = $1",
+                )
+                .bind(aid)
+                .fetch_optional(&state.pool)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "Administrator".to_string())
             } else {
                 "Administrator".to_string()
             }
@@ -2401,9 +2507,13 @@ pub async fn pull_dapodik_records(
     }.await;
 
     if audit_res.is_err() {
-        let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_audit").execute(&mut *tx).await;
+        let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_audit")
+            .execute(&mut *tx)
+            .await;
     } else {
-        let _ = sqlx::query("RELEASE SAVEPOINT sp_audit").execute(&mut *tx).await;
+        let _ = sqlx::query("RELEASE SAVEPOINT sp_audit")
+            .execute(&mut *tx)
+            .await;
     }
 
     // ── 11. Commit Database Transaction ───────────────────────────

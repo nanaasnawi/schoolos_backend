@@ -1,7 +1,7 @@
 use axum::{
-    Json, Router,
     extract::{Path, Query, State},
     routing::{get, post},
+    Json, Router,
 };
 use school_core::academic::application::class::{
     create_class::CreateClassCommand, list_classes::ListClassesQuery,
@@ -147,8 +147,24 @@ async fn list(
     req_ctx: RequestContext,
     Query(params): Query<ListClassesParams>,
 ) -> Result<Json<ApiResponse<Vec<ClassResponse>>>, crate::error::ApiError> {
-    let is_teacher = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Guru" || r.name == "Teacher")).unwrap_or(false);
-    let is_student = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Siswa" || r.name == "Student")).unwrap_or(false);
+    let is_teacher = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles
+                .iter()
+                .any(|r| r.name == "Guru" || r.name == "Teacher")
+        })
+        .unwrap_or(false);
+    let is_student = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles
+                .iter()
+                .any(|r| r.name == "Siswa" || r.name == "Student")
+        })
+        .unwrap_or(false);
 
     if !is_teacher && !is_student {
         use crate::middleware::require_permission;
@@ -245,17 +261,20 @@ async fn list_class_students(
         )
     })?;
 
-    let dtos = rows.into_iter().map(|r| ClassStudentDto {
-        id: r.id,
-        full_name: r.full_name,
-        nisn: r.nisn,
-        gender: r.gender,
-        status: r.status,
-        no_hp: r.no_hp,
-        email: r.email,
-        class_id: r.class_id,
-        class_name: r.class_name,
-    }).collect();
+    let dtos = rows
+        .into_iter()
+        .map(|r| ClassStudentDto {
+            id: r.id,
+            full_name: r.full_name,
+            nisn: r.nisn,
+            gender: r.gender,
+            status: r.status,
+            no_hp: r.no_hp,
+            email: r.email,
+            class_id: r.class_id,
+            class_name: r.class_name,
+        })
+        .collect();
 
     Ok(Json(ApiResponse::success(dtos, req_ctx.request_id)))
 }
@@ -289,17 +308,20 @@ async fn get_class_students_by_id(
         )
     })?;
 
-    let dtos = rows.into_iter().map(|r| ClassStudentDto {
-        id: r.id,
-        full_name: r.full_name,
-        nisn: r.nisn,
-        gender: r.gender,
-        status: r.status,
-        no_hp: r.no_hp,
-        email: r.email,
-        class_id: r.class_id,
-        class_name: r.class_name,
-    }).collect();
+    let dtos = rows
+        .into_iter()
+        .map(|r| ClassStudentDto {
+            id: r.id,
+            full_name: r.full_name,
+            nisn: r.nisn,
+            gender: r.gender,
+            status: r.status,
+            no_hp: r.no_hp,
+            email: r.email,
+            class_id: r.class_id,
+            class_name: r.class_name,
+        })
+        .collect();
 
     Ok(Json(ApiResponse::success(dtos, req_ctx.request_id)))
 }

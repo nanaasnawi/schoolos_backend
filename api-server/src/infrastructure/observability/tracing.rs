@@ -1,5 +1,5 @@
 use axum::{extract::Request, middleware::Next, response::IntoResponse};
-use tracing::{Instrument, info_span};
+use tracing::{info_span, Instrument};
 use uuid::Uuid;
 
 pub async fn tracing_middleware(req: Request, next: Next) -> impl IntoResponse {

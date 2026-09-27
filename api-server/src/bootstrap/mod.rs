@@ -5,7 +5,7 @@ pub use context::ApplicationContext;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::{Router, routing::get};
+use axum::{routing::get, Router};
 use sqlx::postgres::PgPoolOptions;
 use tower_http::{
     cors::CorsLayer,
@@ -45,8 +45,8 @@ use school_core::common::domain::clock::{Clock, SystemClock};
 use school_core::common::event_bus::{InMemoryEventBus, SharedEventBus};
 use school_core::common::infrastructure::pg_outbox_repository::PgOutboxRepository;
 use school_core::common::infrastructure::pg_uow::PgUnitOfWorkFactory;
-use school_core::identity::application::auth::authenticate_user::AuthenticateUserUseCase;
 use school_core::identity::application::auth::authenticate_qr_token::AuthenticateQrTokenUseCase;
+use school_core::identity::application::auth::authenticate_user::AuthenticateUserUseCase;
 use school_core::identity::application::auth::generate_qr_token::GenerateQrTokenUseCase;
 use school_core::identity::application::auth::register_user::RegisterUserUseCase;
 
@@ -151,7 +151,6 @@ use school_core::people::application::update_student::handler::UpdateStudentUseC
 use school_core::people::infrastructure::pg_people_repository::PgPeopleRepository;
 use school_core::permission::infrastructure::pg_permission_repository::PgRoleRepository;
 
-use crate::ApiDoc;
 use crate::idempotency;
 use crate::infrastructure::observability::metrics::{
     metrics_handler, metrics_middleware, setup_metrics_recorder,
@@ -165,25 +164,24 @@ use crate::presentation::{
     academic::grade_levels::controller::grade_level_routes,
     academic::schedules::controller::schedule_routes,
     academic::subjects::controller::subject_routes, academic::terms::controller::term_routes,
-    analytics::controller::analytics_routes,
-    auth::controller::auth_routes, dapodik::controller::dapodik_routes, health::controller::health_routes,
-    learning::achievement::controller::achievement_routes,
+    analytics::controller::analytics_routes, announcements::controller::announcement_routes,
+    auth::controller::auth_routes, dapodik::controller::dapodik_routes,
+    health::controller::health_routes, learning::achievement::controller::achievement_routes,
     learning::assessment::controller::assessment_routes,
     learning::assignments::controller::assignment_routes,
     learning::curricula::controller::curriculum_routes, learning::feed::controller::feed_routes,
-    learning::lessons::controller::lesson_routes, learning::materials::controller::material_routes,
+    learning::inquiries::controller::inquiry_routes, learning::lessons::controller::lesson_routes,
+    learning::library::controller::library_routes,
+    learning::materials::controller::material_routes,
     learning::progress::controller::progress_routes, learning::quizzes::controller::quiz_routes,
     learning::sessions::controller::session_routes,
     learning::syllabuses::controller::syllabus_routes,
-    learning::inquiries::controller::inquiry_routes,
-    learning::library::controller::library_routes,
-    notifications::controller::notification_routes, announcements::controller::announcement_routes,
-    people::guardian::controller::guardian_routes,
+    notifications::controller::notification_routes, people::guardian::controller::guardian_routes,
     people::staff::controller::staff_routes, people::students::controller::student_routes,
-    people::teacher::controller::teacher_routes, school::controller::school_routes,
-    school::controller::get_school_public_info,
-    tenant::controller::tenant_routes,
+    people::teacher::controller::teacher_routes, school::controller::get_school_public_info,
+    school::controller::school_routes, tenant::controller::tenant_routes,
 };
+use crate::ApiDoc;
 
 /// Composition root for the API server.
 ///
@@ -203,9 +201,14 @@ impl Bootstrap {
 
         let mut db_url = raw_db_url.trim().to_string();
         if db_url.starts_with("DATABASE_URL=") {
-            db_url = db_url.trim_start_matches("DATABASE_URL=").trim().to_string();
+            db_url = db_url
+                .trim_start_matches("DATABASE_URL=")
+                .trim()
+                .to_string();
         }
-        if (db_url.starts_with('"') && db_url.ends_with('"')) || (db_url.starts_with('\'') && db_url.ends_with('\'')) {
+        if (db_url.starts_with('"') && db_url.ends_with('"'))
+            || (db_url.starts_with('\'') && db_url.ends_with('\''))
+        {
             db_url = db_url[1..db_url.len() - 1].trim().to_string();
         }
         if !db_url.starts_with("postgres://") && !db_url.starts_with("postgresql://") {
@@ -214,17 +217,34 @@ impl Bootstrap {
             }
         }
 
+        let is_remote_db = !db_url.contains("localhost")
+            && !db_url.contains("127.0.0.1")
+            && !db_url.contains("::1");
+        let is_prod = std::env::var("APP_ENV")
+            .map(|e| e.eq_ignore_ascii_case("production"))
+            .unwrap_or(false)
+            || std::env::var("ENVIRONMENT")
+                .map(|e| e.eq_ignore_ascii_case("production"))
+                .unwrap_or(false)
+            || std::env::var("RAILWAY_ENVIRONMENT").is_ok()
+            || is_remote_db;
+
         let jwt_secret = match std::env::var("JWT_SECRET") {
             Ok(val) if !val.trim().is_empty() => {
-                if val.trim() == "super_secret_jwt_key_123" {
+                let trimmed = val.trim();
+                if trimmed == "super_secret_jwt_key_123"
+                    || trimmed == "dev_jwt_secret_school_os_local_only_123456789"
+                {
+                    if is_prod {
+                        panic!("CRITICAL SECURITY ERROR: Known default dev secret cannot be used as JWT_SECRET in production or with remote database!");
+                    }
                     tracing::warn!("SECURITY WARNING: Using default development JWT secret key. DO NOT USE IN PRODUCTION!");
                 }
-                val.trim().to_string()
+                trimmed.to_string()
             }
             _ => {
-                let is_prod = std::env::var("APP_ENV").map(|e| e.eq_ignore_ascii_case("production")).unwrap_or(false);
                 if is_prod {
-                    panic!("CRITICAL SECURITY ERROR: JWT_SECRET environment variable is required in production!");
+                    panic!("CRITICAL SECURITY ERROR: JWT_SECRET environment variable is strictly required in production or when connected to a remote database! Please generate a strong 32+ character secret.");
                 }
                 tracing::warn!("JWT_SECRET not set, falling back to local development secret key.");
                 "dev_jwt_secret_school_os_local_only_123456789".to_string()
@@ -325,7 +345,10 @@ impl Bootstrap {
         tokio::spawn({
             let cleanup_service = cleanup_service.clone();
             async move {
-                tracing::info!(component = "idempotency_cleanup", "Starting idempotency cleanup service");
+                tracing::info!(
+                    component = "idempotency_cleanup",
+                    "Starting idempotency cleanup service"
+                );
                 cleanup_service.start().await;
             }
         });
@@ -408,6 +431,7 @@ impl Bootstrap {
             event_bus,
             clock: clock.clone(),
             jwt_secret: self.jwt_secret.clone(),
+            auth_cache: crate::middleware::AuthCache::new(),
             authenticate_user: Arc::new(AuthenticateUserUseCase::new(
                 user_repo.clone(),
                 self.jwt_secret.clone(),
@@ -685,11 +709,10 @@ impl Bootstrap {
             .nest("/api/v1/auth", auth_routes(context.clone()))
             .nest(
                 "/api/v1/analytics",
-                analytics_routes()
-                    .layer(axum::middleware::from_fn_with_state(
-                        context.clone(),
-                        auth_middleware,
-                    )),
+                analytics_routes().layer(axum::middleware::from_fn_with_state(
+                    context.clone(),
+                    auth_middleware,
+                )),
             )
             .nest("/api/v1/tenants", tenant_routes())
             // Public school info (no auth required) — used by mobile login screen
@@ -699,11 +722,10 @@ impl Bootstrap {
             )
             .nest(
                 "/api/v1/schools",
-                school_routes()
-                    .layer(axum::middleware::from_fn_with_state(
-                        context.clone(),
-                        auth_middleware,
-                    )),
+                school_routes().layer(axum::middleware::from_fn_with_state(
+                    context.clone(),
+                    auth_middleware,
+                )),
             )
             .nest(
                 "/api/v1/students",
@@ -982,17 +1004,13 @@ impl Bootstrap {
                         auth_middleware,
                     )),
             )
-            .nest(
-                "/api/v1/learning/inquiries",
-                inquiry_routes(),
-            )
+            .nest("/api/v1/learning/inquiries", inquiry_routes())
             .nest(
                 "/api/v1/learning/library",
-                library_routes()
-                    .layer(axum::middleware::from_fn_with_state(
-                        context.clone(),
-                        auth_middleware,
-                    )),
+                library_routes().layer(axum::middleware::from_fn_with_state(
+                    context.clone(),
+                    auth_middleware,
+                )),
             )
             .nest(
                 "/api/v1/notifications",
@@ -1008,11 +1026,10 @@ impl Bootstrap {
             )
             .nest(
                 "/api/v1/announcements",
-                announcement_routes()
-                    .layer(axum::middleware::from_fn_with_state(
-                        context.clone(),
-                        auth_middleware,
-                    )),
+                announcement_routes().layer(axum::middleware::from_fn_with_state(
+                    context.clone(),
+                    auth_middleware,
+                )),
             )
             .nest(
                 "/api/v1/dapodik",
@@ -1026,15 +1043,9 @@ impl Bootstrap {
                         auth_middleware,
                     )),
             )
-            .nest(
-                "/api/v1/system",
-                system_routes(context.clone())
-            )
+            .nest("/api/v1/system", system_routes(context.clone()))
             .nest("/health", health_routes())
-            .nest_service(
-                "/uploads",
-                ServeDir::new("uploads"),
-            )
+            .nest_service("/uploads", ServeDir::new("uploads"))
             .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
             .route(
                 "/metrics",

@@ -1,12 +1,11 @@
 use axum::{
-    Json, Router,
-    extract::{Path, State, Multipart, DefaultBodyLimit},
+    extract::{DefaultBodyLimit, Multipart, Path, State},
     routing::{get, post},
+    Json, Router,
 };
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 use uuid::Uuid;
-
 
 use super::dto::{
     create_learning_material_request::CreateLearningMaterialRequest,
@@ -42,7 +41,15 @@ async fn create(
     req_ctx: RequestContext,
     Json(payload): Json<CreateLearningMaterialRequest>,
 ) -> Result<Json<ApiResponse<LearningMaterialResponse>>, ApiError> {
-    let is_teacher = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Guru" || r.name == "Teacher")).unwrap_or(false);
+    let is_teacher = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles
+                .iter()
+                .any(|r| r.name == "Guru" || r.name == "Teacher")
+        })
+        .unwrap_or(false);
     if !is_teacher {
         use crate::middleware::require_permission;
         use school_core::permission::domain::permission_registry::Permission;
@@ -140,7 +147,7 @@ async fn create(
     // Trigger in-app and FCM push notifications to enrolled students
     let teacher_name = if let Some(tid) = teacher_id {
         sqlx::query_scalar::<_, String>(
-            "SELECT u.full_name FROM teachers t JOIN users u ON u.id = t.user_id WHERE t.id = $1"
+            "SELECT u.full_name FROM teachers t JOIN users u ON u.id = t.user_id WHERE t.id = $1",
         )
         .bind(tid)
         .fetch_optional(&ctx.pool)
@@ -149,15 +156,13 @@ async fn create(
         .flatten()
         .unwrap_or_else(|| "Guru Pengampu".to_string())
     } else if let Some(aid) = actor_id {
-        sqlx::query_scalar::<_, String>(
-            "SELECT full_name FROM users WHERE id = $1"
-        )
-        .bind(aid)
-        .fetch_optional(&ctx.pool)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "Guru Pengampu".to_string())
+        sqlx::query_scalar::<_, String>("SELECT full_name FROM users WHERE id = $1")
+            .bind(aid)
+            .fetch_optional(&ctx.pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "Guru Pengampu".to_string())
     } else {
         "Guru Pengampu".to_string()
     };
@@ -166,7 +171,7 @@ async fn create(
 
     if let Some(cid) = target_class_id {
         let class_name = sqlx::query_scalar::<_, String>(
-            "SELECT name FROM classes WHERE id = $1 AND tenant_id = $2"
+            "SELECT name FROM classes WHERE id = $1 AND tenant_id = $2",
         )
         .bind(cid)
         .bind(req_ctx.tenant_id)
@@ -271,26 +276,38 @@ async fn list(
     })?;
 
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
-    let is_admin = req_ctx.actor.as_ref().map(|a| {
-        a.roles.iter().any(|r| {
-            let n = r.name.to_lowercase();
-            n.contains("admin") || n.contains("kepala sekolah") || n.contains("operator")
+    let is_admin = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("admin") || n.contains("kepala sekolah") || n.contains("operator")
+            })
         })
-    }).unwrap_or(false);
+        .unwrap_or(false);
 
-    let is_teacher = req_ctx.actor.as_ref().map(|a| {
-        a.roles.iter().any(|r| {
-            let n = r.name.to_lowercase();
-            n == "guru" || n.contains("teacher")
+    let is_teacher = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n == "guru" || n.contains("teacher")
+            })
         })
-    }).unwrap_or(false);
+        .unwrap_or(false);
 
-    let is_student = req_ctx.actor.as_ref().map(|a| {
-        a.roles.iter().any(|r| {
-            let n = r.name.to_lowercase();
-            n == "siswa" || n.contains("student")
+    let is_student = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n == "siswa" || n.contains("student")
+            })
         })
-    }).unwrap_or(false);
+        .unwrap_or(false);
 
     let items: Vec<LearningMaterialResponse> = if is_teacher {
         // Teacher strictly sees ONLY materials they created or are assigned to them
@@ -331,30 +348,32 @@ async fn list(
             school_core::common::error::InfrastructureError::Database(e)
         ), &req_ctx.request_id))?;
 
-        rows.into_iter().map(|r| LearningMaterialResponse {
-            id: r.get("id"),
-            tenant_id: r.get("tenant_id"),
-            lesson_id: r.get("lesson_id"),
-            material_type: r.get("material_type"),
-            title: r.get("title"),
-            description: r.get("description"),
-            storage_key: r.get("storage_key"),
-            external_url: r.get("external_url"),
-            order_index: r.get("order_index"),
-            visibility: r.get("visibility"),
-            is_active: r.get("is_active"),
-            created_at: r.get("created_at"),
-            updated_at: r.get("updated_at"),
-            is_completed: None,
-            completed_count: r.get("completed_count"),
-            teacher_name: r.get("teacher_name"),
-            teacher_id: r.get("teacher_id"),
-            class_name: r.get("class_name"),
-            class_id: r.get("class_id"),
-            subject_name: r.get("subject_name"),
-            start_page: r.get("start_page"),
-            end_page: r.get("end_page"),
-        }).collect()
+        rows.into_iter()
+            .map(|r| LearningMaterialResponse {
+                id: r.get("id"),
+                tenant_id: r.get("tenant_id"),
+                lesson_id: r.get("lesson_id"),
+                material_type: r.get("material_type"),
+                title: r.get("title"),
+                description: r.get("description"),
+                storage_key: r.get("storage_key"),
+                external_url: r.get("external_url"),
+                order_index: r.get("order_index"),
+                visibility: r.get("visibility"),
+                is_active: r.get("is_active"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+                is_completed: None,
+                completed_count: r.get("completed_count"),
+                teacher_name: r.get("teacher_name"),
+                teacher_id: r.get("teacher_id"),
+                class_name: r.get("class_name"),
+                class_id: r.get("class_id"),
+                subject_name: r.get("subject_name"),
+                start_page: r.get("start_page"),
+                end_page: r.get("end_page"),
+            })
+            .collect()
     } else if is_student && !is_admin {
         // Student sees materials ONLY for their active enrolled classes (Paket A / B / C strictly isolated)
         let rows = sqlx::query(
@@ -390,40 +409,47 @@ async fn list(
                   WHERE s.user_id = $2 AND (en.status = 'Active' OR en.status = 'ACTIVE')
               )
             ORDER BY m.created_at DESC
-            "#
+            "#,
         )
         .bind(req_ctx.tenant_id)
         .bind(actor_id)
         .fetch_all(&ctx.pool)
         .await
-        .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
-            school_core::common::error::InfrastructureError::Database(e)
-        ), &req_ctx.request_id))?;
+        .map_err(|e| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
 
-        rows.into_iter().map(|r| LearningMaterialResponse {
-            id: r.get("id"),
-            tenant_id: r.get("tenant_id"),
-            lesson_id: r.get("lesson_id"),
-            material_type: r.get("material_type"),
-            title: r.get("title"),
-            description: r.get("description"),
-            storage_key: r.get("storage_key"),
-            external_url: r.get("external_url"),
-            order_index: r.get("order_index"),
-            visibility: r.get("visibility"),
-            is_active: r.get("is_active"),
-            created_at: r.get("created_at"),
-            updated_at: r.get("updated_at"),
-            is_completed: Some(r.get("is_completed")),
-            completed_count: None,
-            teacher_name: r.get("teacher_name"),
-            teacher_id: r.get("teacher_id"),
-            class_name: r.get("class_name"),
-            class_id: r.get("class_id"),
-            subject_name: r.get("subject_name"),
-            start_page: r.get("start_page"),
-            end_page: r.get("end_page"),
-        }).collect()
+        rows.into_iter()
+            .map(|r| LearningMaterialResponse {
+                id: r.get("id"),
+                tenant_id: r.get("tenant_id"),
+                lesson_id: r.get("lesson_id"),
+                material_type: r.get("material_type"),
+                title: r.get("title"),
+                description: r.get("description"),
+                storage_key: r.get("storage_key"),
+                external_url: r.get("external_url"),
+                order_index: r.get("order_index"),
+                visibility: r.get("visibility"),
+                is_active: r.get("is_active"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+                is_completed: Some(r.get("is_completed")),
+                completed_count: None,
+                teacher_name: r.get("teacher_name"),
+                teacher_id: r.get("teacher_id"),
+                class_name: r.get("class_name"),
+                class_id: r.get("class_id"),
+                subject_name: r.get("subject_name"),
+                start_page: r.get("start_page"),
+                end_page: r.get("end_page"),
+            })
+            .collect()
     } else if is_admin {
         // Super Admin / Kepala Sekolah / Staf sees all materials in tenant
         let rows = sqlx::query(
@@ -457,30 +483,32 @@ async fn list(
             school_core::common::error::InfrastructureError::Database(e)
         ), &req_ctx.request_id))?;
 
-        rows.into_iter().map(|r| LearningMaterialResponse {
-            id: r.get("id"),
-            tenant_id: r.get("tenant_id"),
-            lesson_id: r.get("lesson_id"),
-            material_type: r.get("material_type"),
-            title: r.get("title"),
-            description: r.get("description"),
-            storage_key: r.get("storage_key"),
-            external_url: r.get("external_url"),
-            order_index: r.get("order_index"),
-            visibility: r.get("visibility"),
-            is_active: r.get("is_active"),
-            created_at: r.get("created_at"),
-            updated_at: r.get("updated_at"),
-            is_completed: None,
-            completed_count: r.get("completed_count"),
-            teacher_name: r.get("teacher_name"),
-            teacher_id: r.get("teacher_id"),
-            class_name: r.get("class_name"),
-            class_id: r.get("class_id"),
-            subject_name: r.get("subject_name"),
-            start_page: r.get("start_page"),
-            end_page: r.get("end_page"),
-        }).collect()
+        rows.into_iter()
+            .map(|r| LearningMaterialResponse {
+                id: r.get("id"),
+                tenant_id: r.get("tenant_id"),
+                lesson_id: r.get("lesson_id"),
+                material_type: r.get("material_type"),
+                title: r.get("title"),
+                description: r.get("description"),
+                storage_key: r.get("storage_key"),
+                external_url: r.get("external_url"),
+                order_index: r.get("order_index"),
+                visibility: r.get("visibility"),
+                is_active: r.get("is_active"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+                is_completed: None,
+                completed_count: r.get("completed_count"),
+                teacher_name: r.get("teacher_name"),
+                teacher_id: r.get("teacher_id"),
+                class_name: r.get("class_name"),
+                class_id: r.get("class_id"),
+                subject_name: r.get("subject_name"),
+                start_page: r.get("start_page"),
+                end_page: r.get("end_page"),
+            })
+            .collect()
     } else {
         vec![]
     };
@@ -506,26 +534,38 @@ async fn get_by_id(
     })?;
 
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
-    let is_admin = req_ctx.actor.as_ref().map(|a| {
-        a.roles.iter().any(|r| {
-            let n = r.name.to_lowercase();
-            n.contains("admin") || n.contains("kepala sekolah") || n.contains("operator")
+    let is_admin = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("admin") || n.contains("kepala sekolah") || n.contains("operator")
+            })
         })
-    }).unwrap_or(false);
+        .unwrap_or(false);
 
-    let is_teacher = req_ctx.actor.as_ref().map(|a| {
-        a.roles.iter().any(|r| {
-            let n = r.name.to_lowercase();
-            n == "guru" || n.contains("teacher")
+    let is_teacher = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n == "guru" || n.contains("teacher")
+            })
         })
-    }).unwrap_or(false);
+        .unwrap_or(false);
 
-    let is_student = req_ctx.actor.as_ref().map(|a| {
-        a.roles.iter().any(|r| {
-            let n = r.name.to_lowercase();
-            n == "siswa" || n.contains("student")
+    let is_student = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n == "siswa" || n.contains("student")
+            })
         })
-    }).unwrap_or(false);
+        .unwrap_or(false);
 
     if is_teacher {
         let owns = sqlx::query_scalar::<_, bool>(
@@ -605,15 +645,20 @@ async fn get_by_id(
         LEFT JOIN users uc ON uc.id = m.created_by
         LEFT JOIN library_books lb ON lb.id = m.library_book_id
         WHERE m.id = $1 AND m.tenant_id = $2 AND m.deleted_at IS NULL
-        "#
+        "#,
     )
     .bind(id)
     .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
-        school_core::common::error::InfrastructureError::Database(e)
-    ), &req_ctx.request_id))?;
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
 
     let row = row_opt.ok_or_else(|| {
         ApiError::new(
@@ -674,10 +719,7 @@ async fn get_by_id(
         end_page: row.get("end_page"),
     };
 
-    Ok(Json(ApiResponse::success(
-        resp,
-        req_ctx.request_id,
-    )))
+    Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
 }
 
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
@@ -710,9 +752,14 @@ async fn toggle_complete(
     )
     .fetch_optional(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
-        school_core::common::error::InfrastructureError::Database(e)
-    ), &req_ctx.request_id))?
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?
     .ok_or_else(|| {
         ApiError::new(
             school_core::common::error::ApplicationError::Unauthorized(
@@ -731,9 +778,14 @@ async fn toggle_complete(
     )
     .fetch_optional(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
-        school_core::common::error::InfrastructureError::Database(e)
-    ), &req_ctx.request_id))?;
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
 
     let is_completed = if existing.is_some() {
         // Toggle OFF (unmark completed)
@@ -823,18 +875,28 @@ async fn get_material_completions(
         r#"
         SELECT tenant_id, class_id FROM learning_materials
         WHERE id = $1 AND deleted_at IS NULL
-        "#
+        "#,
     )
     .bind(id)
     .fetch_optional(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
-        school_core::common::error::InfrastructureError::Database(e)
-    ), &req_ctx.request_id))?
-    .ok_or_else(|| ApiError::new(school_core::common::error::ApplicationError::NotFound(
-        school_core::common::error_code::ErrorCode::LearningMaterialNotFound,
-        format!("Learning material {} not found", id)
-    ), &req_ctx.request_id))?;
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?
+    .ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::NotFound(
+                school_core::common::error_code::ErrorCode::LearningMaterialNotFound,
+                format!("Learning material {} not found", id),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
 
     let mat_class_id: Option<Uuid> = mat_row.get("class_id");
 
@@ -899,17 +961,20 @@ async fn get_material_completions(
         school_core::common::error::InfrastructureError::Database(e)
     ), &req_ctx.request_id))?;
 
-    let dtos: Vec<MaterialStudentCompletionDto> = rows.into_iter().map(|r| MaterialStudentCompletionDto {
-        student_id: r.get("student_id"),
-        student_name: r.get("student_name"),
-        nisn: r.get("nisn"),
-        gender: r.get("gender"),
-        class_name: r.get("class_name"),
-        is_completed: r.get("is_completed"),
-        completed_at: r.get("completed_at"),
-        current_page: r.get("current_page"),
-        last_read_at: r.get("last_read_at"),
-    }).collect();
+    let dtos: Vec<MaterialStudentCompletionDto> = rows
+        .into_iter()
+        .map(|r| MaterialStudentCompletionDto {
+            student_id: r.get("student_id"),
+            student_name: r.get("student_name"),
+            nisn: r.get("nisn"),
+            gender: r.get("gender"),
+            class_name: r.get("class_name"),
+            is_completed: r.get("is_completed"),
+            completed_at: r.get("completed_at"),
+            current_page: r.get("current_page"),
+            last_read_at: r.get("last_read_at"),
+        })
+        .collect();
 
     Ok(Json(ApiResponse::success(dtos, req_ctx.request_id)))
 }
@@ -933,19 +998,27 @@ async fn update(
     })?;
 
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
-    let is_admin = req_ctx.actor.as_ref().map(|a| {
-        a.roles.iter().any(|r| {
-            let n = r.name.to_lowercase();
-            n.contains("admin") || n.contains("kepala sekolah") || n.contains("operator")
+    let is_admin = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("admin") || n.contains("kepala sekolah") || n.contains("operator")
+            })
         })
-    }).unwrap_or(false);
+        .unwrap_or(false);
 
-    let is_teacher = req_ctx.actor.as_ref().map(|a| {
-        a.roles.iter().any(|r| {
-            let n = r.name.to_lowercase();
-            n == "guru" || n.contains("teacher")
+    let is_teacher = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n == "guru" || n.contains("teacher")
+            })
         })
-    }).unwrap_or(false);
+        .unwrap_or(false);
 
     if is_teacher && !is_admin {
         let owns = sqlx::query_scalar::<_, bool>(
@@ -1013,19 +1086,27 @@ async fn delete(
     })?;
 
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
-    let is_admin = req_ctx.actor.as_ref().map(|a| {
-        a.roles.iter().any(|r| {
-            let n = r.name.to_lowercase();
-            n.contains("admin") || n.contains("kepala sekolah") || n.contains("operator")
+    let is_admin = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("admin") || n.contains("kepala sekolah") || n.contains("operator")
+            })
         })
-    }).unwrap_or(false);
+        .unwrap_or(false);
 
-    let is_teacher = req_ctx.actor.as_ref().map(|a| {
-        a.roles.iter().any(|r| {
-            let n = r.name.to_lowercase();
-            n == "guru" || n.contains("teacher")
+    let is_teacher = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n == "guru" || n.contains("teacher")
+            })
         })
-    }).unwrap_or(false);
+        .unwrap_or(false);
 
     if is_teacher && !is_admin {
         let owns = sqlx::query_scalar::<_, bool>(
@@ -1074,7 +1155,15 @@ async fn upload_file(
     req_ctx: RequestContext,
     mut multipart: Multipart,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    let is_teacher = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Guru" || r.name == "Teacher")).unwrap_or(false);
+    let is_teacher = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles
+                .iter()
+                .any(|r| r.name == "Guru" || r.name == "Teacher")
+        })
+        .unwrap_or(false);
     if !is_teacher {
         use crate::middleware::require_permission;
         use school_core::permission::domain::permission_registry::Permission;
@@ -1093,9 +1182,9 @@ async fn upload_file(
     let uploads_dir = std::path::PathBuf::from("uploads");
     tokio::fs::create_dir_all(&uploads_dir).await.map_err(|e| {
         ApiError::new(
-            school_core::common::error::ApplicationError::Internal(
-                format!("Failed to create uploads directory: {e}"),
-            ),
+            school_core::common::error::ApplicationError::Internal(format!(
+                "Failed to create uploads directory: {e}"
+            )),
             &req_ctx.request_id,
         )
     })?;
@@ -1104,17 +1193,13 @@ async fn upload_file(
 
     while let Some(field) = multipart.next_field().await.map_err(|e| {
         ApiError::new(
-            school_core::common::error::ApplicationError::Internal(
-                format!("Multipart error: {e}"),
-            ),
+            school_core::common::error::ApplicationError::Internal(format!("Multipart error: {e}")),
             &req_ctx.request_id,
         )
     })? {
         let field_name = field.name().unwrap_or("").to_string();
         if field_name == "file" {
-            let original_filename = field.file_name()
-                .unwrap_or("upload")
-                .to_string();
+            let original_filename = field.file_name().unwrap_or("upload").to_string();
             let content_type = field.content_type().unwrap_or("").to_string();
             let mut ext = std::path::Path::new(&original_filename)
                 .extension()
@@ -1148,9 +1233,9 @@ async fn upload_file(
 
             let bytes = field.bytes().await.map_err(|e| {
                 ApiError::new(
-                    school_core::common::error::ApplicationError::Internal(
-                        format!("Failed to read file bytes: {e}"),
-                    ),
+                    school_core::common::error::ApplicationError::Internal(format!(
+                        "Failed to read file bytes: {e}"
+                    )),
                     &req_ctx.request_id,
                 )
             })?;
@@ -1161,9 +1246,9 @@ async fn upload_file(
 
             tokio::fs::write(&file_path, &bytes).await.map_err(|e| {
                 ApiError::new(
-                    school_core::common::error::ApplicationError::Internal(
-                        format!("Failed to save file: {e}"),
-                    ),
+                    school_core::common::error::ApplicationError::Internal(format!(
+                        "Failed to save file: {e}"
+                    )),
                     &req_ctx.request_id,
                 )
             })?;

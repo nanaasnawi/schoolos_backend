@@ -13,11 +13,10 @@ pub trait UserRepository: Send + Sync {
         email: &str,
     ) -> Result<Option<User>, InfrastructureError>;
     // Lookup by email ONLY (no tenant filter) — used for global login flow
-    async fn find_by_email_global(
-        &self,
-        email: &str,
-    ) -> Result<Option<User>, InfrastructureError>;
+    async fn find_by_email_global(&self, email: &str) -> Result<Option<User>, InfrastructureError>;
     async fn find_by_id(&self, id: Uuid) -> Result<Option<User>, InfrastructureError>;
+    async fn find_primary_role(&self, user_id: Uuid)
+        -> Result<Option<String>, InfrastructureError>;
 }
 
 pub struct PgUserRepository {
@@ -90,10 +89,7 @@ impl UserRepository for PgUserRepository {
         Ok(user)
     }
 
-    async fn find_by_email_global(
-        &self,
-        email: &str,
-    ) -> Result<Option<User>, InfrastructureError> {
+    async fn find_by_email_global(&self, email: &str) -> Result<Option<User>, InfrastructureError> {
         let user = sqlx::query_as::<_, User>(
             r#"
             SELECT u.id, u.tenant_id, u.username, u.email, u.password_hash, u.full_name, u.is_active, u.created_at, u.updated_at
@@ -137,5 +133,25 @@ impl UserRepository for PgUserRepository {
         .await?;
 
         Ok(user)
+    }
+
+    async fn find_primary_role(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Option<String>, InfrastructureError> {
+        let role = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT r.name 
+            FROM user_roles ur 
+            JOIN roles r ON r.id = ur.role_id 
+            WHERE ur.user_id = $1 
+            LIMIT 1
+            "#,
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(role)
     }
 }

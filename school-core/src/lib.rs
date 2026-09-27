@@ -7,13 +7,13 @@ pub mod common;
 pub mod communication;
 pub mod config;
 pub mod identity;
+pub mod integration;
 pub mod learning;
 pub mod notification;
 pub mod people;
 pub mod permission;
 pub mod policy;
 pub mod reporting;
-pub mod integration;
 #[cfg(test)]
 mod tests {
     #[test]

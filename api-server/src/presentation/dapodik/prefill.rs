@@ -6,11 +6,8 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
-    bootstrap::ApplicationContext,
-    error::ApiError,
-    extractors::RequestContext,
-    presentation::dapodik::sync::DapodikRawStudent,
-    response::ApiResponse,
+    bootstrap::ApplicationContext, error::ApiError, extractors::RequestContext,
+    presentation::dapodik::sync::DapodikRawStudent, response::ApiResponse,
 };
 
 #[derive(Debug, Deserialize, ToSchema)]

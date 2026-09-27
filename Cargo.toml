@@ -2,8 +2,7 @@
 members = [
     "school-core",
     "api-server",
-    "local-bridge",
-    "hash-gen"
+    "local-bridge"
 ]
 default-members = ["api-server", "school-core", "local-bridge"]
 

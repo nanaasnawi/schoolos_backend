@@ -41,7 +41,8 @@ impl IdempotencyCleanupService {
     }
 
     async fn cleanup(&self) -> Result<(), sqlx::Error> {
-        let chrono_ttl = chrono::Duration::from_std(self.ttl).unwrap_or_else(|_| chrono::Duration::days(1));
+        let chrono_ttl =
+            chrono::Duration::from_std(self.ttl).unwrap_or_else(|_| chrono::Duration::days(1));
         let cutoff = sqlx::types::chrono::Utc::now()
             .checked_sub_signed(chrono_ttl)
             .unwrap_or_default();

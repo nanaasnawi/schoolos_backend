@@ -222,7 +222,11 @@ impl Assignment {
     /// - Parent Lesson MUST be Published (cannot publish assignment for draft lesson)
     /// - Title must not be empty
     /// - Due date (if set) must be in the future
-    pub fn publish(&mut self, lesson_status: Option<&str>, clock: &dyn Clock) -> Result<(), DomainError> {
+    pub fn publish(
+        &mut self,
+        lesson_status: Option<&str>,
+        clock: &dyn Clock,
+    ) -> Result<(), DomainError> {
         if self.status != "draft" {
             return Err(DomainError::Validation(format!(
                 "Cannot publish assignment in '{}' state",

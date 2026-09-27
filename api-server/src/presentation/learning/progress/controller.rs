@@ -1,10 +1,10 @@
 use axum::{
-    Json, Router,
     extract::{Path, State},
     routing::{get, post},
+    Json, Router,
 };
-use uuid::Uuid;
 use chrono::Utc;
+use uuid::Uuid;
 
 use super::dto::{
     calculate_progress_request::CalculateProgressRequest, progress_response::ProgressResponse,
@@ -94,10 +94,17 @@ async fn get_my_progress(
         }
     };
 
-    let resp = calculate_dynamic_student_progress(&ctx, req_ctx.tenant_id, student_id, Some(class_id)).await
-        .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
-            school_core::common::error::InfrastructureError::Database(e)
-        ), &req_ctx.request_id))?;
+    let resp =
+        calculate_dynamic_student_progress(&ctx, req_ctx.tenant_id, student_id, Some(class_id))
+            .await
+            .map_err(|e| {
+                ApiError::new(
+                    school_core::common::error::ApplicationError::Infrastructure(
+                        school_core::common::error::InfrastructureError::Database(e),
+                    ),
+                    &req_ctx.request_id,
+                )
+            })?;
 
     Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
 }
@@ -121,10 +128,16 @@ async fn get_student_progress_by_id(
     .ok()
     .flatten();
 
-    let resp = calculate_dynamic_student_progress(&ctx, req_ctx.tenant_id, student_id, class_id).await
-        .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
-            school_core::common::error::InfrastructureError::Database(e)
-        ), &req_ctx.request_id))?;
+    let resp = calculate_dynamic_student_progress(&ctx, req_ctx.tenant_id, student_id, class_id)
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
 
     Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
 }
@@ -245,7 +258,8 @@ async fn calculate_dynamic_student_progress(
     let total_deliverables = lesson_total + assignment_total;
     let completed_deliverables = lesson_completed + assignment_completed;
     let overall_progress = if total_deliverables > 0 {
-        (((completed_deliverables as f64) / (total_deliverables as f64)) * 100.0 * 10.0).round() / 10.0
+        (((completed_deliverables as f64) / (total_deliverables as f64)) * 100.0 * 10.0).round()
+            / 10.0
     } else {
         0.0
     };
@@ -307,7 +321,10 @@ async fn calculate_dynamic_student_progress(
             "{} memiliki catatan kehadiran yang baik ({} sesi diikuti), namun terdapat {} tugas aktif yang belum dikumpulkan. Mohon bimbingan dan pendampingan orang tua di rumah agar tugas dapat segera diselesaikan.",
             student_name, session_attended, missing_assignments
         )
-    } else if missing_assignments == 0 && total_deliverables > 0 && completed_deliverables == total_deliverables {
+    } else if missing_assignments == 0
+        && total_deliverables > 0
+        && completed_deliverables == total_deliverables
+    {
         format!(
             "Luar biasa! Seluruh modul pembelajaran dan penugasan telah diselesaikan oleh {} dengan tepat waktu. Pertahankan prestasi dan dedikasi belajar ini.",
             student_name
@@ -409,10 +426,7 @@ async fn get_progress(
         subject_id,
     };
 
-    let progress_res = ctx
-        .get_progress
-        .execute(query)
-        .await;
+    let progress_res = ctx.get_progress.execute(query).await;
 
     match progress_res {
         Ok(progress) => Ok(Json(ApiResponse::success(
@@ -421,10 +435,21 @@ async fn get_progress(
         ))),
         Err(_) => {
             // Fallback to dynamic calculation
-            let dynamic = calculate_dynamic_student_progress(&ctx, req_ctx.tenant_id, student_id, Some(class_id)).await
-                .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
-                    school_core::common::error::InfrastructureError::Database(e)
-                ), &req_ctx.request_id))?;
+            let dynamic = calculate_dynamic_student_progress(
+                &ctx,
+                req_ctx.tenant_id,
+                student_id,
+                Some(class_id),
+            )
+            .await
+            .map_err(|e| {
+                ApiError::new(
+                    school_core::common::error::ApplicationError::Infrastructure(
+                        school_core::common::error::InfrastructureError::Database(e),
+                    ),
+                    &req_ctx.request_id,
+                )
+            })?;
             Ok(Json(ApiResponse::success(dynamic, req_ctx.request_id)))
         }
     }

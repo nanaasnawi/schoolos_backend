@@ -85,7 +85,10 @@ impl SyncEngine {
         };
 
         // 8. Kirim ke School OS Cloud Hub
-        let sync_endpoint = format!("{}/api/v1/dapodik/agent/sync", cloud_url.trim_end_matches('/'));
+        let sync_endpoint = format!(
+            "{}/api/v1/dapodik/agent/sync",
+            cloud_url.trim_end_matches('/')
+        );
         let http_client = Client::builder()
             .timeout(Duration::from_secs(180))
             .build()?;
@@ -107,11 +110,7 @@ impl SyncEngine {
         let resp_body = resp.text().await.unwrap_or_default();
 
         if !status.is_success() {
-            return Err(format!(
-                "Server Cloud merespon status {}: {}",
-                status, resp_body
-            )
-            .into());
+            return Err(format!("Server Cloud merespon status {}: {}", status, resp_body).into());
         }
 
         // Hitung total records yang diproses

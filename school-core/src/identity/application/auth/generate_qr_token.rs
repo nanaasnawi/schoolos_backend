@@ -61,7 +61,11 @@ impl GenerateQrTokenUseCase {
             .bind(command.user_id)
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| ApplicationError::Infrastructure(crate::common::error::InfrastructureError::Database(e)))?;
+            .map_err(|e| {
+                ApplicationError::Infrastructure(
+                    crate::common::error::InfrastructureError::Database(e),
+                )
+            })?;
 
             if let Some(row) = existing {
                 if let Ok(Some(existing_raw)) = row.try_get::<Option<String>, _>("raw_token") {
@@ -83,7 +87,11 @@ impl GenerateQrTokenUseCase {
 
         let token_id = Uuid::now_v7();
         let entropy = Uuid::now_v7().to_string().replace('-', "");
-        let raw_token = format!("sch_qr_v1_{}_{}", token_id.to_string().replace('-', ""), &entropy[0..16]);
+        let raw_token = format!(
+            "sch_qr_v1_{}_{}",
+            token_id.to_string().replace('-', ""),
+            &entropy[0..16]
+        );
 
         let mut hasher = Sha256::new();
         hasher.update(raw_token.as_bytes());
@@ -114,7 +122,9 @@ impl GenerateQrTokenUseCase {
         .bind(now)
         .execute(&self.pool)
         .await
-        .map_err(|e| ApplicationError::Infrastructure(crate::common::error::InfrastructureError::Database(e)))?;
+        .map_err(|e| {
+            ApplicationError::Infrastructure(crate::common::error::InfrastructureError::Database(e))
+        })?;
 
         sqlx::query(
             r#"

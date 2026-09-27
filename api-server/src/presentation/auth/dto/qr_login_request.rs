@@ -71,4 +71,3 @@ pub struct BatchGenerateQrItemDto {
     #[schema(value_type = String, format = DateTime)]
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
-

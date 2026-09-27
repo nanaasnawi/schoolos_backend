@@ -57,4 +57,3 @@ impl From<Assignment> for AssignmentResponse {
         }
     }
 }
-

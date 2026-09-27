@@ -16,13 +16,13 @@ impl LocalStore {
 
         let store = Self { pool };
         store.run_migrations().await?;
-        
+
         Ok(store)
     }
 
     async fn run_migrations(&self) -> Result<(), sqlx::Error> {
         info!("Running local SQLite migrations...");
-        
+
         // 1. Encrypted Local Outbox Queue
         // For PUSH mechanism (Cloud -> Dapodik)
         sqlx::query(
@@ -98,12 +98,11 @@ impl LocalStore {
     }
 
     pub async fn get_cursor(&self, entity_type: &str) -> Result<i64, sqlx::Error> {
-        let row: Option<(i64,)> = sqlx::query_as(
-            "SELECT last_cursor FROM sync_cursors WHERE entity_type = ?"
-        )
-        .bind(entity_type)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row: Option<(i64,)> =
+            sqlx::query_as("SELECT last_cursor FROM sync_cursors WHERE entity_type = ?")
+                .bind(entity_type)
+                .fetch_optional(&self.pool)
+                .await?;
 
         Ok(row.map(|(c,)| c).unwrap_or(0))
     }
@@ -115,7 +114,7 @@ impl LocalStore {
             VALUES (?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(entity_type) 
             DO UPDATE SET last_cursor = excluded.last_cursor, updated_at = CURRENT_TIMESTAMP
-            "#
+            "#,
         )
         .bind(entity_type)
         .bind(cursor)
@@ -125,9 +124,13 @@ impl LocalStore {
         Ok(())
     }
 
-    pub async fn get_snapshot_hash(&self, entity_type: &str, external_id: &str) -> Result<Option<String>, sqlx::Error> {
+    pub async fn get_snapshot_hash(
+        &self,
+        entity_type: &str,
+        external_id: &str,
+    ) -> Result<Option<String>, sqlx::Error> {
         let row: Option<(String,)> = sqlx::query_as(
-            "SELECT payload_hash FROM entity_snapshots WHERE entity_type = ? AND external_id = ?"
+            "SELECT payload_hash FROM entity_snapshots WHERE entity_type = ? AND external_id = ?",
         )
         .bind(entity_type)
         .bind(external_id)
@@ -137,14 +140,19 @@ impl LocalStore {
         Ok(row.map(|(h,)| h))
     }
 
-    pub async fn save_snapshot_hash(&self, entity_type: &str, external_id: &str, hash: &str) -> Result<(), sqlx::Error> {
+    pub async fn save_snapshot_hash(
+        &self,
+        entity_type: &str,
+        external_id: &str,
+        hash: &str,
+    ) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
             INSERT INTO entity_snapshots (entity_type, external_id, payload_hash, synced_at)
             VALUES (?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(entity_type, external_id)
             DO UPDATE SET payload_hash = excluded.payload_hash, synced_at = CURRENT_TIMESTAMP
-            "#
+            "#,
         )
         .bind(entity_type)
         .bind(external_id)

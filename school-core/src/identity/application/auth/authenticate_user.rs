@@ -62,19 +62,24 @@ impl AuthenticateUserUseCase {
         // If not found in the given tenant, fall back to a global email search.
         // This allows login without needing to send x-tenant-id header.
         let user_opt = if user_opt.is_none() {
-            self.user_repo
-                .find_by_email_global(&command.email)
-                .await?
+            self.user_repo.find_by_email_global(&command.email).await?
         } else {
             user_opt
         };
 
         if let Some(user) = user_opt {
-            let parsed_hash_result = PasswordHash::new(&user.password_hash);
-            let is_valid = match parsed_hash_result {
-                Ok(parsed_hash) => Argon2::default().verify_password(command.password.as_bytes(), &parsed_hash).is_ok(),
-                Err(_) => false,
-            };
+            let password_hash_str = user.password_hash.clone();
+            let password_bytes = command.password.into_bytes();
+            let is_valid =
+                tokio::task::spawn_blocking(move || match PasswordHash::new(&password_hash_str) {
+                    Ok(parsed_hash) => Argon2::default()
+                        .verify_password(&password_bytes, &parsed_hash)
+                        .is_ok(),
+                    Err(_) => false,
+                })
+                .await
+                .unwrap_or(false);
+
             if is_valid {
                 let expiration = self
                     .clock
@@ -83,12 +88,18 @@ impl AuthenticateUserUseCase {
                     .expect("valid timestamp")
                     .timestamp() as usize;
 
+                let primary_role = self
+                    .user_repo
+                    .find_primary_role(user.id)
+                    .await
+                    .unwrap_or(None);
+
                 let claims = Claims {
                     sub: user.id.to_string(),
                     tenant_id: user.tenant_id.to_string(),
                     email: Some(user.email.clone()),
                     full_name: Some(user.full_name.clone()),
-                    role: Some("Administrator".to_string()),
+                    role: primary_role.or_else(|| Some("Siswa".to_string())),
                     exp: expiration,
                 };
 
@@ -110,4 +121,3 @@ impl AuthenticateUserUseCase {
         ))
     }
 }
-

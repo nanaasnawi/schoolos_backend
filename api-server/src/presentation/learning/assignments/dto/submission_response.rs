@@ -52,4 +52,3 @@ impl From<AssignmentSubmission> for SubmissionResponse {
         }
     }
 }
-

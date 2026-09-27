@@ -291,7 +291,11 @@ impl Quiz {
     /// Rules:
     /// - Associated Lesson status MUST be 'published'
     /// - Quiz MUST have at least 1 question
-    pub fn publish(&mut self, lesson_status: Option<&str>, clock: &dyn Clock) -> Result<(), DomainError> {
+    pub fn publish(
+        &mut self,
+        lesson_status: Option<&str>,
+        clock: &dyn Clock,
+    ) -> Result<(), DomainError> {
         if let Some(status) = lesson_status {
             if status != "published" {
                 return Err(DomainError::Validation(format!(

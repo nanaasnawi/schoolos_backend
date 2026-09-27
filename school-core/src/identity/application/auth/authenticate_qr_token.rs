@@ -48,10 +48,14 @@ impl AuthenticateQrTokenUseCase {
         // Clean token string (extract sch_qr_v1_... if inside URL or JSON, strip quotes/newlines)
         let clean_token = if let Some(idx) = trimmed_token.find("sch_qr_v1_") {
             let rest = &trimmed_token[idx..];
-            let end = rest.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(rest.len());
+            let end = rest
+                .find(|c: char| !c.is_alphanumeric() && c != '_')
+                .unwrap_or(rest.len());
             &rest[..end]
         } else {
-            trimmed_token.trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == '\n' || c == '\r' || c == ' ')
+            trimmed_token.trim_matches(|c: char| {
+                c == '"' || c == '\'' || c == '`' || c == '\n' || c == '\r' || c == ' '
+            })
         };
 
         // 1. Calculate SHA-256 hash of the clean token
@@ -92,12 +96,17 @@ impl AuthenticateQrTokenUseCase {
         )
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| ApplicationError::Infrastructure(crate::common::error::InfrastructureError::Database(e)))?;
+        .map_err(|e| {
+            ApplicationError::Infrastructure(crate::common::error::InfrastructureError::Database(e))
+        })?;
 
         let record = match record {
             Some(r) => r,
             None => {
-                tracing::warn!("authenticate_qr_token: token_hash '{}' not found in database", token_hash);
+                tracing::warn!(
+                    "authenticate_qr_token: token_hash '{}' not found in database",
+                    token_hash
+                );
                 return Err(ApplicationError::Unauthorized(
                     ErrorCode::AuthInvalidCredentials,
                     "QR Code tidak valid atau belum terdaftar di sistem.".to_string(),

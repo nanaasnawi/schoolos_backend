@@ -14,4 +14,3 @@ pub struct UpdateAssignmentRequest {
     #[serde(default)]
     pub questions: Option<Vec<AssignmentQuestionDto>>,
 }
-

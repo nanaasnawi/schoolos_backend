@@ -27,12 +27,17 @@ impl RegisterUserUseCase {
     }
 
     pub async fn execute(&self, command: RegisterUserCommand) -> Result<User, ApplicationError> {
-        let salt = SaltString::generate(&mut OsRng);
-        let argon2 = Argon2::default();
-        let password_hash = argon2
-            .hash_password(command.password.as_bytes(), &salt)
-            .unwrap()
-            .to_string();
+        let password = command.password;
+        let password_hash = tokio::task::spawn_blocking(move || {
+            let salt = SaltString::generate(&mut OsRng);
+            let argon2 = Argon2::default();
+            argon2
+                .hash_password(password.as_bytes(), &salt)
+                .map(|h| h.to_string())
+                .map_err(|e| ApplicationError::Internal(e.to_string()))
+        })
+        .await
+        .map_err(|e| ApplicationError::Internal(e.to_string()))??;
 
         let user = User::new(
             command.tenant_id,

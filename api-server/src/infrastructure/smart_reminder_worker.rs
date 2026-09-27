@@ -70,7 +70,7 @@ impl SmartReminderWorker {
             JOIN subjects sub ON sub.id = cs.subject_id
             WHERE cs.day_of_week ILIKE $1 
               AND cs.deleted_at IS NULL
-            "#
+            "#,
         )
         .bind(current_day)
         .fetch_all(pool)
@@ -94,7 +94,10 @@ impl SmartReminderWorker {
             };
 
             // Deduplication Key: teacher_id + schedule_id + session_date + notification_type
-            let dedup_key = format!("{}_{}_{}_MATERIAL_REMINDER", teacher_id, schedule_id, current_date_str);
+            let dedup_key = format!(
+                "{}_{}_{}_MATERIAL_REMINDER",
+                teacher_id, schedule_id, current_date_str
+            );
 
             // Check if material is already available for this subject, class & teacher
             let material_exists = sqlx::query(
@@ -106,7 +109,7 @@ impl SmartReminderWorker {
                       AND subject_id = $3 
                       AND deleted_at IS NULL
                 ) as exists
-                "#
+                "#,
             )
             .bind(tenant_id)
             .bind(class_id)
@@ -119,12 +122,18 @@ impl SmartReminderWorker {
             let (title, body) = if material_exists {
                 (
                     format!("Materi {} Terjadwal", subject_name),
-                    format!("Materi {} untuk {} akan otomatis ter-publish 15 menit lagi.", subject_name, class_name),
+                    format!(
+                        "Materi {} untuk {} akan otomatis ter-publish 15 menit lagi.",
+                        subject_name, class_name
+                    ),
                 )
             } else {
                 (
                     format!("Pengingat: Jam Mengajar {}", class_name),
-                    format!("Jam pelajaran {} mulai 15 menit lagi, jangan lupa isi materi ya, Pak/Bu.", class_name),
+                    format!(
+                        "Jam pelajaran {} mulai 15 menit lagi, jangan lupa isi materi ya, Pak/Bu.",
+                        class_name
+                    ),
                 )
             };
 

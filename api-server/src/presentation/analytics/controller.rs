@@ -1,16 +1,10 @@
-use axum::{
-    extract::State,
-    routing::get,
-    Json, Router,
-};
+use axum::{extract::State, routing::get, Json, Router};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use uuid::Uuid;
 
 use crate::{
-    bootstrap::ApplicationContext,
-    error::ApiError,
-    extractors::RequestContext,
+    bootstrap::ApplicationContext, error::ApiError, extractors::RequestContext,
     response::ApiResponse,
 };
 
@@ -23,7 +17,7 @@ pub struct AnalyticsOverviewResponse {
     pub total_classes: i64,
     pub active_classes: i64,
     pub total_guardians: i64,
-    pub attendance_rate: f64, // Mocked for now
+    pub attendance_rate: f64,  // Mocked for now
     pub at_risk_students: i64, // Mocked for now
 }
 
@@ -317,7 +311,11 @@ async fn get_dashboard(
         total_notifications: total_notifications_res.unwrap_or(0),
     };
 
-    let total_students_num = if total_students > 0 { total_students } else { 1 } as f64;
+    let total_students_num = if total_students > 0 {
+        total_students
+    } else {
+        1
+    } as f64;
 
     // Gender distribution
     let gender_rows = sqlx::query(
@@ -327,7 +325,7 @@ async fn get_dashboard(
         WHERE tenant_id = $1 AND deleted_at IS NULL
         GROUP BY gender
         ORDER BY gender
-        "#
+        "#,
     )
     .bind(tid)
     .fetch_all(pool)
@@ -381,7 +379,7 @@ async fn get_dashboard(
         WHERE c.tenant_id = $1 AND c.deleted_at IS NULL
         GROUP BY 1
         ORDER BY 1
-        "#
+        "#,
     )
     .bind(tid)
     .fetch_all(pool)
@@ -423,7 +421,7 @@ async fn get_dashboard(
         HAVING COUNT(e.id) > 0
         ORDER BY student_count DESC, c.name ASC
         LIMIT 15
-        "#
+        "#,
     )
     .bind(tid)
     .fetch_all(pool)
@@ -491,7 +489,7 @@ async fn get_dashboard(
         WHERE tenant_id = $1
         ORDER BY is_pinned DESC, created_at DESC
         LIMIT 3
-        "#
+        "#,
     )
     .bind(tid)
     .fetch_all(pool)
@@ -522,7 +520,7 @@ async fn get_dashboard(
         WHERE tenant_id = $1
         ORDER BY timestamp DESC
         LIMIT 6
-        "#
+        "#,
     )
     .bind(tid)
     .fetch_all(pool)

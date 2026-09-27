@@ -5,7 +5,7 @@ pub struct SyncPayload {
     pub agent_id: String,
     pub timestamp: String,
     pub data_type: String, // e.g. "student_master"
-    pub payload: String, // JSON string of the actual data
+    pub payload: String,   // JSON string of the actual data
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -24,10 +24,14 @@ impl IntegrationHub {
         // Here we would validate the mTLS/Agent Token
         // Then parse the payload based on data_type
         // And dispatch to the appropriate master domain (e.g. Identity Domain)
-        
+
         // Example placeholder:
-        tracing::info!("Received PULL sync from agent {}: type {}", payload.agent_id, payload.data_type);
-        
+        tracing::info!(
+            "Received PULL sync from agent {}: type {}",
+            payload.agent_id,
+            payload.data_type
+        );
+
         Ok(())
     }
 
@@ -35,7 +39,7 @@ impl IntegrationHub {
         // Here we would save this task to a cloud outbox queue
         // which the Local Bridge Agent will pull from.
         tracing::info!("Queued PUSH task to Dapodik: {}", task.operation);
-        
+
         Ok(())
     }
 }

@@ -32,7 +32,9 @@ fn load_service_account() -> Option<ServiceAccountKey> {
         if !trimmed.is_empty() {
             if let Ok(sa) = serde_json::from_str::<ServiceAccountKey>(trimmed) {
                 if !sa.private_key.is_empty() {
-                    tracing::info!("Loaded Firebase service account from FIREBASE_SERVICE_ACCOUNT env");
+                    tracing::info!(
+                        "Loaded Firebase service account from FIREBASE_SERVICE_ACCOUNT env"
+                    );
                     return Some(sa);
                 }
             }
@@ -40,13 +42,19 @@ fn load_service_account() -> Option<ServiceAccountKey> {
     }
 
     // 2. Try GOOGLE_APPLICATION_CREDENTIALS or FIREBASE_SERVICE_ACCOUNT_PATH (file path or inline JSON)
-    for env_key in &["GOOGLE_APPLICATION_CREDENTIALS", "FIREBASE_SERVICE_ACCOUNT_PATH"] {
+    for env_key in &[
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "FIREBASE_SERVICE_ACCOUNT_PATH",
+    ] {
         if let Ok(val) = std::env::var(env_key) {
             let trimmed = val.trim();
             if trimmed.starts_with('{') {
                 if let Ok(sa) = serde_json::from_str::<ServiceAccountKey>(trimmed) {
                     if !sa.private_key.is_empty() {
-                        tracing::info!("Loaded Firebase service account from {} (inline JSON)", env_key);
+                        tracing::info!(
+                            "Loaded Firebase service account from {} (inline JSON)",
+                            env_key
+                        );
                         return Some(sa);
                     }
                 }
@@ -54,13 +62,20 @@ fn load_service_account() -> Option<ServiceAccountKey> {
                 let paths_to_try = [
                     std::path::PathBuf::from(trimmed),
                     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(trimmed),
-                    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap_or(std::path::Path::new(".")).join(trimmed),
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .parent()
+                        .unwrap_or(std::path::Path::new("."))
+                        .join(trimmed),
                 ];
                 for p in &paths_to_try {
                     if let Ok(content) = std::fs::read_to_string(p) {
                         if let Ok(sa) = serde_json::from_str::<ServiceAccountKey>(&content) {
                             if !sa.private_key.is_empty() {
-                                tracing::info!("Loaded Firebase service account from {} at {:?}", env_key, p);
+                                tracing::info!(
+                                    "Loaded Firebase service account from {} at {:?}",
+                                    env_key,
+                                    p
+                                );
                                 return Some(sa);
                             }
                         }
@@ -87,7 +102,9 @@ fn load_service_account() -> Option<ServiceAccountKey> {
                 let private_key = trimmed.replace("\\n", "\n");
                 let client_email = std::env::var("FIREBASE_CLIENT_EMAIL")
                     .or_else(|_| std::env::var("FCM_CLIENT_EMAIL"))
-                    .unwrap_or_else(|_| "firebase-adminsdk-fbsvc@akselerasi-edu.iam.gserviceaccount.com".to_string());
+                    .unwrap_or_else(|_| {
+                        "firebase-adminsdk-fbsvc@akselerasi-edu.iam.gserviceaccount.com".to_string()
+                    });
                 let project_id = std::env::var("FCM_PROJECT_ID")
                     .or_else(|_| std::env::var("FIREBASE_PROJECT_ID"))
                     .unwrap_or_else(|_| "akselerasi-edu".to_string());
@@ -108,7 +125,10 @@ fn load_service_account() -> Option<ServiceAccountKey> {
         "../firebase-service-account.json",
         "../api-server/firebase-service-account.json",
         concat!(env!("CARGO_MANIFEST_DIR"), "/firebase-service-account.json"),
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../firebase-service-account.json"),
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../firebase-service-account.json"
+        ),
     ];
 
     for path in &candidate_paths {
@@ -163,7 +183,10 @@ async fn get_access_token(client: &reqwest::Client) -> Result<(String, String), 
         if !token_res.status().is_success() {
             let status = token_res.status();
             let err_text = token_res.text().await.unwrap_or_default();
-            return Err(format!("OAuth2 token endpoint returned {}: {}", status, err_text));
+            return Err(format!(
+                "OAuth2 token endpoint returned {}: {}",
+                status, err_text
+            ));
         }
 
         let token_data = token_res
@@ -177,11 +200,12 @@ async fn get_access_token(client: &reqwest::Client) -> Result<(String, String), 
     // Fallback: OAuth2 refresh token flow
     let client_id = std::env::var("FCM_CLIENT_ID")
         .map_err(|_| "Neither Service Account nor FCM_CLIENT_ID configured".to_string())?;
-    let client_secret = std::env::var("FCM_CLIENT_SECRET")
-        .map_err(|_| "FCM_CLIENT_SECRET not set".to_string())?;
-    let refresh_token = std::env::var("FCM_REFRESH_TOKEN")
-        .map_err(|_| "FCM_REFRESH_TOKEN not set".to_string())?;
-    let project_id = std::env::var("FCM_PROJECT_ID").unwrap_or_else(|_| "akselerasi-edu".to_string());
+    let client_secret =
+        std::env::var("FCM_CLIENT_SECRET").map_err(|_| "FCM_CLIENT_SECRET not set".to_string())?;
+    let refresh_token =
+        std::env::var("FCM_REFRESH_TOKEN").map_err(|_| "FCM_REFRESH_TOKEN not set".to_string())?;
+    let project_id =
+        std::env::var("FCM_PROJECT_ID").unwrap_or_else(|_| "akselerasi-edu".to_string());
 
     let params = [
         ("client_id", client_id.as_str()),
@@ -195,7 +219,12 @@ async fn get_access_token(client: &reqwest::Client) -> Result<(String, String), 
         .form(&params)
         .send()
         .await
-        .map_err(|e| format!("Failed to request FCM OAuth2 token via refresh_token: {}", e))?;
+        .map_err(|e| {
+            format!(
+                "Failed to request FCM OAuth2 token via refresh_token: {}",
+                e
+            )
+        })?;
 
     let token_data = token_res
         .json::<GoogleTokenResponse>()
@@ -270,9 +299,18 @@ fn parse_category(raw: &str) -> FcmCategory {
         FcmCategory::Assignment
     } else if r.contains("kuis") || r.contains("quiz") || r.contains("cbt") || r.contains("ujian") {
         FcmCategory::Quiz
-    } else if r.contains("nilai") || r.contains("grade") || r.contains("rapor") || r.contains("rapot") {
+    } else if r.contains("nilai")
+        || r.contains("grade")
+        || r.contains("rapor")
+        || r.contains("rapot")
+    {
         FcmCategory::Grade
-    } else if r.contains("jadwal") || r.contains("sesi") || r.contains("session") || r.contains("kelas dimulai") || r.contains("mengajar") {
+    } else if r.contains("jadwal")
+        || r.contains("sesi")
+        || r.contains("session")
+        || r.contains("kelas dimulai")
+        || r.contains("mengajar")
+    {
         FcmCategory::Session
     } else if r.contains("reminder") || r.contains("pengingat") {
         FcmCategory::Reminder
@@ -281,13 +319,23 @@ fn parse_category(raw: &str) -> FcmCategory {
     }
 }
 
-pub fn trigger_fcm_push_notification(title: String, content: String, category: String, reference_id: Uuid) {
+pub fn trigger_fcm_push_notification(
+    title: String,
+    content: String,
+    category: String,
+    reference_id: Uuid,
+) {
     let cat = parse_category(&category);
     trigger_fcm_push_categorized(title, content, cat, reference_id);
 }
 
 /// Varian eksplisit agar setiap tipe event (tugas/kuis/nilai/sesi) dapat channel & deep-link sendiri.
-pub fn trigger_fcm_push_categorized(title: String, content: String, category: FcmCategory, reference_id: Uuid) {
+pub fn trigger_fcm_push_categorized(
+    title: String,
+    content: String,
+    category: FcmCategory,
+    reference_id: Uuid,
+) {
     tokio::spawn(async move {
         let client = reqwest::Client::new();
         let (access_token, project_id) = match get_access_token(&client).await {
@@ -305,7 +353,10 @@ pub fn trigger_fcm_push_categorized(title: String, content: String, category: Fc
         // sehingga 100% patuh Google Play Policy dan tidak terblokir oleh batasan OS Android 12+/OEM.
         // Saat notifikasi ditap di lockscreen, payload `data` otomatis diteruskan ke MainActivity via intent extras.
         // Saat aplikasi FOREGROUND: onMessageReceived() tetap dipanggil untuk handle in-app update.
-        let fcm_url = format!("https://fcm.googleapis.com/v1/projects/{}/messages:send", project_id);
+        let fcm_url = format!(
+            "https://fcm.googleapis.com/v1/projects/{}/messages:send",
+            project_id
+        );
         let channel_id = category.channel_id();
         let category_str = category.as_str();
         let click_action = category.click_action();
@@ -354,12 +405,19 @@ pub fn trigger_fcm_push_categorized(title: String, content: String, category: Fc
             .await
         {
             Ok(res) if res.status().is_success() => {
-                tracing::info!("FCM push notification sent successfully for reference {}", reference_id);
+                tracing::info!(
+                    "FCM push notification sent successfully for reference {}",
+                    reference_id
+                );
             }
             Ok(res) => {
                 let status = res.status();
                 let text = res.text().await.unwrap_or_default();
-                tracing::warn!("FCM push notification responded with status {}: {}", status, text);
+                tracing::warn!(
+                    "FCM push notification responded with status {}: {}",
+                    status,
+                    text
+                );
             }
             Err(e) => {
                 tracing::warn!("Failed to send FCM push notification: {}", e);
@@ -375,18 +433,31 @@ mod tests {
     #[test]
     fn test_load_service_account() {
         let sa = load_service_account();
-        assert!(sa.is_some(), "Service account key must be successfully loaded!");
+        assert!(
+            sa.is_some(),
+            "Service account key must be successfully loaded!"
+        );
         let sa = sa.unwrap();
         assert_eq!(sa.project_id, "akselerasi-edu");
-        assert!(!sa.private_key.is_empty(), "Private key should not be empty");
-        assert_eq!(sa.client_email, "firebase-adminsdk-fbsvc@akselerasi-edu.iam.gserviceaccount.com");
+        assert!(
+            !sa.private_key.is_empty(),
+            "Private key should not be empty"
+        );
+        assert_eq!(
+            sa.client_email,
+            "firebase-adminsdk-fbsvc@akselerasi-edu.iam.gserviceaccount.com"
+        );
     }
 
     #[tokio::test]
     async fn test_fcm_oauth_token_acquisition() {
         let client = reqwest::Client::new();
         let res = get_access_token(&client).await;
-        assert!(res.is_ok(), "Failed to get FCM OAuth2 access token: {:?}", res.err());
+        assert!(
+            res.is_ok(),
+            "Failed to get FCM OAuth2 access token: {:?}",
+            res.err()
+        );
         let (token, project_id) = res.unwrap();
         assert!(!token.is_empty(), "Access token should not be empty");
         assert_eq!(project_id, "akselerasi-edu");
@@ -395,8 +466,13 @@ mod tests {
     #[tokio::test]
     async fn test_fcm_send_validate_only() {
         let client = reqwest::Client::new();
-        let (token, project_id) = get_access_token(&client).await.expect("Failed to get token");
-        let fcm_url = format!("https://fcm.googleapis.com/v1/projects/{}/messages:send", project_id);
+        let (token, project_id) = get_access_token(&client)
+            .await
+            .expect("Failed to get token");
+        let fcm_url = format!(
+            "https://fcm.googleapis.com/v1/projects/{}/messages:send",
+            project_id
+        );
         let payload = serde_json::json!({
             "validate_only": true,
             "message": {
@@ -437,7 +513,11 @@ mod tests {
 
         let status = res.status();
         let body = res.text().await.unwrap_or_default();
-        assert!(status.is_success(), "FCM API error (status {}): {}", status, body);
+        assert!(
+            status.is_success(),
+            "FCM API error (status {}): {}",
+            status,
+            body
+        );
     }
 }
-

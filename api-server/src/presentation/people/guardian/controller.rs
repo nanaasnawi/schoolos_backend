@@ -1,7 +1,7 @@
 use axum::{
-    Json, Router,
     extract::{Path, Query, State},
     routing::{get, post},
+    Json, Router,
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -300,28 +300,51 @@ async fn get_guardians_overview(
         LEFT JOIN guardians g ON g.id = s.guardian_id
         WHERE s.tenant_id = $1
         ORDER BY s.full_name ASC
-        "#
+        "#,
     )
     .bind(req_ctx.tenant_id)
     .fetch_all(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Internal(e.to_string()), &req_ctx.request_id))?;
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Internal(e.to_string()),
+            &req_ctx.request_id,
+        )
+    })?;
 
-    let dtos: Vec<GuardianOverviewDto> = records.into_iter().map(|r| {
-        let has_guardian = r.guardian_name.is_some() && !r.guardian_name.as_ref().unwrap().trim().is_empty();
-        GuardianOverviewDto {
-            id: r.guardian_id.map(|u| u.to_string()).unwrap_or_else(|| r.student_id.to_string()),
-            full_name: r.guardian_name.unwrap_or_else(|| r.nama_ibu.clone().unwrap_or_else(|| "(Belum Ada Data Wali)".to_string())),
-            relationship: if has_guardian || r.nama_ibu.is_some() { "Ibu Kandung".to_string() } else { "Belum Diisi".to_string() },
-            student_id: r.student_id.to_string(),
-            student_name: r.student_name,
-            student_nisn: r.student_nisn,
-            phone: r.phone.filter(|p| !p.trim().is_empty()).unwrap_or_else(|| "-".to_string()),
-            is_real_data: has_guardian || r.nama_ibu.is_some(),
-            nama_ayah: r.nama_ayah,
-            nama_ibu: r.nama_ibu,
-        }
-    }).collect();
+    let dtos: Vec<GuardianOverviewDto> = records
+        .into_iter()
+        .map(|r| {
+            let has_guardian =
+                r.guardian_name.is_some() && !r.guardian_name.as_ref().unwrap().trim().is_empty();
+            GuardianOverviewDto {
+                id: r
+                    .guardian_id
+                    .map(|u| u.to_string())
+                    .unwrap_or_else(|| r.student_id.to_string()),
+                full_name: r.guardian_name.unwrap_or_else(|| {
+                    r.nama_ibu
+                        .clone()
+                        .unwrap_or_else(|| "(Belum Ada Data Wali)".to_string())
+                }),
+                relationship: if has_guardian || r.nama_ibu.is_some() {
+                    "Ibu Kandung".to_string()
+                } else {
+                    "Belum Diisi".to_string()
+                },
+                student_id: r.student_id.to_string(),
+                student_name: r.student_name,
+                student_nisn: r.student_nisn,
+                phone: r
+                    .phone
+                    .filter(|p| !p.trim().is_empty())
+                    .unwrap_or_else(|| "-".to_string()),
+                is_real_data: has_guardian || r.nama_ibu.is_some(),
+                nama_ayah: r.nama_ayah,
+                nama_ibu: r.nama_ibu,
+            }
+        })
+        .collect();
 
     Ok(Json(ApiResponse::success(dtos, req_ctx.correlation_id)))
 }

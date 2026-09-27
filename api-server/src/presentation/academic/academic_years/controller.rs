@@ -1,7 +1,7 @@
 use axum::{
-    Json, Router,
     extract::{Query, State},
     routing::post,
+    Json, Router,
 };
 use chrono::NaiveDate;
 use school_core::academic::application::academic_year::{

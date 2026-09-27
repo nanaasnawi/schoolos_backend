@@ -1046,23 +1046,33 @@ impl<'a> Specification<'a> for StudentFilterSpecification<'a> {
         }
 
         if let Some(status) = &self.filter.status {
-            builder.push(" AND students.status = ").push_bind(status.as_db_str());
+            builder
+                .push(" AND students.status = ")
+                .push_bind(status.as_db_str());
         }
 
         if let Some(after) = self.filter.created_after {
-            builder.push(" AND students.created_at >= ").push_bind(after);
+            builder
+                .push(" AND students.created_at >= ")
+                .push_bind(after);
         }
 
         if let Some(before) = self.filter.created_before {
-            builder.push(" AND students.created_at <= ").push_bind(before);
+            builder
+                .push(" AND students.created_at <= ")
+                .push_bind(before);
         }
 
         if let Some(after) = self.filter.updated_after {
-            builder.push(" AND students.updated_at >= ").push_bind(after);
+            builder
+                .push(" AND students.updated_at >= ")
+                .push_bind(after);
         }
 
         if let Some(before) = self.filter.updated_before {
-            builder.push(" AND students.updated_at <= ").push_bind(before);
+            builder
+                .push(" AND students.updated_at <= ")
+                .push_bind(before);
         }
     }
 }

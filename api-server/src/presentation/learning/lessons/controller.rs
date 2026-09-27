@@ -1,7 +1,7 @@
 use axum::{
-    Json, Router,
     extract::{Path, State},
     routing::{get, post},
+    Json, Router,
 };
 use sqlx::Row;
 use uuid::Uuid;
@@ -90,8 +90,24 @@ async fn list(
     })?;
 
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
-    let is_teacher = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Guru" || r.name == "Teacher")).unwrap_or(false);
-    let is_student = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Siswa" || r.name == "Student")).unwrap_or(false);
+    let is_teacher = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles
+                .iter()
+                .any(|r| r.name == "Guru" || r.name == "Teacher")
+        })
+        .unwrap_or(false);
+    let is_student = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles
+                .iter()
+                .any(|r| r.name == "Siswa" || r.name == "Student")
+        })
+        .unwrap_or(false);
 
     let items: Vec<LessonResponse> = if is_teacher {
         // Teacher sees only lessons that have materials they created
@@ -108,7 +124,7 @@ async fn list(
                   OR m.teacher_id IN (SELECT id FROM teachers WHERE user_id = $2)
               )
             ORDER BY l.created_at DESC
-            "#
+            "#,
         )
         .bind(req_ctx.tenant_id)
         .bind(actor_id)
@@ -116,21 +132,23 @@ async fn list(
         .await
         .unwrap_or_default();
 
-        rows.into_iter().map(|r| LessonResponse {
-            id: r.get("id"),
-            tenant_id: r.get("tenant_id"),
-            syllabus_id: r.get("syllabus_id"),
-            code: r.get("code"),
-            title: r.get("title"),
-            description: r.get("description"),
-            learning_objectives: r.get("learning_objectives"),
-            duration_minutes: r.get("duration_minutes"),
-            order_index: r.get("order_index"),
-            status: r.get("status"),
-            is_active: r.get("is_active"),
-            created_at: r.get("created_at"),
-            updated_at: r.get("updated_at"),
-        }).collect()
+        rows.into_iter()
+            .map(|r| LessonResponse {
+                id: r.get("id"),
+                tenant_id: r.get("tenant_id"),
+                syllabus_id: r.get("syllabus_id"),
+                code: r.get("code"),
+                title: r.get("title"),
+                description: r.get("description"),
+                learning_objectives: r.get("learning_objectives"),
+                duration_minutes: r.get("duration_minutes"),
+                order_index: r.get("order_index"),
+                status: r.get("status"),
+                is_active: r.get("is_active"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+            })
+            .collect()
     } else if is_student {
         // Student sees ONLY lessons that have materials for their active enrolled classes
         let rows = sqlx::query(
@@ -149,7 +167,7 @@ async fn list(
                   WHERE s.user_id = $2 AND (en.status = 'Active' OR en.status = 'ACTIVE')
               )
             ORDER BY l.created_at DESC
-            "#
+            "#,
         )
         .bind(req_ctx.tenant_id)
         .bind(actor_id)
@@ -157,21 +175,23 @@ async fn list(
         .await
         .unwrap_or_default();
 
-        rows.into_iter().map(|r| LessonResponse {
-            id: r.get("id"),
-            tenant_id: r.get("tenant_id"),
-            syllabus_id: r.get("syllabus_id"),
-            code: r.get("code"),
-            title: r.get("title"),
-            description: r.get("description"),
-            learning_objectives: r.get("learning_objectives"),
-            duration_minutes: r.get("duration_minutes"),
-            order_index: r.get("order_index"),
-            status: r.get("status"),
-            is_active: r.get("is_active"),
-            created_at: r.get("created_at"),
-            updated_at: r.get("updated_at"),
-        }).collect()
+        rows.into_iter()
+            .map(|r| LessonResponse {
+                id: r.get("id"),
+                tenant_id: r.get("tenant_id"),
+                syllabus_id: r.get("syllabus_id"),
+                code: r.get("code"),
+                title: r.get("title"),
+                description: r.get("description"),
+                learning_objectives: r.get("learning_objectives"),
+                duration_minutes: r.get("duration_minutes"),
+                order_index: r.get("order_index"),
+                status: r.get("status"),
+                is_active: r.get("is_active"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+            })
+            .collect()
     } else {
         // Super Admin / Kepala Sekolah / Staf sees all lessons in tenant
         let query = ListLessonsQuery {

@@ -165,7 +165,7 @@ impl ClassRepository for PgAcademicRepository {
         page_size: u64,
     ) -> Result<Page<Class>, InfrastructureError> {
         let offset = (page.saturating_sub(1)) * page_size;
-        
+
         let (records, count_row) = if let Some(ay_id) = academic_year_id {
             let records = sqlx::query(
                 r#"SELECT id, tenant_id, academic_year_id, grade_level_id, homeroom_teacher_id, name, capacity, created_at, updated_at, deleted_at, deleted_by
@@ -189,7 +189,7 @@ impl ClassRepository for PgAcademicRepository {
             .fetch_one(&self.pool)
             .await
             .map_err(InfrastructureError::Database)?;
-            
+
             (records, count_row)
         } else {
             let records = sqlx::query(
@@ -212,7 +212,7 @@ impl ClassRepository for PgAcademicRepository {
             .fetch_one(&self.pool)
             .await
             .map_err(InfrastructureError::Database)?;
-            
+
             (records, count_row)
         };
 

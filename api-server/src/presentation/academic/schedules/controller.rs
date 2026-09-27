@@ -1,7 +1,7 @@
 use axum::{
-    Json, Router,
     extract::{Path, Query, State},
     routing::{delete, post},
+    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -92,7 +92,14 @@ async fn create(
     )
     .execute(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
 
     let row = sqlx::query_as!(
         ScheduleResponse,
@@ -123,7 +130,14 @@ async fn create(
     )
     .fetch_one(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
 
     Ok(Json(ApiResponse::success(row, req_ctx.request_id)))
 }
@@ -188,7 +202,14 @@ async fn list(
     )
     .fetch_all(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
 
     Ok(Json(ApiResponse::success(rows, req_ctx.request_id)))
 }
@@ -214,7 +235,14 @@ async fn delete_schedule(
     )
     .execute(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
 
     Ok(Json(ApiResponse::success(true, req_ctx.request_id)))
 }

@@ -65,7 +65,12 @@ async fn test_health_and_metrics_endpoints() {
     assert_eq!(metrics_res.status(), StatusCode::OK);
     let body = metrics_res.into_body().collect().await.unwrap().to_bytes();
     let body_str = String::from_utf8_lossy(&body);
-    assert!(body_str.contains("http_requests_total") || body_str.contains("# TYPE") || body_str.is_empty() || !body_str.is_empty());
+    assert!(
+        body_str.contains("http_requests_total")
+            || body_str.contains("# TYPE")
+            || body_str.is_empty()
+            || !body_str.is_empty()
+    );
 }
 
 #[tokio::test]

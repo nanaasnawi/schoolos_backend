@@ -26,7 +26,7 @@ fn test_quiet_hours_evening_deferred_to_morning() {
     // 21:00 WIB is 14:00 UTC (start of quiet hours: 21:00 - 06:00 WIB)
     let evening_now = Utc.with_ymd_and_hms(2026, 9, 17, 14, 0, 0).unwrap();
     let scheduled_at = SmartReminderWorker::compute_delivery_time(evening_now, false);
-    
+
     // Delivery should be postponed to 06:00 WIB next morning (23:00 UTC)
     // 14:00 UTC + 9 hours = 23:00 UTC
     let expected = Utc.with_ymd_and_hms(2026, 9, 17, 23, 0, 0).unwrap();
@@ -38,7 +38,7 @@ fn test_quiet_hours_early_morning_deferred_to_morning() {
     // 03:00 WIB is 20:00 UTC previous day (inside quiet hours)
     let early_morning = Utc.with_ymd_and_hms(2026, 9, 16, 20, 0, 0).unwrap();
     let scheduled_at = SmartReminderWorker::compute_delivery_time(early_morning, false);
-    
+
     // In WIB: wib_hour = (20 + 7) % 24 = 3
     // Hours until 6am = 6 - 3 = 3 hours
     // 20:00 UTC + 3 hours = 23:00 UTC (06:00 WIB)
@@ -48,13 +48,34 @@ fn test_quiet_hours_early_morning_deferred_to_morning() {
 
 #[test]
 fn test_indonesian_weekday_mapping() {
-    assert_eq!(SmartReminderWorker::get_indonesian_weekday(Weekday::Mon), "Senin");
-    assert_eq!(SmartReminderWorker::get_indonesian_weekday(Weekday::Tue), "Selasa");
-    assert_eq!(SmartReminderWorker::get_indonesian_weekday(Weekday::Wed), "Rabu");
-    assert_eq!(SmartReminderWorker::get_indonesian_weekday(Weekday::Thu), "Kamis");
-    assert_eq!(SmartReminderWorker::get_indonesian_weekday(Weekday::Fri), "Jumat");
-    assert_eq!(SmartReminderWorker::get_indonesian_weekday(Weekday::Sat), "Sabtu");
-    assert_eq!(SmartReminderWorker::get_indonesian_weekday(Weekday::Sun), "Minggu");
+    assert_eq!(
+        SmartReminderWorker::get_indonesian_weekday(Weekday::Mon),
+        "Senin"
+    );
+    assert_eq!(
+        SmartReminderWorker::get_indonesian_weekday(Weekday::Tue),
+        "Selasa"
+    );
+    assert_eq!(
+        SmartReminderWorker::get_indonesian_weekday(Weekday::Wed),
+        "Rabu"
+    );
+    assert_eq!(
+        SmartReminderWorker::get_indonesian_weekday(Weekday::Thu),
+        "Kamis"
+    );
+    assert_eq!(
+        SmartReminderWorker::get_indonesian_weekday(Weekday::Fri),
+        "Jumat"
+    );
+    assert_eq!(
+        SmartReminderWorker::get_indonesian_weekday(Weekday::Sat),
+        "Sabtu"
+    );
+    assert_eq!(
+        SmartReminderWorker::get_indonesian_weekday(Weekday::Sun),
+        "Minggu"
+    );
 }
 
 #[test]
@@ -74,13 +95,22 @@ fn test_openapi_schema_contains_core_routes() {
     let openapi = api_server::ApiDoc::openapi();
     let json = openapi.to_json().expect("OpenAPI must serialize to JSON");
     let parsed: Value = serde_json::from_str(&json).expect("Must be valid JSON");
-    
+
     let paths = parsed.get("paths").expect("Must contain paths");
-    
+
     // Core routes documented in ApiDoc
-    assert!(paths.get("/api/v1/auth/login").is_some(), "login route must be documented");
-    assert!(paths.get("/api/v1/academic/classes").is_some(), "classes route must be documented");
-    assert!(paths.get("/api/v1/academic/enrollments").is_some(), "enrollments route must be documented");
+    assert!(
+        paths.get("/api/v1/auth/login").is_some(),
+        "login route must be documented"
+    );
+    assert!(
+        paths.get("/api/v1/academic/classes").is_some(),
+        "classes route must be documented"
+    );
+    assert!(
+        paths.get("/api/v1/academic/enrollments").is_some(),
+        "enrollments route must be documented"
+    );
 }
 
 #[test]
@@ -117,10 +147,18 @@ fn test_teacher_assignment_isolation_logic() {
     let assignment_teacher_id = Some(teacher_a_id);
 
     // Teacher A is the owner
-    let is_teacher_a_owner = assignment_created_by == teacher_a_id || assignment_teacher_id == Some(teacher_a_id);
-    assert!(is_teacher_a_owner, "Teacher A must have access to own assignment");
+    let is_teacher_a_owner =
+        assignment_created_by == teacher_a_id || assignment_teacher_id == Some(teacher_a_id);
+    assert!(
+        is_teacher_a_owner,
+        "Teacher A must have access to own assignment"
+    );
 
     // Teacher B is NOT the owner
-    let is_teacher_b_owner = assignment_created_by == teacher_b_id || assignment_teacher_id == Some(teacher_b_id);
-    assert!(!is_teacher_b_owner, "Teacher B must NOT have access to Teacher A's assignment");
+    let is_teacher_b_owner =
+        assignment_created_by == teacher_b_id || assignment_teacher_id == Some(teacher_b_id);
+    assert!(
+        !is_teacher_b_owner,
+        "Teacher B must NOT have access to Teacher A's assignment"
+    );
 }

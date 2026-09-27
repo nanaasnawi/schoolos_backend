@@ -21,11 +21,14 @@ impl ListClassesUseCase {
     }
 
     pub async fn execute(&self, query: ListClassesQuery) -> Result<Page<Class>, ApplicationError> {
-        self.class_repo.list(
-            query.tenant_id,
-            query.academic_year_id,
-            query.pagination.page,
-            query.pagination.page_size,
-        ).await.map_err(ApplicationError::Infrastructure)
+        self.class_repo
+            .list(
+                query.tenant_id,
+                query.academic_year_id,
+                query.pagination.page,
+                query.pagination.page_size,
+            )
+            .await
+            .map_err(ApplicationError::Infrastructure)
     }
 }

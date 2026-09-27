@@ -144,7 +144,10 @@ impl RoleRepository for PgRoleRepository {
             .collect())
     }
 
-    async fn find_permissions_by_user_id(&self, user_id: Uuid) -> Result<Vec<Permission>, InfrastructureError> {
+    async fn find_permissions_by_user_id(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<Permission>, InfrastructureError> {
         let records = sqlx::query(
             r#"
             SELECT DISTINCT rp.permission

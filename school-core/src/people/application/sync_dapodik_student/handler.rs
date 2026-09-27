@@ -1,8 +1,8 @@
+use crate::common::domain::clock::Clock;
 use crate::integration::contracts::StudentSyncRecord;
 use crate::people::domain::student::{Student, StudentStatus};
-use crate::common::domain::clock::Clock;
-use uuid::Uuid;
 use tracing::info;
+use uuid::Uuid;
 
 pub struct SyncDapodikStudentCommand {
     pub tenant_id: Uuid,
@@ -27,7 +27,7 @@ impl<'a> SyncDapodikStudentHandler<'a> {
 
         // 1. Fetch existing student by NISN or External ID (mocked for now)
         // let existing_student = self.repo.find_by_external_id(&command.sync_record.external_id).await?;
-        
+
         let existing_student: Option<Student> = None; // Mocked
 
         if let Some(mut student) = existing_student {
@@ -36,7 +36,7 @@ impl<'a> SyncDapodikStudentHandler<'a> {
             student.updated_at = self.clock.now();
             // Map external status to internal status
             // ...
-            
+
             // self.repo.save(&student).await?;
             Ok(student)
         } else {
@@ -57,9 +57,9 @@ impl<'a> SyncDapodikStudentHandler<'a> {
                 None, // Guardian
                 self.clock,
             )?;
-            
+
             new_student.status = StudentStatus::Active; // Or map from external status
-            
+
             // self.repo.save(&new_student).await?;
             Ok(new_student)
         }

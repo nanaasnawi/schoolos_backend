@@ -1,7 +1,7 @@
 use axum::{
-    Json, Router,
     extract::State,
     routing::{get, post},
+    Json, Router,
 };
 use sqlx::Row;
 use uuid::Uuid;
@@ -9,8 +9,7 @@ use uuid::Uuid;
 use super::dto::{
     assessment_rule_response::AssessmentRuleResponse,
     calculate_grade_request::CalculateGradeRequest, configure_rules_request::ConfigureRulesRequest,
-    gradebook_entry_response::GradebookEntryResponse,
-    gradebook_response::GradeBookResponse,
+    gradebook_entry_response::GradebookEntryResponse, gradebook_response::GradeBookResponse,
 };
 use crate::{
     bootstrap::ApplicationContext, error::ApiError, extractors::RequestContext,
@@ -266,7 +265,7 @@ async fn save_gradebook(
             FROM enrollments e
             WHERE e.student_id = ANY($1) AND (e.status = 'Active' OR e.status = 'ACTIVE')
             ORDER BY e.student_id
-            "#
+            "#,
         )
         .bind(&student_ids)
         .fetch_all(&ctx.pool)
@@ -320,7 +319,10 @@ async fn save_gradebook(
         gb_academic_year_ids.push(payload.academic_year_id);
         gb_final_scores.push(g.final_score.map(|s| format!("{:.2}", s)));
         gb_letter_grades.push(g.letter_grade.clone());
-        gb_passed_values.push(g.passed.unwrap_or_else(|| g.final_score.map(|s| s >= 75.0).unwrap_or(false)));
+        gb_passed_values.push(
+            g.passed
+                .unwrap_or_else(|| g.final_score.map(|s| s >= 75.0).unwrap_or(false)),
+        );
         gb_statuses.push(g.status.clone().unwrap_or_else(|| "published".to_string()));
     }
 
@@ -374,7 +376,7 @@ async fn save_gradebook(
         r#"
         DELETE FROM gradebook_entries
         WHERE student_id = ANY($1) AND class_id = ANY($2) AND subject_id = $3
-        "#
+        "#,
     )
     .bind(&gb_student_ids)
     .bind(&gb_class_ids)
@@ -467,19 +469,24 @@ async fn save_gradebook(
 
     // ── FCM update NILAI (gradebook save) ke siswa terdampak ──
     {
-        let subject_label = payload.subject_name.clone().unwrap_or_else(|| "Nilai".to_string());
+        let subject_label = payload
+            .subject_name
+            .clone()
+            .unwrap_or_else(|| "Nilai".to_string());
         // Ambil 1 nama siswa contoh untuk body generik (tanpa N+1 query per siswa).
         let t = format!("🏆 Update Nilai: {}", subject_label);
-        let b = "Nilai terbaru sudah diinput guru. Buka Nilai/Progres untuk melihat detail!".to_string();
+        let b = "Nilai terbaru sudah diinput guru. Buka Nilai/Progres untuk melihat detail!"
+            .to_string();
         let tid = req_ctx.tenant_id;
         let first_student = gb_student_ids.first().copied();
         if let Some(sid) = first_student {
-            let user_id: Option<Uuid> = sqlx::query_scalar("SELECT user_id FROM students WHERE id = $1")
-                .bind(sid)
-                .fetch_optional(&ctx.pool)
-                .await
-                .ok()
-                .flatten();
+            let user_id: Option<Uuid> =
+                sqlx::query_scalar("SELECT user_id FROM students WHERE id = $1")
+                    .bind(sid)
+                    .fetch_optional(&ctx.pool)
+                    .await
+                    .ok()
+                    .flatten();
             if let Some(uid) = user_id {
                 let _ = sqlx::query(
                     "INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, reference_type, reference_id, is_read, created_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, 'GRADE_UPDATE', 'in_app', 'grade', $5, FALSE, NOW())",
@@ -491,7 +498,8 @@ async fn save_gradebook(
         // FCM topic broadcast agar SEMUA siswa standby tetap dibangunkan walau
         // insert in-app di atas hanya contoh 1 baris (hemat query batch).
         crate::infrastructure::fcm::trigger_fcm_push_categorized(
-            t, b,
+            t,
+            b,
             crate::infrastructure::fcm::FcmCategory::Grade,
             first_student.unwrap_or_else(Uuid::new_v4),
         );
@@ -499,7 +507,6 @@ async fn save_gradebook(
 
     Ok(Json(ApiResponse::success(true, req_ctx.request_id)))
 }
-
 
 async fn get_gradebook(
     State(ctx): State<ApplicationContext>,
@@ -590,9 +597,14 @@ async fn get_gradebook(
     )
     .fetch_all(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
-        school_core::common::error::InfrastructureError::Database(e)
-    ), &req_ctx.request_id))?;
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
 
     let items = entries
         .into_iter()
@@ -621,6 +633,3 @@ pub struct GradebookParams {
     pub class_id: Option<Uuid>,
     pub subject_id: Option<Uuid>,
 }
-
-
-

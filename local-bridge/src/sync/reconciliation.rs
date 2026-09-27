@@ -1,6 +1,6 @@
-use crate::store::local_store::LocalStore;
 use crate::domain::student::StudentSyncRecord;
-use sha2::{Sha256, Digest};
+use crate::store::local_store::LocalStore;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tracing::info;
 
@@ -26,7 +26,10 @@ impl ReconciliationEngine {
 
     /// Compares a batch of StudentSyncRecords against the local snapshot
     /// and returns only the ones that have changed (Created or Updated).
-    pub async fn reconcile_students(&self, records: Vec<StudentSyncRecord>) -> Result<Vec<StudentChangeSet>, String> {
+    pub async fn reconcile_students(
+        &self,
+        records: Vec<StudentSyncRecord>,
+    ) -> Result<Vec<StudentChangeSet>, String> {
         let mut change_sets = Vec::new();
         let entity_type = "student";
 
@@ -34,13 +37,15 @@ impl ReconciliationEngine {
             // Compute a hash of the canonical contract
             // We use JSON serialization to ensure stable hashing of the contents
             let payload_json = serde_json::to_string(&record).unwrap_or_default();
-            
+
             let mut hasher = Sha256::new();
             hasher.update(payload_json.as_bytes());
             let current_hash = format!("{:x}", hasher.finalize());
 
             // Check previous hash in LocalStore
-            let previous_hash = self.store.get_snapshot_hash(entity_type, &record.external_id)
+            let previous_hash = self
+                .store
+                .get_snapshot_hash(entity_type, &record.external_id)
                 .await
                 .map_err(|e| e.to_string())?;
 
@@ -56,7 +61,8 @@ impl ReconciliationEngine {
                     // Do nothing, save bandwidth
                 }
                 _ => {
-                    self.store.save_snapshot_hash(entity_type, &record.external_id, &current_hash)
+                    self.store
+                        .save_snapshot_hash(entity_type, &record.external_id, &current_hash)
                         .await
                         .map_err(|e| e.to_string())?;
 
@@ -68,7 +74,10 @@ impl ReconciliationEngine {
             }
         }
 
-        info!("Reconciliation complete. Found {} changes to sync.", change_sets.len());
+        info!(
+            "Reconciliation complete. Found {} changes to sync.",
+            change_sets.len()
+        );
 
         Ok(change_sets)
     }

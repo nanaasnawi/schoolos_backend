@@ -24,8 +24,8 @@ use school_core::academic::application::term::{
 };
 use school_core::common::domain::clock::Clock;
 use school_core::common::event_bus::SharedEventBus;
-use school_core::identity::application::auth::authenticate_user::AuthenticateUserUseCase;
 use school_core::identity::application::auth::authenticate_qr_token::AuthenticateQrTokenUseCase;
+use school_core::identity::application::auth::authenticate_user::AuthenticateUserUseCase;
 use school_core::identity::application::auth::generate_qr_token::GenerateQrTokenUseCase;
 use school_core::identity::application::auth::register_user::RegisterUserUseCase;
 
@@ -123,6 +123,7 @@ pub struct ApplicationContext {
     pub event_bus: SharedEventBus,
     pub clock: Arc<dyn Clock>,
     pub jwt_secret: String,
+    pub auth_cache: crate::middleware::AuthCache,
 
     pub authenticate_user: Arc<AuthenticateUserUseCase>,
     pub authenticate_qr_token: Arc<AuthenticateQrTokenUseCase>,

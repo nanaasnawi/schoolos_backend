@@ -1,7 +1,7 @@
 use axum::{
-    Json, Router,
     extract::{Path, Query, State},
     routing::{get, post},
+    Json, Router,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -280,7 +280,7 @@ async fn assign_reading_material(
     );
 
     let book_file_url: Option<String> = sqlx::query_scalar::<_, String>(
-        "SELECT COALESCE(file_url, '') FROM library_books WHERE id = $1"
+        "SELECT COALESCE(file_url, '') FROM library_books WHERE id = $1",
     )
     .bind(payload.book_id)
     .fetch_optional(&ctx.pool)
@@ -325,7 +325,7 @@ async fn assign_reading_material(
     // Fetch teacher & class names for notifications
     let teacher_name = if let Some(tid) = teacher_id {
         sqlx::query_scalar::<_, String>(
-            "SELECT u.full_name FROM teachers t JOIN users u ON u.id = t.user_id WHERE t.id = $1"
+            "SELECT u.full_name FROM teachers t JOIN users u ON u.id = t.user_id WHERE t.id = $1",
         )
         .bind(tid)
         .fetch_optional(&ctx.pool)
@@ -334,21 +334,19 @@ async fn assign_reading_material(
         .flatten()
         .unwrap_or_else(|| "Guru Pengampu".to_string())
     } else if let Some(aid) = actor_id {
-        sqlx::query_scalar::<_, String>(
-            "SELECT full_name FROM users WHERE id = $1"
-        )
-        .bind(aid)
-        .fetch_optional(&ctx.pool)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "Guru Pengampu".to_string())
+        sqlx::query_scalar::<_, String>("SELECT full_name FROM users WHERE id = $1")
+            .bind(aid)
+            .fetch_optional(&ctx.pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "Guru Pengampu".to_string())
     } else {
         "Guru Pengampu".to_string()
     };
 
     let class_name = sqlx::query_scalar::<_, String>(
-        "SELECT name FROM classes WHERE id = $1 AND tenant_id = $2"
+        "SELECT name FROM classes WHERE id = $1 AND tenant_id = $2",
     )
     .bind(payload.class_id)
     .bind(req_ctx.tenant_id)
@@ -483,30 +481,29 @@ async fn get_reading_analytics(
     req_ctx: RequestContext,
     Path(material_id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<ReadingAnalyticsResponse>>, ApiError> {
-    let material_row = sqlx::query(
-        "SELECT class_id FROM learning_materials WHERE id = $1 AND tenant_id = $2"
-    )
-    .bind(material_id)
-    .bind(req_ctx.tenant_id)
-    .fetch_optional(&ctx.pool)
-    .await
-    .map_err(|e| {
-        ApiError::new(
-            ApplicationError::Infrastructure(
-                school_core::common::error::InfrastructureError::Database(e),
-            ),
-            &req_ctx.request_id,
-        )
-    })?
-    .ok_or_else(|| {
-        ApiError::new(
-            ApplicationError::NotFound(
-                ErrorCode::ResourceNotFound,
-                "Materi pembelajaran tidak ditemukan".to_string(),
-            ),
-            &req_ctx.request_id,
-        )
-    })?;
+    let material_row =
+        sqlx::query("SELECT class_id FROM learning_materials WHERE id = $1 AND tenant_id = $2")
+            .bind(material_id)
+            .bind(req_ctx.tenant_id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .map_err(|e| {
+                ApiError::new(
+                    ApplicationError::Infrastructure(
+                        school_core::common::error::InfrastructureError::Database(e),
+                    ),
+                    &req_ctx.request_id,
+                )
+            })?
+            .ok_or_else(|| {
+                ApiError::new(
+                    ApplicationError::NotFound(
+                        ErrorCode::ResourceNotFound,
+                        "Materi pembelajaran tidak ditemukan".to_string(),
+                    ),
+                    &req_ctx.request_id,
+                )
+            })?;
 
     let class_id: Option<Uuid> = material_row.get("class_id");
 
@@ -531,7 +528,7 @@ async fn get_reading_analytics(
             COUNT(CASE WHEN is_completed = true THEN 1 END)::bigint as total_completed
         FROM reading_progress
         WHERE material_id = $1 AND tenant_id = $2
-        "#
+        "#,
     )
     .bind(material_id)
     .bind(req_ctx.tenant_id)

@@ -17,7 +17,11 @@ pub struct DapodikRawStudent {
     pub agama_id_str: Option<String>,
     pub nama_ayah: Option<String>,
     pub pekerjaan_ayah_id_str: Option<String>,
-    #[serde(alias = "nama_ibu_kandung", alias = "nama_ibu_kandung_str", alias = "ibu_kandung")]
+    #[serde(
+        alias = "nama_ibu_kandung",
+        alias = "nama_ibu_kandung_str",
+        alias = "ibu_kandung"
+    )]
     pub nama_ibu: Option<String>,
     pub pekerjaan_ibu_id_str: Option<String>,
     pub nama_wali: Option<String>,
@@ -98,7 +102,7 @@ pub struct DapodikWsStudent {
     pub nipd: Option<String>,
     pub tanggal_masuk_sekolah: Option<String>,
     pub sekolah_asal: Option<String>,
-    
+
     pub peserta_didik_id: String,
     pub nama: String,
     pub nisn: Option<String>,
@@ -106,21 +110,25 @@ pub struct DapodikWsStudent {
     pub nik: Option<String>,
     pub tempat_lahir: Option<String>,
     pub tanggal_lahir: String,
-    
+
     pub agama_id: Option<i32>,
     pub agama_id_str: Option<String>,
     pub alamat_jalan: Option<String>,
     pub nomor_telepon_rumah: Option<String>,
     pub nomor_telepon_seluler: Option<String>,
-    
+
     pub nama_ayah: Option<String>,
-    #[serde(alias = "nama_ibu_kandung", alias = "nama_ibu_kandung_str", alias = "ibu_kandung")]
+    #[serde(
+        alias = "nama_ibu_kandung",
+        alias = "nama_ibu_kandung_str",
+        alias = "ibu_kandung"
+    )]
     pub nama_ibu: Option<String>,
     pub nama_wali: Option<String>,
-    
+
     pub email: Option<String>,
     pub semester_id: Option<String>,
-    
+
     pub anggota_rombel_id: Option<String>,
     pub rombongan_belajar_id: Option<String>,
     pub tingkat_pendidikan_id: Option<String>,
@@ -132,4 +140,3 @@ pub struct DapodikWsStudent {
 pub struct DapodikWsResponse {
     pub rows: Vec<DapodikWsStudent>,
 }
-

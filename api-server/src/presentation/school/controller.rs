@@ -1,12 +1,15 @@
 use axum::{
-    Json, Router,
     extract::{Path, Query, State},
     routing::get,
+    Json, Router,
 };
 use serde::Deserialize;
 use uuid::Uuid;
 
-use super::dto::{school_response::{SchoolPublicInfo, SchoolResponse}, update_school_request::UpdateSchoolRequest};
+use super::dto::{
+    school_response::{SchoolPublicInfo, SchoolResponse},
+    update_school_request::UpdateSchoolRequest,
+};
 use crate::{
     bootstrap::ApplicationContext, error::ApiError, extractors::RequestContext,
     response::ApiResponse,
@@ -43,10 +46,14 @@ pub async fn get_school_public_info(
     )
     .fetch_optional(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(
-        ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)),
-        &uuid::Uuid::nil().to_string(),
-    ))?;
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &uuid::Uuid::nil().to_string(),
+        )
+    })?;
 
     let data = if let Some(r) = row {
         SchoolPublicInfo {
@@ -62,12 +69,18 @@ pub async fn get_school_public_info(
         }
     };
 
-    Ok(Json(ApiResponse::success(data, uuid::Uuid::nil().to_string())))
+    Ok(Json(ApiResponse::success(
+        data,
+        uuid::Uuid::nil().to_string(),
+    )))
 }
 
 pub fn school_routes() -> Router<ApplicationContext> {
     Router::new()
-        .route("/profile", get(get_current_school_profile).put(update_current_school_profile))
+        .route(
+            "/profile",
+            get(get_current_school_profile).put(update_current_school_profile),
+        )
         .route("/{id}", get(get_school).put(update_school))
 }
 
@@ -88,7 +101,10 @@ pub async fn get_current_school_profile(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
 ) -> Result<Json<ApiResponse<SchoolResponse>>, ApiError> {
-    tracing::debug!("get_current_school_profile called with tenant_id: {}", req_ctx.tenant_id);
+    tracing::debug!(
+        "get_current_school_profile called with tenant_id: {}",
+        req_ctx.tenant_id
+    );
     let row = sqlx::query!(
         r#"
         SELECT id, tenant_id, name, npsn, address, phone_number, email, logo_url, status, dapodik_url, dapodik_token, accreditation, created_at, updated_at
@@ -104,15 +120,13 @@ pub async fn get_current_school_profile(
 
     let response_data = if let Some(r) = row {
         let final_school_name = if r.name.trim().is_empty() {
-            sqlx::query_scalar::<_, String>(
-                "SELECT name FROM tenants WHERE id = $1"
-            )
-            .bind(req_ctx.tenant_id)
-            .fetch_optional(&ctx.pool)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "Nama Sekolah".to_string())
+            sqlx::query_scalar::<_, String>("SELECT name FROM tenants WHERE id = $1")
+                .bind(req_ctx.tenant_id)
+                .fetch_optional(&ctx.pool)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "Nama Sekolah".to_string())
         } else {
             r.name
         };
@@ -144,7 +158,10 @@ pub async fn get_current_school_profile(
         .ok()
         .flatten();
 
-        let default_name = tenant_info.as_ref().map(|t| t.name.clone()).unwrap_or_else(|| "Nama Sekolah".to_string());
+        let default_name = tenant_info
+            .as_ref()
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| "Nama Sekolah".to_string());
         let default_npsn = tenant_info.as_ref().and_then(|t| t.npsn.clone());
 
         let new_id = Uuid::now_v7();
@@ -212,7 +229,14 @@ pub async fn update_current_school_profile(
     )
     .fetch_optional(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
 
     let school_id = if let Some(e) = existing {
         e.id
@@ -220,8 +244,16 @@ pub async fn update_current_school_profile(
         Uuid::now_v7()
     };
 
-    let name_trimmed = payload.name.as_ref().map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
-    let npsn_trimmed = payload.npsn.as_ref().map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+    let name_trimmed = payload
+        .name
+        .as_ref()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty());
+    let npsn_trimmed = payload
+        .npsn
+        .as_ref()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty());
 
     if let Some(ref n) = name_trimmed {
         let _ = sqlx::query("UPDATE tenants SET name = $1, updated_at = NOW() WHERE id = $2")

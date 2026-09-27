@@ -1,8 +1,8 @@
 use axum::{
-    Json, Router,
     extract::{Path, State},
     response::sse::{Event, KeepAlive, Sse},
     routing::{delete, get, patch},
+    Json, Router,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -321,7 +321,12 @@ async fn create(
     let _ = ANNOUNCEMENT_BROADCAST.send(broadcast_event);
 
     if row.push_status {
-        trigger_fcm_push_notification(format!("📢 {}", row.title), row.content.clone(), row.category.clone(), row.id);
+        trigger_fcm_push_notification(
+            format!("📢 {}", row.title),
+            row.content.clone(),
+            row.category.clone(),
+            row.id,
+        );
     }
 
     let resp = CreateAnnouncementResponse {
@@ -462,4 +467,3 @@ async fn delete_announcement(
 }
 
 use crate::infrastructure::fcm::trigger_fcm_push_notification;
-

@@ -1,31 +1,32 @@
 use axum::{
-    Router,
     extract::{Json, State},
     routing::post,
+    Router,
 };
 use sqlx::Row;
 
 use super::dto::{
-    login_request::LoginRequest, login_response::LoginResponse,
+    login_request::LoginRequest,
+    login_response::LoginResponse,
     qr_login_request::{
         BatchGenerateQrBadgesRequest, BatchGenerateQrItemDto, GenerateQrBadgeRequest,
         QrLoginRequest, UserQrStatusDto,
     },
-    register_request::RegisterRequest, register_response::RegisterResponse,
+    register_request::RegisterRequest,
+    register_response::RegisterResponse,
 };
 use crate::{
     bootstrap::ApplicationContext, error::ApiError, extractors::RequestContext,
     response::ApiResponse,
 };
 use school_core::identity::application::auth::{
-    authenticate_user::AuthenticateUserCommand,
-    generate_qr_token::GenerateQrTokenCommand,
+    authenticate_user::AuthenticateUserCommand, generate_qr_token::GenerateQrTokenCommand,
     register_user::RegisterUserCommand,
 };
 
 pub fn auth_routes(context: ApplicationContext) -> Router<ApplicationContext> {
-    use axum::middleware;
     use crate::middleware::auth_middleware;
+    use axum::middleware;
 
     Router::new()
         .route("/login", post(login))
@@ -38,14 +39,15 @@ pub fn auth_routes(context: ApplicationContext) -> Router<ApplicationContext> {
                 .route("/users", axum::routing::get(list_users))
                 .route("/change-password", axum::routing::post(change_password))
                 .route("/qr-tokens/generate", post(generate_qr_token_endpoint))
-                .route("/qr-tokens/batch-generate", post(batch_generate_qr_tokens_endpoint))
+                .route(
+                    "/qr-tokens/batch-generate",
+                    post(batch_generate_qr_tokens_endpoint),
+                )
                 .route("/qr-tokens/users", axum::routing::get(list_users_qr_status))
                 .route("/qr-tokens/my-badge", axum::routing::get(get_my_qr_badge))
                 .layer(middleware::from_fn_with_state(context, auth_middleware)),
         )
 }
-
-
 
 /// Authenticate a user and return a JWT access token.
 ///
@@ -72,20 +74,26 @@ async fn login(
     Json(payload): Json<LoginRequest>,
 ) -> Result<Json<ApiResponse<LoginResponse>>, ApiError> {
     // 1. Check if Global Maintenance Mode is active
-    let maintenance_record = sqlx::query!(
-        "SELECT value FROM system_settings WHERE key = 'maintenance'"
-    )
-    .fetch_optional(&ctx.pool)
-    .await
-    .ok()
-    .flatten();
+    let maintenance_record =
+        sqlx::query!("SELECT value FROM system_settings WHERE key = 'maintenance'")
+            .fetch_optional(&ctx.pool)
+            .await
+            .ok()
+            .flatten();
 
     if let Some(rec) = maintenance_record {
-        if rec.value.get("maintenance_mode").and_then(|v| v.as_bool()).unwrap_or(false) {
-            let msg = rec.value.get("maintenance_message")
+        if rec
+            .value
+            .get("maintenance_mode")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            let msg = rec
+                .value
+                .get("maintenance_message")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Sistem sedang dalam mode pemeliharaan oleh Super Admin.");
-            
+
             return Err(ApiError::new(
                 school_core::common::error::ApplicationError::Unauthorized(
                     school_core::common::error_code::ErrorCode::SystemMaintenance,
@@ -188,37 +196,42 @@ async fn login(
     .ok()
     .flatten();
 
-    let (user_id, tenant_id, name, email, role, user_identifier, class_name, child_name, child_id) = if let Some(u) = &user_row {
-        let u_id: uuid::Uuid = u.get("id");
-        let u_tenant_id: Option<uuid::Uuid> = u.get("tenant_id");
-        let u_full_name: String = u.get("full_name");
-        let u_email: String = u.get("email");
-        let u_role: Option<String> = u.get("role_name");
-        let u_ident: String = u.get("identifier");
-        (
-            Some(u_id.to_string()),
-            u_tenant_id,
-            Some(u_full_name),
-            Some(u_email),
-            Some(u_role.unwrap_or_else(|| "Siswa".to_string())),
-            if u_ident.is_empty() { None } else { Some(u_ident) },
-            u.get::<Option<String>, _>("class_name"),
-            u.get::<Option<String>, _>("child_name"),
-            u.get::<Option<String>, _>("child_id"),
-        )
-    } else {
-        (
-            Some(auth_user.id.to_string()),
-            Some(auth_user.tenant_id),
-            Some(auth_user.full_name.clone()),
-            Some(auth_user.email.clone()),
-            Some("Siswa".to_string()),
-            None,
-            None,
-            None,
-            None,
-        )
-    };
+    let (user_id, tenant_id, name, email, role, user_identifier, class_name, child_name, child_id) =
+        if let Some(u) = &user_row {
+            let u_id: uuid::Uuid = u.get("id");
+            let u_tenant_id: Option<uuid::Uuid> = u.get("tenant_id");
+            let u_full_name: String = u.get("full_name");
+            let u_email: String = u.get("email");
+            let u_role: Option<String> = u.get("role_name");
+            let u_ident: String = u.get("identifier");
+            (
+                Some(u_id.to_string()),
+                u_tenant_id,
+                Some(u_full_name),
+                Some(u_email),
+                Some(u_role.unwrap_or_else(|| "Siswa".to_string())),
+                if u_ident.is_empty() {
+                    None
+                } else {
+                    Some(u_ident)
+                },
+                u.get::<Option<String>, _>("class_name"),
+                u.get::<Option<String>, _>("child_name"),
+                u.get::<Option<String>, _>("child_id"),
+            )
+        } else {
+            (
+                Some(auth_user.id.to_string()),
+                Some(auth_user.tenant_id),
+                Some(auth_user.full_name.clone()),
+                Some(auth_user.email.clone()),
+                Some("Siswa".to_string()),
+                None,
+                None,
+                None,
+                None,
+            )
+        };
 
     let school_info = if let Some(t_id) = tenant_id {
         sqlx::query(
@@ -248,7 +261,8 @@ async fn login(
         &jsonwebtoken::Header::default(),
         &refresh_claims,
         &jsonwebtoken::EncodingKey::from_secret(ctx.jwt_secret.as_bytes()),
-    ).ok();
+    )
+    .ok();
 
     let response_data = LoginResponse {
         access_token: token,
@@ -309,27 +323,37 @@ async fn register(
 
     if let Some(target_role_name) = payload.role {
         let role_id = sqlx::query_scalar::<_, uuid::Uuid>(
-            "SELECT id FROM roles WHERE tenant_id = $1 AND name = $2 LIMIT 1"
+            "SELECT id FROM roles WHERE tenant_id = $1 AND name = $2 LIMIT 1",
         )
         .bind(req_ctx.tenant_id)
         .bind(&target_role_name)
         .fetch_optional(&ctx.pool)
         .await
-        .map_err(|e| ApiError::new(
-            school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)),
-            &req_ctx.request_id
-        ))?;
+        .map_err(|e| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
 
         if let Some(r_id) = role_id {
-            sqlx::query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
-                .bind(user.id)
-                .bind(r_id)
-                .execute(&ctx.pool)
-                .await
-                .map_err(|e| ApiError::new(
-                    school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)),
-                    &req_ctx.request_id
-                ))?;
+            sqlx::query(
+                "INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            )
+            .bind(user.id)
+            .bind(r_id)
+            .execute(&ctx.pool)
+            .await
+            .map_err(|e| {
+                ApiError::new(
+                    school_core::common::error::ApplicationError::Infrastructure(
+                        school_core::common::error::InfrastructureError::Database(e),
+                    ),
+                    &req_ctx.request_id,
+                )
+            })?;
         }
     }
 
@@ -405,23 +429,33 @@ async fn list_users(
     .bind(req_ctx.tenant_id)
     .fetch_all(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
 
-    let dtos = rows.into_iter().map(|r| AuthUserDto {
-        id: r.get("id"),
-        email: r.get("email"),
-        full_name: r.get("full_name"),
-        role: r.get("role_name"),
-        is_active: r.get("is_active"),
-        created_at: r.get("created_at"),
-        school_name: None,
-        school_logo_url: None,
-        identifier: None,
-        class_name: None,
-        child_name: None,
-        child_id: None,
-        username: r.get("username"),
-    }).collect();
+    let dtos = rows
+        .into_iter()
+        .map(|r| AuthUserDto {
+            id: r.get("id"),
+            email: r.get("email"),
+            full_name: r.get("full_name"),
+            role: r.get("role_name"),
+            is_active: r.get("is_active"),
+            created_at: r.get("created_at"),
+            school_name: None,
+            school_logo_url: None,
+            identifier: None,
+            class_name: None,
+            child_name: None,
+            child_id: None,
+            username: r.get("username"),
+        })
+        .collect();
 
     Ok(Json(ApiResponse::success(dtos, req_ctx.request_id)))
 }
@@ -446,7 +480,9 @@ async fn change_password(
     Json(payload): Json<ChangePasswordRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     use argon2::{
-        password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+        password_hash::{
+            rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
+        },
         Argon2,
     };
 
@@ -472,13 +508,20 @@ async fn change_password(
     }
 
     let password_hash = sqlx::query_scalar::<_, String>(
-        "SELECT password_hash FROM users WHERE id = $1 AND tenant_id = $2"
+        "SELECT password_hash FROM users WHERE id = $1 AND tenant_id = $2",
     )
     .bind(actor_id)
     .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?
     .ok_or_else(|| {
         ApiError::new(
             school_core::common::error::ApplicationError::NotFound(
@@ -489,10 +532,15 @@ async fn change_password(
         )
     })?;
 
-    let is_valid = match PasswordHash::new(&password_hash) {
-        Ok(parsed_hash) => Argon2::default().verify_password(payload.current_password.as_bytes(), &parsed_hash).is_ok(),
+    let cur_pwd_bytes = payload.current_password.into_bytes();
+    let is_valid = tokio::task::spawn_blocking(move || match PasswordHash::new(&password_hash) {
+        Ok(parsed_hash) => Argon2::default()
+            .verify_password(&cur_pwd_bytes, &parsed_hash)
+            .is_ok(),
         Err(_) => false,
-    };
+    })
+    .await
+    .unwrap_or(false);
 
     if !is_valid {
         return Err(ApiError::new(
@@ -505,28 +553,54 @@ async fn change_password(
         ));
     }
 
-    let salt = SaltString::generate(&mut OsRng);
-    let new_hash = Argon2::default()
-        .hash_password(payload.new_password.as_bytes(), &salt)
-        .map_err(|e| {
-            ApiError::new(
-                school_core::common::error::ApplicationError::Domain(
-                    school_core::common::error::DomainError::Validation(format!("Gagal mengenkripsi kata sandi: {}", e)),
-                ),
-                &req_ctx.request_id,
-            )
-        })?
-        .to_string();
+    let new_pwd_bytes = payload.new_password.into_bytes();
+    let new_hash = tokio::task::spawn_blocking(move || {
+        let salt = SaltString::generate(&mut OsRng);
+        Argon2::default()
+            .hash_password(&new_pwd_bytes, &salt)
+            .map(|h| h.to_string())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Domain(
+                school_core::common::error::DomainError::Validation(format!(
+                    "Gagal mengenkripsi kata sandi: {}",
+                    e
+                )),
+            ),
+            &req_ctx.request_id,
+        )
+    })?
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Domain(
+                school_core::common::error::DomainError::Validation(format!(
+                    "Gagal mengenkripsi kata sandi: {}",
+                    e
+                )),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
 
     sqlx::query(
-        "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3"
+        "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3",
     )
     .bind(&new_hash)
     .bind(actor_id)
     .bind(req_ctx.tenant_id)
     .execute(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
 
     Ok(Json(ApiResponse::success(
         serde_json::json!({
@@ -668,7 +742,9 @@ async fn get_me(
                 id: r.get("id"),
                 email: r.get("email"),
                 full_name: r.get("full_name"),
-                role: r.get::<Option<String>, _>("role_name").unwrap_or_else(|| "Administrator".to_string()),
+                role: r
+                    .get::<Option<String>, _>("role_name")
+                    .unwrap_or_else(|| "Administrator".to_string()),
                 is_active: r.get("is_active"),
                 created_at: r.get("created_at"),
                 school_name: school_info.as_ref().map(|s| s.name.clone()),
@@ -679,7 +755,7 @@ async fn get_me(
                 child_id: r.get("child_id"),
                 username: None,
             }
-        },
+        }
         None => AuthUserDto {
             id: actor_id,
             email: "admin@schoolos.com".to_string(),
@@ -718,22 +794,31 @@ async fn qr_login(
     req_ctx: RequestContext,
     Json(payload): Json<QrLoginRequest>,
 ) -> Result<Json<ApiResponse<LoginResponse>>, ApiError> {
-    tracing::info!("qr_login incoming request: token_len={}", payload.token.len());
+    tracing::info!(
+        "qr_login incoming request: token_len={}",
+        payload.token.len()
+    );
     // 1. Check if Global Maintenance Mode is active
-    let maintenance_record = sqlx::query!(
-        "SELECT value FROM system_settings WHERE key = 'maintenance'"
-    )
-    .fetch_optional(&ctx.pool)
-    .await
-    .ok()
-    .flatten();
+    let maintenance_record =
+        sqlx::query!("SELECT value FROM system_settings WHERE key = 'maintenance'")
+            .fetch_optional(&ctx.pool)
+            .await
+            .ok()
+            .flatten();
 
     if let Some(rec) = maintenance_record {
-        if rec.value.get("maintenance_mode").and_then(|v| v.as_bool()).unwrap_or(false) {
-            let msg = rec.value.get("maintenance_message")
+        if rec
+            .value
+            .get("maintenance_mode")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            let msg = rec
+                .value
+                .get("maintenance_message")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Sistem sedang dalam mode pemeliharaan oleh Super Admin.");
-            
+
             return Err(ApiError::new(
                 school_core::common::error::ApplicationError::Unauthorized(
                     school_core::common::error_code::ErrorCode::SystemMaintenance,
@@ -854,7 +939,8 @@ async fn qr_login(
         &jsonwebtoken::Header::default(),
         &refresh_claims,
         &jsonwebtoken::EncodingKey::from_secret(ctx.jwt_secret.as_bytes()),
-    ).ok();
+    )
+    .ok();
 
     let response_data = LoginResponse {
         access_token: result.token,
@@ -1072,24 +1158,31 @@ async fn list_users_qr_status(
     .await
     .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
 
-    let dtos = rows.into_iter().map(|r| {
-        let active_id: Option<uuid::Uuid> = r.try_get("active_token_id").unwrap_or(None);
-        let id_str: String = r.try_get("identifier").unwrap_or_default();
-        UserQrStatusDto {
-            id: r.get("id"),
-            email: r.get("email"),
-            full_name: r.get("full_name"),
-            role: r.try_get("role_name").unwrap_or_default(),
-            is_active: r.get("is_active"),
-            identifier: if id_str.is_empty() { None } else { Some(id_str) },
-            class_name: r.try_get("class_name").unwrap_or(None),
-            has_active_token: active_id.is_some(),
-            active_token_label: r.try_get("active_token_label").unwrap_or(None),
-            raw_token: r.try_get("active_raw_token").unwrap_or(None),
-            token_created_at: r.try_get("token_created_at").unwrap_or(None),
-            token_last_used_at: r.try_get("token_last_used_at").unwrap_or(None),
-        }
-    }).collect();
+    let dtos = rows
+        .into_iter()
+        .map(|r| {
+            let active_id: Option<uuid::Uuid> = r.try_get("active_token_id").unwrap_or(None);
+            let id_str: String = r.try_get("identifier").unwrap_or_default();
+            UserQrStatusDto {
+                id: r.get("id"),
+                email: r.get("email"),
+                full_name: r.get("full_name"),
+                role: r.try_get("role_name").unwrap_or_default(),
+                is_active: r.get("is_active"),
+                identifier: if id_str.is_empty() {
+                    None
+                } else {
+                    Some(id_str)
+                },
+                class_name: r.try_get("class_name").unwrap_or(None),
+                has_active_token: active_id.is_some(),
+                active_token_label: r.try_get("active_token_label").unwrap_or(None),
+                raw_token: r.try_get("active_raw_token").unwrap_or(None),
+                token_created_at: r.try_get("token_created_at").unwrap_or(None),
+                token_last_used_at: r.try_get("token_last_used_at").unwrap_or(None),
+            }
+        })
+        .collect();
 
     Ok(Json(ApiResponse::success(dtos, req_ctx.request_id)))
 }
@@ -1156,12 +1249,21 @@ async fn batch_generate_qr_tokens_endpoint(
                     u.full_name,
                     u.email,
                     u.role_name.unwrap_or_default(),
-                    if u.identifier.is_empty() { None } else { Some(u.identifier) },
+                    if u.identifier.is_empty() {
+                        None
+                    } else {
+                        Some(u.identifier)
+                    },
                     u.class_name,
                 ),
-                None => ("Pengguna".to_string(), String::new(), "User".to_string(), None, None),
+                None => (
+                    "Pengguna".to_string(),
+                    String::new(),
+                    "User".to_string(),
+                    None,
+                    None,
+                ),
             };
-
 
             results.push(BatchGenerateQrItemDto {
                 id: generated.id,
@@ -1295,6 +1397,3 @@ async fn refresh(
         request_id: req_ctx.request_id,
     }))
 }
-
-
-

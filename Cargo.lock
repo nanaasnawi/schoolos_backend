@@ -1381,17 +1381,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hash-gen"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "chrono",
- "sqlx",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "hashbag"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"

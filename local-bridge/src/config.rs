@@ -45,21 +45,36 @@ pub fn default_config_path() -> PathBuf {
 
     // 3. Check Windows Downloads, Desktop, and Documents folders
     if let Ok(user_profile) = std::env::var("USERPROFILE") {
-        let downloads = PathBuf::from(&user_profile).join("Downloads").join("schoolos-agent.json");
+        let downloads = PathBuf::from(&user_profile)
+            .join("Downloads")
+            .join("schoolos-agent.json");
         if downloads.exists() {
-            println!("📂 Otomatis menemukan konfigurasi di folder Downloads: {:?}", downloads);
+            println!(
+                "📂 Otomatis menemukan konfigurasi di folder Downloads: {:?}",
+                downloads
+            );
             return downloads;
         }
 
-        let desktop = PathBuf::from(&user_profile).join("Desktop").join("schoolos-agent.json");
+        let desktop = PathBuf::from(&user_profile)
+            .join("Desktop")
+            .join("schoolos-agent.json");
         if desktop.exists() {
-            println!("📂 Otomatis menemukan konfigurasi di Desktop: {:?}", desktop);
+            println!(
+                "📂 Otomatis menemukan konfigurasi di Desktop: {:?}",
+                desktop
+            );
             return desktop;
         }
 
-        let documents = PathBuf::from(&user_profile).join("Documents").join("schoolos-agent.json");
+        let documents = PathBuf::from(&user_profile)
+            .join("Documents")
+            .join("schoolos-agent.json");
         if documents.exists() {
-            println!("📂 Otomatis menemukan konfigurasi di Documents: {:?}", documents);
+            println!(
+                "📂 Otomatis menemukan konfigurasi di Documents: {:?}",
+                documents
+            );
             return documents;
         }
     }

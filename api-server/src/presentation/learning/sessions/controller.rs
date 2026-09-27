@@ -1,7 +1,7 @@
 use axum::{
-    Json, Router,
     extract::{Path, Query, State},
     routing::{get, post},
+    Json, Router,
 };
 use serde::Deserialize;
 use uuid::Uuid;
@@ -96,7 +96,8 @@ async fn start(
         .execute(&ctx.pool)
         .await;
         crate::infrastructure::fcm::trigger_fcm_push_categorized(
-            t, b,
+            t,
+            b,
             crate::infrastructure::fcm::FcmCategory::Session,
             session.id,
         );
@@ -180,9 +181,37 @@ async fn list(
         let monday = now.date_naive() - chrono::Duration::days(days_from_monday);
 
         let user_id = req_ctx.actor.as_ref().map(|a| a.id);
-        let is_student = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Siswa" || r.name == "Student")).unwrap_or(false);
-        let is_teacher = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Guru" || r.name == "Teacher")).unwrap_or(false);
-        let is_management = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Administrator" || r.name == "Admin" || r.name == "Kepala Sekolah" || r.name == "Operator" || r.name == "Staf TU")).unwrap_or(true);
+        let is_student = req_ctx
+            .actor
+            .as_ref()
+            .map(|a| {
+                a.roles
+                    .iter()
+                    .any(|r| r.name == "Siswa" || r.name == "Student")
+            })
+            .unwrap_or(false);
+        let is_teacher = req_ctx
+            .actor
+            .as_ref()
+            .map(|a| {
+                a.roles
+                    .iter()
+                    .any(|r| r.name == "Guru" || r.name == "Teacher")
+            })
+            .unwrap_or(false);
+        let is_management = req_ctx
+            .actor
+            .as_ref()
+            .map(|a| {
+                a.roles.iter().any(|r| {
+                    r.name == "Administrator"
+                        || r.name == "Admin"
+                        || r.name == "Kepala Sekolah"
+                        || r.name == "Operator"
+                        || r.name == "Staf TU"
+                })
+            })
+            .unwrap_or(true);
 
         let student_class_id: Option<Uuid> = if is_student {
             if let Some(uid) = user_id {
@@ -207,16 +236,14 @@ async fn list(
             None
         };
 
-        let target_class_id: Option<Uuid> = filter.class_id
-            .as_deref()
-            .and_then(|s| {
-                let trimmed = s.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Uuid::parse_str(trimmed).ok()
-                }
-            });
+        let target_class_id: Option<Uuid> = filter.class_id.as_deref().and_then(|s| {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Uuid::parse_str(trimmed).ok()
+            }
+        });
 
         for row in schedule_rows {
             // Filter by explicit query class_id
@@ -277,7 +304,10 @@ async fn list(
             let target_date = monday + chrono::Duration::days(day_offset);
 
             let start_parts: Vec<&str> = row.start_time.split(':').collect();
-            let start_h: u32 = start_parts.first().and_then(|s| s.parse().ok()).unwrap_or(8);
+            let start_h: u32 = start_parts
+                .first()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8);
             let start_m: u32 = start_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
 
             let end_parts: Vec<&str> = row.end_time.split(':').collect();
@@ -287,8 +317,18 @@ async fn list(
             let start_naive = target_date.and_hms_opt(start_h, start_m, 0);
             let end_naive = target_date.and_hms_opt(end_h, end_m, 0);
 
-            let scheduled_at = start_naive.map(|dt| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt - chrono::Duration::hours(7), chrono::Utc));
-            let ended_at = end_naive.map(|dt| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt - chrono::Duration::hours(7), chrono::Utc));
+            let scheduled_at = start_naive.map(|dt| {
+                chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+                    dt - chrono::Duration::hours(7),
+                    chrono::Utc,
+                )
+            });
+            let ended_at = end_naive.map(|dt| {
+                chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+                    dt - chrono::Duration::hours(7),
+                    chrono::Utc,
+                )
+            });
 
             let status = if let (Some(s), Some(e)) = (scheduled_at, ended_at) {
                 if now >= s && now <= e {
@@ -309,8 +349,16 @@ async fn list(
                 class_id: row.class_id,
                 teacher_id: row.teacher_id,
                 scheduled_at,
-                started_at: if status == "active" || status == "completed" { scheduled_at } else { None },
-                ended_at: if status == "completed" { ended_at } else { None },
+                started_at: if status == "active" || status == "completed" {
+                    scheduled_at
+                } else {
+                    None
+                },
+                ended_at: if status == "completed" {
+                    ended_at
+                } else {
+                    None
+                },
                 status,
                 notes: Some(format!("{} • {}", row.subject_name, row.room)),
                 subject_name: Some(row.subject_name),
@@ -383,7 +431,12 @@ async fn get_by_id(
     )
     .fetch_optional(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Internal(e.to_string()), &req_ctx.request_id))?;
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Internal(e.to_string()),
+            &req_ctx.request_id,
+        )
+    })?;
 
     if let Some(row) = schedule_row {
         let now = chrono::Utc::now();
@@ -403,7 +456,10 @@ async fn get_by_id(
         let target_date = monday + chrono::Duration::days(day_offset);
 
         let start_parts: Vec<&str> = row.start_time.split(':').collect();
-        let start_h: u32 = start_parts.first().and_then(|s| s.parse().ok()).unwrap_or(8);
+        let start_h: u32 = start_parts
+            .first()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(8);
         let start_m: u32 = start_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
 
         let end_parts: Vec<&str> = row.end_time.split(':').collect();
@@ -413,8 +469,18 @@ async fn get_by_id(
         let start_naive = target_date.and_hms_opt(start_h, start_m, 0);
         let end_naive = target_date.and_hms_opt(end_h, end_m, 0);
 
-        let scheduled_at = start_naive.map(|dt| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt - chrono::Duration::hours(7), chrono::Utc));
-        let ended_at = end_naive.map(|dt| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt - chrono::Duration::hours(7), chrono::Utc));
+        let scheduled_at = start_naive.map(|dt| {
+            chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+                dt - chrono::Duration::hours(7),
+                chrono::Utc,
+            )
+        });
+        let ended_at = end_naive.map(|dt| {
+            chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+                dt - chrono::Duration::hours(7),
+                chrono::Utc,
+            )
+        });
 
         let status = if let (Some(s), Some(e)) = (scheduled_at, ended_at) {
             if now >= s && now <= e {
@@ -435,8 +501,16 @@ async fn get_by_id(
             class_id: row.class_id,
             teacher_id: row.teacher_id,
             scheduled_at,
-            started_at: if status == "active" || status == "completed" { scheduled_at } else { None },
-            ended_at: if status == "completed" { ended_at } else { None },
+            started_at: if status == "active" || status == "completed" {
+                scheduled_at
+            } else {
+                None
+            },
+            ended_at: if status == "completed" {
+                ended_at
+            } else {
+                None
+            },
             status,
             notes: Some(format!("{} • {}", row.subject_name, row.room)),
             subject_name: Some(row.subject_name),

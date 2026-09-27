@@ -1,7 +1,7 @@
 use axum::{
-    Json, Router,
     extract::{Path, State},
     routing::{get, post},
+    Json, Router,
 };
 use sqlx::Row;
 use uuid::Uuid;
@@ -17,9 +17,8 @@ use crate::{
 };
 use school_core::learning::application::quiz::{
     create_quiz::CreateQuizCommand, get_quiz::GetQuizQuery, grade_attempt::GradeAttemptCommand,
-    publish_quiz::PublishQuizCommand,
-    start_attempt::StartAttemptCommand, submit_attempt::SubmitAnswer,
-    submit_attempt::SubmitAttemptCommand,
+    publish_quiz::PublishQuizCommand, start_attempt::StartAttemptCommand,
+    submit_attempt::SubmitAnswer, submit_attempt::SubmitAttemptCommand,
 };
 
 pub fn quiz_routes() -> Router<ApplicationContext> {
@@ -157,21 +156,28 @@ async fn create(
     resp.class_id = target_class_id;
     if let Some(cid) = target_class_id {
         resp.class_name = sqlx::query_scalar!(r#"SELECT name FROM classes WHERE id = $1"#, cid)
-            .fetch_optional(&ctx.pool).await.ok().flatten();
+            .fetch_optional(&ctx.pool)
+            .await
+            .ok()
+            .flatten();
     }
     if let Some(sid) = subject_id {
         resp.subject_name = sqlx::query_scalar!(r#"SELECT name FROM subjects WHERE id = $1"#, sid)
-            .fetch_optional(&ctx.pool).await.ok().flatten();
+            .fetch_optional(&ctx.pool)
+            .await
+            .ok()
+            .flatten();
     }
     if let Some(tid) = teacher_id {
-        resp.teacher_name = sqlx::query_scalar!(r#"SELECT full_name FROM teachers WHERE id = $1"#, tid)
-            .fetch_optional(&ctx.pool).await.ok().flatten();
+        resp.teacher_name =
+            sqlx::query_scalar!(r#"SELECT full_name FROM teachers WHERE id = $1"#, tid)
+                .fetch_optional(&ctx.pool)
+                .await
+                .ok()
+                .flatten();
     }
 
-    Ok(Json(ApiResponse::success(
-        resp,
-        req_ctx.request_id,
-    )))
+    Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
 }
 
 async fn list(
@@ -201,22 +207,49 @@ async fn list(
             })
         })
         .unwrap_or(false)
-        || crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(&ctx.pool, req_ctx.tenant_id, actor_id.unwrap_or_default()).await.ok().flatten().is_some();
+        || crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            actor_id.unwrap_or_default(),
+        )
+        .await
+        .ok()
+        .flatten()
+        .is_some();
     let is_parent = req_ctx
         .actor
         .as_ref()
-        .map(|a| a.roles.iter().any(|r| {
-            let n = r.name.to_lowercase();
-            n.contains("wali") || n.contains("parent") || n.contains("guardian") || n.contains("ortu")
-        }))
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("wali")
+                    || n.contains("parent")
+                    || n.contains("guardian")
+                    || n.contains("ortu")
+            })
+        })
         .unwrap_or(false);
-    let is_student = !is_parent && !is_teacher && (
-        req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| {
-            let n = r.name.to_lowercase();
-            n == "siswa" || n == "student" || n == "murid" || n.contains("siswa")
-        })).unwrap_or(false)
-        || crate::authorization_helpers::AuthorizationScope::resolve_student_id(&ctx.pool, req_ctx.tenant_id, actor_id.unwrap_or_default()).await.ok().flatten().is_some()
-    );
+    let is_student = !is_parent
+        && !is_teacher
+        && (req_ctx
+            .actor
+            .as_ref()
+            .map(|a| {
+                a.roles.iter().any(|r| {
+                    let n = r.name.to_lowercase();
+                    n == "siswa" || n == "student" || n == "murid" || n.contains("siswa")
+                })
+            })
+            .unwrap_or(false)
+            || crate::authorization_helpers::AuthorizationScope::resolve_student_id(
+                &ctx.pool,
+                req_ctx.tenant_id,
+                actor_id.unwrap_or_default(),
+            )
+            .await
+            .ok()
+            .flatten()
+            .is_some());
 
     // Auto-link any orphan quizzes with class_id IS NULL if their description or title contains the class name
     let _ = sqlx::query(
@@ -231,7 +264,7 @@ async fn list(
               q.description ILIKE '%' || c.name || '%' 
               OR q.title ILIKE '%' || c.name || '%'
           )
-        "#
+        "#,
     )
     .bind(req_ctx.tenant_id)
     .execute(&ctx.pool)
@@ -270,30 +303,32 @@ async fn list(
             school_core::common::error::InfrastructureError::Database(e)
         ), &req_ctx.request_id))?;
 
-        rows.into_iter().map(|r| QuizResponse {
-            id: r.get("id"),
-            tenant_id: r.get("tenant_id"),
-            lesson_id: r.get("lesson_id"),
-            title: r.get("title"),
-            description: r.get("description"),
-            duration_minutes: r.get::<Option<i32>, _>("time_limit_minutes").unwrap_or(30),
-            passing_score: r.get("passing_score"),
-            max_score: r.get("max_score"),
-            max_attempts: r.get("max_attempts"),
-            shuffle_questions: r.get("shuffle_questions"),
-            shuffle_choices: r.get("shuffle_choices"),
-            start_at: r.get("start_at"),
-            end_at: r.get("end_at"),
-            status: r.get("status"),
-            questions_count: r.get("questions_count"),
-            is_active: r.get("is_active"),
-            created_at: r.get("created_at"),
-            updated_at: r.get("updated_at"),
-            class_id: r.get("class_id"),
-            class_name: r.get("class_name"),
-            subject_name: r.get("subject_name"),
-            teacher_name: r.get("teacher_name"),
-        }).collect()
+        rows.into_iter()
+            .map(|r| QuizResponse {
+                id: r.get("id"),
+                tenant_id: r.get("tenant_id"),
+                lesson_id: r.get("lesson_id"),
+                title: r.get("title"),
+                description: r.get("description"),
+                duration_minutes: r.get::<Option<i32>, _>("time_limit_minutes").unwrap_or(30),
+                passing_score: r.get("passing_score"),
+                max_score: r.get("max_score"),
+                max_attempts: r.get("max_attempts"),
+                shuffle_questions: r.get("shuffle_questions"),
+                shuffle_choices: r.get("shuffle_choices"),
+                start_at: r.get("start_at"),
+                end_at: r.get("end_at"),
+                status: r.get("status"),
+                questions_count: r.get("questions_count"),
+                is_active: r.get("is_active"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+                class_id: r.get("class_id"),
+                class_name: r.get("class_name"),
+                subject_name: r.get("subject_name"),
+                teacher_name: r.get("teacher_name"),
+            })
+            .collect()
     } else if is_student || is_parent {
         let rows = sqlx::query(
             r#"
@@ -376,30 +411,32 @@ async fn list(
             school_core::common::error::InfrastructureError::Database(e)
         ), &req_ctx.request_id))?;
 
-        rows.into_iter().map(|r| QuizResponse {
-            id: r.get("id"),
-            tenant_id: r.get("tenant_id"),
-            lesson_id: r.get("lesson_id"),
-            title: r.get("title"),
-            description: r.get("description"),
-            duration_minutes: r.get::<Option<i32>, _>("time_limit_minutes").unwrap_or(30),
-            passing_score: r.get("passing_score"),
-            max_score: r.get("max_score"),
-            max_attempts: r.get("max_attempts"),
-            shuffle_questions: r.get("shuffle_questions"),
-            shuffle_choices: r.get("shuffle_choices"),
-            start_at: r.get("start_at"),
-            end_at: r.get("end_at"),
-            status: r.get("status"),
-            questions_count: r.get("questions_count"),
-            is_active: r.get("is_active"),
-            created_at: r.get("created_at"),
-            updated_at: r.get("updated_at"),
-            class_id: r.get("class_id"),
-            class_name: r.get("class_name"),
-            subject_name: r.get("subject_name"),
-            teacher_name: r.get("teacher_name"),
-        }).collect()
+        rows.into_iter()
+            .map(|r| QuizResponse {
+                id: r.get("id"),
+                tenant_id: r.get("tenant_id"),
+                lesson_id: r.get("lesson_id"),
+                title: r.get("title"),
+                description: r.get("description"),
+                duration_minutes: r.get::<Option<i32>, _>("time_limit_minutes").unwrap_or(30),
+                passing_score: r.get("passing_score"),
+                max_score: r.get("max_score"),
+                max_attempts: r.get("max_attempts"),
+                shuffle_questions: r.get("shuffle_questions"),
+                shuffle_choices: r.get("shuffle_choices"),
+                start_at: r.get("start_at"),
+                end_at: r.get("end_at"),
+                status: r.get("status"),
+                questions_count: r.get("questions_count"),
+                is_active: r.get("is_active"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+                class_id: r.get("class_id"),
+                class_name: r.get("class_name"),
+                subject_name: r.get("subject_name"),
+                teacher_name: r.get("teacher_name"),
+            })
+            .collect()
     } else {
         let rows = sqlx::query!(
             r#"
@@ -427,30 +464,32 @@ async fn list(
             school_core::common::error::InfrastructureError::Database(e)
         ), &req_ctx.request_id))?;
 
-        rows.into_iter().map(|r| QuizResponse {
-            id: r.id,
-            tenant_id: r.tenant_id,
-            lesson_id: r.lesson_id,
-            title: r.title,
-            description: r.description,
-            duration_minutes: r.time_limit_minutes.unwrap_or(30),
-            passing_score: r.passing_score,
-            max_score: r.max_score,
-            max_attempts: r.max_attempts,
-            shuffle_questions: r.shuffle_questions,
-            shuffle_choices: r.shuffle_choices,
-            start_at: r.start_at,
-            end_at: r.end_at,
-            status: r.status,
-            questions_count: r.questions_count,
-            is_active: r.is_active,
-            created_at: r.created_at,
-            updated_at: r.updated_at,
-            class_id: r.class_id,
-            class_name: r.class_name,
-            subject_name: r.subject_name,
-            teacher_name: r.teacher_name,
-        }).collect()
+        rows.into_iter()
+            .map(|r| QuizResponse {
+                id: r.id,
+                tenant_id: r.tenant_id,
+                lesson_id: r.lesson_id,
+                title: r.title,
+                description: r.description,
+                duration_minutes: r.time_limit_minutes.unwrap_or(30),
+                passing_score: r.passing_score,
+                max_score: r.max_score,
+                max_attempts: r.max_attempts,
+                shuffle_questions: r.shuffle_questions,
+                shuffle_choices: r.shuffle_choices,
+                start_at: r.start_at,
+                end_at: r.end_at,
+                status: r.status,
+                questions_count: r.questions_count,
+                is_active: r.is_active,
+                created_at: r.created_at,
+                updated_at: r.updated_at,
+                class_id: r.class_id,
+                class_name: r.class_name,
+                subject_name: r.subject_name,
+                teacher_name: r.teacher_name,
+            })
+            .collect()
     };
 
     Ok(Json(ApiResponse::success(items, req_ctx.request_id)))
@@ -553,14 +592,12 @@ async fn publish(
 
     // ── FCM + in-app untuk KUIS/CBT yang di-publish ──
     {
-        let meta = sqlx::query(
-            "SELECT tenant_id, class_id FROM quizzes WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_optional(&ctx.pool)
-        .await
-        .ok()
-        .flatten();
+        let meta = sqlx::query("SELECT tenant_id, class_id FROM quizzes WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .ok()
+            .flatten();
         let (q_tenant, q_class): (Option<uuid::Uuid>, Option<uuid::Uuid>) = match meta {
             Some(r) => {
                 use sqlx::Row;
@@ -569,7 +606,9 @@ async fn publish(
             None => (None, None),
         };
         let t = format!("💻 Kuis/CBT Baru: {}", quiz.title);
-        let b = "Kuis/CBT baru sudah dipublish. Buka aplikasi untuk mengerjakan sebelum batas waktu!".to_string();
+        let b =
+            "Kuis/CBT baru sudah dipublish. Buka aplikasi untuk mengerjakan sebelum batas waktu!"
+                .to_string();
         if let Some(tid) = q_tenant.or(Some(req_ctx.tenant_id)) {
             let cid = q_class;
             let _ = sqlx::query(
@@ -594,7 +633,8 @@ async fn publish(
             .await;
         }
         crate::infrastructure::fcm::trigger_fcm_push_categorized(
-            t, b,
+            t,
+            b,
             crate::infrastructure::fcm::FcmCategory::Quiz,
             id,
         );
@@ -666,21 +706,22 @@ async fn start_attempt(
     .await?;
 
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
-    let effective_student_id = crate::authorization_helpers::AuthorizationScope::resolve_student_id(
-        &ctx.pool,
-        req_ctx.tenant_id,
-        actor_id,
-    )
-    .await
-    .map_err(|e| {
-        ApiError::new(
-            school_core::common::error::ApplicationError::Infrastructure(
-                school_core::common::error::InfrastructureError::Database(e),
-            ),
-            &req_ctx.request_id,
+    let effective_student_id =
+        crate::authorization_helpers::AuthorizationScope::resolve_student_id(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            actor_id,
         )
-    })?
-    .unwrap_or(payload.student_id);
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?
+        .unwrap_or(payload.student_id);
 
     let command = StartAttemptCommand {
         tenant_id: req_ctx.tenant_id,
@@ -721,12 +762,22 @@ async fn submit_attempt(
     let is_student = req_ctx
         .actor
         .as_ref()
-        .map(|a| a.roles.iter().any(|r| {
-            let n = r.name.to_lowercase();
-            n == "siswa" || n == "student" || n == "murid" || n.contains("siswa")
-        }))
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n == "siswa" || n == "student" || n == "murid" || n.contains("siswa")
+            })
+        })
         .unwrap_or(false)
-        || crate::authorization_helpers::AuthorizationScope::resolve_student_id(&ctx.pool, req_ctx.tenant_id, actor_id).await.ok().flatten().is_some();
+        || crate::authorization_helpers::AuthorizationScope::resolve_student_id(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            actor_id,
+        )
+        .await
+        .ok()
+        .flatten()
+        .is_some();
 
     if is_student {
         let student_id = crate::authorization_helpers::AuthorizationScope::resolve_student_id(
@@ -745,30 +796,29 @@ async fn submit_attempt(
         })?
         .unwrap_or(actor_id);
 
-        let attempt_owner = sqlx::query(
-            "SELECT student_id FROM quiz_attempts WHERE id = $1 AND tenant_id = $2",
-        )
-        .bind(attempt_id)
-        .bind(req_ctx.tenant_id)
-        .fetch_optional(&ctx.pool)
-        .await
-        .map_err(|e| {
-            ApiError::new(
-                school_core::common::error::ApplicationError::Infrastructure(
-                    school_core::common::error::InfrastructureError::Database(e),
-                ),
-                &req_ctx.request_id,
-            )
-        })?
-        .ok_or_else(|| {
-            ApiError::new(
-                school_core::common::error::ApplicationError::NotFound(
-                    school_core::common::error_code::ErrorCode::AttemptNotFound,
-                    format!("Attempt {} not found", attempt_id),
-                ),
-                &req_ctx.request_id,
-            )
-        })?;
+        let attempt_owner =
+            sqlx::query("SELECT student_id FROM quiz_attempts WHERE id = $1 AND tenant_id = $2")
+                .bind(attempt_id)
+                .bind(req_ctx.tenant_id)
+                .fetch_optional(&ctx.pool)
+                .await
+                .map_err(|e| {
+                    ApiError::new(
+                        school_core::common::error::ApplicationError::Infrastructure(
+                            school_core::common::error::InfrastructureError::Database(e),
+                        ),
+                        &req_ctx.request_id,
+                    )
+                })?
+                .ok_or_else(|| {
+                    ApiError::new(
+                        school_core::common::error::ApplicationError::NotFound(
+                            school_core::common::error_code::ErrorCode::AttemptNotFound,
+                            format!("Attempt {} not found", attempt_id),
+                        ),
+                        &req_ctx.request_id,
+                    )
+                })?;
 
         let attempt_owner_id: Uuid = attempt_owner.get("student_id");
         if attempt_owner_id != student_id {
@@ -929,7 +979,15 @@ async fn get_questions(
         )
     })?;
 
-    let is_teacher = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Guru" || r.name == "Kepala Sekolah" || r.name == "Administrator")).unwrap_or(false);
+    let is_teacher = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                r.name == "Guru" || r.name == "Kepala Sekolah" || r.name == "Administrator"
+            })
+        })
+        .unwrap_or(false);
 
     let questions = sqlx::query!(
         r#"
@@ -942,9 +1000,14 @@ async fn get_questions(
     )
     .fetch_all(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
-        school_core::common::error::InfrastructureError::Database(e)
-    ), &req_ctx.request_id))?;
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
 
     let mut result = Vec::new();
     for q in questions {
@@ -959,9 +1022,14 @@ async fn get_questions(
         )
         .fetch_all(&ctx.pool)
         .await
-        .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
-            school_core::common::error::InfrastructureError::Database(e)
-        ), &req_ctx.request_id))?;
+        .map_err(|e| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
 
         result.push(QuizQuestionResponse {
             id: q.id,
@@ -970,12 +1038,15 @@ async fn get_questions(
             points: q.points,
             order_index: q.order_index,
             image_url: None,
-            choices: choices.into_iter().map(|c| QuizChoiceResponse {
-                id: c.id,
-                choice_text: c.choice_text,
-                order_index: c.order_index,
-                is_correct: if is_teacher { Some(c.is_correct) } else { None },
-            }).collect(),
+            choices: choices
+                .into_iter()
+                .map(|c| QuizChoiceResponse {
+                    id: c.id,
+                    choice_text: c.choice_text,
+                    order_index: c.order_index,
+                    is_correct: if is_teacher { Some(c.is_correct) } else { None },
+                })
+                .collect(),
         });
     }
 
@@ -1001,7 +1072,9 @@ async fn add_question(
     })?;
 
     let q_id = Uuid::new_v4();
-    let q_type = payload.question_type.unwrap_or_else(|| "multiple_choice".to_string());
+    let q_type = payload
+        .question_type
+        .unwrap_or_else(|| "multiple_choice".to_string());
     let points = payload.points.unwrap_or(10);
     let order_idx = payload.order_index.unwrap_or(1);
 
@@ -1086,4 +1159,3 @@ async fn add_question(
         req_ctx.request_id,
     )))
 }
-

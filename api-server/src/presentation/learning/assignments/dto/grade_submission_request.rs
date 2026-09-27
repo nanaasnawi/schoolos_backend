@@ -16,4 +16,3 @@ pub struct GradeSubmissionRequest {
     #[serde(default)]
     pub answer_grades: Option<Vec<GradeAnswerDto>>,
 }
-

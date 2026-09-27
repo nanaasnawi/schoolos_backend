@@ -1,7 +1,7 @@
 use axum::{
-    Json, Router,
     extract::{Path, State},
     routing::{get, post},
+    Json, Router,
 };
 use sqlx::Row;
 use uuid::Uuid;
@@ -28,7 +28,6 @@ use school_core::learning::application::assignment::{
     grade_submission::GradeSubmissionCommand, publish_assignment::PublishAssignmentCommand,
     submit_assignment::SubmitAssignmentCommand, update_assignment::UpdateAssignmentCommand,
 };
-
 
 pub fn assignment_routes() -> Router<ApplicationContext> {
     Router::new()
@@ -237,7 +236,10 @@ async fn create(
             if let Some(cid) = target_class_id {
                 sqlx::query_scalar::<_, String>(r#"SELECT name FROM classes WHERE id = $1"#)
                     .bind(cid)
-                    .fetch_optional(&ctx.pool).await.ok().flatten()
+                    .fetch_optional(&ctx.pool)
+                    .await
+                    .ok()
+                    .flatten()
             } else {
                 None
             }
@@ -246,7 +248,10 @@ async fn create(
             if let Some(sid) = subject_id {
                 sqlx::query_scalar::<_, String>(r#"SELECT name FROM subjects WHERE id = $1"#)
                     .bind(sid)
-                    .fetch_optional(&ctx.pool).await.ok().flatten()
+                    .fetch_optional(&ctx.pool)
+                    .await
+                    .ok()
+                    .flatten()
             } else {
                 None
             }
@@ -255,7 +260,10 @@ async fn create(
             if let Some(tid) = final_teacher_id {
                 sqlx::query_scalar::<_, String>(r#"SELECT full_name FROM teachers WHERE id = $1"#)
                     .bind(tid)
-                    .fetch_optional(&ctx.pool).await.ok().flatten()
+                    .fetch_optional(&ctx.pool)
+                    .await
+                    .ok()
+                    .flatten()
             } else {
                 None
             }
@@ -337,9 +345,18 @@ async fn create(
     {
         let t = format!("📝 Tugas Baru: {}", assignment_title_for_notif);
         let b = match (&resp.class_name, &resp.teacher_name) {
-            (Some(c), Some(g)) => format!("{} memberi tugas baru untuk kelas {}. Kerjakan sebelum tenggat!", g, c),
-            (Some(c), None) => format!("Ada tugas baru untuk kelas {}. Kerjakan sebelum tenggat!", c),
-            _ => format!("Ada tugas baru: {}. Kerjakan sebelum tenggat!", assignment_title_for_notif),
+            (Some(c), Some(g)) => format!(
+                "{} memberi tugas baru untuk kelas {}. Kerjakan sebelum tenggat!",
+                g, c
+            ),
+            (Some(c), None) => format!(
+                "Ada tugas baru untuk kelas {}. Kerjakan sebelum tenggat!",
+                c
+            ),
+            _ => format!(
+                "Ada tugas baru: {}. Kerjakan sebelum tenggat!",
+                assignment_title_for_notif
+            ),
         };
         let tid = req_ctx.tenant_id;
         let cid = target_class_id;
@@ -366,18 +383,15 @@ async fn create(
         .execute(&ctx.pool)
         .await;
         crate::infrastructure::fcm::trigger_fcm_push_categorized(
-            t, b,
+            t,
+            b,
             crate::infrastructure::fcm::FcmCategory::Assignment,
             assignment_id_for_notif,
         );
     }
 
-    Ok(Json(ApiResponse::success(
-        resp,
-        req_ctx.request_id,
-    )))
+    Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
 }
-
 
 async fn list(
     State(ctx): State<ApplicationContext>,
@@ -406,22 +420,35 @@ async fn list(
             })
         })
         .unwrap_or(false)
-        || crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(&ctx.pool, req_ctx.tenant_id, actor_id.unwrap_or_default()).await.ok().flatten().is_some();
+        || crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            actor_id.unwrap_or_default(),
+        )
+        .await
+        .ok()
+        .flatten()
+        .is_some();
     let is_parent = req_ctx
         .actor
         .as_ref()
         .map(|a| {
             a.roles.iter().any(|r| {
                 let n = r.name.to_lowercase();
-                n.contains("wali") || n.contains("parent") || n.contains("guardian") || n.contains("ortu")
+                n.contains("wali")
+                    || n.contains("parent")
+                    || n.contains("guardian")
+                    || n.contains("ortu")
             })
         })
         .unwrap_or(false);
-    let is_student = !is_parent && !is_teacher && req_ctx
-        .actor
-        .as_ref()
-        .map(|a| a.roles.iter().any(|r| r.name == "Siswa"))
-        .unwrap_or(false);
+    let is_student = !is_parent
+        && !is_teacher
+        && req_ctx
+            .actor
+            .as_ref()
+            .map(|a| a.roles.iter().any(|r| r.name == "Siswa"))
+            .unwrap_or(false);
 
     // Self-healing: Ensure assignments with class_id have published status and teacher_id resolved
     let _ = sqlx::query(
@@ -767,12 +794,7 @@ async fn get_by_id(
 
             // Strict Cross-Class and Multi-Tenant Access Verification
             crate::authorization_helpers::AuthorizationScope::verify_learning_resource_access(
-                &ctx.pool,
-                &req_ctx,
-                tenant_id,
-                class_id,
-                teacher_id,
-                created_by,
+                &ctx.pool, &req_ctx, tenant_id, class_id, teacher_id, created_by,
             )
             .await?;
 
@@ -915,14 +937,13 @@ async fn update(
         }
     }
 
-    let questions = fetch_assignment_questions(&ctx.pool, id, false).await.unwrap_or_default();
+    let questions = fetch_assignment_questions(&ctx.pool, id, false)
+        .await
+        .unwrap_or_default();
     let mut resp = AssignmentResponse::from(assignment);
     resp.questions = questions;
 
-    Ok(Json(ApiResponse::success(
-        resp,
-        req_ctx.request_id,
-    )))
+    Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
 }
 
 async fn publish(
@@ -1288,10 +1309,7 @@ async fn submit(
         })
         .collect();
 
-    Ok(Json(ApiResponse::success(
-        resp,
-        req_ctx.request_id,
-    )))
+    Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
 }
 
 async fn get_submissions(
@@ -1355,7 +1373,11 @@ async fn get_submissions(
     let is_parent = req_ctx
         .actor
         .as_ref()
-        .map(|a| a.roles.iter().any(|r| r.name == "Wali Murid" || r.name == "Orang Tua"))
+        .map(|a| {
+            a.roles
+                .iter()
+                .any(|r| r.name == "Wali Murid" || r.name == "Orang Tua")
+        })
         .unwrap_or(false);
 
     let rows = if is_student || is_parent {
@@ -1619,9 +1641,5 @@ async fn grade(
     }
     resp.answers = answers;
 
-    Ok(Json(ApiResponse::success(
-        resp,
-        req_ctx.request_id,
-    )))
+    Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
 }
-

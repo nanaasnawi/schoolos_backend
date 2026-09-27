@@ -66,10 +66,22 @@ impl ProvisionTenantUseCase {
 
         // 4. Create Standard System Roles & Scope
         let standard_roles = vec![
-            ("Kepala Sekolah", "Kepala Sekolah / Pimpinan Unit", "WEB, ANDROID"),
+            (
+                "Kepala Sekolah",
+                "Kepala Sekolah / Pimpinan Unit",
+                "WEB, ANDROID",
+            ),
             ("Guru", "Guru Pengajar & Wali Kelas", "WEB, ANDROID"),
-            ("Operator/Staff", "Operator Sekolah & Staf Administrasi", "WEB"),
-            ("Bendahara", "Bendahara & Pengelola Keuangan Sekolah", "WEB, ANDROID"),
+            (
+                "Operator/Staff",
+                "Operator Sekolah & Staf Administrasi",
+                "WEB",
+            ),
+            (
+                "Bendahara",
+                "Bendahara & Pengelola Keuangan Sekolah",
+                "WEB, ANDROID",
+            ),
             ("Siswa", "Peserta Didik / Siswa", "ANDROID"),
             ("Wali Siswa", "Orang Tua / Wali Murid", "ANDROID"),
         ];

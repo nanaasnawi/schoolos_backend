@@ -167,7 +167,8 @@ impl AuthorizationScope {
                 return Err(ApiError::new(
                     ApplicationError::Unauthorized(
                         ErrorCode::AuthPermissionDenied,
-                        "Autentikasi diperlukan untuk mengakses sumber daya pembelajaran".to_string(),
+                        "Autentikasi diperlukan untuk mengakses sumber daya pembelajaran"
+                            .to_string(),
                     ),
                     &req_ctx.request_id,
                 ));
@@ -190,17 +191,28 @@ impl AuthorizationScope {
         let is_teacher = actor.roles.iter().any(|r| {
             let n = r.name.to_lowercase();
             n.contains("guru") || n.contains("teacher") || n.contains("pengajar")
-        }) || Self::resolve_teacher_id(pool, req_ctx.tenant_id, actor.id).await.ok().flatten().is_some();
+        }) || Self::resolve_teacher_id(pool, req_ctx.tenant_id, actor.id)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
         let is_parent = actor.roles.iter().any(|r| {
             let n = r.name.to_lowercase();
-            n.contains("wali") || n.contains("parent") || n.contains("guardian") || n.contains("ortu")
+            n.contains("wali")
+                || n.contains("parent")
+                || n.contains("guardian")
+                || n.contains("ortu")
         });
-        let is_student = !is_parent && !is_teacher && (
-            actor.roles.iter().any(|r| {
+        let is_student = !is_parent
+            && !is_teacher
+            && (actor.roles.iter().any(|r| {
                 let n = r.name.to_lowercase();
                 n == "siswa" || n == "student" || n == "murid" || n.contains("siswa")
-            }) || Self::resolve_student_id(pool, req_ctx.tenant_id, actor.id).await.ok().flatten().is_some()
-        );
+            }) || Self::resolve_student_id(pool, req_ctx.tenant_id, actor.id)
+                .await
+                .ok()
+                .flatten()
+                .is_some());
 
         // 3. Teacher Access Check (Strict Cross-Teacher Isolation)
         if is_teacher {
@@ -298,27 +310,24 @@ impl AuthorizationScope {
         // 5. Parent Access Check
         if is_parent {
             if let Some(cid) = resource_class_id {
-                let is_child_class = Self::is_parent_of_enrolled_student(
-                    pool,
-                    req_ctx.tenant_id,
-                    actor.id,
-                    cid,
-                )
-                .await
-                .map_err(|e| {
-                    ApiError::new(
-                        ApplicationError::Infrastructure(
-                            school_core::common::error::InfrastructureError::Database(e),
-                        ),
-                        &req_ctx.request_id,
-                    )
-                })?;
+                let is_child_class =
+                    Self::is_parent_of_enrolled_student(pool, req_ctx.tenant_id, actor.id, cid)
+                        .await
+                        .map_err(|e| {
+                            ApiError::new(
+                                ApplicationError::Infrastructure(
+                                    school_core::common::error::InfrastructureError::Database(e),
+                                ),
+                                &req_ctx.request_id,
+                            )
+                        })?;
 
                 if !is_child_class {
                     return Err(ApiError::new(
                         ApplicationError::Unauthorized(
                             ErrorCode::AuthPermissionDenied,
-                            "Tugas/Materi ini tidak terkait dengan kelas putra/putri Anda".to_string(),
+                            "Tugas/Materi ini tidak terkait dengan kelas putra/putri Anda"
+                                .to_string(),
                         ),
                         &req_ctx.request_id,
                     ));

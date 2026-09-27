@@ -25,7 +25,9 @@ pub fn get_installed_exe_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
 /// Check if the currently running binary is already the installed binary
 pub fn is_running_from_install_dir(current_exe: &Path) -> bool {
     if let Ok(installed) = get_installed_exe_path() {
-        if let (Ok(cur_canon), Ok(inst_canon)) = (current_exe.canonicalize(), installed.canonicalize()) {
+        if let (Ok(cur_canon), Ok(inst_canon)) =
+            (current_exe.canonicalize(), installed.canonicalize())
+        {
             return cur_canon == inst_canon;
         }
         return current_exe == installed;
@@ -40,8 +42,14 @@ pub fn show_native_message(title: &str, message: &str, is_error: bool) {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
 
-        let wide_title: Vec<u16> = OsStr::new(title).encode_wide().chain(std::iter::once(0)).collect();
-        let wide_msg: Vec<u16> = OsStr::new(message).encode_wide().chain(std::iter::once(0)).collect();
+        let wide_title: Vec<u16> = OsStr::new(title)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let wide_msg: Vec<u16> = OsStr::new(message)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
 
         extern "system" {
             fn MessageBoxW(hwnd: isize, text: *const u16, caption: *const u16, utype: u32) -> i32;
@@ -51,7 +59,12 @@ pub fn show_native_message(title: &str, message: &str, is_error: bool) {
         const MB_ICONINFORMATION: u32 = 0x00000040;
         const MB_ICONERROR: u32 = 0x00000010;
 
-        let flags = MB_OK | if is_error { MB_ICONERROR } else { MB_ICONINFORMATION };
+        let flags = MB_OK
+            | if is_error {
+                MB_ICONERROR
+            } else {
+                MB_ICONINFORMATION
+            };
         unsafe {
             MessageBoxW(0, wide_msg.as_ptr(), wide_title.as_ptr(), flags);
         }
@@ -153,7 +166,13 @@ pub fn perform_self_install(current_exe: &Path) -> Result<(), Box<dyn std::error
             current_pid
         );
         let _ = Command::new("powershell")
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                &ps_cmd,
+            ])
             .creation_flags(0x08000000)
             .status();
         std::thread::sleep(std::time::Duration::from_millis(600));

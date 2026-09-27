@@ -36,7 +36,9 @@ impl StudentStatus {
             "active" => Self::Active,
             "inactive" => Self::Inactive,
             "graduated" => Self::Graduated,
-            "transferred" | "transferredout" | "transferred_out" | "mutasi_out" => Self::Transferred,
+            "transferred" | "transferredout" | "transferred_out" | "mutasi_out" => {
+                Self::Transferred
+            }
             "archived" => Self::Archived,
             _ => {
                 warn!(
