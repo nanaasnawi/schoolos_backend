@@ -6,9 +6,9 @@ use axum::{
 };
 use jsonwebtoken::{decode, DecodingKey, Validation};
 use school_core::authorization::domain::actor::Actor;
-use school_core::authorization::domain::role::Role;
 use school_core::identity::application::auth::authenticate_user::Claims;
 use school_core::permission::domain::permission_registry::Permission;
+use school_core::permission::domain::role::Role;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
