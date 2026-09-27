@@ -60,7 +60,6 @@ cargo build --release -p api-server
 ├── api-server/           # Axum HTTP API service & routing layer
 ├── school-core/          # Domain models, clean architecture use cases & repositories
 ├── local-bridge/         # Local integration bridge & test harnesses
-├── hash-gen/             # Password hashing utility
 ├── database/             # Database seeds and reference SQL
 └── scripts/              # Setup, migration, and management utilities
 ```

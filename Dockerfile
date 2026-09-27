@@ -18,7 +18,6 @@ COPY Cargo.toml Cargo.lock ./
 COPY school-core ./school-core
 COPY api-server ./api-server
 COPY local-bridge ./local-bridge
-COPY hash-gen ./hash-gen
 COPY migrations ./migrations
 COPY .sqlx ./.sqlx
 
