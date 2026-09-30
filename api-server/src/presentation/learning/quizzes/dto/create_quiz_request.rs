@@ -9,6 +9,7 @@ pub struct CreateQuizRequest {
     pub lesson_id: Option<Uuid>,
     pub title: String,
     pub description: Option<String>,
+    #[serde(alias = "time_limit_minutes")]
     pub duration_minutes: Option<i32>,
     #[serde(default = "default_passing_score")]
     pub passing_score: i32,
@@ -21,6 +22,8 @@ pub struct CreateQuizRequest {
     pub start_at: Option<DateTime<Utc>>,
     pub end_at: Option<DateTime<Utc>>,
     pub class_id: Option<String>,
+    #[serde(default)]
+    pub questions: Option<Vec<super::quiz_question_dto::CreateQuizQuestionRequest>>,
 }
 
 fn default_lesson_id() -> Option<Uuid> {

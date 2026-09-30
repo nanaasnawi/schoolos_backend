@@ -1099,7 +1099,7 @@ async fn submit(
 ) -> Result<Json<ApiResponse<SubmissionResponse>>, ApiError> {
     use crate::middleware::require_permission;
     use school_core::permission::domain::permission_registry::Permission;
-    require_permission(&req_ctx.actor, Permission::LearningAssignmentUpdate).map_err(|_| {
+    require_permission(&req_ctx.actor, Permission::LearningAssignmentSubmit).map_err(|_| {
         ApiError::new(
             school_core::common::error::ApplicationError::Unauthorized(
                 school_core::common::error_code::ErrorCode::AuthPermissionDenied,
@@ -1249,7 +1249,7 @@ async fn submit(
         let _ = sqlx::query(
             r#"
             UPDATE assignment_submissions
-            SET score = $1, status = 'Graded', graded_at = NOW()
+            SET score = $1, status = 'graded', graded_at = NOW()
             WHERE id = $2
             "#,
         )
@@ -1260,7 +1260,7 @@ async fn submit(
 
         let mut s = submission;
         s.score = Some(auto_score);
-        s.status = "Graded".to_string();
+        s.status = "graded".to_string();
         s
     } else {
         submission

@@ -202,12 +202,18 @@ impl QuizAttempt {
             }
         }
 
-        let percentage = if quiz.max_score > 0 {
-            (earned_score * 100) / quiz.max_score
+        let effective_max = if quiz.max_score > 0 {
+            quiz.max_score
         } else {
-            0
+            let sum_pts: i32 = quiz.questions.iter().map(|q| q.points).sum();
+            if sum_pts > 0 {
+                sum_pts
+            } else {
+                100
+            }
         };
 
+        let percentage = (earned_score * 100) / effective_max;
         let passed = percentage >= quiz.passing_score;
         let now = clock.now();
 

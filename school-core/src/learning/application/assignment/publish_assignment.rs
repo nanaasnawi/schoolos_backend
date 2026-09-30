@@ -46,6 +46,14 @@ impl PublishAssignmentUseCase {
                 )
             })?;
 
+        // Tenant isolation: ensure assignment belongs to requesting tenant
+        if assignment.tenant_id != command.tenant_id {
+            return Err(ApplicationError::NotFound(
+                ErrorCode::AssignmentNotFound,
+                format!("Assignment {} not found", command.assignment_id),
+            ));
+        }
+
         let lesson_status = if let Some(lid) = assignment.lesson_id {
             let lesson = self.lesson_repo.find_by_id(lid).await?.ok_or_else(|| {
                 ApplicationError::NotFound(

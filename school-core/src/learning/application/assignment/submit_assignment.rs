@@ -51,6 +51,14 @@ impl SubmitAssignmentUseCase {
                 )
             })?;
 
+        // Tenant isolation: ensure assignment belongs to requesting tenant
+        if assignment.tenant_id != command.tenant_id {
+            return Err(ApplicationError::NotFound(
+                ErrorCode::AssignmentNotFound,
+                format!("Assignment {} not found", command.assignment_id),
+            ));
+        }
+
         let existing_submissions = self.repo.find_submissions(command.assignment_id).await?;
         let existing = existing_submissions
             .into_iter()

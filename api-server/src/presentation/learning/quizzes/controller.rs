@@ -7,8 +7,14 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use super::dto::{
-    attempt_response::AttemptResponse, create_quiz_request::CreateQuizRequest,
-    quiz_response::QuizResponse, start_attempt_request::StartAttemptRequest,
+    attempt_response::AttemptResponse,
+    create_quiz_request::CreateQuizRequest,
+    quiz_question_dto::{
+        AttemptAnswerDetailDto, CreateQuizQuestionRequest,
+        GradeAttemptRequest, QuizChoiceResponse, QuizQuestionResponse,
+    },
+    quiz_response::QuizResponse,
+    start_attempt_request::StartAttemptRequest,
     submit_attempt_request::SubmitAttemptRequest,
 };
 use crate::{
@@ -27,7 +33,8 @@ pub fn quiz_routes() -> Router<ApplicationContext> {
         .route("/{id}", get(get_by_id))
         .route("/{id}/publish", post(publish))
         .route("/{id}/questions", post(add_question).get(get_questions))
-        .route("/{id}/attempts", post(start_attempt))
+        .route("/{id}/attempts", post(start_attempt).get(get_attempts))
+        .route("/{id}/attempts/{attempt_id}", get(get_attempt_by_id))
         .route("/{id}/attempts/{attempt_id}/submit", post(submit_attempt))
         .route("/{id}/attempts/{attempt_id}/grade", post(grade_attempt))
 }
@@ -177,6 +184,66 @@ async fn create(
                 .flatten();
     }
 
+    if let Some(questions) = payload.questions {
+        let q_count = questions.len() as i32;
+        let mut total_pts = 0;
+        for (idx, q) in questions.into_iter().enumerate() {
+            let q_id = Uuid::new_v4();
+            let q_type = q.question_type.unwrap_or_else(|| "multiple_choice".to_string());
+            let points = q.points.unwrap_or(10);
+            total_pts += points;
+            let order_idx = q.order_index.unwrap_or(idx as i32 + 1);
+
+            let _ = sqlx::query(
+                r#"
+                INSERT INTO quiz_questions (id, quiz_id, question_text, question_type, points, order_index, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+                "#,
+            )
+            .bind(q_id)
+            .bind(resp.id)
+            .bind(&q.question_text)
+            .bind(&q_type)
+            .bind(points)
+            .bind(order_idx)
+            .execute(&ctx.pool)
+            .await;
+
+            if let Some(choices) = q.choices {
+                for (c_idx, c) in choices.into_iter().enumerate() {
+                    let c_id = Uuid::new_v4();
+                    let is_corr = c.is_correct.unwrap_or(false);
+                    let c_order = c.order_index.unwrap_or(c_idx as i32 + 1);
+                    let _ = sqlx::query(
+                        r#"
+                        INSERT INTO quiz_choices (id, question_id, choice_text, is_correct, order_index, created_at, updated_at)
+                        VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+                        "#,
+                    )
+                    .bind(c_id)
+                    .bind(q_id)
+                    .bind(&c.choice_text)
+                    .bind(is_corr)
+                    .bind(c_order)
+                    .execute(&ctx.pool)
+                    .await;
+                }
+            }
+        }
+
+        let _ = sqlx::query(
+            "UPDATE quizzes SET questions_count = $1, max_score = $2 WHERE id = $3",
+        )
+        .bind(q_count)
+        .bind(total_pts)
+        .bind(resp.id)
+        .execute(&ctx.pool)
+        .await;
+
+        resp.questions_count = q_count;
+        resp.max_score = total_pts;
+    }
+
     Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
 }
 
@@ -304,29 +371,33 @@ async fn list(
         ), &req_ctx.request_id))?;
 
         rows.into_iter()
-            .map(|r| QuizResponse {
-                id: r.get("id"),
-                tenant_id: r.get("tenant_id"),
-                lesson_id: r.get("lesson_id"),
-                title: r.get("title"),
-                description: r.get("description"),
-                duration_minutes: r.get::<Option<i32>, _>("time_limit_minutes").unwrap_or(30),
-                passing_score: r.get("passing_score"),
-                max_score: r.get("max_score"),
-                max_attempts: r.get("max_attempts"),
-                shuffle_questions: r.get("shuffle_questions"),
-                shuffle_choices: r.get("shuffle_choices"),
-                start_at: r.get("start_at"),
-                end_at: r.get("end_at"),
-                status: r.get("status"),
-                questions_count: r.get("questions_count"),
-                is_active: r.get("is_active"),
-                created_at: r.get("created_at"),
-                updated_at: r.get("updated_at"),
-                class_id: r.get("class_id"),
-                class_name: r.get("class_name"),
-                subject_name: r.get("subject_name"),
-                teacher_name: r.get("teacher_name"),
+            .map(|r| {
+                let dur = r.get::<Option<i32>, _>("time_limit_minutes").unwrap_or(30);
+                QuizResponse {
+                    id: r.get("id"),
+                    tenant_id: r.get("tenant_id"),
+                    lesson_id: r.get("lesson_id"),
+                    title: r.get("title"),
+                    description: r.get("description"),
+                    duration_minutes: dur,
+                    time_limit_minutes: dur,
+                    passing_score: r.get("passing_score"),
+                    max_score: r.get("max_score"),
+                    max_attempts: r.get("max_attempts"),
+                    shuffle_questions: r.get("shuffle_questions"),
+                    shuffle_choices: r.get("shuffle_choices"),
+                    start_at: r.get("start_at"),
+                    end_at: r.get("end_at"),
+                    status: r.get("status"),
+                    questions_count: r.get("questions_count"),
+                    is_active: r.get("is_active"),
+                    created_at: r.get("created_at"),
+                    updated_at: r.get("updated_at"),
+                    class_id: r.get("class_id"),
+                    class_name: r.get("class_name"),
+                    subject_name: r.get("subject_name"),
+                    teacher_name: r.get("teacher_name"),
+                }
             })
             .collect()
     } else if is_student || is_parent {
@@ -412,29 +483,33 @@ async fn list(
         ), &req_ctx.request_id))?;
 
         rows.into_iter()
-            .map(|r| QuizResponse {
-                id: r.get("id"),
-                tenant_id: r.get("tenant_id"),
-                lesson_id: r.get("lesson_id"),
-                title: r.get("title"),
-                description: r.get("description"),
-                duration_minutes: r.get::<Option<i32>, _>("time_limit_minutes").unwrap_or(30),
-                passing_score: r.get("passing_score"),
-                max_score: r.get("max_score"),
-                max_attempts: r.get("max_attempts"),
-                shuffle_questions: r.get("shuffle_questions"),
-                shuffle_choices: r.get("shuffle_choices"),
-                start_at: r.get("start_at"),
-                end_at: r.get("end_at"),
-                status: r.get("status"),
-                questions_count: r.get("questions_count"),
-                is_active: r.get("is_active"),
-                created_at: r.get("created_at"),
-                updated_at: r.get("updated_at"),
-                class_id: r.get("class_id"),
-                class_name: r.get("class_name"),
-                subject_name: r.get("subject_name"),
-                teacher_name: r.get("teacher_name"),
+            .map(|r| {
+                let dur = r.get::<Option<i32>, _>("time_limit_minutes").unwrap_or(30);
+                QuizResponse {
+                    id: r.get("id"),
+                    tenant_id: r.get("tenant_id"),
+                    lesson_id: r.get("lesson_id"),
+                    title: r.get("title"),
+                    description: r.get("description"),
+                    duration_minutes: dur,
+                    time_limit_minutes: dur,
+                    passing_score: r.get("passing_score"),
+                    max_score: r.get("max_score"),
+                    max_attempts: r.get("max_attempts"),
+                    shuffle_questions: r.get("shuffle_questions"),
+                    shuffle_choices: r.get("shuffle_choices"),
+                    start_at: r.get("start_at"),
+                    end_at: r.get("end_at"),
+                    status: r.get("status"),
+                    questions_count: r.get("questions_count"),
+                    is_active: r.get("is_active"),
+                    created_at: r.get("created_at"),
+                    updated_at: r.get("updated_at"),
+                    class_id: r.get("class_id"),
+                    class_name: r.get("class_name"),
+                    subject_name: r.get("subject_name"),
+                    teacher_name: r.get("teacher_name"),
+                }
             })
             .collect()
     } else {
@@ -465,29 +540,33 @@ async fn list(
         ), &req_ctx.request_id))?;
 
         rows.into_iter()
-            .map(|r| QuizResponse {
-                id: r.id,
-                tenant_id: r.tenant_id,
-                lesson_id: r.lesson_id,
-                title: r.title,
-                description: r.description,
-                duration_minutes: r.time_limit_minutes.unwrap_or(30),
-                passing_score: r.passing_score,
-                max_score: r.max_score,
-                max_attempts: r.max_attempts,
-                shuffle_questions: r.shuffle_questions,
-                shuffle_choices: r.shuffle_choices,
-                start_at: r.start_at,
-                end_at: r.end_at,
-                status: r.status,
-                questions_count: r.questions_count,
-                is_active: r.is_active,
-                created_at: r.created_at,
-                updated_at: r.updated_at,
-                class_id: r.class_id,
-                class_name: r.class_name,
-                subject_name: r.subject_name,
-                teacher_name: r.teacher_name,
+            .map(|r| {
+                let dur = r.time_limit_minutes.unwrap_or(30);
+                QuizResponse {
+                    id: r.id,
+                    tenant_id: r.tenant_id,
+                    lesson_id: r.lesson_id,
+                    title: r.title,
+                    description: r.description,
+                    duration_minutes: dur,
+                    time_limit_minutes: dur,
+                    passing_score: r.passing_score,
+                    max_score: r.max_score,
+                    max_attempts: r.max_attempts,
+                    shuffle_questions: r.shuffle_questions,
+                    shuffle_choices: r.shuffle_choices,
+                    start_at: r.start_at,
+                    end_at: r.end_at,
+                    status: r.status,
+                    questions_count: r.questions_count,
+                    is_active: r.is_active,
+                    created_at: r.created_at,
+                    updated_at: r.updated_at,
+                    class_id: r.class_id,
+                    class_name: r.class_name,
+                    subject_name: r.subject_name,
+                    teacher_name: r.teacher_name,
+                }
             })
             .collect()
     };
@@ -862,6 +941,7 @@ async fn grade_attempt(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
     Path((_id, attempt_id)): Path<(Uuid, Uuid)>,
+    payload: Option<Json<GradeAttemptRequest>>,
 ) -> Result<Json<ApiResponse<AttemptResponse>>, ApiError> {
     use crate::middleware::require_permission;
     use school_core::permission::domain::permission_registry::Permission;
@@ -875,12 +955,54 @@ async fn grade_attempt(
         )
     })?;
 
-    let command = GradeAttemptCommand { attempt_id };
-    let attempt = ctx
-        .grade_attempt
-        .execute(command)
-        .await
-        .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
+    let _grader_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
+
+    if let Some(Json(ref p)) = payload {
+        if let Some(ref answer_grades) = p.answer_grades {
+            for ag in answer_grades {
+                let _ = sqlx::query(
+                    r#"
+                    UPDATE attempt_answers 
+                    SET points_earned = $1, text_answer = COALESCE(text_answer, $2)
+                    WHERE attempt_id = $3 AND question_id = $4
+                    "#,
+                )
+                .bind(ag.points_earned)
+                .bind(&ag.teacher_feedback)
+                .bind(attempt_id)
+                .bind(ag.question_id)
+                .execute(&ctx.pool)
+                .await;
+            }
+
+            let new_score: i32 = if let Some(manual_score) = p.score {
+                manual_score
+            } else {
+                sqlx::query_scalar!(
+                    r#"SELECT COALESCE(SUM(points_earned), 0)::int as "total!" FROM attempt_answers WHERE attempt_id = $1"#,
+                    attempt_id
+                )
+                .fetch_one(&ctx.pool)
+                .await
+                .unwrap_or(0)
+            };
+
+            let _ = sqlx::query(
+                r#"
+                UPDATE quiz_attempts 
+                SET score = $1, status = 'graded', completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
+                WHERE id = $2
+                "#
+            )
+            .bind(new_score)
+            .bind(attempt_id)
+            .execute(&ctx.pool)
+            .await;
+        }
+    } else {
+        let command = GradeAttemptCommand { attempt_id };
+        let _ = ctx.grade_attempt.execute(command).await;
+    }
 
     // ── FCM update NILAI kuis ke siswa pemilik attempt ──
     {
@@ -919,47 +1041,345 @@ async fn grade_attempt(
         }
     }
 
+    let updated_attempt = sqlx::query(
+        r#"
+        SELECT 
+            a.id, a.quiz_id, a.student_id, a.started_at, a.completed_at,
+            a.score, a.total_points, a.status, a.created_at, a.updated_at,
+            COALESCE(s.full_name, u.full_name, 'Siswa') as student_name,
+            COALESCE(s.nisn, u.username, '-') as student_nisn,
+            q.max_score, q.passing_score
+        FROM quiz_attempts a
+        JOIN quizzes q ON q.id = a.quiz_id
+        LEFT JOIN students s ON s.id = a.student_id OR s.user_id = a.student_id
+        LEFT JOIN users u ON u.id = a.student_id OR u.id = s.user_id
+        WHERE a.id = $1
+        LIMIT 1
+        "#,
+    )
+    .bind(attempt_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
+        school_core::common::error::InfrastructureError::Database(e)
+    ), &req_ctx.request_id))?;
+
+    let score: Option<i32> = updated_attempt.get("score");
+    let total_points: i32 = updated_attempt.get("total_points");
+    let max_score: i32 = updated_attempt.get("max_score");
+    let passing_score: i32 = updated_attempt.get("passing_score");
+
+    let effective_max = if total_points > 0 {
+        total_points
+    } else if max_score > 0 {
+        max_score
+    } else {
+        100
+    };
+
+    let percentage = score.map(|s| (s * 100) / effective_max);
+    let passed = percentage.map(|p| p >= passing_score);
+
     Ok(Json(ApiResponse::success(
-        AttemptResponse::from(attempt),
+        AttemptResponse {
+            id: updated_attempt.get("id"),
+            quiz_id: updated_attempt.get("quiz_id"),
+            student_id: updated_attempt.get("student_id"),
+            started_at: updated_attempt.get("started_at"),
+            completed_at: updated_attempt.get("completed_at"),
+            score,
+            total_points: effective_max,
+            percentage,
+            passed,
+            status: updated_attempt.get("status"),
+            created_at: updated_attempt.get("created_at"),
+            updated_at: updated_attempt.get("updated_at"),
+            student_name: updated_attempt.get("student_name"),
+            student_nisn: updated_attempt.get("student_nisn"),
+            answers: Vec::new(),
+        },
         req_ctx.request_id,
     )))
 }
 
-#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
-pub struct QuizChoiceResponse {
-    pub id: Uuid,
-    pub choice_text: String,
-    pub order_index: i32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_correct: Option<bool>,
+async fn get_attempts(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ApiResponse<Vec<AttemptResponse>>>, ApiError> {
+    use crate::middleware::require_permission;
+    use school_core::permission::domain::permission_registry::Permission;
+    require_permission(&req_ctx.actor, Permission::LearningQuizRead).map_err(|_| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Insufficient permissions".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
+    let is_student = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n == "siswa" || n == "student" || n == "murid" || n.contains("siswa")
+            })
+        })
+        .unwrap_or(false)
+        || crate::authorization_helpers::AuthorizationScope::resolve_student_id(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            actor_id,
+        )
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+
+    let rows = if is_student {
+        let student_db_id = crate::authorization_helpers::AuthorizationScope::resolve_student_id(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            actor_id,
+        )
+        .await
+        .unwrap_or(None);
+
+        sqlx::query(
+            r#"
+            SELECT 
+                a.id, a.quiz_id, a.student_id, a.started_at, a.completed_at,
+                a.score, a.total_points, a.status, a.created_at, a.updated_at,
+                COALESCE(s.full_name, u.full_name, 'Siswa') as student_name,
+                COALESCE(s.nisn, u.username, '-') as student_nisn,
+                q.max_score, q.passing_score
+            FROM quiz_attempts a
+            JOIN quizzes q ON q.id = a.quiz_id
+            LEFT JOIN students s ON s.id = a.student_id OR s.user_id = a.student_id
+            LEFT JOIN users u ON u.id = a.student_id OR u.id = s.user_id
+            WHERE a.quiz_id = $1 AND a.tenant_id = $2
+              AND (
+                  a.student_id = $3
+                  OR s.user_id = $3
+                  OR ($4::uuid IS NOT NULL AND a.student_id = $4)
+              )
+            ORDER BY a.started_at DESC
+            "#,
+        )
+        .bind(id)
+        .bind(req_ctx.tenant_id)
+        .bind(actor_id)
+        .bind(student_db_id)
+        .fetch_all(&ctx.pool)
+        .await
+    } else {
+        sqlx::query(
+            r#"
+            SELECT 
+                a.id, a.quiz_id, a.student_id, a.started_at, a.completed_at,
+                a.score, a.total_points, a.status, a.created_at, a.updated_at,
+                COALESCE(s.full_name, u.full_name, 'Siswa') as student_name,
+                COALESCE(s.nisn, u.username, '-') as student_nisn,
+                q.max_score, q.passing_score
+            FROM quiz_attempts a
+            JOIN quizzes q ON q.id = a.quiz_id
+            LEFT JOIN students s ON s.id = a.student_id OR s.user_id = a.student_id
+            LEFT JOIN users u ON u.id = a.student_id OR u.id = s.user_id
+            WHERE a.quiz_id = $1 AND a.tenant_id = $2
+            ORDER BY a.started_at DESC
+            "#,
+        )
+        .bind(id)
+        .bind(req_ctx.tenant_id)
+        .fetch_all(&ctx.pool)
+        .await
+    }
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let items: Vec<AttemptResponse> = rows
+        .into_iter()
+        .map(|r| {
+            let score: Option<i32> = r.get("score");
+            let total_points: i32 = r.get("total_points");
+            let max_score: i32 = r.get("max_score");
+            let passing_score: i32 = r.get("passing_score");
+
+            let effective_max = if total_points > 0 {
+                total_points
+            } else if max_score > 0 {
+                max_score
+            } else {
+                100
+            };
+
+            let percentage = score.map(|s| (s * 100) / effective_max);
+            let passed = percentage.map(|p| p >= passing_score);
+
+            AttemptResponse {
+                id: r.get("id"),
+                quiz_id: r.get("quiz_id"),
+                student_id: r.get("student_id"),
+                started_at: r.get("started_at"),
+                completed_at: r.get("completed_at"),
+                score,
+                total_points: effective_max,
+                percentage,
+                passed,
+                status: r.get("status"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+                student_name: r.get("student_name"),
+                student_nisn: r.get("student_nisn"),
+                answers: Vec::new(),
+            }
+        })
+        .collect();
+
+    Ok(Json(ApiResponse::success(items, req_ctx.request_id)))
 }
 
-#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
-pub struct QuizQuestionResponse {
-    pub id: Uuid,
-    pub question_text: String,
-    pub question_type: String,
-    pub points: i32,
-    pub order_index: i32,
-    pub image_url: Option<String>,
-    pub choices: Vec<QuizChoiceResponse>,
-}
+async fn get_attempt_by_id(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Path((quiz_id, attempt_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<ApiResponse<AttemptResponse>>, ApiError> {
+    use crate::middleware::require_permission;
+    use school_core::permission::domain::permission_registry::Permission;
+    require_permission(&req_ctx.actor, Permission::LearningQuizRead).map_err(|_| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Insufficient permissions".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
 
-#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
-pub struct CreateQuizOptionInput {
-    pub choice_text: String,
-    pub is_correct: Option<bool>,
-    pub order_index: Option<i32>,
-}
+    let row = sqlx::query(
+        r#"
+        SELECT 
+            a.id, a.quiz_id, a.student_id, a.started_at, a.completed_at,
+            a.score, a.total_points, a.status, a.created_at, a.updated_at,
+            COALESCE(s.full_name, u.full_name, 'Siswa') as student_name,
+            COALESCE(s.nisn, u.username, '-') as student_nisn,
+            q.max_score, q.passing_score
+        FROM quiz_attempts a
+        JOIN quizzes q ON q.id = a.quiz_id
+        LEFT JOIN students s ON s.id = a.student_id OR s.user_id = a.student_id
+        LEFT JOIN users u ON u.id = a.student_id OR u.id = s.user_id
+        WHERE a.id = $1 AND a.quiz_id = $2 AND a.tenant_id = $3
+        LIMIT 1
+        "#,
+    )
+    .bind(attempt_id)
+    .bind(quiz_id)
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?
+    .ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::NotFound(
+                school_core::common::error_code::ErrorCode::AttemptNotFound,
+                format!("Attempt {} not found", attempt_id),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
 
-#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
-pub struct CreateQuizQuestionRequest {
-    pub question_text: String,
-    pub question_type: Option<String>,
-    pub points: Option<i32>,
-    pub order_index: Option<i32>,
-    pub image_url: Option<String>,
-    pub choices: Option<Vec<CreateQuizOptionInput>>,
+    let answer_rows = sqlx::query(
+        r#"
+        SELECT 
+            ans.question_id,
+            q.question_text,
+            q.question_type,
+            q.points as max_points,
+            ans.chosen_choice_id,
+            c.choice_text as chosen_choice_text,
+            c.is_correct as is_correct,
+            ans.text_answer,
+            ans.points_earned
+        FROM attempt_answers ans
+        JOIN quiz_questions q ON q.id = ans.question_id
+        LEFT JOIN quiz_choices c ON c.id = ans.chosen_choice_id
+        WHERE ans.attempt_id = $1
+        ORDER BY q.order_index ASC, q.created_at ASC
+        "#,
+    )
+    .bind(attempt_id)
+    .fetch_all(&ctx.pool)
+    .await
+    .unwrap_or_default();
+
+    let answers: Vec<AttemptAnswerDetailDto> = answer_rows
+        .into_iter()
+        .map(|a| AttemptAnswerDetailDto {
+            question_id: a.get("question_id"),
+            question_text: a.get("question_text"),
+            question_type: a.get("question_type"),
+            max_points: a.get("max_points"),
+            chosen_choice_id: a.get("chosen_choice_id"),
+            chosen_choice_text: a.get("chosen_choice_text"),
+            is_correct: a.get("is_correct"),
+            text_answer: a.get("text_answer"),
+            points_earned: a.get::<Option<i32>, _>("points_earned").unwrap_or(0),
+            teacher_feedback: None,
+        })
+        .collect();
+
+    let score: Option<i32> = row.get("score");
+    let total_points: i32 = row.get("total_points");
+    let max_score: i32 = row.get("max_score");
+    let passing_score: i32 = row.get("passing_score");
+
+    let effective_max = if total_points > 0 {
+        total_points
+    } else if max_score > 0 {
+        max_score
+    } else {
+        100
+    };
+
+    let percentage = score.map(|s| (s * 100) / effective_max);
+    let passed = percentage.map(|p| p >= passing_score);
+
+    let resp = AttemptResponse {
+        id: row.get("id"),
+        quiz_id: row.get("quiz_id"),
+        student_id: row.get("student_id"),
+        started_at: row.get("started_at"),
+        completed_at: row.get("completed_at"),
+        score,
+        total_points: effective_max,
+        percentage,
+        passed,
+        status: row.get("status"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        student_name: row.get("student_name"),
+        student_nisn: row.get("student_nisn"),
+        answers,
+    };
+
+    Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
 }
 
 async fn get_questions(
@@ -1141,10 +1561,17 @@ async fn add_question(
         }
     }
 
-    let _ = sqlx::query("UPDATE quizzes SET questions_count = questions_count + 1 WHERE id = $1")
-        .bind(id)
-        .execute(&ctx.pool)
-        .await;
+    let _ = sqlx::query(
+        r#"
+        UPDATE quizzes 
+        SET questions_count = (SELECT COUNT(*) FROM quiz_questions WHERE quiz_id = $1),
+            max_score = (SELECT COALESCE(SUM(points), 0) FROM quiz_questions WHERE quiz_id = $1)
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .execute(&ctx.pool)
+    .await;
 
     Ok(Json(ApiResponse::success(
         QuizQuestionResponse {

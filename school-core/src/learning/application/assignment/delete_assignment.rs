@@ -31,6 +31,14 @@ impl DeleteAssignmentUseCase {
                 )
             })?;
 
+        // Tenant isolation: ensure assignment belongs to requesting tenant
+        if assignment.tenant_id != command.tenant_id {
+            return Err(ApplicationError::NotFound(
+                ErrorCode::AssignmentNotFound,
+                format!("Assignment {} not found", command.assignment_id),
+            ));
+        }
+
         self.repo.delete(assignment.id, command.deleted_by).await?;
 
         Ok(())

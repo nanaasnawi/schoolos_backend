@@ -51,6 +51,14 @@ impl GradeSubmissionUseCase {
                 )
             })?;
 
+        // Tenant isolation: ensure submission belongs to requesting tenant
+        if submission.tenant_id != command.tenant_id {
+            return Err(ApplicationError::NotFound(
+                ErrorCode::SubmissionNotFound,
+                format!("Submission {} not found", command.submission_id),
+            ));
+        }
+
         let assignment = self
             .repo
             .find_by_id(submission.assignment_id)
@@ -61,6 +69,14 @@ impl GradeSubmissionUseCase {
                     format!("Assignment {} not found", submission.assignment_id),
                 )
             })?;
+
+        // Double-check assignment also belongs to same tenant
+        if assignment.tenant_id != command.tenant_id {
+            return Err(ApplicationError::NotFound(
+                ErrorCode::AssignmentNotFound,
+                format!("Assignment {} not found", submission.assignment_id),
+            ));
+        }
 
         submission
             .grade(

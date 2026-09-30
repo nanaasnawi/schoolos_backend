@@ -6,6 +6,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 pub struct GetAssignmentQuery {
+    pub tenant_id: Uuid,
     pub assignment_id: Uuid,
 }
 
@@ -19,7 +20,8 @@ impl GetAssignmentUseCase {
     }
 
     pub async fn execute(&self, query: GetAssignmentQuery) -> Result<Assignment, ApplicationError> {
-        self.repo
+        let assignment = self
+            .repo
             .find_by_id(query.assignment_id)
             .await?
             .ok_or_else(|| {
@@ -27,6 +29,16 @@ impl GetAssignmentUseCase {
                     ErrorCode::AssignmentNotFound,
                     format!("Assignment {} not found", query.assignment_id),
                 )
-            })
+            })?;
+
+        // Tenant isolation: ensure assignment belongs to requesting tenant
+        if assignment.tenant_id != query.tenant_id {
+            return Err(ApplicationError::NotFound(
+                ErrorCode::AssignmentNotFound,
+                format!("Assignment {} not found", query.assignment_id),
+            ));
+        }
+
+        Ok(assignment)
     }
 }
