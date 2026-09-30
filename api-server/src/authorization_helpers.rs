@@ -52,17 +52,13 @@ impl AuthorizationScope {
         let row = sqlx::query(
             r#"
             SELECT EXISTS(
-                SELECT 1 FROM students
-                WHERE tenant_id = $1 
-                  AND id = $2 
-                  AND class_id = $3
-                  AND deleted_at IS NULL
-                UNION
-                SELECT 1 FROM enrollments 
-                WHERE tenant_id = $1 
-                  AND student_id = $2 
-                  AND class_id = $3 
-                  AND (status ILIKE 'active')
+                SELECT 1 FROM enrollments en
+                JOIN students s ON s.id = en.student_id
+                WHERE en.tenant_id = $1 
+                  AND en.student_id = $2 
+                  AND en.class_id = $3 
+                  AND (en.status ILIKE 'active')
+                  AND s.deleted_at IS NULL
             ) as is_enrolled
             "#,
         )
@@ -88,19 +84,12 @@ impl AuthorizationScope {
                 SELECT 1 
                 FROM guardians g
                 JOIN students s ON s.guardian_id = g.id
-                WHERE g.user_id = $1 
-                  AND g.tenant_id = $2
-                  AND s.class_id = $3
-                  AND s.deleted_at IS NULL
-                UNION
-                SELECT 1 
-                FROM guardians g
-                JOIN students s ON s.guardian_id = g.id
                 JOIN enrollments en ON en.student_id = s.id
                 WHERE g.user_id = $1 
                   AND g.tenant_id = $2
                   AND en.class_id = $3
                   AND (en.status ILIKE 'active')
+                  AND s.deleted_at IS NULL
             ) as is_parent
             "#,
         )

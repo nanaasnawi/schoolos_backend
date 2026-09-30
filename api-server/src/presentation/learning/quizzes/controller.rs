@@ -420,25 +420,16 @@ async fn list(
               AND q.deleted_at IS NULL
               AND (
                   q.class_id IN (
-                      SELECT s.class_id 
-                      FROM students s 
-                      WHERE s.user_id = $2 AND s.class_id IS NOT NULL AND s.deleted_at IS NULL
+                      SELECT en.class_id 
+                      FROM enrollments en
+                      JOIN students s ON s.id = en.student_id
+                      WHERE s.user_id = $2 AND en.status ILIKE 'active'
                       UNION
                       SELECT en.class_id 
-                      FROM students s
-                      JOIN enrollments en ON en.student_id = s.id
-                      WHERE s.user_id = $2 AND (en.status ILIKE 'active')
-                      UNION
-                      SELECT s.class_id 
-                      FROM guardians g
-                      JOIN students s ON s.guardian_id = g.id
-                      WHERE g.user_id = $2 AND s.class_id IS NOT NULL AND s.deleted_at IS NULL
-                      UNION
-                      SELECT en.class_id 
-                      FROM guardians g
-                      JOIN students s ON s.guardian_id = g.id
-                      JOIN enrollments en ON en.student_id = s.id
-                      WHERE g.user_id = $2 AND (en.status ILIKE 'active')
+                      FROM enrollments en
+                      JOIN students s ON s.id = en.student_id
+                      JOIN guardians g ON g.id = s.guardian_id
+                      WHERE g.user_id = $2 AND en.status ILIKE 'active'
                   )
                   OR (
                       q.class_id IS NULL
@@ -447,16 +438,17 @@ async fn list(
                           WHERE other_c.tenant_id = q.tenant_id
                             AND (q.description ILIKE '%' || other_c.name || '%' OR q.title ILIKE '%' || other_c.name || '%')
                             AND other_c.id NOT IN (
-                                SELECT s.class_id FROM students s WHERE s.user_id = $2 AND s.class_id IS NOT NULL
-                                UNION
-                                SELECT en.class_id FROM students s JOIN enrollments en ON en.student_id = s.id WHERE s.user_id = $2 AND en.status ILIKE 'active'
+                                SELECT en.class_id FROM enrollments en 
+                                JOIN students s ON s.id = en.student_id 
+                                WHERE s.user_id = $2 AND en.status ILIKE 'active'
                             )
                       )
                       AND (
                           CASE 
                               WHEN EXISTS (
-                                  SELECT 1 FROM students s 
-                                  LEFT JOIN classes sc ON sc.id = s.class_id
+                                  SELECT 1 FROM enrollments en
+                                  JOIN students s ON s.id = en.student_id 
+                                  JOIN classes sc ON sc.id = en.class_id
                                   WHERE s.user_id = $2 AND (sc.name ILIKE '%PAKET A%' OR sc.name ILIKE '%SD%')
                               ) THEN (
                                   q.title NOT ILIKE '%PAKET B%' AND q.title NOT ILIKE '%PAKET C%' 
@@ -978,10 +970,10 @@ async fn grade_attempt(
             let new_score: i32 = if let Some(manual_score) = p.score {
                 manual_score
             } else {
-                sqlx::query_scalar!(
-                    r#"SELECT COALESCE(SUM(points_earned), 0)::int as "total!" FROM attempt_answers WHERE attempt_id = $1"#,
-                    attempt_id
+                sqlx::query_scalar::<_, i32>(
+                    r#"SELECT COALESCE(SUM(points_earned), 0)::int FROM attempt_answers WHERE attempt_id = $1"#,
                 )
+                .bind(attempt_id)
                 .fetch_one(&ctx.pool)
                 .await
                 .unwrap_or(0)
