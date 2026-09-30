@@ -80,7 +80,8 @@ use school_core::learning::application::quiz::{
 use school_core::learning::application::session::{
     end_session::EndSessionUseCase, get_attendance::GetAttendanceUseCase,
     get_session::GetSessionUseCase, list_sessions::ListSessionsUseCase,
-    record_attendance::RecordAttendanceUseCase, start_session::StartSessionUseCase,
+    record_attendance::RecordAttendanceUseCase, record_attendance_bulk::RecordAttendanceBulkUseCase,
+    start_session::StartSessionUseCase,
 };
 use school_core::learning::application::syllabus::{
     add_competency::AddCompetencyUseCase, create_syllabus::CreateSyllabusUseCase,
@@ -206,6 +207,7 @@ pub struct ApplicationContext {
     pub get_session: Arc<GetSessionUseCase>,
     pub list_sessions: Arc<ListSessionsUseCase>,
     pub record_attendance: Arc<RecordAttendanceUseCase>,
+    pub record_attendance_bulk: Arc<RecordAttendanceBulkUseCase>,
     pub get_attendance: Arc<GetAttendanceUseCase>,
 
     pub create_assignment: Arc<CreateAssignmentUseCase>,

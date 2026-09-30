@@ -194,7 +194,9 @@ async fn get_overview(
         .bind(req_ctx.tenant_id)
         .fetch_one(pool),
         sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM session_attendances WHERE tenant_id = $1 AND status IN ('Present', 'present', 'Hadir', 'hadir')",
+            // Setelah migration 20260930, semua status sudah dinormalisasi ke lowercase.
+            // 'late' (terlambat) juga dihitung sebagai hadir (masuk sekolah).
+            "SELECT COUNT(*) FROM session_attendances WHERE tenant_id = $1 AND status IN ('present', 'late')",
         )
         .bind(req_ctx.tenant_id)
         .fetch_one(pool),

@@ -140,10 +140,15 @@ impl SessionRepository for PgSessionRepository {
     ) -> Result<(), InfrastructureError> {
         sqlx::query(
             r#"
-            INSERT INTO session_attendances (id, tenant_id, session_id, student_id, status, checked_in_at, notes, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            INSERT INTO session_attendances (id, tenant_id, session_id, student_id, status, checked_in_at, notes, method, recorded_by, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT (session_id, student_id) DO UPDATE
-            SET status = $5, checked_in_at = COALESCE($6, session_attendances.checked_in_at), notes = COALESCE($7, session_attendances.notes), updated_at = $9
+            SET status = EXCLUDED.status,
+                checked_in_at = COALESCE(EXCLUDED.checked_in_at, session_attendances.checked_in_at),
+                notes = COALESCE(EXCLUDED.notes, session_attendances.notes),
+                method = COALESCE(EXCLUDED.method, session_attendances.method),
+                recorded_by = COALESCE(EXCLUDED.recorded_by, session_attendances.recorded_by),
+                updated_at = EXCLUDED.updated_at
             "#
         )
         .bind(attendance.id)
@@ -153,6 +158,8 @@ impl SessionRepository for PgSessionRepository {
         .bind(&attendance.status)
         .bind(attendance.checked_in_at)
         .bind(&attendance.notes)
+        .bind(&attendance.method)
+        .bind(attendance.recorded_by)
         .bind(attendance.created_at)
         .bind(attendance.updated_at)
         .execute(&self.pool)
@@ -162,12 +169,56 @@ impl SessionRepository for PgSessionRepository {
         Ok(())
     }
 
+    async fn record_attendance_bulk(
+        &self,
+        attendances: &[SessionAttendance],
+    ) -> Result<(), InfrastructureError> {
+        if attendances.is_empty() {
+            return Ok(());
+        }
+
+        let mut tx = self.pool.begin().await.map_err(InfrastructureError::Database)?;
+
+        for attendance in attendances {
+            sqlx::query(
+                r#"
+                INSERT INTO session_attendances (id, tenant_id, session_id, student_id, status, checked_in_at, notes, method, recorded_by, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                ON CONFLICT (session_id, student_id) DO UPDATE
+                SET status = EXCLUDED.status,
+                    checked_in_at = COALESCE(EXCLUDED.checked_in_at, session_attendances.checked_in_at),
+                    notes = COALESCE(EXCLUDED.notes, session_attendances.notes),
+                    method = COALESCE(EXCLUDED.method, session_attendances.method),
+                    recorded_by = COALESCE(EXCLUDED.recorded_by, session_attendances.recorded_by),
+                    updated_at = EXCLUDED.updated_at
+                "#
+            )
+            .bind(attendance.id)
+            .bind(attendance.tenant_id)
+            .bind(attendance.session_id)
+            .bind(attendance.student_id)
+            .bind(&attendance.status)
+            .bind(attendance.checked_in_at)
+            .bind(&attendance.notes)
+            .bind(&attendance.method)
+            .bind(attendance.recorded_by)
+            .bind(attendance.created_at)
+            .bind(attendance.updated_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(InfrastructureError::Database)?;
+        }
+
+        tx.commit().await.map_err(InfrastructureError::Database)?;
+        Ok(())
+    }
+
     async fn find_attendance(
         &self,
         session_id: Uuid,
     ) -> Result<Vec<SessionAttendance>, InfrastructureError> {
         let records = sqlx::query(
-            r#"SELECT id, tenant_id, session_id, student_id, status, checked_in_at, notes, created_at, updated_at
+            r#"SELECT id, tenant_id, session_id, student_id, status, checked_in_at, notes, method, recorded_by, created_at, updated_at
                FROM session_attendances WHERE session_id = $1
                ORDER BY checked_in_at ASC NULLS LAST"#
         )
@@ -186,6 +237,44 @@ impl SessionRepository for PgSessionRepository {
                 status: r.get("status"),
                 checked_in_at: r.get("checked_in_at"),
                 notes: r.get("notes"),
+                method: r.try_get("method").ok(),
+                recorded_by: r.try_get("recorded_by").ok(),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+            })
+            .collect();
+
+        Ok(items)
+    }
+
+    async fn find_attendance_by_tenant_and_session(
+        &self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<Vec<SessionAttendance>, InfrastructureError> {
+        let records = sqlx::query(
+            r#"SELECT id, tenant_id, session_id, student_id, status, checked_in_at, notes, method, recorded_by, created_at, updated_at
+               FROM session_attendances WHERE tenant_id = $1 AND session_id = $2
+               ORDER BY checked_in_at ASC NULLS LAST"#
+        )
+        .bind(tenant_id)
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(InfrastructureError::Database)?;
+
+        let items = records
+            .into_iter()
+            .map(|r| SessionAttendance {
+                id: r.get("id"),
+                tenant_id: r.get("tenant_id"),
+                session_id: r.get("session_id"),
+                student_id: r.get("student_id"),
+                status: r.get("status"),
+                checked_in_at: r.get("checked_in_at"),
+                notes: r.get("notes"),
+                method: r.try_get("method").ok(),
+                recorded_by: r.try_get("recorded_by").ok(),
                 created_at: r.get("created_at"),
                 updated_at: r.get("updated_at"),
             })
@@ -233,16 +322,56 @@ impl SessionRepository for PgSessionRepository {
         Ok(items)
     }
 
+    async fn find_attendance_by_class(
+        &self,
+        tenant_id: Uuid,
+        class_id: Uuid,
+    ) -> Result<Vec<SessionAttendance>, InfrastructureError> {
+        let records = sqlx::query(
+            r#"SELECT sa.id, sa.tenant_id, sa.session_id, sa.student_id, sa.status, sa.checked_in_at, sa.notes, sa.method, sa.recorded_by, sa.created_at, sa.updated_at
+               FROM session_attendances sa
+               LEFT JOIN learning_sessions ls ON ls.id = sa.session_id
+               LEFT JOIN class_schedules cs ON cs.id = sa.session_id
+               WHERE sa.tenant_id = $1 AND (ls.class_id = $2 OR cs.class_id = $2)
+               ORDER BY sa.created_at DESC"#
+        )
+        .bind(tenant_id)
+        .bind(class_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(InfrastructureError::Database)?;
+
+        let items = records
+            .into_iter()
+            .map(|r| SessionAttendance {
+                id: r.get("id"),
+                tenant_id: r.get("tenant_id"),
+                session_id: r.get("session_id"),
+                student_id: r.get("student_id"),
+                status: r.get("status"),
+                checked_in_at: r.get("checked_in_at"),
+                notes: r.get("notes"),
+                method: r.try_get("method").ok(),
+                recorded_by: r.try_get("recorded_by").ok(),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+            })
+            .collect();
+
+        Ok(items)
+    }
+
     async fn find_attendance_by_student(
         &self,
         student_id: Uuid,
         class_id: Uuid,
     ) -> Result<Vec<SessionAttendance>, InfrastructureError> {
         let records = sqlx::query(
-            r#"SELECT sa.id, sa.tenant_id, sa.session_id, sa.student_id, sa.status, sa.checked_in_at, sa.notes, sa.created_at, sa.updated_at
+            r#"SELECT sa.id, sa.tenant_id, sa.session_id, sa.student_id, sa.status, sa.checked_in_at, sa.notes, sa.method, sa.recorded_by, sa.created_at, sa.updated_at
                FROM session_attendances sa
-               JOIN learning_sessions ls ON ls.id = sa.session_id
-               WHERE sa.student_id = $1 AND ls.class_id = $2
+               LEFT JOIN learning_sessions ls ON ls.id = sa.session_id
+               LEFT JOIN class_schedules cs ON cs.id = sa.session_id
+               WHERE sa.student_id = $1 AND (ls.class_id = $2 OR cs.class_id = $2)
                ORDER BY sa.checked_in_at ASC NULLS LAST"#
         )
         .bind(student_id)
@@ -261,6 +390,8 @@ impl SessionRepository for PgSessionRepository {
                 status: r.get("status"),
                 checked_in_at: r.get("checked_in_at"),
                 notes: r.get("notes"),
+                method: r.try_get("method").ok(),
+                recorded_by: r.try_get("recorded_by").ok(),
                 created_at: r.get("created_at"),
                 updated_at: r.get("updated_at"),
             })

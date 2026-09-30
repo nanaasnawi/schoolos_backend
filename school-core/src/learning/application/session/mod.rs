@@ -3,4 +3,5 @@ pub mod get_attendance;
 pub mod get_session;
 pub mod list_sessions;
 pub mod record_attendance;
+pub mod record_attendance_bulk;
 pub mod start_session;

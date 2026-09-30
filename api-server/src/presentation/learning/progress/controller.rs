@@ -4,6 +4,7 @@ use axum::{
     Json, Router,
 };
 use chrono::Utc;
+use sqlx::Row;
 use uuid::Uuid;
 
 use super::dto::{
@@ -149,107 +150,108 @@ async fn calculate_dynamic_student_progress(
     class_id: Option<Uuid>,
 ) -> Result<ProgressResponse, sqlx::Error> {
     // 1. Learning materials
-    let lesson_total = sqlx::query_scalar!(
+    let lesson_total: i32 = sqlx::query_scalar(
         r#"
-        SELECT COUNT(*)::int as "count!"
+        SELECT COUNT(*)::int
         FROM learning_materials
         WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true
           AND (class_id IS NULL OR class_id = $2)
         "#,
-        tenant_id,
-        class_id
     )
+    .bind(tenant_id)
+    .bind(class_id)
     .fetch_one(&ctx.pool)
     .await
     .unwrap_or(0);
 
-    let lesson_completed = sqlx::query_scalar!(
+    let lesson_completed: i32 = sqlx::query_scalar(
         r#"
-        SELECT COUNT(*)::int as "count!"
+        SELECT COUNT(*)::int
         FROM student_material_completions
         WHERE tenant_id = $1 AND student_id = $2
         "#,
-        tenant_id,
-        student_id
     )
+    .bind(tenant_id)
+    .bind(student_id)
     .fetch_one(&ctx.pool)
     .await
     .unwrap_or(0);
 
     // 2. Assignments
-    let assignment_total = sqlx::query_scalar!(
+    let assignment_total: i32 = sqlx::query_scalar(
         r#"
-        SELECT COUNT(*)::int as "count!"
+        SELECT COUNT(*)::int
         FROM assignments
         WHERE tenant_id = $1 AND deleted_at IS NULL
           AND (class_id IS NULL OR class_id = $2)
         "#,
-        tenant_id,
-        class_id
     )
+    .bind(tenant_id)
+    .bind(class_id)
     .fetch_one(&ctx.pool)
     .await
     .unwrap_or(0);
 
-    let assignment_completed = sqlx::query_scalar!(
+    let assignment_completed: i32 = sqlx::query_scalar(
         r#"
-        SELECT COUNT(DISTINCT assignment_id)::int as "count!"
+        SELECT COUNT(DISTINCT assignment_id)::int
         FROM assignment_submissions
         WHERE student_id = $1 AND (status = 'submitted' OR status = 'graded')
         "#,
-        student_id
     )
+    .bind(student_id)
     .fetch_one(&ctx.pool)
     .await
     .unwrap_or(0);
 
     // 3. Quizzes
-    let quiz_total = sqlx::query_scalar!(
+    let quiz_total: i32 = sqlx::query_scalar(
         r#"
-        SELECT COUNT(*)::int as "count!"
+        SELECT COUNT(*)::int
         FROM quizzes
         WHERE tenant_id = $1 AND is_active = true AND deleted_at IS NULL
         "#,
-        tenant_id
     )
+    .bind(tenant_id)
     .fetch_one(&ctx.pool)
     .await
     .unwrap_or(0);
 
-    let quiz_completed = sqlx::query_scalar!(
+    let quiz_completed: i32 = sqlx::query_scalar(
         r#"
-        SELECT COUNT(DISTINCT quiz_id)::int as "count!"
+        SELECT COUNT(DISTINCT quiz_id)::int
         FROM quiz_attempts
         WHERE student_id = $1
         "#,
-        student_id
     )
+    .bind(student_id)
     .fetch_one(&ctx.pool)
     .await
     .unwrap_or(0);
 
     // 4. Sessions
-    let session_total = sqlx::query_scalar!(
+    let session_total: i32 = sqlx::query_scalar(
         r#"
-        SELECT COUNT(*)::int as "count!"
+        SELECT COUNT(*)::int
         FROM learning_sessions
         WHERE tenant_id = $1 AND (class_id IS NULL OR class_id = $2) AND status = 'completed' AND deleted_at IS NULL
         "#,
-        tenant_id,
-        class_id
     )
+    .bind(tenant_id)
+    .bind(class_id)
     .fetch_one(&ctx.pool)
     .await
     .unwrap_or(0);
 
-    let session_attended = sqlx::query_scalar!(
+    let session_attended: i32 = sqlx::query_scalar(
         r#"
-        SELECT COUNT(*)::int as "count!"
+        SELECT COUNT(*)::int
         FROM session_attendances
-        WHERE student_id = $1 AND (status = 'present' OR status = 'late')
+        WHERE tenant_id = $1 AND student_id = $2 AND (status = 'present' OR status = 'late')
         "#,
-        student_id
     )
+    .bind(tenant_id)
+    .bind(student_id)
     .fetch_one(&ctx.pool)
     .await
     .unwrap_or(0);
@@ -265,10 +267,10 @@ async fn calculate_dynamic_student_progress(
     };
 
     // Query student name
-    let student_name = sqlx::query_scalar!(
+    let student_name: String = sqlx::query_scalar(
         r#"SELECT full_name FROM students WHERE id = $1 LIMIT 1"#,
-        student_id
     )
+    .bind(student_id)
     .fetch_optional(&ctx.pool)
     .await
     .ok()
@@ -277,23 +279,26 @@ async fn calculate_dynamic_student_progress(
 
     // Query class name and homeroom teacher name
     let (class_name, homeroom_teacher_name) = if let Some(cid) = class_id {
-        let r = sqlx::query!(
+        let r = sqlx::query(
             r#"
-            SELECT c.name as class_name, t.full_name as "teacher_name?"
+            SELECT c.name as class_name, t.full_name as teacher_name
             FROM classes c
             LEFT JOIN teachers t ON t.id = c.homeroom_teacher_id
             WHERE c.id = $1
             LIMIT 1
             "#,
-            cid
         )
+        .bind(cid)
         .fetch_optional(&ctx.pool)
         .await
         .ok()
         .flatten();
 
         match r {
-            Some(row) => (Some(row.class_name), row.teacher_name),
+            Some(row) => (
+                row.try_get::<String, _>("class_name").ok(),
+                row.try_get::<Option<String>, _>("teacher_name").ok().flatten(),
+            ),
             None => (None, None),
         }
     } else {

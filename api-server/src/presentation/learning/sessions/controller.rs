@@ -17,7 +17,8 @@ use crate::{
 use school_core::learning::application::session::{
     end_session::EndSessionCommand, get_attendance::GetAttendanceQuery,
     get_session::GetSessionQuery, list_sessions::ListSessionsQuery,
-    record_attendance::RecordAttendanceCommand, start_session::StartSessionCommand,
+    record_attendance::RecordAttendanceCommand, record_attendance_bulk::{AttendanceItemDto, RecordAttendanceBulkCommand},
+    start_session::StartSessionCommand,
 };
 
 pub fn session_routes() -> Router<ApplicationContext> {
@@ -29,6 +30,7 @@ pub fn session_routes() -> Router<ApplicationContext> {
             "/{id}/attendance",
             post(record_attendance).get(get_attendance),
         )
+        .route("/{id}/attendance/bulk", post(record_attendance_bulk))
 }
 
 async fn start(
@@ -572,15 +574,21 @@ async fn record_attendance(
 ) -> Result<Json<ApiResponse<AttendanceResponse>>, ApiError> {
     use crate::middleware::require_permission;
     use school_core::permission::domain::permission_registry::Permission;
-    require_permission(&req_ctx.actor, Permission::LearningSessionUpdate).map_err(|_| {
-        ApiError::new(
-            school_core::common::error::ApplicationError::Unauthorized(
-                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                "Insufficient permissions".to_string(),
-            ),
-            &req_ctx.request_id,
-        )
-    })?;
+    // Guru (TeacherRead) juga bisa mencatat presensi selain yang punya SessionUpdate
+    require_permission(&req_ctx.actor, Permission::LearningSessionUpdate)
+        .or_else(|_| require_permission(&req_ctx.actor, Permission::TeacherRead))
+        .map_err(|_| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Insufficient permissions".to_string(),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+
+    // Ambil user_id dari actor sebagai recorded_by
+    let recorded_by = req_ctx.actor.as_ref().map(|a| a.id);
 
     let command = RecordAttendanceCommand {
         tenant_id: req_ctx.tenant_id,
@@ -589,6 +597,7 @@ async fn record_attendance(
         status: payload.status,
         checked_in_at: payload.checked_in_at,
         notes: payload.notes,
+        recorded_by,
     };
 
     let attendance = ctx
@@ -631,7 +640,11 @@ async fn get_attendance(
             )
         })?;
 
-    let query = GetAttendanceQuery { session_id: id };
+    // Wajib sertakan tenant_id untuk isolasi multi-tenant
+    let query = GetAttendanceQuery {
+        tenant_id: req_ctx.tenant_id,
+        session_id: id,
+    };
 
     let records = ctx
         .get_attendance
@@ -640,6 +653,48 @@ async fn get_attendance(
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
     let items = records.into_iter().map(AttendanceResponse::from).collect();
+
+    Ok(Json(ApiResponse::success(items, req_ctx.request_id)))
+}
+
+/// Catat presensi massal untuk seluruh siswa dalam satu sesi
+async fn record_attendance_bulk(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<Vec<AttendanceItemDto>>,
+) -> Result<Json<ApiResponse<Vec<AttendanceResponse>>>, ApiError> {
+    use crate::middleware::require_permission;
+    use school_core::permission::domain::permission_registry::Permission;
+    require_permission(&req_ctx.actor, Permission::LearningSessionUpdate)
+        .or_else(|_| require_permission(&req_ctx.actor, Permission::TeacherRead))
+        .map_err(|_| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Insufficient permissions".to_string(),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+
+    let recorded_by = req_ctx.actor.as_ref().map(|a| a.id);
+
+    let command = RecordAttendanceBulkCommand {
+        tenant_id: req_ctx.tenant_id,
+        session_id: id,
+        items: payload,
+        method: Some("manual".to_string()),
+        recorded_by,
+    };
+
+    let attendances = ctx
+        .record_attendance_bulk
+        .execute(command)
+        .await
+        .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
+
+    let items = attendances.into_iter().map(AttendanceResponse::from).collect();
 
     Ok(Json(ApiResponse::success(items, req_ctx.request_id)))
 }

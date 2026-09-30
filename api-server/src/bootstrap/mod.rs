@@ -104,7 +104,8 @@ use school_core::learning::application::quiz::{
 use school_core::learning::application::session::{
     end_session::EndSessionUseCase, get_attendance::GetAttendanceUseCase,
     get_session::GetSessionUseCase, list_sessions::ListSessionsUseCase,
-    record_attendance::RecordAttendanceUseCase, start_session::StartSessionUseCase,
+    record_attendance::RecordAttendanceUseCase, record_attendance_bulk::RecordAttendanceBulkUseCase,
+    start_session::StartSessionUseCase,
 };
 use school_core::learning::application::syllabus::{
     add_competency::AddCompetencyUseCase, create_syllabus::CreateSyllabusUseCase,
@@ -588,6 +589,7 @@ impl Bootstrap {
             get_session: Arc::new(GetSessionUseCase::new(session_repo.clone())),
             list_sessions: Arc::new(ListSessionsUseCase::new(session_repo.clone())),
             record_attendance: Arc::new(RecordAttendanceUseCase::new(session_repo.clone())),
+            record_attendance_bulk: Arc::new(RecordAttendanceBulkUseCase::new(session_repo.clone())),
             get_attendance: Arc::new(GetAttendanceUseCase::new(session_repo.clone())),
 
             create_assignment: Arc::new(CreateAssignmentUseCase::new(assignment_repo.clone(), c10)),

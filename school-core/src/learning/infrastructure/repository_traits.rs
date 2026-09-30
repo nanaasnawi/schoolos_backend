@@ -133,14 +133,28 @@ pub trait SessionRepository: Send + Sync {
         &self,
         attendance: &SessionAttendance,
     ) -> Result<(), InfrastructureError>;
+    async fn record_attendance_bulk(
+        &self,
+        attendances: &[SessionAttendance],
+    ) -> Result<(), InfrastructureError>;
     async fn find_attendance(
         &self,
+        session_id: Uuid,
+    ) -> Result<Vec<SessionAttendance>, InfrastructureError>;
+    async fn find_attendance_by_tenant_and_session(
+        &self,
+        tenant_id: Uuid,
         session_id: Uuid,
     ) -> Result<Vec<SessionAttendance>, InfrastructureError>;
     async fn find_by_class(
         &self,
         class_id: Uuid,
     ) -> Result<Vec<LearningSession>, InfrastructureError>;
+    async fn find_attendance_by_class(
+        &self,
+        tenant_id: Uuid,
+        class_id: Uuid,
+    ) -> Result<Vec<SessionAttendance>, InfrastructureError>;
     async fn find_attendance_by_student(
         &self,
         student_id: Uuid,

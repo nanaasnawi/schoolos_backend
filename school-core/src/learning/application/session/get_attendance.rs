@@ -5,6 +5,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 pub struct GetAttendanceQuery {
+    pub tenant_id: Uuid,
     pub session_id: Uuid,
 }
 
@@ -21,6 +22,9 @@ impl GetAttendanceUseCase {
         &self,
         query: GetAttendanceQuery,
     ) -> Result<Vec<SessionAttendance>, ApplicationError> {
-        Ok(self.session_repo.find_attendance(query.session_id).await?)
+        Ok(self
+            .session_repo
+            .find_attendance_by_tenant_and_session(query.tenant_id, query.session_id)
+            .await?)
     }
 }

@@ -12,6 +12,7 @@ pub struct RecordAttendanceCommand {
     pub status: String,
     pub checked_in_at: Option<DateTime<Utc>>,
     pub notes: Option<String>,
+    pub recorded_by: Option<Uuid>,
 }
 
 pub struct RecordAttendanceUseCase {
@@ -27,13 +28,15 @@ impl RecordAttendanceUseCase {
         &self,
         command: RecordAttendanceCommand,
     ) -> Result<SessionAttendance, ApplicationError> {
-        let attendance = SessionAttendance::new(
+        let attendance = SessionAttendance::with_details(
             command.tenant_id,
             command.session_id,
             command.student_id,
             command.status,
             command.checked_in_at,
             command.notes,
+            Some("manual".to_string()),
+            command.recorded_by,
         );
 
         self.session_repo.record_attendance(&attendance).await?;
