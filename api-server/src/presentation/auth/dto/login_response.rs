@@ -28,6 +28,9 @@ pub struct LoginResponse {
     pub email: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]

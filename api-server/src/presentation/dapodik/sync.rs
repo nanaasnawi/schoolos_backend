@@ -333,6 +333,80 @@ fn truncate_str(val: &str, max_len: usize) -> String {
     val.trim().chars().take(max_len).collect()
 }
 
+pub fn clean_name_for_base_username(full_name: &str) -> String {
+    let lower = full_name.to_lowercase();
+    // Strip common academic and honorific titles
+    let without_titles = lower
+        .replace("s.pd.sd", "")
+        .replace("s.pd", "")
+        .replace("s.ag", "")
+        .replace("m.pd", "")
+        .replace("s.kom", "")
+        .replace("s.sos", "")
+        .replace("s.si", "")
+        .replace("m.si", "")
+        .replace("drs.", "")
+        .replace("dra.", "")
+        .replace("drs", "")
+        .replace("dra", "")
+        .replace("h.", "")
+        .replace("hj.", "");
+    let main_name = without_titles.split(',').next().unwrap_or("user").trim();
+    let cleaned: String = main_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c.is_whitespace() { c } else { ' ' })
+        .collect();
+    let words: Vec<&str> = cleaned.split_whitespace().collect();
+    if words.is_empty() {
+        "user".to_string()
+    } else {
+        words.join(".")
+    }
+}
+
+pub async fn generate_unique_name_username(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: Uuid,
+    full_name: &str,
+    exclude_user_id: Option<Uuid>,
+) -> Result<String, sqlx::Error> {
+    let base = clean_name_for_base_username(full_name);
+    // Dynamic query from database - NO HARDCODING
+    let existing_rows = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT LOWER(username) 
+        FROM users 
+        WHERE tenant_id = $1 
+          AND username IS NOT NULL
+          AND ($2::uuid IS NULL OR id != $2)
+          AND (
+            LOWER(username) = LOWER($3)
+            OR LOWER(username) ~ ('^' || LOWER($3) || '[0-9]+$')
+          )
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(exclude_user_id)
+    .bind(&base)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let existing_set: HashSet<String> = existing_rows.into_iter().collect();
+
+    if !existing_set.contains(&base) {
+        return Ok(base);
+    }
+
+    let mut counter = 1;
+    loop {
+        let candidate = format!("{}{}", base, counter);
+        if !existing_set.contains(&candidate) {
+            return Ok(candidate);
+        }
+        counter += 1;
+    }
+}
+
 async fn safe_upsert_user(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: Uuid,
@@ -341,9 +415,15 @@ async fn safe_upsert_user(
     full_name: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Uuid, sqlx::Error> {
-    let clean_uname = truncate_str(username, 100);
-    let clean_email = truncate_str(email, 255);
     let clean_fullname = truncate_str(full_name, 255);
+    let clean_uname = if username.trim().is_empty() {
+        generate_unique_name_username(tx, tenant_id, &clean_fullname, None)
+            .await
+            .unwrap_or_else(|_| "user".to_string())
+    } else {
+        truncate_str(username, 100)
+    };
+    let clean_email = truncate_str(email, 255);
 
     // 1. Check if user already exists by email OR username (case-insensitive)
     let existing_user = sqlx::query_scalar::<_, Uuid>(
@@ -1262,11 +1342,9 @@ pub async fn pull_dapodik_records(
                 .map(|s| truncate_str(&s, 100));
 
             let email = format!("{}@guru.schoolos.id", ptk_prefix);
-            let username = nip
-                .as_ref()
-                .cloned()
-                .or_else(|| nuptk.as_ref().cloned())
-                .unwrap_or_else(|| format!("guru_{}", ptk_prefix));
+            let username = generate_unique_name_username(&mut tx, ctx.tenant_id, &nama, None)
+                .await
+                .unwrap_or_else(|_| format!("guru_{}", ptk_prefix));
 
             let user_res =
                 safe_upsert_user(&mut tx, ctx.tenant_id, &username, &email, &nama, now).await;
@@ -1912,7 +1990,9 @@ pub async fn pull_dapodik_records(
                 .unwrap_or_else(|| "-".to_string());
 
             let email = format!("{}@siswa.schoolos.id", final_nisn);
-            let username = final_nisn.clone();
+            let username = generate_unique_name_username(&mut tx, ctx.tenant_id, &nama_upper, None)
+                .await
+                .unwrap_or_else(|_| final_nisn.clone());
 
             let user_res =
                 safe_upsert_user(&mut tx, ctx.tenant_id, &username, &email, &nama_upper, now).await;
@@ -2012,11 +2092,15 @@ pub async fn pull_dapodik_records(
                     Some(gid)
                 } else {
                     let g_id = Uuid::now_v7();
-                    let g_username = if relationship == "Mother" {
-                        format!("ibu_{}", final_nisn)
-                    } else {
-                        format!("wali_{}", final_nisn)
-                    };
+                    let g_username = generate_unique_name_username(&mut tx, ctx.tenant_id, &g_upper, None)
+                        .await
+                        .unwrap_or_else(|_| {
+                            if relationship == "Mother" {
+                                format!("ibu_{}", final_nisn)
+                            } else {
+                                format!("wali_{}", final_nisn)
+                            }
+                        });
                     let g_email = format!("{}@wali.schoolos.id", g_username);
 
                     let actual_g_user_id = match safe_upsert_user(

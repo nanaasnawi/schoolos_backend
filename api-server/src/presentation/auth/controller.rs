@@ -120,7 +120,7 @@ async fn login(
 
     let user_row = sqlx::query(
         r#"
-        SELECT u.id, u.tenant_id, u.email, u.full_name,
+        SELECT u.id, u.tenant_id, u.username, u.email, u.full_name,
                COALESCE(
                  (SELECT r.name FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = u.id LIMIT 1),
                  'Siswa'
@@ -196,12 +196,13 @@ async fn login(
     .ok()
     .flatten();
 
-    let (user_id, tenant_id, name, email, role, user_identifier, class_name, child_name, child_id) =
+    let (user_id, tenant_id, name, email, username, role, user_identifier, class_name, child_name, child_id) =
         if let Some(u) = &user_row {
             let u_id: uuid::Uuid = u.get("id");
             let u_tenant_id: Option<uuid::Uuid> = u.get("tenant_id");
             let u_full_name: String = u.get("full_name");
             let u_email: String = u.get("email");
+            let u_username: Option<String> = u.try_get("username").ok().flatten();
             let u_role: Option<String> = u.get("role_name");
             let u_ident: String = u.get("identifier");
             (
@@ -209,6 +210,7 @@ async fn login(
                 u_tenant_id,
                 Some(u_full_name),
                 Some(u_email),
+                u_username,
                 Some(u_role.unwrap_or_else(|| "Siswa".to_string())),
                 if u_ident.is_empty() {
                     None
@@ -225,6 +227,7 @@ async fn login(
                 Some(auth_user.tenant_id),
                 Some(auth_user.full_name.clone()),
                 Some(auth_user.email.clone()),
+                auth_user.username.clone(),
                 Some("Siswa".to_string()),
                 None,
                 None,
@@ -273,6 +276,7 @@ async fn login(
         tenant_id: tenant_id.map(|t| t.to_string()),
         name,
         email,
+        username,
         role,
         school_name,
         school_logo_url,
@@ -847,6 +851,7 @@ async fn qr_login(
     let user_extra = sqlx::query(
         r#"
         SELECT 
+            (SELECT u.username FROM users u WHERE u.id = $1) as username,
             COALESCE(
                 (SELECT s.nisn FROM students s WHERE s.user_id = $1 ORDER BY s.updated_at DESC LIMIT 1),
                 (SELECT t.nip FROM teachers t WHERE t.user_id = $1 ORDER BY t.updated_at DESC LIMIT 1),
@@ -915,16 +920,17 @@ async fn qr_login(
     .ok()
     .flatten();
 
-    let (user_identifier, class_name, child_name, child_id) = if let Some(e) = user_extra {
+    let (user_identifier, class_name, child_name, child_id, qr_username) = if let Some(e) = user_extra {
         let ident: String = e.get("identifier");
         (
             if ident.is_empty() { None } else { Some(ident) },
             e.get("class_name"),
             e.get("child_name"),
             e.get("child_id"),
+            e.try_get("username").ok().flatten(),
         )
     } else {
-        (None, None, None, None)
+        (None, None, None, None, None)
     };
 
     let refresh_claims = school_core::identity::application::auth::authenticate_user::Claims {
@@ -951,6 +957,7 @@ async fn qr_login(
         tenant_id: Some(result.tenant_id.to_string()),
         name: Some(result.full_name),
         email: Some(result.email),
+        username: qr_username,
         role: Some(result.role),
         school_name: school_info.as_ref().map(|s| s.name.clone()),
         school_logo_url: school_info.and_then(|s| s.logo_url),
@@ -1100,6 +1107,7 @@ async fn list_users_qr_status(
         r#"
         SELECT 
             u.id, 
+            u.username,
             u.email, 
             u.full_name, 
             u.is_active,
@@ -1166,6 +1174,7 @@ async fn list_users_qr_status(
             UserQrStatusDto {
                 id: r.get("id"),
                 email: r.get("email"),
+                username: r.try_get("username").unwrap_or(None),
                 full_name: r.get("full_name"),
                 role: r.try_get("role_name").unwrap_or_default(),
                 is_active: r.get("is_active"),
@@ -1222,6 +1231,7 @@ async fn batch_generate_qr_tokens_endpoint(
                 SELECT 
                     u.full_name, 
                     u.email, 
+                    u.username as "username?",
                     COALESCE(r.name, 'No Role') as role_name,
                     COALESCE(s.nisn, t.nip, g.phone_number, '') as "identifier!",
                     c.name as "class_name?"
@@ -1244,10 +1254,11 @@ async fn batch_generate_qr_tokens_endpoint(
             .ok()
             .flatten();
 
-            let (full_name, email, role, identifier, class_name) = match user_info {
+            let (full_name, email, username, role, identifier, class_name) = match user_info {
                 Some(u) => (
                     u.full_name,
                     u.email,
+                    u.username,
                     u.role_name.unwrap_or_default(),
                     if u.identifier.is_empty() {
                         None
@@ -1259,6 +1270,7 @@ async fn batch_generate_qr_tokens_endpoint(
                 None => (
                     "Pengguna".to_string(),
                     String::new(),
+                    None,
                     "User".to_string(),
                     None,
                     None,
@@ -1271,6 +1283,7 @@ async fn batch_generate_qr_tokens_endpoint(
                 raw_token: generated.raw_token,
                 full_name,
                 email,
+                username,
                 role,
                 identifier,
                 class_name,

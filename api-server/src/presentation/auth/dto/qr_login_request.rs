@@ -40,6 +40,8 @@ pub struct BatchGenerateQrBadgesRequest {
 pub struct UserQrStatusDto {
     pub id: uuid::Uuid,
     pub email: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
     pub full_name: String,
     pub role: String,
     pub is_active: bool,
@@ -61,6 +63,8 @@ pub struct BatchGenerateQrItemDto {
     pub raw_token: String,
     pub full_name: String,
     pub email: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
     pub role: String,
     pub identifier: Option<String>,
     pub class_name: Option<String>,
