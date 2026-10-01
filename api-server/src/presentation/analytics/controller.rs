@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use uuid::Uuid;
 
+use school_core::common::error::ApplicationError;
+
 use crate::{
     bootstrap::ApplicationContext, error::ApiError, extractors::RequestContext,
     response::ApiResponse,
@@ -256,6 +258,22 @@ async fn get_dashboard(
 ) -> Result<Json<ApiResponse<DashboardDataResponse>>, ApiError> {
     let pool = &ctx.pool;
     let tid = req_ctx.tenant_id;
+
+    if let Some(ref actor) = req_ctx.actor {
+        let is_admin_or_staff = actor.roles.iter().any(|r| {
+            let n = r.name.to_lowercase();
+            n.contains("admin") || n.contains("kepala") || n.contains("staff") || n.contains("tata usaha")
+        });
+        if !is_admin_or_staff {
+            return Err(ApiError::new(
+                ApplicationError::Unauthorized(
+                    "Akses ditolak: Portal administrator dan analitik sekolah hanya dapat diakses oleh Administrator & Staf Tata Usaha.".into(),
+                    "FORBIDDEN_PORTAL_ACCESS".into(),
+                ),
+                req_ctx.request_id,
+            ));
+        }
+    }
 
     let (
         total_students_res,
