@@ -1226,15 +1226,15 @@ async fn batch_generate_qr_tokens_endpoint(
         };
 
         if let Ok(generated) = ctx.generate_qr_token.execute(command).await {
-            let user_info = sqlx::query!(
+            let user_info = sqlx::query(
                 r#"
                 SELECT 
                     u.full_name, 
                     u.email, 
-                    u.username as "username?",
+                    u.username,
                     COALESCE(r.name, 'No Role') as role_name,
-                    COALESCE(s.nisn, t.nip, g.phone_number, '') as "identifier!",
-                    c.name as "class_name?"
+                    COALESCE(s.nisn, t.nip, g.phone_number, '') as identifier,
+                    c.name as class_name
                 FROM users u
                 LEFT JOIN user_roles ur ON u.id = ur.user_id
                 LEFT JOIN roles r ON ur.role_id = r.id
@@ -1246,27 +1246,30 @@ async fn batch_generate_qr_tokens_endpoint(
                 WHERE u.id = $1 AND u.tenant_id = $2
                 LIMIT 1
                 "#,
-                user_id,
-                req_ctx.tenant_id
             )
+            .bind(user_id)
+            .bind(req_ctx.tenant_id)
             .fetch_optional(&ctx.pool)
             .await
             .ok()
             .flatten();
 
             let (full_name, email, username, role, identifier, class_name) = match user_info {
-                Some(u) => (
-                    u.full_name,
-                    u.email,
-                    u.username,
-                    u.role_name.unwrap_or_default(),
-                    if u.identifier.is_empty() {
-                        None
-                    } else {
-                        Some(u.identifier)
-                    },
-                    u.class_name,
-                ),
+                Some(u) => {
+                    let ident: String = u.try_get("identifier").unwrap_or_default();
+                    (
+                        u.try_get("full_name").unwrap_or_else(|_| "Pengguna".to_string()),
+                        u.try_get("email").unwrap_or_default(),
+                        u.try_get("username").ok().flatten(),
+                        u.try_get("role_name").unwrap_or_else(|_| "No Role".to_string()),
+                        if ident.is_empty() {
+                            None
+                        } else {
+                            Some(ident)
+                        },
+                        u.try_get("class_name").ok().flatten(),
+                    )
+                }
                 None => (
                     "Pengguna".to_string(),
                     String::new(),
