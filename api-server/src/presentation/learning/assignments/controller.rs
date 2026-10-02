@@ -545,7 +545,24 @@ async fn list(
             SELECT 
                 a.id, a.tenant_id, a.lesson_id, a.title, a.description, a.instructions,
                 a.max_score, a.due_at, a.assignment_type,
-                CASE WHEN a.status = 'draft' AND a.class_id IS NOT NULL THEN 'published' ELSE a.status END as status,
+                COALESCE(
+                    (
+                        SELECT sub.status 
+                        FROM assignment_submissions sub 
+                        LEFT JOIN students s ON s.id = sub.student_id
+                        WHERE sub.assignment_id = a.id 
+                          AND (
+                              sub.student_id = $2 
+                              OR s.user_id = $2 
+                              OR sub.student_id IN (SELECT id FROM students WHERE user_id = $2)
+                              OR sub.student_id IN (SELECT s2.id FROM guardians g JOIN students s2 ON s2.guardian_id = g.id WHERE g.user_id = $2)
+                          )
+                          AND sub.status != 'unsubmitted'
+                        ORDER BY sub.submitted_at DESC NULLS LAST
+                        LIMIT 1
+                    ),
+                    CASE WHEN a.status = 'draft' AND a.class_id IS NOT NULL THEN 'published' ELSE a.status END
+                ) as status,
                 a.is_active,
                 a.created_at, a.updated_at,
                 a.class_id,
@@ -728,7 +745,24 @@ async fn get_by_id(
         SELECT 
             a.id, a.tenant_id, a.lesson_id, a.title, a.description, a.instructions,
             a.max_score, a.due_at, a.assignment_type,
-            CASE WHEN a.status = 'draft' AND a.class_id IS NOT NULL THEN 'published' ELSE a.status END as status,
+            COALESCE(
+                (
+                    SELECT sub.status 
+                    FROM assignment_submissions sub 
+                    LEFT JOIN students s ON s.id = sub.student_id
+                    WHERE sub.assignment_id = a.id 
+                      AND (
+                          sub.student_id = $3 
+                          OR s.user_id = $3 
+                          OR sub.student_id IN (SELECT id FROM students WHERE user_id = $3)
+                          OR sub.student_id IN (SELECT s2.id FROM guardians g JOIN students s2 ON s2.guardian_id = g.id WHERE g.user_id = $3)
+                      )
+                      AND sub.status != 'unsubmitted'
+                    ORDER BY sub.submitted_at DESC NULLS LAST
+                    LIMIT 1
+                ),
+                CASE WHEN a.status = 'draft' AND a.class_id IS NOT NULL THEN 'published' ELSE a.status END
+            ) as status,
             a.is_active,
             a.created_at, a.updated_at,
             a.class_id, a.teacher_id, a.created_by,
@@ -753,6 +787,7 @@ async fn get_by_id(
     )
     .bind(id)
     .bind(req_ctx.tenant_id)
+    .bind(req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default())
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| {

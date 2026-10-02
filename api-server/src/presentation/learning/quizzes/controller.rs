@@ -78,11 +78,11 @@ async fn create(
 
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
     let teacher_id = if let Some(aid) = actor_id {
-        sqlx::query_scalar!(
-            r#"SELECT id FROM teachers WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 LIMIT 1"#,
-            aid,
-            req_ctx.tenant_id
+        sqlx::query_scalar::<_, Uuid>(
+            r#"SELECT id FROM teachers WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 LIMIT 1"#
         )
+        .bind(aid)
+        .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await
         .ok()
