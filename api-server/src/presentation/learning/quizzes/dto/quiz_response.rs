@@ -33,6 +33,16 @@ pub struct QuizResponse {
     pub subject_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub teacher_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub student_attempt_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub student_attempts_count: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub student_has_completed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub student_last_score: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub student_last_attempt_id: Option<Uuid>,
 }
 
 impl From<Quiz> for QuizResponse {
@@ -61,6 +71,11 @@ impl From<Quiz> for QuizResponse {
             class_name: None,
             subject_name: None,
             teacher_name: None,
+            student_attempt_status: None,
+            student_attempts_count: None,
+            student_has_completed: None,
+            student_last_score: None,
+            student_last_attempt_id: None,
         }
     }
 }

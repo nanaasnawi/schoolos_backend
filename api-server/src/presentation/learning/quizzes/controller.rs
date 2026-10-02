@@ -397,6 +397,11 @@ async fn list(
                     class_name: r.get("class_name"),
                     subject_name: r.get("subject_name"),
                     teacher_name: r.get("teacher_name"),
+                    student_attempt_status: None,
+                    student_attempts_count: None,
+                    student_has_completed: None,
+                    student_last_score: None,
+                    student_last_attempt_id: None,
                 }
             })
             .collect()
@@ -411,7 +416,46 @@ async fn list(
                 q.class_id,
                 c.name as class_name,
                 sub.name as subject_name,
-                t.full_name as teacher_name
+                t.full_name as teacher_name,
+                (
+                    SELECT qa.status FROM quiz_attempts qa
+                    WHERE qa.quiz_id = q.id AND qa.tenant_id = q.tenant_id
+                      AND (
+                          qa.student_id = $2 
+                          OR qa.student_id IN (SELECT s.id FROM students s WHERE s.user_id = $2)
+                          OR qa.student_id IN (SELECT s.id FROM students s JOIN guardians g ON g.id = s.guardian_id WHERE g.user_id = $2)
+                      )
+                    ORDER BY qa.created_at DESC LIMIT 1
+                ) AS student_attempt_status,
+                (
+                    SELECT COUNT(*)::int FROM quiz_attempts qa
+                    WHERE qa.quiz_id = q.id AND qa.tenant_id = q.tenant_id
+                      AND (
+                          qa.student_id = $2 
+                          OR qa.student_id IN (SELECT s.id FROM students s WHERE s.user_id = $2)
+                          OR qa.student_id IN (SELECT s.id FROM students s JOIN guardians g ON g.id = s.guardian_id WHERE g.user_id = $2)
+                      )
+                ) AS student_attempts_count,
+                (
+                    SELECT qa.score FROM quiz_attempts qa
+                    WHERE qa.quiz_id = q.id AND qa.tenant_id = q.tenant_id
+                      AND (
+                          qa.student_id = $2 
+                          OR qa.student_id IN (SELECT s.id FROM students s WHERE s.user_id = $2)
+                          OR qa.student_id IN (SELECT s.id FROM students s JOIN guardians g ON g.id = s.guardian_id WHERE g.user_id = $2)
+                      )
+                    ORDER BY qa.created_at DESC LIMIT 1
+                ) AS student_last_score,
+                (
+                    SELECT qa.id FROM quiz_attempts qa
+                    WHERE qa.quiz_id = q.id AND qa.tenant_id = q.tenant_id
+                      AND (
+                          qa.student_id = $2 
+                          OR qa.student_id IN (SELECT s.id FROM students s WHERE s.user_id = $2)
+                          OR qa.student_id IN (SELECT s.id FROM students s JOIN guardians g ON g.id = s.guardian_id WHERE g.user_id = $2)
+                      )
+                    ORDER BY qa.created_at DESC LIMIT 1
+                ) AS student_last_attempt_id
             FROM quizzes q
             LEFT JOIN classes c ON c.id = q.class_id
             LEFT JOIN subjects sub ON sub.id = q.subject_id
@@ -478,6 +522,18 @@ async fn list(
         rows.into_iter()
             .map(|r| {
                 let dur = r.get::<Option<i32>, _>("time_limit_minutes").unwrap_or(30);
+                let student_attempt_status: Option<String> = r.get("student_attempt_status");
+                let student_attempts_count: Option<i32> = r.get("student_attempts_count");
+                let student_last_score: Option<i32> = r.get("student_last_score");
+                let student_last_attempt_id: Option<Uuid> = r.get("student_last_attempt_id");
+
+                let max_att = r.get::<i32, _>("max_attempts");
+                let count = student_attempts_count.unwrap_or(0);
+                let is_completed = student_attempt_status.as_deref().map(|s| {
+                    let s_lower = s.to_lowercase();
+                    s_lower == "completed" || s_lower == "submitted" || s_lower == "graded"
+                }).unwrap_or(false) || (count > 0 && count >= max_att);
+
                 QuizResponse {
                     id: r.get("id"),
                     tenant_id: r.get("tenant_id"),
@@ -488,7 +544,7 @@ async fn list(
                     time_limit_minutes: dur,
                     passing_score: r.get("passing_score"),
                     max_score: r.get("max_score"),
-                    max_attempts: r.get("max_attempts"),
+                    max_attempts: max_att,
                     shuffle_questions: r.get("shuffle_questions"),
                     shuffle_choices: r.get("shuffle_choices"),
                     start_at: r.get("start_at"),
@@ -502,6 +558,11 @@ async fn list(
                     class_name: r.get("class_name"),
                     subject_name: r.get("subject_name"),
                     teacher_name: r.get("teacher_name"),
+                    student_attempt_status,
+                    student_attempts_count,
+                    student_has_completed: Some(is_completed),
+                    student_last_score,
+                    student_last_attempt_id,
                 }
             })
             .collect()
@@ -559,6 +620,11 @@ async fn list(
                     class_name: r.class_name,
                     subject_name: r.subject_name,
                     teacher_name: r.teacher_name,
+                    student_attempt_status: None,
+                    student_attempts_count: None,
+                    student_has_completed: None,
+                    student_last_score: None,
+                    student_last_attempt_id: None,
                 }
             })
             .collect()
@@ -632,8 +698,50 @@ async fn get_by_id(
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
+    let mut resp = QuizResponse::from(quiz);
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
+
+    let attempt_info = sqlx::query(
+        r#"
+        SELECT 
+            qa.status,
+            (SELECT COUNT(*)::int FROM quiz_attempts qa2 WHERE qa2.quiz_id = $1 AND (qa2.student_id = $2 OR qa2.student_id IN (SELECT s.id FROM students s WHERE s.user_id = $2))) as attempts_count,
+            qa.score,
+            qa.id as attempt_id
+        FROM quiz_attempts qa
+        WHERE qa.quiz_id = $1 AND qa.tenant_id = $3
+          AND (qa.student_id = $2 OR qa.student_id IN (SELECT s.id FROM students s WHERE s.user_id = $2))
+        ORDER BY qa.created_at DESC LIMIT 1
+        "#
+    )
+    .bind(id)
+    .bind(actor_id)
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .ok()
+    .flatten();
+
+    if let Some(r) = attempt_info {
+        let status: Option<String> = r.get("status");
+        let count: Option<i32> = r.get("attempts_count");
+        let score: Option<i32> = r.get("score");
+        let att_id: Option<Uuid> = r.get("attempt_id");
+        let count_val = count.unwrap_or(0);
+        let is_completed = status.as_deref().map(|s| {
+            let s_lower = s.to_lowercase();
+            s_lower == "completed" || s_lower == "submitted" || s_lower == "graded"
+        }).unwrap_or(false) || (count_val > 0 && count_val >= resp.max_attempts);
+
+        resp.student_attempt_status = status;
+        resp.student_attempts_count = count;
+        resp.student_has_completed = Some(is_completed);
+        resp.student_last_score = score;
+        resp.student_last_attempt_id = att_id;
+    }
+
     Ok(Json(ApiResponse::success(
-        QuizResponse::from(quiz),
+        resp,
         req_ctx.request_id,
     )))
 }
