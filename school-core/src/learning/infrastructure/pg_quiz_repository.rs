@@ -106,6 +106,19 @@ impl QuizRepository for PgQuizRepository {
 
         if let Some(r) = record {
             let questions = self.find_questions(id).await?;
+            let stored_max: i32 = r.get("max_score");
+            let effective_max = if stored_max > 0 {
+                stored_max
+            } else {
+                questions.iter().map(|q| q.points).sum()
+            };
+            let stored_count: i32 = r.get("questions_count");
+            let effective_count = if stored_count > 0 {
+                stored_count
+            } else {
+                questions.len() as i32
+            };
+
             Ok(Some(Quiz {
                 id: r.get("id"),
                 tenant_id: r.get("tenant_id"),
@@ -114,7 +127,7 @@ impl QuizRepository for PgQuizRepository {
                 description: r.get("description"),
                 duration_minutes: r.get::<Option<i32>, _>("time_limit_minutes").unwrap_or(30),
                 passing_score: r.get("passing_score"),
-                max_score: r.get("max_score"),
+                max_score: effective_max,
                 max_attempts: r.get::<Option<i32>, _>("max_attempts").unwrap_or(1),
                 shuffle_questions: r
                     .get::<Option<bool>, _>("shuffle_questions")
@@ -123,7 +136,7 @@ impl QuizRepository for PgQuizRepository {
                 start_at: r.get("start_at"),
                 end_at: r.get("end_at"),
                 status: r.get("status"),
-                questions_count: r.get("questions_count"),
+                questions_count: effective_count,
                 questions,
                 is_active: r.get("is_active"),
                 created_at: r.get("created_at"),

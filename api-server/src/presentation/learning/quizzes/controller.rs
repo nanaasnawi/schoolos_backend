@@ -418,6 +418,7 @@ async fn list(
             LEFT JOIN teachers t ON t.id = q.teacher_id
             WHERE q.tenant_id = $1 
               AND q.deleted_at IS NULL
+              AND q.status != 'draft'
               AND (
                   q.class_id IN (
                       SELECT en.class_id 
