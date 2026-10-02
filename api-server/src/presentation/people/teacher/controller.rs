@@ -108,11 +108,73 @@ async fn create(
         request_id: Some(req_ctx.correlation_id.clone()),
     };
 
-    let teacher = ctx
+    let mut teacher = ctx
         .create_teacher
         .execute(command)
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
+
+    // Auto-provision login account for the newly registered teacher
+    let clean_fullname = teacher.full_name.trim();
+    let base_username = clean_fullname
+        .to_lowercase()
+        .replace("s.pd", "")
+        .replace("m.pd", "")
+        .replace("s.ag", "")
+        .replace("s.kom", "")
+        .replace("drs", "")
+        .replace("dra", "")
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(".");
+    let uname = if base_username.is_empty() {
+        format!("guru_{}", &teacher.id.to_string()[..8])
+    } else {
+        base_username
+    };
+
+    let user_email = format!("{}@guru.schoolos.id", &teacher.id.to_string().replace('-', "")[..8]);
+    let default_guru_pw_hash = "$argon2id$v=19$m=65536,p=4,t=3$SnCFuF71lzKF+Cuw4svZPw$c9YgXUK8C/boJ85Pb2IEuyK1xsNP28uGdzlvvflF5ts"; // guru2565
+
+    if let Ok(uid) = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        INSERT INTO users (id, tenant_id, username, email, password_hash, full_name, is_active, created_at, updated_at)
+        VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, true, NOW(), NOW())
+        ON CONFLICT (tenant_id, email) DO UPDATE SET full_name = EXCLUDED.full_name, updated_at = NOW()
+        RETURNING id
+        "#,
+    )
+    .bind(req_ctx.tenant_id)
+    .bind(&uname)
+    .bind(&user_email)
+    .bind(default_guru_pw_hash)
+    .bind(clean_fullname)
+    .fetch_one(&ctx.pool)
+    .await
+    {
+        if let Ok(Some(role_id)) = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM roles WHERE tenant_id = $1 AND name = 'Guru' LIMIT 1"
+        )
+        .bind(req_ctx.tenant_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        {
+            let _ = sqlx::query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+                .bind(uid)
+                .bind(role_id)
+                .execute(&ctx.pool)
+                .await;
+        }
+        let _ = sqlx::query("UPDATE teachers SET user_id = $1 WHERE id = $2")
+            .bind(uid)
+            .bind(teacher.id)
+            .execute(&ctx.pool)
+            .await;
+        teacher.user_id = Some(uid);
+    }
 
     Ok(Json(ApiResponse::success(
         map_teacher_response(teacher),

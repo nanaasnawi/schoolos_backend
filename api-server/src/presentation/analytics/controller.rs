@@ -4,6 +4,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use school_core::common::error::ApplicationError;
+use school_core::common::error_code::ErrorCode;
 
 use crate::{
     bootstrap::ApplicationContext, error::ApiError, extractors::RequestContext,
@@ -267,8 +268,8 @@ async fn get_dashboard(
         if !is_admin_or_staff {
             return Err(ApiError::new(
                 ApplicationError::Unauthorized(
-                    "Akses ditolak: Portal administrator dan analitik sekolah hanya dapat diakses oleh Administrator & Staf Tata Usaha.".into(),
-                    "FORBIDDEN_PORTAL_ACCESS".into(),
+                    ErrorCode::AuthPermissionDenied,
+                    "Akses ditolak: Portal administrator dan analitik sekolah hanya dapat diakses oleh Administrator & Staf Tata Usaha.".to_string(),
                 ),
                 req_ctx.request_id,
             ));
