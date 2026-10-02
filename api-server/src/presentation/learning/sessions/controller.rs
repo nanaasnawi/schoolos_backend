@@ -199,6 +199,19 @@ async fn list(
             })
             .unwrap_or(false);
 
+        let resolved_actor_teacher_id = if let Some(uid) = user_id {
+            crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(
+                &ctx.pool,
+                req_ctx.tenant_id,
+                uid,
+            )
+            .await
+            .ok()
+            .flatten()
+        } else {
+            None
+        };
+
         let is_teacher = !is_management && (
             req_ctx
                 .actor
@@ -210,15 +223,7 @@ async fn list(
                     })
                 })
                 .unwrap_or(false)
-                || crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(
-                    &ctx.pool,
-                    req_ctx.tenant_id,
-                    user_id.unwrap_or_default(),
-                )
-                .await
-                .ok()
-                .flatten()
-                .is_some()
+                || resolved_actor_teacher_id.is_some()
         );
 
         let is_student = !is_management
@@ -295,19 +300,11 @@ async fn list(
             if is_teacher && !is_management {
                 match user_id {
                     Some(uid) => {
-                        let is_mine = row.teacher_user_id == Some(uid) || row.teacher_id == uid;
+                        let is_mine = row.teacher_user_id == Some(uid)
+                            || row.teacher_id == uid
+                            || (resolved_actor_teacher_id.is_some() && resolved_actor_teacher_id == Some(row.teacher_id));
                         if !is_mine {
-                            let tid = crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(
-                                &ctx.pool,
-                                req_ctx.tenant_id,
-                                uid,
-                            )
-                            .await
-                            .ok()
-                            .flatten();
-                            if tid.is_none() || tid != Some(row.teacher_id) {
-                                continue;
-                            }
+                            continue;
                         }
                     }
                     None => {
