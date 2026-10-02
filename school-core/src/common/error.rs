@@ -21,6 +21,9 @@ pub enum ApplicationError {
     #[error("Unauthorized: {1} ({0})")]
     Unauthorized(ErrorCode, String),
 
+    #[error("Forbidden: {1} ({0})")]
+    Forbidden(ErrorCode, String),
+
     #[error("Infrastructure error: {0}")]
     Infrastructure(#[from] InfrastructureError),
 
@@ -56,6 +59,7 @@ impl ApplicationError {
             ApplicationError::Domain(DomainError::BusinessRule(code, _)) => code.clone(),
             ApplicationError::NotFound(code, _) => code.clone(),
             ApplicationError::Unauthorized(code, _) => code.clone(),
+            ApplicationError::Forbidden(code, _) => code.clone(),
             ApplicationError::Infrastructure(InfrastructureError::Database(_)) => {
                 ErrorCode::DatabaseError
             }

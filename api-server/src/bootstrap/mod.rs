@@ -1006,7 +1006,18 @@ impl Bootstrap {
                         auth_middleware,
                     )),
             )
-            .nest("/api/v1/learning/inquiries", inquiry_routes())
+            .nest(
+                "/api/v1/learning/inquiries",
+                inquiry_routes()
+                    .layer(axum::middleware::from_fn_with_state(
+                        context.clone(),
+                        idempotency::idempotency_middleware,
+                    ))
+                    .layer(axum::middleware::from_fn_with_state(
+                        context.clone(),
+                        auth_middleware,
+                    )),
+            )
             .nest(
                 "/api/v1/learning/library",
                 library_routes().layer(axum::middleware::from_fn_with_state(

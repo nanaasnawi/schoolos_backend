@@ -267,7 +267,7 @@ async fn get_dashboard(
         });
         if !is_admin_or_staff {
             return Err(ApiError::new(
-                ApplicationError::Unauthorized(
+                ApplicationError::Forbidden(
                     ErrorCode::AuthPermissionDenied,
                     "Akses ditolak: Portal administrator dan analitik sekolah hanya dapat diakses oleh Administrator & Staf Tata Usaha.".to_string(),
                 ),

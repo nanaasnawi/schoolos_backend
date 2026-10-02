@@ -229,7 +229,7 @@ impl AuthorizationScope {
             }
 
             return Err(ApiError::new(
-                ApplicationError::Unauthorized(
+                ApplicationError::Forbidden(
                     ErrorCode::AuthPermissionDenied,
                     "Tugas atau materi ini milik guru lain. Anda hanya dapat mengakses tugas milik Anda sendiri.".to_string(),
                 ),
@@ -251,7 +251,7 @@ impl AuthorizationScope {
                 })?
                 .ok_or_else(|| {
                     ApiError::new(
-                        ApplicationError::Unauthorized(
+                        ApplicationError::Forbidden(
                             ErrorCode::AuthPermissionDenied,
                             "Profil siswa tidak ditemukan untuk akun ini".to_string(),
                         ),
@@ -279,7 +279,7 @@ impl AuthorizationScope {
 
                     if !enrolled {
                         return Err(ApiError::new(
-                            ApplicationError::Unauthorized(
+                            ApplicationError::Forbidden(
                                 ErrorCode::AuthPermissionDenied,
                                 "Materi/Tugas ini bukan untuk kelas Anda. Akses ditolak demi keamanan data kelas."
                                     .to_string(),
@@ -313,7 +313,7 @@ impl AuthorizationScope {
 
                 if !is_child_class {
                     return Err(ApiError::new(
-                        ApplicationError::Unauthorized(
+                        ApplicationError::Forbidden(
                             ErrorCode::AuthPermissionDenied,
                             "Tugas/Materi ini tidak terkait dengan kelas putra/putri Anda"
                                 .to_string(),

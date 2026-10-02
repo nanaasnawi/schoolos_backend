@@ -36,6 +36,7 @@ impl IntoResponse for ApiError {
             ApplicationError::Domain(_) => StatusCode::BAD_REQUEST,
             ApplicationError::NotFound(_, _) => StatusCode::NOT_FOUND,
             ApplicationError::Unauthorized(_, _) => StatusCode::UNAUTHORIZED,
+            ApplicationError::Forbidden(_, _) => StatusCode::FORBIDDEN,
             ApplicationError::Infrastructure(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ApplicationError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
