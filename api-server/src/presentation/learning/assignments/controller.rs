@@ -146,12 +146,15 @@ async fn create(
 
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
     let teacher_id = if let Some(aid) = actor_id {
-        sqlx::query_scalar::<_, Uuid>(r#"SELECT id FROM teachers WHERE user_id = $1 LIMIT 1"#)
-            .bind(aid)
-            .fetch_optional(&ctx.pool)
-            .await
-            .ok()
-            .flatten()
+        sqlx::query_scalar::<_, Uuid>(
+            r#"SELECT id FROM teachers WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 LIMIT 1"#
+        )
+        .bind(aid)
+        .bind(req_ctx.tenant_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten()
     } else {
         None
     };
@@ -201,18 +204,11 @@ async fn create(
     } else {
         sqlx::query_scalar::<_, Option<Uuid>>(
             r#"
-            SELECT COALESCE(
-                (SELECT cs.teacher_id FROM class_schedules cs WHERE cs.class_id = $1 AND cs.subject_id = $2 AND cs.tenant_id = $3 LIMIT 1),
-                (SELECT c.homeroom_teacher_id FROM classes c WHERE c.id = $1 AND c.tenant_id = $3 LIMIT 1),
-                (SELECT t.id FROM teachers t WHERE t.user_id = $4 AND t.tenant_id = $3 LIMIT 1),
-                (SELECT t.id FROM teachers t WHERE t.tenant_id = $3 ORDER BY t.created_at ASC LIMIT 1)
-            ) as "teacher_id"
+            SELECT (SELECT t.id FROM teachers t WHERE (t.user_id = $1 OR t.id = $1) AND t.tenant_id = $2 LIMIT 1) as "teacher_id"
             "#,
         )
-        .bind(target_class_id)
-        .bind(subject_id)
-        .bind(req_ctx.tenant_id)
         .bind(actor_id)
+        .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await
         .ok()
@@ -468,12 +464,7 @@ async fn list(
     let _ = sqlx::query(
         r#"
         UPDATE assignments a
-        SET teacher_id = COALESCE(
-            (SELECT cs.teacher_id FROM class_schedules cs WHERE cs.class_id = a.class_id AND cs.subject_id = a.subject_id AND cs.tenant_id = a.tenant_id LIMIT 1),
-            (SELECT c.homeroom_teacher_id FROM classes c WHERE c.id = a.class_id AND c.tenant_id = a.tenant_id LIMIT 1),
-            (SELECT t.id FROM teachers t WHERE t.user_id = a.created_by AND t.tenant_id = a.tenant_id LIMIT 1),
-            (SELECT t.id FROM teachers t WHERE t.tenant_id = a.tenant_id ORDER BY t.created_at ASC LIMIT 1)
-        )
+        SET teacher_id = (SELECT t.id FROM teachers t WHERE (t.user_id = a.created_by OR t.id = a.created_by) AND t.tenant_id = a.tenant_id LIMIT 1)
         WHERE a.tenant_id = $1 AND a.teacher_id IS NULL AND a.deleted_at IS NULL
         "#,
     )
@@ -495,12 +486,9 @@ async fn list(
                 sub.name as subject_name,
                 COALESCE(
                     t.full_name,
-                    (SELECT t2.full_name FROM class_schedules cs JOIN teachers t2 ON t2.id = cs.teacher_id WHERE cs.class_id = a.class_id AND cs.subject_id = a.subject_id LIMIT 1),
-                    (SELECT t3.full_name FROM teachers t3 WHERE t3.user_id = a.created_by LIMIT 1),
-                    (SELECT t4.full_name FROM teachers t4 WHERE t4.id = a.created_by LIMIT 1),
-                    (SELECT t5.full_name FROM classes cl JOIN teachers t5 ON t5.id = cl.homeroom_teacher_id WHERE cl.id = a.class_id LIMIT 1),
+                    (SELECT t3.full_name FROM teachers t3 WHERE (t3.user_id = a.created_by OR t3.id = a.created_by) LIMIT 1),
                     (SELECT u.full_name FROM users u WHERE u.id = a.created_by LIMIT 1),
-                    (SELECT t6.full_name FROM teachers t6 WHERE t6.tenant_id = a.tenant_id ORDER BY t6.created_at ASC LIMIT 1)
+                    'Guru Pengampu'
                 ) as teacher_name
             FROM assignments a
             LEFT JOIN classes c ON c.id = a.class_id
@@ -510,17 +498,8 @@ async fn list(
               AND a.deleted_at IS NULL
               AND (
                   a.created_by = $2 
-                  OR a.teacher_id IN (SELECT id FROM teachers WHERE user_id = $2 AND tenant_id = $1)
-                  OR a.class_id IN (
-                      SELECT cs.class_id FROM class_schedules cs 
-                      JOIN teachers t ON t.id = cs.teacher_id 
-                      WHERE t.user_id = $2 AND cs.tenant_id = $1
-                  )
-                  OR a.class_id IN (
-                      SELECT c.id FROM classes c 
-                      JOIN teachers t ON t.id = c.homeroom_teacher_id 
-                      WHERE t.user_id = $2 AND c.tenant_id = $1
-                  )
+                  OR a.teacher_id IN (SELECT id FROM teachers WHERE (user_id = $2 OR id = $2) AND tenant_id = $1)
+                  OR a.teacher_id = $2
               )
             ORDER BY a.created_at DESC
             "#,

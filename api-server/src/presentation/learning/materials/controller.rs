@@ -84,15 +84,19 @@ async fn create(
 
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
     let resolved_actor_teacher_id = if let Some(aid) = actor_id {
-        sqlx::query_scalar!(r#"SELECT id FROM teachers WHERE user_id = $1 LIMIT 1"#, aid)
-            .fetch_optional(&ctx.pool)
-            .await
-            .ok()
-            .flatten()
+        sqlx::query_scalar!(
+            r#"SELECT id FROM teachers WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 LIMIT 1"#,
+            aid,
+            req_ctx.tenant_id
+        )
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten()
     } else {
         None
     };
-    let teacher_id = payload.teacher_id.or(resolved_actor_teacher_id);
+    let teacher_id = resolved_actor_teacher_id.or(payload.teacher_id);
 
     // Resolve class_id from UUID or class name string (e.g. "PAKET C10")
     let target_class_id: Option<Uuid> = match payload.class_id {
@@ -282,32 +286,50 @@ async fn list(
         .map(|a| {
             a.roles.iter().any(|r| {
                 let n = r.name.to_lowercase();
-                n.contains("admin") || n.contains("kepala sekolah") || n.contains("operator")
+                n.contains("admin")
+                    || n.contains("kepala")
+                    || n.contains("operator")
+                    || n.contains("tu")
+                    || n.contains("staff")
+                    || n.contains("staf")
             })
         })
         .unwrap_or(false);
 
-    let is_teacher = req_ctx
-        .actor
-        .as_ref()
-        .map(|a| {
-            a.roles.iter().any(|r| {
-                let n = r.name.to_lowercase();
-                n == "guru" || n.contains("teacher")
+    let is_teacher = !is_admin && (
+        req_ctx
+            .actor
+            .as_ref()
+            .map(|a| {
+                a.roles.iter().any(|r| {
+                    let n = r.name.to_lowercase();
+                    n.contains("guru") || n.contains("teacher") || n.contains("pengajar")
+                })
             })
-        })
-        .unwrap_or(false);
+            .unwrap_or(false)
+            || crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(
+                &ctx.pool,
+                req_ctx.tenant_id,
+                actor_id.unwrap_or_default(),
+            )
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+    );
 
-    let is_student = req_ctx
-        .actor
-        .as_ref()
-        .map(|a| {
-            a.roles.iter().any(|r| {
-                let n = r.name.to_lowercase();
-                n == "siswa" || n.contains("student")
+    let is_student = !is_admin
+        && !is_teacher
+        && req_ctx
+            .actor
+            .as_ref()
+            .map(|a| {
+                a.roles.iter().any(|r| {
+                    let n = r.name.to_lowercase();
+                    n == "siswa" || n.contains("student") || n == "murid"
+                })
             })
-        })
-        .unwrap_or(false);
+            .unwrap_or(false);
 
     let items: Vec<LearningMaterialResponse> = if is_teacher {
         // Teacher strictly sees ONLY materials they created or are assigned to them
@@ -335,7 +357,8 @@ async fn list(
               AND m.deleted_at IS NULL
               AND (
                   m.created_by = $2 
-                  OR m.teacher_id IN (SELECT id FROM teachers WHERE user_id = $2)
+                  OR m.teacher_id IN (SELECT id FROM teachers WHERE (user_id = $2 OR id = $2) AND tenant_id = $1)
+                  OR m.teacher_id = $2
               )
             ORDER BY m.created_at DESC
             "#

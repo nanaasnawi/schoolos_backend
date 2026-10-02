@@ -78,11 +78,15 @@ async fn create(
 
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
     let teacher_id = if let Some(aid) = actor_id {
-        sqlx::query_scalar!(r#"SELECT id FROM teachers WHERE user_id = $1 LIMIT 1"#, aid)
-            .fetch_optional(&ctx.pool)
-            .await
-            .ok()
-            .flatten()
+        sqlx::query_scalar!(
+            r#"SELECT id FROM teachers WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 LIMIT 1"#,
+            aid,
+            req_ctx.tenant_id
+        )
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten()
     } else {
         None
     };
@@ -264,25 +268,43 @@ async fn list(
     })?;
 
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
-    let is_teacher = req_ctx
+    let is_admin = req_ctx
         .actor
         .as_ref()
         .map(|a| {
             a.roles.iter().any(|r| {
                 let n = r.name.to_lowercase();
-                n.contains("guru") || n.contains("teacher") || n.contains("pengajar")
+                n.contains("admin")
+                    || n.contains("kepala")
+                    || n.contains("operator")
+                    || n.contains("tu")
+                    || n.contains("staff")
+                    || n.contains("staf")
             })
         })
-        .unwrap_or(false)
-        || crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(
-            &ctx.pool,
-            req_ctx.tenant_id,
-            actor_id.unwrap_or_default(),
-        )
-        .await
-        .ok()
-        .flatten()
-        .is_some();
+        .unwrap_or(false);
+
+    let is_teacher = !is_admin && (
+        req_ctx
+            .actor
+            .as_ref()
+            .map(|a| {
+                a.roles.iter().any(|r| {
+                    let n = r.name.to_lowercase();
+                    n.contains("guru") || n.contains("teacher") || n.contains("pengajar")
+                })
+            })
+            .unwrap_or(false)
+            || crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(
+                &ctx.pool,
+                req_ctx.tenant_id,
+                actor_id.unwrap_or_default(),
+            )
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+    );
     let is_parent = req_ctx
         .actor
         .as_ref()
@@ -298,6 +320,7 @@ async fn list(
         .unwrap_or(false);
     let is_student = !is_parent
         && !is_teacher
+        && !is_admin
         && (req_ctx
             .actor
             .as_ref()
@@ -357,7 +380,8 @@ async fn list(
               AND q.deleted_at IS NULL
               AND (
                   q.created_by = $2 
-                  OR q.teacher_id IN (SELECT id FROM teachers WHERE user_id = $2 AND tenant_id = $1)
+                  OR q.teacher_id IN (SELECT id FROM teachers WHERE (user_id = $2 OR id = $2) AND tenant_id = $1)
+                  OR q.teacher_id = $2
               )
             ORDER BY q.created_at DESC
             "#,

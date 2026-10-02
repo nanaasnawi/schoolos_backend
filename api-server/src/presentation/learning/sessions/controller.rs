@@ -183,37 +183,58 @@ async fn list(
         let monday = now.date_naive() - chrono::Duration::days(days_from_monday);
 
         let user_id = req_ctx.actor.as_ref().map(|a| a.id);
-        let is_student = req_ctx
-            .actor
-            .as_ref()
-            .map(|a| {
-                a.roles
-                    .iter()
-                    .any(|r| r.name == "Siswa" || r.name == "Student")
-            })
-            .unwrap_or(false);
-        let is_teacher = req_ctx
-            .actor
-            .as_ref()
-            .map(|a| {
-                a.roles
-                    .iter()
-                    .any(|r| r.name == "Guru" || r.name == "Teacher")
-            })
-            .unwrap_or(false);
         let is_management = req_ctx
             .actor
             .as_ref()
             .map(|a| {
                 a.roles.iter().any(|r| {
-                    r.name == "Administrator"
-                        || r.name == "Admin"
-                        || r.name == "Kepala Sekolah"
-                        || r.name == "Operator"
-                        || r.name == "Staf TU"
+                    let n = r.name.to_lowercase();
+                    n.contains("admin")
+                        || n.contains("kepala")
+                        || n.contains("operator")
+                        || n.contains("tu")
+                        || n.contains("staff")
+                        || n.contains("staf")
                 })
             })
-            .unwrap_or(true);
+            .unwrap_or(false);
+
+        let is_teacher = !is_management && (
+            req_ctx
+                .actor
+                .as_ref()
+                .map(|a| {
+                    a.roles.iter().any(|r| {
+                        let n = r.name.to_lowercase();
+                        n.contains("guru") || n.contains("teacher") || n.contains("pengajar")
+                    })
+                })
+                .unwrap_or(false)
+                || crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(
+                    &ctx.pool,
+                    req_ctx.tenant_id,
+                    user_id.unwrap_or_default(),
+                )
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+        );
+
+        let is_student = !is_management
+            && !is_teacher
+            && req_ctx
+                .actor
+                .as_ref()
+                .map(|a| {
+                    a.roles
+                        .iter()
+                        .any(|r| {
+                            let n = r.name.to_lowercase();
+                            n == "siswa" || n.contains("student") || n == "murid"
+                        })
+                })
+                .unwrap_or(false);
 
         let student_class_id: Option<Uuid> = if is_student {
             if let Some(uid) = user_id {
@@ -271,23 +292,25 @@ async fn list(
             }
 
             // Teacher isolation: non-management teachers only see their own teaching schedules
-            // IMPORTANT: If teacher_user_id is NULL (teacher has no linked user), skip the row
-            // to prevent data leakage between teachers.
             if is_teacher && !is_management {
                 match user_id {
                     Some(uid) => {
-                        match row.teacher_user_id {
-                            Some(t_uid) if t_uid == uid => {
-                                // This schedule belongs to the logged-in teacher — allow it
-                            }
-                            _ => {
-                                // NULL teacher_user_id or different teacher — skip to prevent leakage
+                        let is_mine = row.teacher_user_id == Some(uid) || row.teacher_id == uid;
+                        if !is_mine {
+                            let tid = crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(
+                                &ctx.pool,
+                                req_ctx.tenant_id,
+                                uid,
+                            )
+                            .await
+                            .ok()
+                            .flatten();
+                            if tid.is_none() || tid != Some(row.teacher_id) {
                                 continue;
                             }
                         }
                     }
                     None => {
-                        // No user context for teacher — skip all to prevent leakage
                         continue;
                     }
                 }
