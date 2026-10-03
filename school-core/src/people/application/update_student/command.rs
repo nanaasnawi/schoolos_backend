@@ -11,5 +11,6 @@ pub struct UpdateStudentCommand {
     pub place_of_birth: Option<String>,
     pub date_of_birth: Option<String>,
     pub religion: Option<String>,
+    pub status: Option<String>,
     pub request_id: Option<String>,
 }

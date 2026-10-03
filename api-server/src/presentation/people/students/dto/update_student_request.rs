@@ -17,4 +17,10 @@ pub struct UpdateStudentRequest {
     pub date_of_birth: Option<String>,
     #[schema(value_type = Option<String>)]
     pub religion: Option<String>,
+    #[schema(value_type = Option<String>)]
+    pub status: Option<String>,
+    #[schema(value_type = Option<String>)]
+    pub class_id: Option<uuid::Uuid>,
+    #[schema(value_type = Option<String>)]
+    pub class_name: Option<String>,
 }

@@ -83,6 +83,10 @@ impl UpdateStudentUseCase {
             student.religion = Some(religion);
         }
 
+        if let Some(status_str) = command.status {
+            student.status = crate::people::domain::student::StudentStatus::from_db_str(&status_str);
+        }
+
         student.updated_at = self.clock.now();
 
         let mut uow = self.uow_factory.begin().await?;

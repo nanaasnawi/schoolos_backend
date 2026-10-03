@@ -435,6 +435,7 @@ async fn update(
         place_of_birth: payload.place_of_birth,
         date_of_birth: payload.date_of_birth,
         religion: payload.religion,
+        status: payload.status,
         request_id: Some(req_ctx.correlation_id.clone()),
     };
 
@@ -444,8 +445,63 @@ async fn update(
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
+    // Handle class enrollment update if class_id or class_name is provided
+    let target_class_id = match (payload.class_id, payload.class_name.as_deref()) {
+        (Some(cid), _) => Some(cid),
+        (None, Some(cname)) if !cname.is_empty() && cname != "-" && cname != "null" => {
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM classes WHERE name = $1 AND tenant_id = $2 LIMIT 1",
+            )
+            .bind(cname)
+            .bind(req_ctx.tenant_id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .map_err(|e| {
+                ApiError::new(
+                    school_core::common::error::ApplicationError::from(
+                        school_core::common::error::InfrastructureError::Database(e),
+                    ),
+                    &req_ctx.request_id,
+                )
+            })?
+        }
+        _ => None,
+    };
+
+    if let Some(class_id) = target_class_id {
+        let enroll_command =
+            school_core::academic::application::enrollment::enroll_student::EnrollStudentCommand {
+                tenant_id: req_ctx.tenant_id,
+                student_id: id,
+                class_id,
+            };
+        let _ = ctx
+            .enroll_student
+            .execute(enroll_command)
+            .await
+            .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
+    }
+
+    let mut response_dto = map_student_response(student);
+
+    // Fetch updated active class name
+    let class_name: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT c.name FROM enrollments e
+        JOIN classes c ON c.id = e.class_id
+        WHERE e.student_id = $1 AND e.status = 'Active'
+        LIMIT 1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .unwrap_or(None);
+
+    response_dto.class_name = class_name;
+
     Ok(Json(ApiResponse::success(
-        map_student_response(student),
+        response_dto,
         req_ctx.correlation_id,
     )))
 }

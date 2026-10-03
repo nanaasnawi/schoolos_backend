@@ -246,7 +246,9 @@ impl EnrollmentRepository for PgAcademicRepository {
             r#"
             INSERT INTO enrollments (id, tenant_id, student_id, class_id, academic_year_id, status, enrolled_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
-            "#
+            ON CONFLICT (student_id, academic_year_id) WHERE status = 'Active'
+            DO UPDATE SET class_id = EXCLUDED.class_id, enrolled_at = EXCLUDED.enrolled_at
+            "#,
         )
         .bind(enrollment.id)
         .bind(enrollment.tenant_id)
