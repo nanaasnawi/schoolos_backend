@@ -32,7 +32,7 @@ pub struct TeacherFilter {
 pub fn teacher_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/", post(create).get(list))
-        .route("/{id}", get(get_by_id).patch(update))
+        .route("/{id}", get(get_by_id).patch(update).put(update))
 }
 
 fn map_teacher_response(teacher: Teacher) -> TeacherResponse {
@@ -359,16 +359,102 @@ async fn update(
     let command = school_core::people::application::teacher::update::UpdateTeacherCommand {
         tenant_id: req_ctx.tenant_id,
         teacher_id: id,
-        full_name: payload.full_name,
-        nip: payload.nip,
+        full_name: payload.full_name.clone(),
+        nip: payload.nip.clone(),
         request_id: Some(req_ctx.correlation_id.clone()),
     };
 
-    let teacher = ctx
+    let mut teacher = ctx
         .update_teacher
         .execute(command)
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
+
+    // Update additional fields if provided in payload
+    if payload.nuptk.is_some()
+        || payload.jk.is_some()
+        || payload.tempat_lahir.is_some()
+        || payload.status_kepegawaian.is_some()
+        || payload.jenis_ptk.is_some()
+        || payload.agama.is_some()
+        || payload.alamat_jalan.is_some()
+        || payload.no_hp.is_some()
+        || payload.email.is_some()
+        || payload.subject.is_some()
+        || payload.is_active.is_some()
+    {
+        let _ = sqlx::query(
+            r#"
+            UPDATE teachers
+            SET nuptk = COALESCE($1, nuptk),
+                jk = COALESCE($2, jk),
+                tempat_lahir = COALESCE($3, tempat_lahir),
+                status_kepegawaian = COALESCE($4, status_kepegawaian),
+                jenis_ptk = COALESCE($5, jenis_ptk),
+                agama = COALESCE($6, agama),
+                alamat_jalan = COALESCE($7, alamat_jalan),
+                no_hp = COALESCE($8, no_hp),
+                email = COALESCE($9, email),
+                subject = COALESCE($10, subject),
+                is_active = COALESCE($11, is_active),
+                updated_at = NOW()
+            WHERE id = $12 AND tenant_id = $13
+            "#
+        )
+        .bind(&payload.nuptk)
+        .bind(&payload.jk)
+        .bind(&payload.tempat_lahir)
+        .bind(&payload.status_kepegawaian)
+        .bind(&payload.jenis_ptk)
+        .bind(&payload.agama)
+        .bind(&payload.alamat_jalan)
+        .bind(&payload.no_hp)
+        .bind(&payload.email)
+        .bind(&payload.subject)
+        .bind(payload.is_active)
+        .bind(id)
+        .bind(req_ctx.tenant_id)
+        .execute(&ctx.pool)
+        .await;
+    }
+
+    // Synchronize teacher name across users table and dependent records
+    if let Some(ref new_name) = payload.full_name {
+        let clean_name = new_name.trim();
+        if !clean_name.is_empty() {
+            if let Some(uid) = teacher.user_id {
+                let _ = sqlx::query("UPDATE users SET full_name = $1, updated_at = NOW() WHERE id = $2")
+                    .bind(clean_name)
+                    .bind(uid)
+                    .execute(&ctx.pool)
+                    .await;
+            } else if let Some(ref email) = teacher.email {
+                let _ = sqlx::query("UPDATE users SET full_name = $1, updated_at = NOW() WHERE tenant_id = $2 AND email = $3")
+                    .bind(clean_name)
+                    .bind(req_ctx.tenant_id)
+                    .bind(email)
+                    .execute(&ctx.pool)
+                    .await;
+            }
+
+            let _ = sqlx::query("UPDATE inquiry_threads SET teacher_name = $1, updated_at = NOW() WHERE teacher_id = $2")
+                .bind(clean_name)
+                .bind(id)
+                .execute(&ctx.pool)
+                .await;
+
+            let _ = sqlx::query("UPDATE learning_materials SET teacher_name = $1 WHERE teacher_id = $2")
+                .bind(clean_name)
+                .bind(id)
+                .execute(&ctx.pool)
+                .await;
+        }
+    }
+
+    // Reload refreshed teacher model
+    if let Ok(Some(refreshed)) = ctx.teacher_repo.find_by_id(id).await {
+        teacher = refreshed;
+    }
 
     Ok(Json(ApiResponse::success(
         map_teacher_response(teacher),
