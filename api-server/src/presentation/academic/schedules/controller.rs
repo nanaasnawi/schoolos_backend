@@ -76,9 +76,10 @@ async fn create(
         vec![single_id]
     } else {
         return Err(ApiError::new(
-            school_core::common::error::ApplicationError::Validation(
-                school_core::common::error_code::ErrorCode::ValMissingField,
-                "class_id atau class_ids wajib dipilih".to_string(),
+            school_core::common::error::ApplicationError::Domain(
+                school_core::common::error::DomainError::Validation(
+                    "class_id atau class_ids wajib dipilih".to_string(),
+                ),
             ),
             &req_ctx.request_id,
         ));
@@ -89,24 +90,24 @@ async fn create(
 
     for cid in &target_class_ids {
         let id = Uuid::new_v4();
-        sqlx::query!(
+        sqlx::query(
             r#"
             INSERT INTO class_schedules (
                 id, tenant_id, class_id, subject_id, teacher_id, academic_year_id,
                 day_of_week, start_time, end_time, room, created_at, updated_at
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
             "#,
-            id,
-            req_ctx.tenant_id,
-            cid,
-            payload.subject_id,
-            payload.teacher_id,
-            payload.academic_year_id,
-            payload.day_of_week,
-            payload.start_time,
-            payload.end_time,
-            room
         )
+        .bind(id)
+        .bind(req_ctx.tenant_id)
+        .bind(cid)
+        .bind(payload.subject_id)
+        .bind(payload.teacher_id)
+        .bind(payload.academic_year_id)
+        .bind(&payload.day_of_week)
+        .bind(&payload.start_time)
+        .bind(&payload.end_time)
+        .bind(&room)
         .execute(&ctx.pool)
         .await
         .map_err(|e| {
@@ -121,8 +122,7 @@ async fn create(
         created_ids.push(id);
     }
 
-    let rows = sqlx::query_as!(
-        ScheduleResponse,
+    let rows = sqlx::query_as::<_, ScheduleResponse>(
         r#"
         SELECT 
             cs.id,
@@ -137,7 +137,7 @@ async fn create(
             cs.day_of_week,
             cs.start_time,
             cs.end_time,
-            COALESCE(cs.room, 'Ruang Kelas') as "room!",
+            COALESCE(cs.room, 'Ruang Kelas') as room,
             cs.created_at
         FROM class_schedules cs
         JOIN classes c ON c.id = cs.class_id
@@ -146,9 +146,9 @@ async fn create(
         WHERE cs.id = ANY($1) AND cs.tenant_id = $2
         ORDER BY c.name ASC
         "#,
-        &created_ids,
-        req_ctx.tenant_id
     )
+    .bind(&created_ids)
+    .bind(req_ctx.tenant_id)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| {
@@ -200,20 +200,19 @@ async fn list(
 
     let mut filter_teacher_id = query.teacher_id;
     if is_teacher && filter_teacher_id.is_none() {
-        if let Ok(Some(t)) = sqlx::query!(
+        if let Ok(Some(t_id)) = sqlx::query_scalar::<_, Uuid>(
             "SELECT id FROM teachers WHERE user_id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
-            req_ctx.user_id,
-            req_ctx.tenant_id
         )
+        .bind(req_ctx.user_id)
+        .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await
         {
-            filter_teacher_id = Some(t.id);
+            filter_teacher_id = Some(t_id);
         }
     }
 
-    let rows = sqlx::query_as!(
-        ScheduleResponse,
+    let rows = sqlx::query_as::<_, ScheduleResponse>(
         r#"
         SELECT 
             cs.id,
@@ -228,7 +227,7 @@ async fn list(
             cs.day_of_week,
             cs.start_time,
             cs.end_time,
-            COALESCE(cs.room, 'Ruang Kelas') as "room!",
+            COALESCE(cs.room, 'Ruang Kelas') as room,
             cs.created_at
         FROM class_schedules cs
         JOIN classes c ON c.id = cs.class_id
@@ -251,11 +250,11 @@ async fn list(
             END,
             cs.start_time ASC
         "#,
-        req_ctx.tenant_id,
-        query.class_id,
-        filter_teacher_id,
-        query.day
     )
+    .bind(req_ctx.tenant_id)
+    .bind(query.class_id)
+    .bind(filter_teacher_id)
+    .bind(query.day)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| {
@@ -284,11 +283,11 @@ async fn delete_schedule(
     req_ctx: RequestContext,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<bool>>, ApiError> {
-    sqlx::query!(
+    sqlx::query(
         "UPDATE class_schedules SET deleted_at = NOW() WHERE id = $1 AND tenant_id = $2",
-        id,
-        req_ctx.tenant_id
     )
+    .bind(id)
+    .bind(req_ctx.tenant_id)
     .execute(&ctx.pool)
     .await
     .map_err(|e| {

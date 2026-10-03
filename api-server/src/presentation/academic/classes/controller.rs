@@ -16,7 +16,7 @@ use crate::error::ApiError;
 use crate::extractors::RequestContext;
 use crate::response::{ApiMeta, ApiResponse, PaginationMeta};
 
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct ClassStudentDto {
     pub id: Uuid,
     pub full_name: String,
@@ -219,15 +219,15 @@ async fn list(
         .collect();
 
     if is_teacher && params.all != Some(true) {
-        if let Ok(Some(teacher)) = sqlx::query!(
+        if let Ok(Some(teacher_id)) = sqlx::query_scalar::<_, Uuid>(
             "SELECT id FROM teachers WHERE user_id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
-            req_ctx.user_id,
-            req_ctx.tenant_id
         )
+        .bind(req_ctx.user_id)
+        .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await
         {
-            let allowed_class_ids: Vec<Uuid> = sqlx::query_scalar!(
+            let allowed_class_ids: Vec<Uuid> = sqlx::query_scalar::<_, Uuid>(
                 r#"
                 SELECT DISTINCT c.id FROM classes c
                 WHERE c.tenant_id = $1 AND c.deleted_at IS NULL
@@ -241,9 +241,9 @@ async fn list(
                       )
                   )
                 "#,
-                req_ctx.tenant_id,
-                teacher.id
             )
+            .bind(req_ctx.tenant_id)
+            .bind(teacher_id)
             .fetch_all(&ctx.pool)
             .await
             .unwrap_or_default();
@@ -305,19 +305,19 @@ async fn list_class_students(
 
     let mut teacher_filter_id: Option<Uuid> = None;
     if is_teacher {
-        if let Ok(Some(t)) = sqlx::query!(
+        if let Ok(Some(t_id)) = sqlx::query_scalar::<_, Uuid>(
             "SELECT id FROM teachers WHERE user_id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
-            req_ctx.user_id,
-            tenant_id
         )
+        .bind(req_ctx.user_id)
+        .bind(tenant_id)
         .fetch_optional(&ctx.pool)
         .await
         {
-            teacher_filter_id = Some(t.id);
+            teacher_filter_id = Some(t_id);
         }
     }
 
-    let rows = sqlx::query!(
+    let dtos = sqlx::query_as::<_, ClassStudentDto>(
         r#"
         SELECT 
             s.id, s.full_name, s.nisn, s.gender, s.status, s.no_hp, s.email,
@@ -345,12 +345,12 @@ async fn list_class_students(
           )
         ORDER BY s.full_name ASC
         "#,
-        tenant_id,
-        query.class_id,
-        query.class_name.as_deref().map(|s| s.trim()),
-        query.search.as_deref().map(|s| s.trim()),
-        teacher_filter_id
     )
+    .bind(tenant_id)
+    .bind(query.class_id)
+    .bind(query.class_name.as_deref().map(|s| s.trim()))
+    .bind(query.search.as_deref().map(|s| s.trim()))
+    .bind(teacher_filter_id)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| {
@@ -362,21 +362,6 @@ async fn list_class_students(
         )
     })?;
 
-    let dtos = rows
-        .into_iter()
-        .map(|r| ClassStudentDto {
-            id: r.id,
-            full_name: r.full_name,
-            nisn: r.nisn,
-            gender: r.gender,
-            status: r.status,
-            no_hp: r.no_hp,
-            email: r.email,
-            class_id: r.class_id,
-            class_name: r.class_name,
-        })
-        .collect();
-
     Ok(Json(ApiResponse::success(dtos, req_ctx.request_id)))
 }
 
@@ -385,7 +370,7 @@ async fn get_class_students_by_id(
     req_ctx: RequestContext,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<Vec<ClassStudentDto>>>, ApiError> {
-    let rows = sqlx::query!(
+    let dtos = sqlx::query_as::<_, ClassStudentDto>(
         r#"
         SELECT 
             s.id, s.full_name, s.nisn, s.gender, s.status, s.no_hp, s.email,
@@ -396,8 +381,8 @@ async fn get_class_students_by_id(
         WHERE c.id = $1
         ORDER BY s.full_name ASC
         "#,
-        id
     )
+    .bind(id)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| {
@@ -408,21 +393,6 @@ async fn get_class_students_by_id(
             &req_ctx.request_id,
         )
     })?;
-
-    let dtos = rows
-        .into_iter()
-        .map(|r| ClassStudentDto {
-            id: r.id,
-            full_name: r.full_name,
-            nisn: r.nisn,
-            gender: r.gender,
-            status: r.status,
-            no_hp: r.no_hp,
-            email: r.email,
-            class_id: r.class_id,
-            class_name: r.class_name,
-        })
-        .collect();
 
     Ok(Json(ApiResponse::success(dtos, req_ctx.request_id)))
 }
