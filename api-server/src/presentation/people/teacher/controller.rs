@@ -136,7 +136,10 @@ async fn create(
         base_username
     };
 
-    let user_email = format!("{}@guru.schoolos.id", &teacher.id.to_string().replace('-', "")[..8]);
+    let user_email = format!(
+        "{}@guru.schoolos.id",
+        &teacher.id.to_string().replace('-', "")[..8]
+    );
     let default_guru_pw_hash = "$argon2id$v=19$m=65536,p=4,t=3$SnCFuF71lzKF+Cuw4svZPw$c9YgXUK8C/boJ85Pb2IEuyK1xsNP28uGdzlvvflF5ts"; // guru2565
 
     if let Ok(uid) = sqlx::query_scalar::<_, Uuid>(
@@ -399,7 +402,7 @@ async fn update(
                 is_active = COALESCE($11, is_active),
                 updated_at = NOW()
             WHERE id = $12 AND tenant_id = $13
-            "#
+            "#,
         )
         .bind(&payload.nuptk)
         .bind(&payload.jk)
@@ -417,17 +420,39 @@ async fn update(
         .execute(&ctx.pool)
         .await;
 
-        if let Some(ref nuptk) = payload.nuptk { teacher.nuptk = Some(nuptk.clone()); }
-        if let Some(ref jk) = payload.jk { teacher.jk = Some(jk.clone()); }
-        if let Some(ref tempat_lahir) = payload.tempat_lahir { teacher.tempat_lahir = Some(tempat_lahir.clone()); }
-        if let Some(ref status_kepegawaian) = payload.status_kepegawaian { teacher.status_kepegawaian = Some(status_kepegawaian.clone()); }
-        if let Some(ref jenis_ptk) = payload.jenis_ptk { teacher.jenis_ptk = Some(jenis_ptk.clone()); }
-        if let Some(ref agama) = payload.agama { teacher.agama = Some(agama.clone()); }
-        if let Some(ref alamat_jalan) = payload.alamat_jalan { teacher.alamat_jalan = Some(alamat_jalan.clone()); }
-        if let Some(ref no_hp) = payload.no_hp { teacher.no_hp = Some(no_hp.clone()); }
-        if let Some(ref email) = payload.email { teacher.email = Some(email.clone()); }
-        if let Some(ref subject) = payload.subject { teacher.subject = Some(subject.clone()); }
-        if let Some(is_active) = payload.is_active { teacher.is_active = is_active; }
+        if let Some(ref nuptk) = payload.nuptk {
+            teacher.nuptk = Some(nuptk.clone());
+        }
+        if let Some(ref jk) = payload.jk {
+            teacher.jk = Some(jk.clone());
+        }
+        if let Some(ref tempat_lahir) = payload.tempat_lahir {
+            teacher.tempat_lahir = Some(tempat_lahir.clone());
+        }
+        if let Some(ref status_kepegawaian) = payload.status_kepegawaian {
+            teacher.status_kepegawaian = Some(status_kepegawaian.clone());
+        }
+        if let Some(ref jenis_ptk) = payload.jenis_ptk {
+            teacher.jenis_ptk = Some(jenis_ptk.clone());
+        }
+        if let Some(ref agama) = payload.agama {
+            teacher.agama = Some(agama.clone());
+        }
+        if let Some(ref alamat_jalan) = payload.alamat_jalan {
+            teacher.alamat_jalan = Some(alamat_jalan.clone());
+        }
+        if let Some(ref no_hp) = payload.no_hp {
+            teacher.no_hp = Some(no_hp.clone());
+        }
+        if let Some(ref email) = payload.email {
+            teacher.email = Some(email.clone());
+        }
+        if let Some(ref subject) = payload.subject {
+            teacher.subject = Some(subject.clone());
+        }
+        if let Some(is_active) = payload.is_active {
+            teacher.is_active = is_active;
+        }
         teacher.updated_at = Utc::now();
     }
 
@@ -436,11 +461,13 @@ async fn update(
         let clean_name = new_name.trim();
         if !clean_name.is_empty() {
             if let Some(uid) = teacher.user_id {
-                let _ = sqlx::query("UPDATE users SET full_name = $1, updated_at = NOW() WHERE id = $2")
-                    .bind(clean_name)
-                    .bind(uid)
-                    .execute(&ctx.pool)
-                    .await;
+                let _ = sqlx::query(
+                    "UPDATE users SET full_name = $1, updated_at = NOW() WHERE id = $2",
+                )
+                .bind(clean_name)
+                .bind(uid)
+                .execute(&ctx.pool)
+                .await;
             } else if let Some(ref email) = teacher.email {
                 let _ = sqlx::query("UPDATE users SET full_name = $1, updated_at = NOW() WHERE tenant_id = $2 AND email = $3")
                     .bind(clean_name)
@@ -456,11 +483,13 @@ async fn update(
                 .execute(&ctx.pool)
                 .await;
 
-            let _ = sqlx::query("UPDATE learning_materials SET teacher_name = $1 WHERE teacher_id = $2")
-                .bind(clean_name)
-                .bind(id)
-                .execute(&ctx.pool)
-                .await;
+            let _ = sqlx::query(
+                "UPDATE learning_materials SET teacher_name = $1 WHERE teacher_id = $2",
+            )
+            .bind(clean_name)
+            .bind(id)
+            .execute(&ctx.pool)
+            .await;
         }
     }
 

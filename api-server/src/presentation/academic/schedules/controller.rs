@@ -13,7 +13,8 @@ use crate::{
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct CreateScheduleRequest {
-    pub class_id: Uuid,
+    pub class_id: Option<Uuid>,
+    pub class_ids: Option<Vec<Uuid>>,
     pub subject_id: Uuid,
     pub teacher_id: Uuid,
     pub academic_year_id: Option<Uuid>,
@@ -60,7 +61,7 @@ pub fn schedule_routes() -> Router<ApplicationContext> {
     path = "/api/v1/academic/schedules",
     request_body = CreateScheduleRequest,
     responses(
-        (status = 201, description = "Schedule created", body = ApiResponse<ScheduleResponse>)
+        (status = 201, description = "Schedules created", body = ApiResponse<Vec<ScheduleResponse>>)
     ),
     security(("Bearer" = []))
 )]
@@ -68,40 +69,59 @@ async fn create(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
     Json(payload): Json<CreateScheduleRequest>,
-) -> Result<Json<ApiResponse<ScheduleResponse>>, ApiError> {
-    let room = payload.room.unwrap_or_else(|| "Ruang Kelas".to_string());
-    let id = Uuid::new_v4();
-
-    sqlx::query!(
-        r#"
-        INSERT INTO class_schedules (
-            id, tenant_id, class_id, subject_id, teacher_id, academic_year_id,
-            day_of_week, start_time, end_time, room, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
-        "#,
-        id,
-        req_ctx.tenant_id,
-        payload.class_id,
-        payload.subject_id,
-        payload.teacher_id,
-        payload.academic_year_id,
-        payload.day_of_week,
-        payload.start_time,
-        payload.end_time,
-        room
-    )
-    .execute(&ctx.pool)
-    .await
-    .map_err(|e| {
-        ApiError::new(
-            school_core::common::error::ApplicationError::Infrastructure(
-                school_core::common::error::InfrastructureError::Database(e),
+) -> Result<Json<ApiResponse<Vec<ScheduleResponse>>>, ApiError> {
+    let target_class_ids = if let Some(ids) = payload.class_ids.filter(|v| !v.is_empty()) {
+        ids
+    } else if let Some(single_id) = payload.class_id {
+        vec![single_id]
+    } else {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Validation(
+                school_core::common::error_code::ErrorCode::ValMissingField,
+                "class_id atau class_ids wajib dipilih".to_string(),
             ),
             &req_ctx.request_id,
-        )
-    })?;
+        ));
+    };
 
-    let row = sqlx::query_as!(
+    let room = payload.room.unwrap_or_else(|| "Ruang Kelas".to_string());
+    let mut created_ids = Vec::new();
+
+    for cid in &target_class_ids {
+        let id = Uuid::new_v4();
+        sqlx::query!(
+            r#"
+            INSERT INTO class_schedules (
+                id, tenant_id, class_id, subject_id, teacher_id, academic_year_id,
+                day_of_week, start_time, end_time, room, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+            "#,
+            id,
+            req_ctx.tenant_id,
+            cid,
+            payload.subject_id,
+            payload.teacher_id,
+            payload.academic_year_id,
+            payload.day_of_week,
+            payload.start_time,
+            payload.end_time,
+            room
+        )
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+
+        created_ids.push(id);
+    }
+
+    let rows = sqlx::query_as!(
         ScheduleResponse,
         r#"
         SELECT 
@@ -123,12 +143,13 @@ async fn create(
         JOIN classes c ON c.id = cs.class_id
         JOIN subjects s ON s.id = cs.subject_id
         JOIN teachers t ON t.id = cs.teacher_id
-        WHERE cs.id = $1 AND cs.tenant_id = $2
+        WHERE cs.id = ANY($1) AND cs.tenant_id = $2
+        ORDER BY c.name ASC
         "#,
-        id,
+        &created_ids,
         req_ctx.tenant_id
     )
-    .fetch_one(&ctx.pool)
+    .fetch_all(&ctx.pool)
     .await
     .map_err(|e| {
         ApiError::new(
@@ -139,7 +160,7 @@ async fn create(
         )
     })?;
 
-    Ok(Json(ApiResponse::success(row, req_ctx.request_id)))
+    Ok(Json(ApiResponse::success(rows, req_ctx.request_id)))
 }
 
 #[utoipa::path(
@@ -156,6 +177,41 @@ async fn list(
     req_ctx: RequestContext,
     Query(query): Query<ScheduleFilterQuery>,
 ) -> Result<Json<ApiResponse<Vec<ScheduleResponse>>>, ApiError> {
+    let is_admin_or_staff = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                r.name == "Kepala Sekolah"
+                    || r.name == "Operator/Staff"
+                    || r.name == "Admin"
+                    || r.name == "SuperAdmin"
+                    || r.name == "Bendahara"
+            })
+        })
+        .unwrap_or(false);
+
+    let is_teacher = !is_admin_or_staff
+        && req_ctx
+            .actor
+            .as_ref()
+            .map(|a| a.roles.iter().any(|r| r.name == "Guru" || r.name == "Teacher"))
+            .unwrap_or(false);
+
+    let mut filter_teacher_id = query.teacher_id;
+    if is_teacher && filter_teacher_id.is_none() {
+        if let Ok(Some(t)) = sqlx::query!(
+            "SELECT id FROM teachers WHERE user_id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+            req_ctx.user_id,
+            req_ctx.tenant_id
+        )
+        .fetch_optional(&ctx.pool)
+        .await
+        {
+            filter_teacher_id = Some(t.id);
+        }
+    }
+
     let rows = sqlx::query_as!(
         ScheduleResponse,
         r#"
@@ -197,7 +253,7 @@ async fn list(
         "#,
         req_ctx.tenant_id,
         query.class_id,
-        query.teacher_id,
+        filter_teacher_id,
         query.day
     )
     .fetch_all(&ctx.pool)

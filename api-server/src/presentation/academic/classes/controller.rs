@@ -126,6 +126,7 @@ pub struct ListClassesParams {
     pub academic_year_id: Option<Uuid>,
     pub page: Option<u64>,
     pub page_size: Option<u64>,
+    pub all: Option<bool>,
 }
 
 #[utoipa::path(
@@ -135,7 +136,8 @@ pub struct ListClassesParams {
     params(
         ("academic_year_id" = Option<Uuid>, Query, description = "Filter by academic year"),
         ("page" = Option<u64>, Query, description = "Page number"),
-        ("page_size" = Option<u64>, Query, description = "Items per page")
+        ("page_size" = Option<u64>, Query, description = "Items per page"),
+        ("all" = Option<bool>, Query, description = "Return all classes regardless of role")
     ),
     responses(
         (status = 200, description = "List of Classes", body = ApiResponse<Vec<ClassResponse>>)
@@ -147,15 +149,30 @@ async fn list(
     req_ctx: RequestContext,
     Query(params): Query<ListClassesParams>,
 ) -> Result<Json<ApiResponse<Vec<ClassResponse>>>, crate::error::ApiError> {
-    let is_teacher = req_ctx
+    let is_admin_or_staff = req_ctx
         .actor
         .as_ref()
         .map(|a| {
-            a.roles
-                .iter()
-                .any(|r| r.name == "Guru" || r.name == "Teacher")
+            a.roles.iter().any(|r| {
+                r.name == "Kepala Sekolah"
+                    || r.name == "Operator/Staff"
+                    || r.name == "Admin"
+                    || r.name == "SuperAdmin"
+                    || r.name == "Bendahara"
+            })
         })
         .unwrap_or(false);
+
+    let is_teacher = !is_admin_or_staff
+        && req_ctx
+            .actor
+            .as_ref()
+            .map(|a| {
+                a.roles
+                    .iter()
+                    .any(|r| r.name == "Guru" || r.name == "Teacher")
+            })
+            .unwrap_or(false);
     let is_student = req_ctx
         .actor
         .as_ref()
@@ -166,7 +183,7 @@ async fn list(
         })
         .unwrap_or(false);
 
-    if !is_teacher && !is_student {
+    if !is_admin_or_staff && !is_teacher && !is_student {
         use crate::middleware::require_permission;
         use school_core::permission::domain::permission_registry::Permission;
         require_permission(&req_ctx.actor, Permission::AcademicManage)
@@ -195,11 +212,45 @@ async fn list(
 
     let page_result = ctx.list_classes.execute(query).await?;
 
-    let items = page_result
+    let mut items: Vec<ClassResponse> = page_result
         .items
         .into_iter()
         .map(ClassResponse::from)
         .collect();
+
+    if is_teacher && params.all != Some(true) {
+        if let Ok(Some(teacher)) = sqlx::query!(
+            "SELECT id FROM teachers WHERE user_id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+            req_ctx.user_id,
+            req_ctx.tenant_id
+        )
+        .fetch_optional(&ctx.pool)
+        .await
+        {
+            let allowed_class_ids: Vec<Uuid> = sqlx::query_scalar!(
+                r#"
+                SELECT DISTINCT c.id FROM classes c
+                WHERE c.tenant_id = $1 AND c.deleted_at IS NULL
+                  AND (
+                      c.homeroom_teacher_id = $2
+                      OR EXISTS (
+                          SELECT 1 FROM class_schedules cs
+                          WHERE cs.class_id = c.id
+                            AND cs.teacher_id = $2
+                            AND cs.deleted_at IS NULL
+                      )
+                  )
+                "#,
+                req_ctx.tenant_id,
+                teacher.id
+            )
+            .fetch_all(&ctx.pool)
+            .await
+            .unwrap_or_default();
+
+            items.retain(|c| allowed_class_ids.contains(&c.id));
+        }
+    }
 
     let meta = ApiMeta {
         pagination: Some(PaginationMeta {
@@ -227,6 +278,45 @@ async fn list_class_students(
 ) -> Result<Json<ApiResponse<Vec<ClassStudentDto>>>, ApiError> {
     let tenant_id = req_ctx.tenant_id;
 
+    let is_admin_or_staff = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                r.name == "Kepala Sekolah"
+                    || r.name == "Operator/Staff"
+                    || r.name == "Admin"
+                    || r.name == "SuperAdmin"
+                    || r.name == "Bendahara"
+            })
+        })
+        .unwrap_or(false);
+
+    let is_teacher = !is_admin_or_staff
+        && req_ctx
+            .actor
+            .as_ref()
+            .map(|a| {
+                a.roles
+                    .iter()
+                    .any(|r| r.name == "Guru" || r.name == "Teacher")
+            })
+            .unwrap_or(false);
+
+    let mut teacher_filter_id: Option<Uuid> = None;
+    if is_teacher {
+        if let Ok(Some(t)) = sqlx::query!(
+            "SELECT id FROM teachers WHERE user_id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+            req_ctx.user_id,
+            tenant_id
+        )
+        .fetch_optional(&ctx.pool)
+        .await
+        {
+            teacher_filter_id = Some(t.id);
+        }
+    }
+
     let rows = sqlx::query!(
         r#"
         SELECT 
@@ -243,12 +333,23 @@ async fn list_class_students(
               s.full_name ILIKE '%' || $4 || '%' OR 
               s.nisn ILIKE '%' || $4 || '%'
           )
+          AND (
+              $5::uuid IS NULL OR
+              c.homeroom_teacher_id = $5 OR
+              EXISTS (
+                  SELECT 1 FROM class_schedules cs
+                  WHERE cs.class_id = c.id
+                    AND cs.teacher_id = $5
+                    AND cs.deleted_at IS NULL
+              )
+          )
         ORDER BY s.full_name ASC
         "#,
         tenant_id,
         query.class_id,
         query.class_name.as_deref().map(|s| s.trim()),
-        query.search.as_deref().map(|s| s.trim())
+        query.search.as_deref().map(|s| s.trim()),
+        teacher_filter_id
     )
     .fetch_all(&ctx.pool)
     .await
