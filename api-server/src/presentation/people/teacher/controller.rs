@@ -416,6 +416,19 @@ async fn update(
         .bind(req_ctx.tenant_id)
         .execute(&ctx.pool)
         .await;
+
+        if let Some(ref nuptk) = payload.nuptk { teacher.nuptk = Some(nuptk.clone()); }
+        if let Some(ref jk) = payload.jk { teacher.jk = Some(jk.clone()); }
+        if let Some(ref tempat_lahir) = payload.tempat_lahir { teacher.tempat_lahir = Some(tempat_lahir.clone()); }
+        if let Some(ref status_kepegawaian) = payload.status_kepegawaian { teacher.status_kepegawaian = Some(status_kepegawaian.clone()); }
+        if let Some(ref jenis_ptk) = payload.jenis_ptk { teacher.jenis_ptk = Some(jenis_ptk.clone()); }
+        if let Some(ref agama) = payload.agama { teacher.agama = Some(agama.clone()); }
+        if let Some(ref alamat_jalan) = payload.alamat_jalan { teacher.alamat_jalan = Some(alamat_jalan.clone()); }
+        if let Some(ref no_hp) = payload.no_hp { teacher.no_hp = Some(no_hp.clone()); }
+        if let Some(ref email) = payload.email { teacher.email = Some(email.clone()); }
+        if let Some(ref subject) = payload.subject { teacher.subject = Some(subject.clone()); }
+        if let Some(is_active) = payload.is_active { teacher.is_active = is_active; }
+        teacher.updated_at = Utc::now();
     }
 
     // Synchronize teacher name across users table and dependent records
@@ -449,11 +462,6 @@ async fn update(
                 .execute(&ctx.pool)
                 .await;
         }
-    }
-
-    // Reload refreshed teacher model
-    if let Ok(Some(refreshed)) = ctx.teacher_repo.find_by_id(id).await {
-        teacher = refreshed;
     }
 
     Ok(Json(ApiResponse::success(
