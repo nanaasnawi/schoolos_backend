@@ -200,10 +200,11 @@ async fn list(
 
     let mut filter_teacher_id = query.teacher_id;
     if is_teacher && filter_teacher_id.is_none() {
+        let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
         if let Ok(Some(t_id)) = sqlx::query_scalar::<_, Uuid>(
             "SELECT id FROM teachers WHERE user_id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
         )
-        .bind(req_ctx.user_id)
+        .bind(user_id)
         .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await

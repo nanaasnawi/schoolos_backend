@@ -219,10 +219,11 @@ async fn list(
         .collect();
 
     if is_teacher && params.all != Some(true) {
+        let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
         if let Ok(Some(teacher_id)) = sqlx::query_scalar::<_, Uuid>(
             "SELECT id FROM teachers WHERE user_id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
         )
-        .bind(req_ctx.user_id)
+        .bind(user_id)
         .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await
@@ -305,10 +306,11 @@ async fn list_class_students(
 
     let mut teacher_filter_id: Option<Uuid> = None;
     if is_teacher {
+        let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
         if let Ok(Some(t_id)) = sqlx::query_scalar::<_, Uuid>(
             "SELECT id FROM teachers WHERE user_id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
         )
-        .bind(req_ctx.user_id)
+        .bind(user_id)
         .bind(tenant_id)
         .fetch_optional(&ctx.pool)
         .await
