@@ -7,9 +7,16 @@ use uuid::Uuid;
 
 use school_core::common::error::ApplicationError;
 
+#[derive(Debug)]
 pub struct ApiError {
     pub inner: ApplicationError,
     pub request_id: String,
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.inner)
+    }
 }
 
 impl ApiError {

@@ -1038,7 +1038,7 @@ pub async fn agent_sync_async_handler(
             }
             Err(err) => {
                 tracing::error!(
-                    "[Dapodik Background] Sync job {} failed: {:?}",
+                    "[Dapodik Background] Sync job {} failed: {}",
                     job_id, err
                 );
             }
