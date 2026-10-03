@@ -1085,8 +1085,27 @@ async fn update(
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
+    if payload.start_page.is_some() || payload.end_page.is_some() {
+        let _ = sqlx::query!(
+            r#"UPDATE learning_materials SET start_page = COALESCE($1, start_page), end_page = COALESCE($2, end_page) WHERE id = $3"#,
+            payload.start_page,
+            payload.end_page,
+            id
+        )
+        .execute(&ctx.pool)
+        .await;
+    }
+
+    let mut resp = LearningMaterialResponse::from(material);
+    if payload.start_page.is_some() {
+        resp.start_page = payload.start_page;
+    }
+    if payload.end_page.is_some() {
+        resp.end_page = payload.end_page;
+    }
+
     Ok(Json(ApiResponse::success(
-        LearningMaterialResponse::from(material),
+        resp,
         req_ctx.request_id,
     )))
 }
