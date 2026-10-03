@@ -3,6 +3,7 @@ use axum::{extract::FromRequestParts, http::request::Parts};
 use school_core::authorization::domain::actor::Actor;
 use uuid::Uuid;
 
+#[derive(Debug, Clone)]
 pub struct RequestContext {
     pub request_id: String,
     pub correlation_id: String,

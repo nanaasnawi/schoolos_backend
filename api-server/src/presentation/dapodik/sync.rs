@@ -1,4 +1,9 @@
-use axum::{extract::State, Json};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
 use chrono::Utc;
 use hex::ToHex;
 use school_core::common::error::{ApplicationError, DomainError};
@@ -407,6 +412,185 @@ pub async fn generate_unique_name_username(
     }
 }
 
+pub fn fast_generate_unique_username(
+    existing_usernames: &mut HashSet<String>,
+    full_name: &str,
+) -> String {
+    let base = clean_name_for_base_username(full_name);
+    let base_lower = base.to_lowercase();
+    if !existing_usernames.contains(&base_lower) {
+        existing_usernames.insert(base_lower);
+        return base;
+    }
+
+    let mut counter = 1;
+    loop {
+        let candidate = format!("{}{}", base, counter);
+        let cand_lower = candidate.to_lowercase();
+        if !existing_usernames.contains(&cand_lower) {
+            existing_usernames.insert(cand_lower);
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
+async fn fast_safe_upsert_user(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: Uuid,
+    user_by_email: &mut HashMap<String, Uuid>,
+    user_by_username: &mut HashMap<String, Uuid>,
+    existing_usernames: &mut HashSet<String>,
+    username: &str,
+    email: &str,
+    full_name: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Uuid, sqlx::Error> {
+    let clean_fullname = truncate_str(full_name, 255);
+    let clean_uname = if username.trim().is_empty() {
+        fast_generate_unique_username(existing_usernames, &clean_fullname)
+    } else {
+        truncate_str(username, 100)
+    };
+    let clean_email = truncate_str(email, 255);
+    let clean_email_lower = clean_email.to_lowercase();
+    let clean_uname_lower = clean_uname.to_lowercase();
+
+    // 1. Check in-memory cache first (0 network latency)
+    let cached_uid = user_by_email
+        .get(&clean_email_lower)
+        .or_else(|| user_by_username.get(&clean_uname_lower))
+        .copied();
+
+    if let Some(uid) = cached_uid {
+        sqlx::query(
+            r#"
+            UPDATE users 
+            SET full_name = $1, 
+                username = COALESCE(users.username, $2),
+                is_active = true,
+                updated_at = $3
+            WHERE id = $4
+            "#,
+        )
+        .bind(&clean_fullname)
+        .bind(&clean_uname)
+        .bind(now)
+        .bind(uid)
+        .execute(&mut **tx)
+        .await?;
+
+        user_by_email.insert(clean_email_lower, uid);
+        user_by_username.insert(clean_uname_lower, uid);
+        return Ok(uid);
+    }
+
+    // 2. Insert with savepoint protection against unique constraint abort
+    let new_uid = Uuid::now_v7();
+    let _ = sqlx::query("SAVEPOINT sp_upsert_user")
+        .execute(&mut **tx)
+        .await;
+
+    let insert_res = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        INSERT INTO users (id, tenant_id, username, email, password_hash, full_name, is_active, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, '$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY', $5, true, $6, $6)
+        ON CONFLICT (tenant_id, email) DO UPDATE SET
+            username = COALESCE(users.username, EXCLUDED.username),
+            full_name = EXCLUDED.full_name,
+            updated_at = EXCLUDED.updated_at
+        RETURNING id
+        "#,
+    )
+    .bind(new_uid)
+    .bind(tenant_id)
+    .bind(&clean_uname)
+    .bind(&clean_email)
+    .bind(&clean_fullname)
+    .bind(now)
+    .fetch_one(&mut **tx)
+    .await;
+
+    match insert_res {
+        Ok(uid) => {
+            let _ = sqlx::query("RELEASE SAVEPOINT sp_upsert_user")
+                .execute(&mut **tx)
+                .await;
+            user_by_email.insert(clean_email_lower, uid);
+            user_by_username.insert(clean_uname_lower.clone(), uid);
+            existing_usernames.insert(clean_uname_lower);
+            Ok(uid)
+        }
+        Err(e) => {
+            let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_upsert_user")
+                .execute(&mut **tx)
+                .await;
+            // Fallback query if conflict happened on username
+            let fallback_user = sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM users WHERE tenant_id = $1 AND (email = $2 OR LOWER(username) = LOWER($3)) LIMIT 1",
+            )
+            .bind(tenant_id)
+            .bind(&clean_email)
+            .bind(&clean_uname)
+            .fetch_optional(&mut **tx)
+            .await?;
+
+            if let Some(uid) = fallback_user {
+                user_by_email.insert(clean_email_lower, uid);
+                user_by_username.insert(clean_uname_lower, uid);
+                Ok(uid)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+async fn fast_ensure_qr_token(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: Uuid,
+    active_qr_users: &mut HashSet<Uuid>,
+    user_id: Uuid,
+    label: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), sqlx::Error> {
+    if !active_qr_users.contains(&user_id) {
+        let token_id = Uuid::now_v7();
+        let entropy = Uuid::now_v7().to_string().replace('-', "");
+        let raw_token = format!(
+            "sch_qr_v1_{}_{}",
+            token_id.to_string().replace('-', ""),
+            &entropy[0..16]
+        );
+        let mut hasher = Sha256::new();
+        hasher.update(raw_token.as_bytes());
+        let token_hash = hasher.finalize().encode_hex::<String>();
+
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO user_qr_tokens (
+                id, tenant_id, user_id, token_hash, raw_token, token_type, label, is_active, created_at, updated_at
+            ) VALUES (
+                $1, $2, $3, $4, $5, 'BADGE', $6, true, $7, $7
+            )
+            ON CONFLICT (token_hash) DO NOTHING
+            "#,
+        )
+        .bind(token_id)
+        .bind(tenant_id)
+        .bind(user_id)
+        .bind(&token_hash)
+        .bind(&raw_token)
+        .bind(truncate_str(label, 255))
+        .bind(now)
+        .execute(&mut **tx)
+        .await?;
+
+        active_qr_users.insert(user_id);
+    }
+    Ok(())
+}
+
 async fn safe_upsert_user(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: Uuid,
@@ -674,7 +858,17 @@ pub struct DapodikRawRombel {
     pub pembelajaran: Option<Vec<DapodikRawPembelajaran>>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone)]
+pub struct AgentSyncAcceptedDto {
+    pub job_id: String,
+    pub status: String,
+    pub message: String,
+    pub total_students: usize,
+    pub total_gtk: usize,
+    pub total_rombel: usize,
+}
+
+#[derive(Debug, Deserialize, ToSchema, Clone)]
 pub struct PullDapodikRequest {
     pub dapodik_url: Option<String>,
     pub npsn: Option<String>,
@@ -684,6 +878,8 @@ pub struct PullDapodikRequest {
     pub raw_rombel: Option<Vec<DapodikRawRombel>>,
     pub raw_sekolah: Option<serde_json::Value>,
     pub synced_by: Option<String>,
+    pub batch_index: Option<usize>,
+    pub total_batches: Option<usize>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -788,6 +984,85 @@ pub async fn get_agent_info(
     Ok(Json(ApiResponse::success(info, ctx.request_id)))
 }
 
+pub async fn agent_sync_async_handler(
+    ctx: RequestContext,
+    state: State<ApplicationContext>,
+    payload: Option<Json<PullDapodikRequest>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let req = match payload.as_ref() {
+        Some(Json(r)) => r,
+        None => {
+            return Err(ApiError::new(
+                ApplicationError::Domain(DomainError::Validation(
+                    "Payload sinkronisasi kosong.".into(),
+                )),
+                &ctx.request_id,
+            ));
+        }
+    };
+
+    let total_students = req.raw_students.as_ref().map(|s| s.len()).unwrap_or(0);
+    let total_gtk = req.raw_gtk.as_ref().map(|g| g.len()).unwrap_or(0);
+    let total_rombel = req.raw_rombel.as_ref().map(|r| r.len()).unwrap_or(0);
+
+    if req.raw_students.is_none() && req.raw_gtk.is_none() && req.raw_rombel.is_none() {
+        return Err(ApiError::new(
+            ApplicationError::Domain(DomainError::Validation(
+                "Sinkronisasi Dapodik memerlukan data Siswa, GTK, atau Rombel dari Bridge.".into(),
+            )),
+            &ctx.request_id,
+        ));
+    }
+
+    let job_id = Uuid::now_v7();
+    let cloned_ctx = ctx.clone();
+    let cloned_state = state.clone();
+    let cloned_payload = payload.clone();
+    let batch_info = match (req.batch_index, req.total_batches) {
+        (Some(idx), Some(total)) => format!(" (Batch {}/{})", idx + 1, total),
+        _ => String::new(),
+    };
+
+    tokio::spawn(async move {
+        tracing::info!(
+            "[Dapodik Background] Starting sync job {} for tenant {}{} ({} Siswa, {} GTK, {} Rombel)",
+            job_id, cloned_ctx.tenant_id, batch_info, total_students, total_gtk, total_rombel
+        );
+        match pull_dapodik_records(cloned_ctx, cloned_state, cloned_payload).await {
+            Ok(res) => {
+                let count = res.0.data.as_ref().map(|v| v.len()).unwrap_or(0);
+                tracing::info!(
+                    "[Dapodik Background] Successfully finished sync job {}: {} records processed.",
+                    job_id, count
+                );
+            }
+            Err(err) => {
+                tracing::error!(
+                    "[Dapodik Background] Sync job {} failed: {:?}",
+                    job_id, err
+                );
+            }
+        }
+    });
+
+    let accepted = AgentSyncAcceptedDto {
+        job_id: job_id.to_string(),
+        status: "ACCEPTED".into(),
+        message: format!(
+            "Sinkronisasi Dapodik berhasil diterima dan sedang diproses di background cloud ({} Siswa, {} GTK, {} Rombel).",
+            total_students, total_gtk, total_rombel
+        ),
+        total_students,
+        total_gtk,
+        total_rombel,
+    };
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(ApiResponse::success(accepted, ctx.request_id)),
+    ))
+}
+
 pub async fn pull_dapodik_records(
     ctx: RequestContext,
     state: State<ApplicationContext>,
@@ -802,6 +1077,8 @@ pub async fn pull_dapodik_records(
         agent_rombel,
         agent_sekolah,
         req_synced_by,
+        batch_index,
+        total_batches,
     ) = match payload {
         Some(Json(req)) => (
             req.dapodik_url,
@@ -812,8 +1089,10 @@ pub async fn pull_dapodik_records(
             req.raw_rombel,
             req.raw_sekolah,
             req.synced_by,
+            req.batch_index,
+            req.total_batches,
         ),
-        None => (None, None, None, None, None, None, None, None),
+        None => (None, None, None, None, None, None, None, None, None, None),
     };
 
     let is_agent_sync = agent_students.is_some();
@@ -1112,6 +1391,41 @@ pub async fn pull_dapodik_records(
         .map(|r| (r.full_name, r.id))
         .collect();
 
+    #[derive(sqlx::FromRow)]
+    struct UserCacheRow {
+        id: Uuid,
+        email: String,
+        username: Option<String>,
+    }
+    let user_rows = sqlx::query_as::<_, UserCacheRow>(
+        "SELECT id, email, username FROM users WHERE tenant_id = $1"
+    )
+    .bind(ctx.tenant_id)
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap_or_default();
+
+    let mut user_by_email: HashMap<String, Uuid> = HashMap::new();
+    let mut user_by_username: HashMap<String, Uuid> = HashMap::new();
+    let mut existing_usernames: HashSet<String> = HashSet::new();
+    for u in user_rows {
+        user_by_email.insert(u.email.to_lowercase(), u.id);
+        if let Some(uname) = u.username {
+            let lower = uname.to_lowercase();
+            user_by_username.insert(lower.clone(), u.id);
+            existing_usernames.insert(lower);
+        }
+    }
+
+    let qr_rows = sqlx::query_scalar::<_, Uuid>(
+        "SELECT user_id FROM user_qr_tokens WHERE tenant_id = $1 AND is_active = true"
+    )
+    .bind(ctx.tenant_id)
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap_or_default();
+    let mut active_qr_users: HashSet<Uuid> = qr_rows.into_iter().collect();
+
     let mut imported_records: Vec<DapodikSyncRecordDto> = Vec::new();
     let now = Utc::now();
 
@@ -1342,12 +1656,20 @@ pub async fn pull_dapodik_records(
                 .map(|s| truncate_str(&s, 100));
 
             let email = format!("{}@guru.schoolos.id", ptk_prefix);
-            let username = generate_unique_name_username(&mut tx, ctx.tenant_id, &nama, None)
-                .await
-                .unwrap_or_else(|_| format!("guru_{}", ptk_prefix));
+            let username = fast_generate_unique_username(&mut existing_usernames, &nama);
 
-            let user_res =
-                safe_upsert_user(&mut tx, ctx.tenant_id, &username, &email, &nama, now).await;
+            let user_res = fast_safe_upsert_user(
+                &mut tx,
+                ctx.tenant_id,
+                &mut user_by_email,
+                &mut user_by_username,
+                &mut existing_usernames,
+                &username,
+                &email,
+                &nama,
+                now,
+            )
+            .await;
 
             let actual_user_id = match user_res {
                 Ok(uid) => uid,
@@ -1368,48 +1690,15 @@ pub async fn pull_dapodik_records(
             .execute(&mut *tx)
             .await;
 
-            // Ensure active QR badge token exists for GTK without touching existing active cards
-            let has_active_qr = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM user_qr_tokens WHERE tenant_id = $1 AND user_id = $2 AND is_active = true)"
+            let _ = fast_ensure_qr_token(
+                &mut tx,
+                ctx.tenant_id,
+                &mut active_qr_users,
+                actual_user_id,
+                &format!("Kartu GTK - {}", nama),
+                now,
             )
-            .bind(ctx.tenant_id)
-            .bind(actual_user_id)
-            .fetch_one(&mut *tx)
-            .await
-            .unwrap_or(false);
-
-            if !has_active_qr {
-                let token_id = Uuid::now_v7();
-                let entropy = Uuid::now_v7().to_string().replace('-', "");
-                let raw_token = format!(
-                    "sch_qr_v1_{}_{}",
-                    token_id.to_string().replace('-', ""),
-                    &entropy[0..16]
-                );
-                let mut hasher = Sha256::new();
-                hasher.update(raw_token.as_bytes());
-                let token_hash = hasher.finalize().encode_hex::<String>();
-
-                let _ = sqlx::query(
-                    r#"
-                    INSERT INTO user_qr_tokens (
-                        id, tenant_id, user_id, token_hash, raw_token, token_type, label, is_active, created_at, updated_at
-                    ) VALUES (
-                        $1, $2, $3, $4, $5, 'BADGE', $6, true, $7, $7
-                    )
-                    ON CONFLICT (token_hash) DO NOTHING
-                    "#
-                )
-                .bind(token_id)
-                .bind(ctx.tenant_id)
-                .bind(actual_user_id)
-                .bind(&token_hash)
-                .bind(&raw_token)
-                .bind(truncate_str(&format!("Kartu GTK - {}", nama), 255))
-                .bind(now)
-                .execute(&mut *tx)
-                .await;
-            }
+            .await;
 
             let is_tendik = gtk.jenis_ptk_id_str.as_deref().unwrap_or("").to_lowercase() != "guru";
             let tgl_lahir = gtk
@@ -1990,12 +2279,20 @@ pub async fn pull_dapodik_records(
                 .unwrap_or_else(|| "-".to_string());
 
             let email = format!("{}@siswa.schoolos.id", final_nisn);
-            let username = generate_unique_name_username(&mut tx, ctx.tenant_id, &nama_upper, None)
-                .await
-                .unwrap_or_else(|_| final_nisn.clone());
+            let username = fast_generate_unique_username(&mut existing_usernames, &nama_upper);
 
-            let user_res =
-                safe_upsert_user(&mut tx, ctx.tenant_id, &username, &email, &nama_upper, now).await;
+            let user_res = fast_safe_upsert_user(
+                &mut tx,
+                ctx.tenant_id,
+                &mut user_by_email,
+                &mut user_by_username,
+                &mut existing_usernames,
+                &username,
+                &email,
+                &nama_upper,
+                now,
+            )
+            .await;
 
             let actual_user_id = match user_res {
                 Ok(uid) => Some(uid),
@@ -2014,48 +2311,15 @@ pub async fn pull_dapodik_records(
                 .execute(&mut *tx)
                 .await;
 
-                // Ensure active QR badge token exists for student without invalidating existing active card
-                let has_active_qr = sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS(SELECT 1 FROM user_qr_tokens WHERE tenant_id = $1 AND user_id = $2 AND is_active = true)"
+                let _ = fast_ensure_qr_token(
+                    &mut tx,
+                    ctx.tenant_id,
+                    &mut active_qr_users,
+                    uid,
+                    &format!("Kartu Pelajar - {}", nama_upper),
+                    now,
                 )
-                .bind(ctx.tenant_id)
-                .bind(uid)
-                .fetch_one(&mut *tx)
-                .await
-                .unwrap_or(false);
-
-                if !has_active_qr {
-                    let token_id = Uuid::now_v7();
-                    let entropy = Uuid::now_v7().to_string().replace('-', "");
-                    let raw_token = format!(
-                        "sch_qr_v1_{}_{}",
-                        token_id.to_string().replace('-', ""),
-                        &entropy[0..16]
-                    );
-                    let mut hasher = Sha256::new();
-                    hasher.update(raw_token.as_bytes());
-                    let token_hash = hasher.finalize().encode_hex::<String>();
-
-                    let _ = sqlx::query(
-                        r#"
-                        INSERT INTO user_qr_tokens (
-                            id, tenant_id, user_id, token_hash, raw_token, token_type, label, is_active, created_at, updated_at
-                        ) VALUES (
-                            $1, $2, $3, $4, $5, 'BADGE', $6, true, $7, $7
-                        )
-                        ON CONFLICT (token_hash) DO NOTHING
-                        "#
-                    )
-                    .bind(token_id)
-                    .bind(ctx.tenant_id)
-                    .bind(uid)
-                    .bind(&token_hash)
-                    .bind(&raw_token)
-                    .bind(truncate_str(&format!("Kartu Pelajar - {}", nama_upper), 255))
-                    .bind(now)
-                    .execute(&mut *tx)
-                    .await;
-                }
+                .await;
             }
 
             // ── Guardian / Orang Tua Synchronization ────────────────
@@ -2092,20 +2356,15 @@ pub async fn pull_dapodik_records(
                     Some(gid)
                 } else {
                     let g_id = Uuid::now_v7();
-                    let g_username = generate_unique_name_username(&mut tx, ctx.tenant_id, &g_upper, None)
-                        .await
-                        .unwrap_or_else(|_| {
-                            if relationship == "Mother" {
-                                format!("ibu_{}", final_nisn)
-                            } else {
-                                format!("wali_{}", final_nisn)
-                            }
-                        });
+                    let g_username = fast_generate_unique_username(&mut existing_usernames, &g_upper);
                     let g_email = format!("{}@wali.schoolos.id", g_username);
 
-                    let actual_g_user_id = match safe_upsert_user(
+                    let actual_g_user_id = match fast_safe_upsert_user(
                         &mut tx,
                         ctx.tenant_id,
+                        &mut user_by_email,
+                        &mut user_by_username,
+                        &mut existing_usernames,
                         &g_username,
                         &g_email,
                         &g_upper,
@@ -2129,48 +2388,15 @@ pub async fn pull_dapodik_records(
                         .execute(&mut *tx)
                         .await;
 
-                        // Ensure active QR badge token exists for guardian without invalidating existing card
-                        let has_active_qr = sqlx::query_scalar::<_, bool>(
-                            "SELECT EXISTS(SELECT 1 FROM user_qr_tokens WHERE tenant_id = $1 AND user_id = $2 AND is_active = true)"
+                        let _ = fast_ensure_qr_token(
+                            &mut tx,
+                            ctx.tenant_id,
+                            &mut active_qr_users,
+                            uid,
+                            &format!("Kartu Akses Wali - {}", g_upper),
+                            now,
                         )
-                        .bind(ctx.tenant_id)
-                        .bind(uid)
-                        .fetch_one(&mut *tx)
-                        .await
-                        .unwrap_or(false);
-
-                        if !has_active_qr {
-                            let token_id = Uuid::now_v7();
-                            let entropy = Uuid::now_v7().to_string().replace('-', "");
-                            let raw_token = format!(
-                                "sch_qr_v1_{}_{}",
-                                token_id.to_string().replace('-', ""),
-                                &entropy[0..16]
-                            );
-                            let mut hasher = Sha256::new();
-                            hasher.update(raw_token.as_bytes());
-                            let token_hash = hasher.finalize().encode_hex::<String>();
-
-                            let _ = sqlx::query(
-                                r#"
-                                INSERT INTO user_qr_tokens (
-                                    id, tenant_id, user_id, token_hash, raw_token, token_type, label, is_active, created_at, updated_at
-                                ) VALUES (
-                                    $1, $2, $3, $4, $5, 'BADGE', $6, true, $7, $7
-                                )
-                                ON CONFLICT (token_hash) DO NOTHING
-                                "#
-                            )
-                            .bind(token_id)
-                            .bind(ctx.tenant_id)
-                            .bind(uid)
-                            .bind(&token_hash)
-                            .bind(&raw_token)
-                            .bind(truncate_str(&format!("Kartu Akses Wali - {}", g_upper), 255))
-                            .bind(now)
-                            .execute(&mut *tx)
-                            .await;
-                        }
+                        .await;
                     }
 
                     let inserted_gid = sqlx::query_scalar::<_, Uuid>(
@@ -2379,8 +2605,13 @@ pub async fn pull_dapodik_records(
             });
         }
 
+        let is_partial_batch = match (batch_index, total_batches) {
+            (Some(idx), Some(total)) => idx + 1 < total,
+            _ => false,
+        };
+
         // ── 9. Automatic Deletion for Transferred / Left / Graduated Students ─
-        if !active_student_ids.is_empty() {
+        if !is_partial_batch && !active_student_ids.is_empty() {
             let active_ids_vec: Vec<Uuid> = active_student_ids.into_iter().collect();
 
             #[derive(sqlx::FromRow)]
@@ -2468,74 +2699,76 @@ pub async fn pull_dapodik_records(
         }
 
         // ── 9.5. Automatic Cleanup for Empty Classes (0 Siswa) ─────────
-        #[derive(sqlx::FromRow)]
-        struct EmptyClassRow {
-            id: Uuid,
-            name: String,
-        }
+        if !is_partial_batch {
+            #[derive(sqlx::FromRow)]
+            struct EmptyClassRow {
+                id: Uuid,
+                name: String,
+            }
 
-        let _ = sqlx::query("SAVEPOINT sp_cleanup_classes")
-            .execute(&mut *tx)
-            .await;
-
-        let empty_classes = sqlx::query_as::<_, EmptyClassRow>(
-            r#"
-            SELECT c.id, c.name 
-            FROM classes c 
-            WHERE c.tenant_id = $1 
-            AND NOT EXISTS (
-                SELECT 1 FROM enrollments e 
-                WHERE e.class_id = c.id 
-                AND e.tenant_id = c.tenant_id 
-                AND (e.status = 'Active' OR e.status = 'active')
-            )
-            "#,
-        )
-        .bind(ctx.tenant_id)
-        .fetch_all(&mut *tx)
-        .await
-        .unwrap_or_default();
-
-        if !empty_classes.is_empty() {
-            let empty_class_ids: Vec<Uuid> = empty_classes.iter().map(|c| c.id).collect();
-            let empty_class_names: Vec<String> =
-                empty_classes.iter().map(|c| c.name.clone()).collect();
-
-            let del_cls_res =
-                sqlx::query("DELETE FROM classes WHERE tenant_id = $1 AND id = ANY($2)")
-                    .bind(ctx.tenant_id)
-                    .bind(&empty_class_ids)
-                    .execute(&mut *tx)
-                    .await;
-
-            if del_cls_res.is_ok() {
-                let _ = sqlx::query(
-                    "DELETE FROM dapodik_sync_records WHERE tenant_id = $1 AND rombel = ANY($2)",
-                )
-                .bind(ctx.tenant_id)
-                .bind(&empty_class_names)
+            let _ = sqlx::query("SAVEPOINT sp_cleanup_classes")
                 .execute(&mut *tx)
                 .await;
 
+            let empty_classes = sqlx::query_as::<_, EmptyClassRow>(
+                r#"
+                SELECT c.id, c.name 
+                FROM classes c 
+                WHERE c.tenant_id = $1 
+                AND NOT EXISTS (
+                    SELECT 1 FROM enrollments e 
+                    WHERE e.class_id = c.id 
+                    AND e.tenant_id = c.tenant_id 
+                    AND (e.status = 'Active' OR e.status = 'active')
+                )
+                "#,
+            )
+            .bind(ctx.tenant_id)
+            .fetch_all(&mut *tx)
+            .await
+            .unwrap_or_default();
+
+            if !empty_classes.is_empty() {
+                let empty_class_ids: Vec<Uuid> = empty_classes.iter().map(|c| c.id).collect();
+                let empty_class_names: Vec<String> =
+                    empty_classes.iter().map(|c| c.name.clone()).collect();
+
+                let del_cls_res =
+                    sqlx::query("DELETE FROM classes WHERE tenant_id = $1 AND id = ANY($2)")
+                        .bind(ctx.tenant_id)
+                        .bind(&empty_class_ids)
+                        .execute(&mut *tx)
+                        .await;
+
+                if del_cls_res.is_ok() {
+                    let _ = sqlx::query(
+                        "DELETE FROM dapodik_sync_records WHERE tenant_id = $1 AND rombel = ANY($2)",
+                    )
+                    .bind(ctx.tenant_id)
+                    .bind(&empty_class_names)
+                    .execute(&mut *tx)
+                    .await;
+
+                    let _ = sqlx::query("RELEASE SAVEPOINT sp_cleanup_classes")
+                        .execute(&mut *tx)
+                        .await;
+
+                    tracing::info!(
+                        "Otomatis menghapus {} kelas kosong (0 siswa) dari PostgreSQL: {:?}",
+                        empty_classes.len(),
+                        empty_class_names
+                    );
+                } else {
+                    let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_cleanup_classes")
+                        .execute(&mut *tx)
+                        .await;
+                    tracing::warn!("Cleanup of empty classes skipped due to constraint dependency");
+                }
+            } else {
                 let _ = sqlx::query("RELEASE SAVEPOINT sp_cleanup_classes")
                     .execute(&mut *tx)
                     .await;
-
-                tracing::info!(
-                    "Otomatis menghapus {} kelas kosong (0 siswa) dari PostgreSQL: {:?}",
-                    empty_classes.len(),
-                    empty_class_names
-                );
-            } else {
-                let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_cleanup_classes")
-                    .execute(&mut *tx)
-                    .await;
-                tracing::warn!("Cleanup of empty classes skipped due to constraint dependency");
             }
-        } else {
-            let _ = sqlx::query("RELEASE SAVEPOINT sp_cleanup_classes")
-                .execute(&mut *tx)
-                .await;
         }
     }
 

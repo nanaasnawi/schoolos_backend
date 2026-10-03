@@ -72,69 +72,93 @@ impl SyncEngine {
         let total_rombel = rombel_list.len();
         let total_students = student_list.len();
 
-        // 7. Siapkan Payload untuk Cloud Hub
-        let payload = AgentSyncPayload {
-            dapodik_url: Some(dapodik_url.to_string()),
-            npsn: Some(npsn.to_string()),
-            bearer_token: Some(dapodik_token.to_string()),
-            raw_sekolah: sekolah_val,
-            raw_gtk: Some(gtk_list),
-            raw_rombel: Some(rombel_list),
-            raw_students: Some(student_list),
-            synced_by: synced_by.map(|s| s.to_string()),
-        };
-
-        // 8. Kirim ke School OS Cloud Hub
+        // 7. Siapkan Payload & Kirim ke School OS Cloud Hub dalam Batch
         let sync_endpoint = format!(
             "{}/api/v1/dapodik/agent/sync",
             cloud_url.trim_end_matches('/')
         );
         let http_client = Client::builder()
-            .timeout(Duration::from_secs(180))
+            .timeout(Duration::from_secs(60))
             .build()?;
 
-        let mut req = http_client.post(&sync_endpoint).json(&payload);
-
-        if !cloud_token.is_empty() {
-            req = req.header("Authorization", format!("Bearer {}", cloud_token));
-        }
-
-        let resp = req.send().await.map_err(|e| {
-            format!(
-                "Gagal mengirim data ke School OS Cloud ({:?}): {}. Pastikan koneksi internet aktif.",
-                sync_endpoint, e
-            )
-        })?;
-
-        let status = resp.status();
-        let resp_body = resp.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(format!("Server Cloud merespon status {}: {}", status, resp_body).into());
-        }
-
-        // Hitung total records yang diproses
-        let records_synced = match serde_json::from_str::<serde_json::Value>(&resp_body) {
-            Ok(json_resp) => {
-                if let Some(data_arr) = json_resp.get("data").and_then(|d| d.as_array()) {
-                    data_arr.len()
-                } else {
-                    total_students
-                }
-            }
-            Err(_) => total_students,
+        let batch_size = 50;
+        let total_batches = if student_list.is_empty() {
+            1
+        } else {
+            (student_list.len() + batch_size - 1) / batch_size
         };
+
+        for batch_index in 0..total_batches {
+            let start = batch_index * batch_size;
+            let end = (start + batch_size).min(student_list.len());
+            let chunk_students = if student_list.is_empty() {
+                Vec::new()
+            } else {
+                student_list[start..end].to_vec()
+            };
+
+            // Profil Sekolah, GTK, dan Rombel dikirim bersama batch 0
+            let (b_sekolah, b_gtk, b_rombel) = if batch_index == 0 {
+                (
+                    sekolah_val.clone(),
+                    Some(gtk_list.clone()),
+                    Some(rombel_list.clone()),
+                )
+            } else {
+                (None, Some(vec![]), Some(vec![]))
+            };
+
+            let payload = AgentSyncPayload {
+                dapodik_url: Some(dapodik_url.to_string()),
+                npsn: Some(npsn.to_string()),
+                bearer_token: Some(dapodik_token.to_string()),
+                raw_sekolah: b_sekolah,
+                raw_gtk: b_gtk,
+                raw_rombel: b_rombel,
+                raw_students: Some(chunk_students),
+                synced_by: synced_by.map(|s| s.to_string()),
+                batch_index: Some(batch_index),
+                total_batches: Some(total_batches),
+            };
+
+            let mut req = http_client.post(&sync_endpoint).json(&payload);
+
+            if !cloud_token.is_empty() {
+                req = req.header("Authorization", format!("Bearer {}", cloud_token));
+            }
+
+            let resp = req.send().await.map_err(|e| {
+                format!(
+                    "Gagal mengirim data (batch {}/{}) ke School OS Cloud ({:?}): {}. Pastikan koneksi internet aktif.",
+                    batch_index + 1, total_batches, sync_endpoint, e
+                )
+            })?;
+
+            let status = resp.status();
+            let resp_body = resp.text().await.unwrap_or_default();
+
+            if !status.is_success() {
+                return Err(format!("Server Cloud merespon status {}: {}", status, resp_body).into());
+            }
+
+            info!(
+                "Batch {}/{} berhasil diterima Cloud ({} Siswa)",
+                batch_index + 1,
+                total_batches,
+                end - start
+            );
+        }
 
         info!(
             "Sinkronisasi berhasil: {} GTK, {} Rombel, {} Siswa (Total diproses cloud: {})",
-            total_gtk, total_rombel, total_students, records_synced
+            total_gtk, total_rombel, total_students, total_students
         );
 
         Ok(SyncSummary {
             total_gtk,
             total_rombel,
             total_students,
-            cloud_records_synced: records_synced,
+            cloud_records_synced: total_students,
             status: "SUCCESS".to_string(),
             message: format!(
                 "Berhasil menyinkronkan {} Siswa, {} GTK, dan {} Rombel ke Cloud School OS.",
