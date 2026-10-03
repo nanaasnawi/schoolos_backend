@@ -339,14 +339,18 @@ impl AssignmentRepository for PgAssignmentRepository {
         &self,
         attempt: &crate::learning::domain::assignment_submission::SubmissionAttempt,
     ) -> Result<(), InfrastructureError> {
+        // tenant_id is resolved from the parent submission. Binding Uuid::nil() here
+        // violated submission_attempts_tenant_id_fkey, which made every submit return
+        // 500 before the per-question answers were persisted.
         sqlx::query(
             r#"
             INSERT INTO submission_attempts (id, tenant_id, submission_id, attempt_number, content, file_url, checksum, submitted_at, is_late, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+            SELECT $1, s.tenant_id, s.id, $3, $4, $5, $6, $7, $8, NOW()
+            FROM assignment_submissions s
+            WHERE s.id = $2
             "#
         )
         .bind(attempt.id)
-        .bind(Uuid::nil()) // Fallback tenant ID if not on attempt
         .bind(attempt.submission_id)
         .bind(attempt.attempt_number)
         .bind(&attempt.content)
