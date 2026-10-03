@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
-    routing::{delete, post},
+    routing::{delete, post, put},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,18 @@ pub struct CreateScheduleRequest {
     pub day_of_week: String,
     pub start_time: String,
     pub end_time: String,
+    pub room: Option<String>,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct UpdateScheduleRequest {
+    pub class_id: Option<Uuid>,
+    pub subject_id: Option<Uuid>,
+    pub teacher_id: Option<Uuid>,
+    pub academic_year_id: Option<Uuid>,
+    pub day_of_week: Option<String>,
+    pub start_time: Option<String>,
+    pub end_time: Option<String>,
     pub room: Option<String>,
 }
 
@@ -52,7 +64,7 @@ pub struct ScheduleFilterQuery {
 pub fn schedule_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/", post(create).get(list))
-        .route("/{id}", delete(delete_schedule))
+        .route("/{id}", put(update_schedule).delete(delete_schedule))
 }
 
 #[utoipa::path(
@@ -201,16 +213,26 @@ async fn list(
     let mut filter_teacher_id = query.teacher_id;
     if is_teacher && filter_teacher_id.is_none() {
         let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
-        if let Ok(Some(t_id)) = sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM teachers WHERE user_id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+        let t_id = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT id FROM teachers 
+            WHERE (
+                user_id = $1 
+                OR lower(trim(full_name)) = (SELECT lower(trim(full_name)) FROM users WHERE id = $1)
+                OR (email IS NOT NULL AND lower(trim(email)) = (SELECT lower(trim(email)) FROM users WHERE id = $1))
+            )
+            AND tenant_id = $2 AND deleted_at IS NULL
+            LIMIT 1
+            "#,
         )
         .bind(user_id)
         .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await
-        {
-            filter_teacher_id = Some(t_id);
-        }
+        .ok()
+        .flatten();
+
+        filter_teacher_id = t_id;
     }
 
     let rows = sqlx::query_as::<_, ScheduleResponse>(
@@ -301,4 +323,96 @@ async fn delete_schedule(
     })?;
 
     Ok(Json(ApiResponse::success(true, req_ctx.request_id)))
+}
+
+#[utoipa::path(
+    put,
+    operation_id = "updateSchedule",
+    path = "/api/v1/academic/schedules/{id}",
+    request_body = UpdateScheduleRequest,
+    responses(
+        (status = 200, description = "Schedule updated", body = ApiResponse<ScheduleResponse>)
+    ),
+    security(("Bearer" = []))
+)]
+async fn update_schedule(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateScheduleRequest>,
+) -> Result<Json<ApiResponse<ScheduleResponse>>, ApiError> {
+    sqlx::query(
+        r#"
+        UPDATE class_schedules SET
+            class_id = COALESCE($1, class_id),
+            subject_id = COALESCE($2, subject_id),
+            teacher_id = COALESCE($3, teacher_id),
+            academic_year_id = COALESCE($4, academic_year_id),
+            day_of_week = COALESCE($5, day_of_week),
+            start_time = COALESCE($6, start_time),
+            end_time = COALESCE($7, end_time),
+            room = COALESCE($8, room),
+            updated_at = NOW()
+        WHERE id = $9 AND tenant_id = $10 AND deleted_at IS NULL
+        "#
+    )
+    .bind(payload.class_id)
+    .bind(payload.subject_id)
+    .bind(payload.teacher_id)
+    .bind(payload.academic_year_id)
+    .bind(payload.day_of_week)
+    .bind(payload.start_time)
+    .bind(payload.end_time)
+    .bind(payload.room)
+    .bind(id)
+    .bind(req_ctx.tenant_id)
+    .execute(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let row = sqlx::query_as::<_, ScheduleResponse>(
+        r#"
+        SELECT 
+            cs.id,
+            cs.tenant_id,
+            cs.class_id,
+            c.name as class_name,
+            cs.subject_id,
+            s.name as subject_name,
+            cs.teacher_id,
+            t.full_name as teacher_name,
+            t.user_id as teacher_user_id,
+            cs.day_of_week,
+            cs.start_time,
+            cs.end_time,
+            COALESCE(cs.room, 'Ruang Kelas') as room,
+            cs.created_at
+        FROM class_schedules cs
+        JOIN classes c ON c.id = cs.class_id
+        JOIN subjects s ON s.id = cs.subject_id
+        JOIN teachers t ON t.id = cs.teacher_id
+        WHERE cs.id = $1 AND cs.tenant_id = $2
+        "#,
+    )
+    .bind(id)
+    .bind(req_ctx.tenant_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    Ok(Json(ApiResponse::success(row, req_ctx.request_id)))
 }

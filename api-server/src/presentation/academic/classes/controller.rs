@@ -220,14 +220,34 @@ async fn list(
 
     if is_teacher && params.all != Some(true) {
         let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
-        if let Ok(Some(teacher_id)) = sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM teachers WHERE user_id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+        let teacher_id_opt: Option<Uuid> = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT id FROM teachers 
+            WHERE (
+                user_id = $1 
+                OR lower(trim(full_name)) = (SELECT lower(trim(full_name)) FROM users WHERE id = $1)
+                OR (email IS NOT NULL AND lower(trim(email)) = (SELECT lower(trim(email)) FROM users WHERE id = $1))
+            )
+            AND tenant_id = $2 AND deleted_at IS NULL
+            LIMIT 1
+            "#,
         )
         .bind(user_id)
         .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await
-        {
+        .unwrap_or(None);
+
+        if let Some(teacher_id) = teacher_id_opt {
+            // Auto-heal user_id link on teachers record if missing
+            let _ = sqlx::query(
+                "UPDATE teachers SET user_id = $1 WHERE id = $2 AND user_id IS NULL",
+            )
+            .bind(user_id)
+            .bind(teacher_id)
+            .execute(&ctx.pool)
+            .await;
+
             let allowed_class_ids: Vec<Uuid> = sqlx::query_scalar::<_, Uuid>(
                 r#"
                 SELECT DISTINCT c.id FROM classes c
@@ -250,6 +270,8 @@ async fn list(
             .unwrap_or_default();
 
             items.retain(|c| allowed_class_ids.contains(&c.id));
+        } else {
+            items.clear();
         }
     }
 
@@ -307,16 +329,25 @@ async fn list_class_students(
     let mut teacher_filter_id: Option<Uuid> = None;
     if is_teacher {
         let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
-        if let Ok(Some(t_id)) = sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM teachers WHERE user_id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+        let t_id = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT id FROM teachers 
+            WHERE (
+                user_id = $1 
+                OR lower(trim(full_name)) = (SELECT lower(trim(full_name)) FROM users WHERE id = $1)
+                OR (email IS NOT NULL AND lower(trim(email)) = (SELECT lower(trim(email)) FROM users WHERE id = $1))
+            )
+            AND tenant_id = $2 AND deleted_at IS NULL
+            LIMIT 1
+            "#,
         )
         .bind(user_id)
         .bind(tenant_id)
         .fetch_optional(&ctx.pool)
         .await
-        {
-            teacher_filter_id = Some(t_id);
-        }
+        .unwrap_or(None);
+
+        teacher_filter_id = t_id.or(Some(Uuid::nil()));
     }
 
     let dtos = sqlx::query_as::<_, ClassStudentDto>(
