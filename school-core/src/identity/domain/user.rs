@@ -10,8 +10,10 @@ pub struct User {
     pub id: Uuid,
     pub tenant_id: Uuid,
     #[serde(default)]
+    #[sqlx(default)]
     pub username: Option<String>,
     #[serde(default)]
+    #[sqlx(default)]
     pub avatar_url: Option<String>,
     pub email: String,
     pub password_hash: String,

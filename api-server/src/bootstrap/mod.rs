@@ -307,6 +307,14 @@ impl Bootstrap {
             tracing::info!("Database schema migrations up to date.");
         }
 
+        // Ensure critical new schema columns exist
+        if let Err(e) = sqlx::query("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT;")
+            .execute(&pool)
+            .await
+        {
+            tracing::warn!("Notice on avatar_url column check: {:?}", e);
+        }
+
         // Infrastructure
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let in_memory_event_bus = Arc::new(InMemoryEventBus::new(self.event_bus_capacity));
