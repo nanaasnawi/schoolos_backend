@@ -811,13 +811,13 @@ async fn get_me(
 async fn upload_avatar(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
-    mut multipart: axum::extract::Multipart,
+    mut multipart: Multipart,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
     if actor_id.is_nil() {
         return Err(ApiError::new(
             school_core::common::error::ApplicationError::Unauthorized(
-                school_core::common::error_code::ErrorCode::AuthTokenInvalid,
+                school_core::common::error_code::ErrorCode::AuthInvalidToken,
                 "Authentication required".to_string(),
             ),
             &req_ctx.request_id,
@@ -961,7 +961,7 @@ async fn update_profile(
     if actor_id.is_nil() {
         return Err(ApiError::new(
             school_core::common::error::ApplicationError::Unauthorized(
-                school_core::common::error_code::ErrorCode::AuthTokenInvalid,
+                school_core::common::error_code::ErrorCode::AuthInvalidToken,
                 "Authentication required".to_string(),
             ),
             &req_ctx.request_id,

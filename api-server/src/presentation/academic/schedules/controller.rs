@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
-    routing::{delete, post, put},
+    routing::{post, put},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
