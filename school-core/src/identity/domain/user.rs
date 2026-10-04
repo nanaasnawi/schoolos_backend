@@ -11,6 +11,8 @@ pub struct User {
     pub tenant_id: Uuid,
     #[serde(default)]
     pub username: Option<String>,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
     pub email: String,
     pub password_hash: String,
     pub full_name: String,
@@ -32,6 +34,7 @@ impl User {
             id: Uuid::now_v7(),
             tenant_id,
             username: None,
+            avatar_url: None,
             email,
             password_hash,
             full_name,

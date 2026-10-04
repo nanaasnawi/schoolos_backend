@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Json, State},
+    extract::{Json, Multipart, State},
     routing::post,
     Router,
 };
@@ -36,6 +36,8 @@ pub fn auth_routes(context: ApplicationContext) -> Router<ApplicationContext> {
         .merge(
             Router::new()
                 .route("/me", axum::routing::get(get_me))
+                .route("/profile", axum::routing::put(update_profile))
+                .route("/avatar", axum::routing::post(upload_avatar))
                 .route("/users", axum::routing::get(list_users))
                 .route("/change-password", axum::routing::post(change_password))
                 .route("/qr-tokens/generate", post(generate_qr_token_endpoint))
@@ -120,7 +122,7 @@ async fn login(
 
     let user_row = sqlx::query(
         r#"
-        SELECT u.id, u.tenant_id, u.username, u.email, u.full_name,
+        SELECT u.id, u.tenant_id, u.username, u.email, u.full_name, u.avatar_url,
                COALESCE(
                  (SELECT r.name FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = u.id LIMIT 1),
                  'Siswa'
@@ -284,6 +286,7 @@ async fn login(
         class_name,
         child_name,
         child_id,
+        avatar_url: user_row.as_ref().and_then(|u| u.try_get("avatar_url").ok().flatten()),
     };
 
     Ok(Json(ApiResponse::success(
@@ -395,12 +398,20 @@ pub struct AuthUserDto {
     pub child_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
 }
 
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 pub struct ChangePasswordRequest {
     pub current_password: String,
     pub new_password: String,
+}
+
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct UpdateProfileRequest {
+    pub full_name: Option<String>,
+    pub avatar_url: Option<String>,
 }
 
 #[utoipa::path(
@@ -421,7 +432,7 @@ async fn list_users(
 ) -> Result<Json<ApiResponse<Vec<AuthUserDto>>>, ApiError> {
     let rows = sqlx::query(
         r#"
-        SELECT u.id, u.username, u.email, u.full_name, u.is_active, u.created_at,
+        SELECT u.id, u.username, u.email, u.full_name, u.avatar_url, u.is_active, u.created_at,
                COALESCE(r.name, 'No Role') as role_name
         FROM users u
         LEFT JOIN user_roles ur ON u.id = ur.user_id
@@ -458,6 +469,7 @@ async fn list_users(
             child_name: None,
             child_id: None,
             username: r.get("username"),
+            avatar_url: r.try_get("avatar_url").ok().flatten(),
         })
         .collect();
 
@@ -658,6 +670,7 @@ async fn get_me(
                 child_name: None,
                 child_id: None,
                 username: None,
+                avatar_url: None,
             },
             req_ctx.request_id,
         )));
@@ -665,7 +678,7 @@ async fn get_me(
 
     let record = sqlx::query(
         r#"
-        SELECT u.id, u.email, u.full_name, u.is_active, u.created_at,
+        SELECT u.id, u.email, u.full_name, u.avatar_url, u.is_active, u.created_at,
                COALESCE(r.name, 'Administrator') as role_name,
                COALESCE(
                  (SELECT s.nisn FROM students s WHERE s.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),
@@ -758,6 +771,7 @@ async fn get_me(
                 child_name: r.get("child_name"),
                 child_id: r.get("child_id"),
                 username: None,
+                avatar_url: r.try_get("avatar_url").ok().flatten(),
             }
         }
         None => AuthUserDto {
@@ -774,10 +788,232 @@ async fn get_me(
             child_name: None,
             child_id: None,
             username: None,
+            avatar_url: None,
         },
     };
 
     Ok(Json(ApiResponse::success(dto, req_ctx.request_id)))
+}
+
+/// Upload or change user profile avatar photo
+#[utoipa::path(
+    post,
+    operation_id = "uploadUserAvatar",
+    path = "/api/v1/auth/avatar",
+    responses(
+        (status = 200, description = "Avatar uploaded successfully", body = inline(ApiResponse<serde_json::Value>)),
+    ),
+    security(
+        ("Bearer" = [])
+    ),
+    tag = "Auth"
+)]
+async fn upload_avatar(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
+    if actor_id.is_nil() {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthTokenInvalid,
+                "Authentication required".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
+    let uploads_dir = std::path::PathBuf::from("uploads");
+    tokio::fs::create_dir_all(&uploads_dir).await.map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Internal(format!(
+                "Failed to create uploads directory: {e}"
+            )),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let mut avatar_url: Option<String> = None;
+
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Internal(format!("Multipart error: {e}")),
+            &req_ctx.request_id,
+        )
+    })? {
+        let field_name = field.name().unwrap_or("").to_string();
+        if field_name == "avatar" || field_name == "file" || field_name == "photo" {
+            let original_filename = field.file_name().unwrap_or("avatar.jpg").to_string();
+            let content_type = field.content_type().unwrap_or("").to_string();
+            let mut ext = std::path::Path::new(&original_filename)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+
+            if ext.is_empty() {
+                ext = match content_type.as_str() {
+                    "image/jpeg" | "image/jpg" => "jpg".to_string(),
+                    "image/png" => "png".to_string(),
+                    "image/webp" => "webp".to_string(),
+                    "image/gif" => "gif".to_string(),
+                    _ => "jpg".to_string(),
+                };
+            }
+
+            let allowed = ["jpg", "jpeg", "png", "gif", "webp"];
+            if !allowed.contains(&ext.as_str()) {
+                return Err(ApiError::new(
+                    school_core::common::error::ApplicationError::Domain(
+                        school_core::common::error::DomainError::Validation(
+                            format!("Tipe file .{ext} tidak diizinkan. Hanya file gambar (JPG, PNG, WebP) yang diperbolehkan."),
+                        ),
+                    ),
+                    &req_ctx.request_id,
+                ));
+            }
+
+            let bytes = field.bytes().await.map_err(|e| {
+                ApiError::new(
+                    school_core::common::error::ApplicationError::Internal(format!(
+                        "Failed to read image bytes: {e}"
+                    )),
+                    &req_ctx.request_id,
+                )
+            })?;
+
+            let unique_name = format!("avatar_{}_{}.{}", actor_id, chrono::Utc::now().timestamp(), ext);
+            let file_path = uploads_dir.join(&unique_name);
+
+            tokio::fs::write(&file_path, &bytes).await.map_err(|e| {
+                ApiError::new(
+                    school_core::common::error::ApplicationError::Internal(format!(
+                        "Failed to save avatar image file: {e}"
+                    )),
+                    &req_ctx.request_id,
+                )
+            })?;
+
+            let url = format!("/uploads/{unique_name}");
+            avatar_url = Some(url);
+            break;
+        }
+    }
+
+    let url = avatar_url.ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Domain(
+                school_core::common::error::DomainError::Validation(
+                    "Berkas gambar avatar tidak ditemukan dalam request form-data.".to_string(),
+                ),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    // Update users table in PostgreSQL
+    sqlx::query(
+        "UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE id = $2",
+    )
+    .bind(&url)
+    .bind(actor_id)
+    .execute(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({
+            "avatar_url": url,
+            "message": "Foto profil berhasil diperbarui dan disimpan ke database"
+        }),
+        req_ctx.request_id,
+    )))
+}
+
+/// Update user profile (name or avatar_url directly)
+#[utoipa::path(
+    put,
+    operation_id = "updateUserProfile",
+    path = "/api/v1/auth/profile",
+    request_body = UpdateProfileRequest,
+    responses(
+        (status = 200, description = "Profile updated successfully", body = inline(ApiResponse<serde_json::Value>)),
+    ),
+    security(
+        ("Bearer" = [])
+    ),
+    tag = "Auth"
+)]
+async fn update_profile(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Json(payload): Json<UpdateProfileRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
+    if actor_id.is_nil() {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthTokenInvalid,
+                "Authentication required".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
+    if let Some(ref av) = payload.avatar_url {
+        sqlx::query(
+            "UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE id = $2",
+        )
+        .bind(av)
+        .bind(actor_id)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+    }
+
+    if let Some(ref name) = payload.full_name {
+        if !name.trim().is_empty() {
+            sqlx::query(
+                "UPDATE users SET full_name = $1, updated_at = NOW() WHERE id = $2",
+            )
+            .bind(name.trim())
+            .bind(actor_id)
+            .execute(&ctx.pool)
+            .await
+            .map_err(|e| {
+                ApiError::new(
+                    school_core::common::error::ApplicationError::Infrastructure(
+                        school_core::common::error::InfrastructureError::Database(e),
+                    ),
+                    &req_ctx.request_id,
+                )
+            })?;
+        }
+    }
+
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({
+            "message": "Profil berhasil diperbarui",
+            "avatar_url": payload.avatar_url,
+            "full_name": payload.full_name
+        }),
+        req_ctx.request_id,
+    )))
 }
 
 /// Authenticate a user via Zero-Password QR Code / Badge Token
@@ -852,6 +1088,7 @@ async fn qr_login(
         r#"
         SELECT 
             (SELECT u.username FROM users u WHERE u.id = $1) as username,
+            (SELECT u.avatar_url FROM users u WHERE u.id = $1) as avatar_url,
             COALESCE(
                 (SELECT s.nisn FROM students s WHERE s.user_id = $1 ORDER BY s.updated_at DESC LIMIT 1),
                 (SELECT t.nip FROM teachers t WHERE t.user_id = $1 ORDER BY t.updated_at DESC LIMIT 1),
@@ -920,7 +1157,7 @@ async fn qr_login(
     .ok()
     .flatten();
 
-    let (user_identifier, class_name, child_name, child_id, qr_username) = if let Some(e) = user_extra {
+    let (user_identifier, class_name, child_name, child_id, qr_username, qr_avatar_url) = if let Some(e) = user_extra {
         let ident: String = e.get("identifier");
         (
             if ident.is_empty() { None } else { Some(ident) },
@@ -928,9 +1165,10 @@ async fn qr_login(
             e.get("child_name"),
             e.get("child_id"),
             e.try_get("username").ok().flatten(),
+            e.try_get("avatar_url").ok().flatten(),
         )
     } else {
-        (None, None, None, None, None)
+        (None, None, None, None, None, None)
     };
 
     let refresh_claims = school_core::identity::application::auth::authenticate_user::Claims {
@@ -965,6 +1203,7 @@ async fn qr_login(
         class_name,
         child_name,
         child_id,
+        avatar_url: qr_avatar_url,
     };
 
     Ok(Json(ApiResponse::success(
