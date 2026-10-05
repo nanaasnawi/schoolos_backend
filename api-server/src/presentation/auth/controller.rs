@@ -479,6 +479,8 @@ async fn list_users(
             child_id: None,
             username: r.get("username"),
             avatar_url: r.try_get("avatar_url").ok().flatten(),
+            phone: None,
+            about: None,
         })
         .collect();
 
@@ -680,6 +682,8 @@ async fn get_me(
                 child_id: None,
                 username: None,
                 avatar_url: None,
+                phone: None,
+                about: None,
             },
             req_ctx.request_id,
         )));
@@ -814,6 +818,8 @@ async fn get_me(
             child_id: None,
             username: None,
             avatar_url: None,
+            phone: None,
+            about: None,
         },
     };
 
