@@ -50,6 +50,8 @@ pub struct DapodikRawGtk {
     pub nama_gtk: Option<String>,
     pub jenis_ptk: Option<String>,
     pub jenis_ptk_id_str: Option<String>,
+    pub jabatan_ptk_id_str: Option<String>,
+    pub status_kepegawaian_id_str: Option<String>,
     pub mata_pelajaran: Option<String>,
     pub mapel: Option<String>,
     pub jenis_kelamin: Option<String>,

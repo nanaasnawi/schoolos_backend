@@ -31,6 +31,8 @@ pub struct InquiryThreadDto {
     pub last_message_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub message_count: i64,
+    pub student_avatar_url: Option<String>,
+    pub teacher_avatar_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -199,7 +201,9 @@ async fn list_inquiries(
                 t.teacher_id, t.teacher_name, t.subject_name, t.inquiry_type,
                 t.reference_title, t.reference_id, t.status,
                 t.last_message_content, t.last_message_at, t.created_at,
-                (SELECT COUNT(*)::bigint FROM inquiry_messages m WHERE m.thread_id = t.id) as message_count
+                (SELECT COUNT(*)::bigint FROM inquiry_messages m WHERE m.thread_id = t.id) as message_count,
+                (SELECT u.avatar_url FROM users u WHERE u.id = t.student_id OR u.id IN (SELECT s.user_id FROM students s WHERE s.id = t.student_id) LIMIT 1) as student_avatar_url,
+                (SELECT u.avatar_url FROM users u WHERE u.id = t.teacher_id OR u.id IN (SELECT tch.user_id FROM teachers tch WHERE tch.id = t.teacher_id) LIMIT 1) as teacher_avatar_url
             FROM inquiry_threads t
             WHERE t.tenant_id = $1
               AND ($2::text IS NULL OR t.status = $2)
@@ -256,6 +260,8 @@ async fn list_inquiries(
                 last_message_at: r.get("last_message_at"),
                 created_at: r.get("created_at"),
                 message_count: r.get("message_count"),
+                student_avatar_url: r.try_get("student_avatar_url").ok().flatten(),
+                teacher_avatar_url: r.try_get("teacher_avatar_url").ok().flatten(),
             })
             .collect();
 
@@ -287,13 +293,19 @@ async fn list_inquiries(
     let effective_teacher_name = if is_admin {
         query.teacher_name
     } else {
-        query
-            .teacher_name
-            .or(actor_teacher
-                .as_ref()
-                .map(|t| t.get::<String, _>("full_name")))
+        // Prefer the authoritative DB name over the client-sent name so the
+        // list stays identical across logout/login sessions.
+        actor_teacher
+            .as_ref()
+            .map(|t| t.get::<String, _>("full_name"))
+            .or(query.teacher_name)
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
+    };
+    let actor_id_text: Option<String> = if is_admin {
+        None
+    } else {
+        actor.map(|a| a.id.to_string())
     };
 
     let rows = sqlx::query(
@@ -303,7 +315,9 @@ async fn list_inquiries(
             t.teacher_id, t.teacher_name, t.subject_name, t.inquiry_type,
             t.reference_title, t.reference_id, t.status,
             t.last_message_content, t.last_message_at, t.created_at,
-            (SELECT COUNT(*)::bigint FROM inquiry_messages m WHERE m.thread_id = t.id) as message_count
+            (SELECT COUNT(*)::bigint FROM inquiry_messages m WHERE m.thread_id = t.id) as message_count,
+            (SELECT u.avatar_url FROM users u WHERE u.id = t.student_id OR u.id IN (SELECT s.user_id FROM students s WHERE s.id = t.student_id) LIMIT 1) as student_avatar_url,
+            (SELECT u.avatar_url FROM users u WHERE u.id = t.teacher_id OR u.id IN (SELECT tch.user_id FROM teachers tch WHERE tch.id = t.teacher_id) LIMIT 1) as teacher_avatar_url
         FROM inquiry_threads t
         WHERE t.tenant_id = $1
           AND ($2::text IS NULL OR t.status = $2)
@@ -317,6 +331,10 @@ async fn list_inquiries(
           AND (
               ($5::uuid IS NULL AND $6::text IS NULL) OR
               t.teacher_id = $5 OR
+              ($8::text IS NOT NULL AND EXISTS (
+                  SELECT 1 FROM inquiry_messages im
+                  WHERE im.thread_id = t.id AND im.is_from_teacher = true AND im.sender_id = $8
+              )) OR
               ($6::text IS NOT NULL AND (
                   t.teacher_name ILIKE '%' || $6 || '%' OR
                   $6 ILIKE '%' || t.teacher_name || '%' OR
@@ -342,6 +360,7 @@ async fn list_inquiries(
     .bind(effective_teacher_id)
     .bind(effective_teacher_name)
     .bind(query.search.as_deref().map(|s| s.trim()))
+    .bind(actor_id_text)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| {
@@ -371,6 +390,8 @@ async fn list_inquiries(
             last_message_at: r.get("last_message_at"),
             created_at: r.get("created_at"),
             message_count: r.get("message_count"),
+            student_avatar_url: r.try_get("student_avatar_url").ok().flatten(),
+            teacher_avatar_url: r.try_get("teacher_avatar_url").ok().flatten(),
         })
         .collect();
 
@@ -399,7 +420,9 @@ async fn get_inquiry_detail(
             t.subject_name, t.inquiry_type,
             t.reference_title, t.reference_id, t.status,
             t.last_message_content, t.last_message_at, t.created_at,
-            (SELECT COUNT(*)::bigint FROM inquiry_messages m WHERE m.thread_id = t.id) as message_count
+            (SELECT COUNT(*)::bigint FROM inquiry_messages m WHERE m.thread_id = t.id) as message_count,
+            (SELECT u.avatar_url FROM users u WHERE u.id = t.student_id OR u.id IN (SELECT s.user_id FROM students s WHERE s.id = t.student_id) LIMIT 1) as student_avatar_url,
+            (SELECT u.avatar_url FROM users u WHERE u.id = t.teacher_id OR u.id IN (SELECT tch.user_id FROM teachers tch WHERE tch.id = t.teacher_id) LIMIT 1) as teacher_avatar_url
         FROM inquiry_threads t
         WHERE t.id = $1 AND t.tenant_id = $2
         "#,
@@ -442,6 +465,8 @@ async fn get_inquiry_detail(
         last_message_at: thread_row.get("last_message_at"),
         created_at: thread_row.get("created_at"),
         message_count: thread_row.get("message_count"),
+        student_avatar_url: thread_row.try_get("student_avatar_url").ok().flatten(),
+        teacher_avatar_url: thread_row.try_get("teacher_avatar_url").ok().flatten(),
     };
 
     // Cross-user access control check
@@ -539,6 +564,8 @@ async fn get_inquiry_detail(
             last_message_at: thread.last_message_at,
             created_at: thread.created_at,
             message_count: thread.message_count,
+            student_avatar_url: thread.student_avatar_url.clone(),
+            teacher_avatar_url: thread.teacher_avatar_url.clone(),
         },
         messages: messages
             .into_iter()
@@ -905,11 +932,81 @@ async fn create_inquiry(
         resolved_teacher_name = "Guru Mata Pelajaran".to_string();
     }
 
-    let thread_id = payload.id.unwrap_or_else(Uuid::new_v4);
     let inquiry_type = payload.inquiry_type.to_uppercase();
-    let initial_msg = payload.initial_message.trim().to_string();
+    let raw_msg = payload.initial_message.trim().to_string();
+    let ref_title = payload.reference_title.trim().to_string();
 
-    let thread = sqlx::query(
+    // WhatsApp-style: one conversation per student-teacher pair.
+    // If one already exists, append to it instead of creating a new thread.
+    let existing_thread: Option<(Uuid, String)> = sqlx::query_as::<_, (Uuid, String)>(
+        r#"
+        SELECT id, reference_title FROM inquiry_threads
+        WHERE tenant_id = $1 AND student_id = $2
+          AND (
+              ($3::uuid IS NOT NULL AND teacher_id = $3) OR
+              ($3::uuid IS NULL AND teacher_name = $4)
+          )
+        ORDER BY last_message_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(resolved_tenant_id)
+    .bind(student_id)
+    .bind(resolved_teacher_id)
+    .bind(&resolved_teacher_name)
+    .fetch_optional(&ctx.pool)
+    .await
+    .ok()
+    .flatten();
+
+    let initial_msg = match &existing_thread {
+        Some((_, prev_title)) if !prev_title.eq_ignore_ascii_case(&ref_title) => {
+            let label = match inquiry_type.as_str() {
+                "ASSIGNMENT" => "Tugas",
+                "MATERIAL" => "Materi",
+                _ => "Topik",
+            };
+            format!("📌 {}: {}\n{}", label, ref_title, raw_msg)
+        }
+        _ => raw_msg.clone(),
+    };
+
+    let thread_id = existing_thread
+        .as_ref()
+        .map(|(id, _)| *id)
+        .unwrap_or_else(|| payload.id.unwrap_or_else(Uuid::new_v4));
+
+    let thread = if existing_thread.is_some() {
+        sqlx::query(
+            r#"
+            UPDATE inquiry_threads SET
+                inquiry_type = $2, reference_title = $3, reference_id = $4,
+                subject_name = $5, status = 'WAITING_REPLY',
+                last_message_content = $6, last_message_at = NOW(), updated_at = NOW()
+            WHERE id = $1
+            RETURNING id, student_id, student_name, student_class, teacher_id, teacher_name,
+                      subject_name, inquiry_type, reference_title, reference_id, status,
+                      last_message_content, last_message_at, created_at
+            "#,
+        )
+        .bind(thread_id)
+        .bind(&inquiry_type)
+        .bind(&ref_title)
+        .bind(&payload.reference_id)
+        .bind(&resolved_subject_name)
+        .bind(&initial_msg)
+        .fetch_one(&ctx.pool)
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?
+    } else {
+        sqlx::query(
         r#"
         INSERT INTO inquiry_threads (
             id, tenant_id, student_id, student_name, student_class,
@@ -944,9 +1041,8 @@ async fn create_inquiry(
             ),
             &req_ctx.request_id,
         )
-    })?;
-
-    // Insert first message
+    })?
+    };
     let _ = sqlx::query(
         r#"
         INSERT INTO inquiry_messages (id, tenant_id, thread_id, sender_id, sender_name, sender_role, content, is_from_teacher, created_at)
@@ -994,6 +1090,14 @@ async fn create_inquiry(
                 .bind(thread_id)
                 .execute(&ctx.pool)
                 .await;
+
+                // Trigger HIGH-PRIORITY FCM push notification for lock screen / standby
+                crate::infrastructure::fcm::trigger_fcm_push_notification(
+                    notif_title,
+                    notif_body,
+                    "INQUIRY".to_string(),
+                    thread_id,
+                );
             }
         }
     }
@@ -1014,6 +1118,8 @@ async fn create_inquiry(
         last_message_at: thread.get("last_message_at"),
         created_at: thread.get("created_at"),
         message_count: 1,
+        student_avatar_url: None,
+        teacher_avatar_url: None,
     };
 
     Ok(Json(ApiResponse::success(dto, req_ctx.request_id)))
@@ -1304,6 +1410,13 @@ async fn send_message(
                 .bind(id)
                 .execute(&ctx.pool)
                 .await;
+                // Trigger HIGH-PRIORITY FCM push notification for lock screen / standby
+                crate::infrastructure::fcm::trigger_fcm_push_notification(
+                    notif_title,
+                    notif_body,
+                    "INQUIRY".to_string(),
+                    id,
+                );
             }
         }
     } else {
@@ -1341,6 +1454,14 @@ async fn send_message(
                 .bind(id)
                 .execute(&ctx.pool)
                 .await;
+
+                // Trigger HIGH-PRIORITY FCM push notification for lock screen / standby
+                crate::infrastructure::fcm::trigger_fcm_push_notification(
+                    notif_title,
+                    notif_body,
+                    "INQUIRY".to_string(),
+                    id,
+                );
             }
         }
     }

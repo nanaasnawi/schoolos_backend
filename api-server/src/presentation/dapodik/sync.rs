@@ -338,6 +338,84 @@ fn truncate_str(val: &str, max_len: usize) -> String {
     val.trim().chars().take(max_len).collect()
 }
 
+/// Kategori PTK hasil klasifikasi dari data mentah Dapodik (`jenis_ptk_id_str` / `jabatan_ptk_id_str`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PtkKind {
+    Guru,
+    KepalaSekolah,
+    Tendik,
+}
+
+/// Klasifikasi PTK berdasarkan nilai asli Dapodik.
+/// Dapodik mengirim nilai seperti "Guru Mapel", "Guru Kelas", "Guru BK", "Tutor",
+/// "Kepala Sekolah", "Tenaga Kependidikan", "Tenaga Administrasi Sekolah", dst.
+/// (Sebelumnya dicek dengan `!= "guru"` sehingga "Guru Mapel" dianggap tendik, dan
+/// semua GTK tetap diberi role Guru.)
+fn classify_dapodik_ptk(jenis_ptk: Option<&str>, jabatan_ptk: Option<&str>) -> PtkKind {
+    let jenis = jenis_ptk.unwrap_or("").trim().to_lowercase();
+    let jabatan = jabatan_ptk.unwrap_or("").trim().to_lowercase();
+
+    let is_kepala = |s: &str| {
+        s.contains("kepala sekolah")
+            || s.contains("kepala pkbm")
+            || s.contains("kepala satuan")
+            || s.contains("ketua pkbm")
+            || s == "kepala"
+            || s == "kepsek"
+    };
+    if is_kepala(&jenis) || is_kepala(&jabatan) {
+        return PtkKind::KepalaSekolah;
+    }
+
+    // Kata kunci tendik dicek lebih dulu karena "tenaga kependidikan" mengandung "pendidik".
+    const TENDIK_KEYWORDS: [&str; 21] = [
+        "kependidikan",
+        "tendik",
+        "tenaga administrasi",
+        "administrasi",
+        "tata usaha",
+        "laboran",
+        "pustakawan",
+        "perpustakaan",
+        "penjaga",
+        "keamanan",
+        "satpam",
+        "pesuruh",
+        "office boy",
+        "kebun",
+        "pengemudi",
+        "sopir",
+        "teknisi",
+        "operator",
+        "bendahara",
+        "caraka",
+        "kebersihan",
+    ];
+    if TENDIK_KEYWORDS.iter().any(|k| jenis.contains(k)) {
+        return PtkKind::Tendik;
+    }
+
+    const GURU_KEYWORDS: [&str; 7] = [
+        "guru",
+        "tutor",
+        "pamong belajar",
+        "instruktur",
+        "pendidik",
+        "pengajar",
+        "pelatih",
+    ];
+    if GURU_KEYWORDS.iter().any(|k| jenis.contains(k)) {
+        return PtkKind::Guru;
+    }
+
+    // Jenis PTK kosong -> anggap pendidik; jenis lain yang tidak dikenal -> tendik (bukan guru).
+    if jenis.is_empty() {
+        PtkKind::Guru
+    } else {
+        PtkKind::Tendik
+    }
+}
+
 pub fn clean_name_for_base_username(full_name: &str) -> String {
     let lower = full_name.to_lowercase();
     // Strip common academic and honorific titles
@@ -826,6 +904,8 @@ pub struct DapodikRawGtk {
     pub nama_gtk: Option<String>,
     pub jenis_ptk: Option<String>,
     pub jenis_ptk_id_str: Option<String>,
+    pub jabatan_ptk_id_str: Option<String>,
+    pub status_kepegawaian_id_str: Option<String>,
     pub mata_pelajaran: Option<String>,
     pub mapel: Option<String>,
     pub jenis_kelamin: Option<String>,
@@ -1287,6 +1367,60 @@ pub async fn pull_dapodik_records(
         }
     };
 
+    let role_kepsek_id = match sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM roles WHERE tenant_id = $1 AND name = 'Kepala Sekolah' LIMIT 1",
+    )
+    .bind(ctx.tenant_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Internal(format!("Database error reading Kepala Sekolah role: {}", e)),
+            &ctx.request_id,
+        )
+    })? {
+        Some(id) => id,
+        None => {
+            let new_role_id = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO roles (id, tenant_id, name, description, allowed_platforms, is_system_default, created_at, updated_at) VALUES ($1, $2, 'Kepala Sekolah', 'Kepala Sekolah / Pimpinan Unit', 'WEB, ANDROID', true, NOW(), NOW())"
+            )
+            .bind(new_role_id)
+            .bind(ctx.tenant_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ApiError::new(ApplicationError::Internal(format!("Failed to insert Kepala Sekolah role: {}", e)), &ctx.request_id))?;
+            new_role_id
+        }
+    };
+
+    let role_tendik_id = match sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM roles WHERE tenant_id = $1 AND name = 'Tendik' LIMIT 1",
+    )
+    .bind(ctx.tenant_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Internal(format!("Database error reading Tendik role: {}", e)),
+            &ctx.request_id,
+        )
+    })? {
+        Some(id) => id,
+        None => {
+            let new_role_id = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO roles (id, tenant_id, name, description, allowed_platforms, is_system_default, created_at, updated_at) VALUES ($1, $2, 'Tendik', 'Tenaga Kependidikan (sesuai Dapodik)', 'ANDROID', true, NOW(), NOW())"
+            )
+            .bind(new_role_id)
+            .bind(ctx.tenant_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ApiError::new(ApplicationError::Internal(format!("Failed to insert Tendik role: {}", e)), &ctx.request_id))?;
+            new_role_id
+        }
+    };
+
     // ── 4. In-Memory Cache Pre-loading (Eliminating N+1) ───────────
     let class_rows = sqlx::query!(
         "SELECT id, name FROM classes WHERE tenant_id = $1",
@@ -1647,13 +1781,28 @@ pub async fn pull_dapodik_records(
             let nama = truncate_str(&raw_nama, 255);
             let nama_upper = truncate_str(&nama.to_uppercase(), 255);
 
-            let subject_val = gtk
-                .jenis_ptk
+            // Nilai asli dari Dapodik — disimpan apa adanya (tidak diubah).
+            let jenis_ptk_raw = gtk
+                .jenis_ptk_id_str
                 .clone()
-                .or(gtk.jenis_ptk_id_str.clone())
-                .or(gtk.mata_pelajaran.clone())
-                .or(gtk.mapel.clone())
+                .filter(|s| !s.trim().is_empty())
+                .or(gtk.jenis_ptk.clone().filter(|s| !s.trim().is_empty()))
                 .map(|s| truncate_str(&s, 100));
+            let status_kepegawaian_raw = gtk
+                .status_kepegawaian_id_str
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| truncate_str(s, 100));
+            let mapel_val = gtk
+                .mata_pelajaran
+                .clone()
+                .or(gtk.mapel.clone())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| truncate_str(&s, 100));
+            let ptk_kind = classify_dapodik_ptk(
+                jenis_ptk_raw.as_deref(),
+                gtk.jabatan_ptk_id_str.as_deref(),
+            );
 
             let email = format!("{}@guru.schoolos.id", ptk_prefix);
             let username = fast_generate_unique_username(&mut existing_usernames, &nama);
@@ -1682,13 +1831,31 @@ pub async fn pull_dapodik_records(
                 }
             };
 
+            // Role mengikuti data Dapodik: Guru / Kepala Sekolah / Tendik.
+            let target_role_id = match ptk_kind {
+                PtkKind::Guru => role_guru_id,
+                PtkKind::KepalaSekolah => role_kepsek_id,
+                PtkKind::Tendik => role_tendik_id,
+            };
             let _ = sqlx::query(
                 "INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
             )
             .bind(actual_user_id)
-            .bind(role_guru_id)
+            .bind(target_role_id)
             .execute(&mut *tx)
             .await;
+
+            // Cabut role GTK lama yang tidak sesuai Dapodik (mis. Tendik yang dulu diberi role Guru).
+            // Role 'Kepala Sekolah' TIDAK pernah dicabut otomatis agar akun admin tidak terkunci.
+            let stale_roles: Vec<Uuid> = [role_guru_id, role_tendik_id]
+                .into_iter()
+                .filter(|r| *r != target_role_id)
+                .collect();
+            let _ = sqlx::query("DELETE FROM user_roles WHERE user_id = $1 AND role_id = ANY($2)")
+                .bind(actual_user_id)
+                .bind(&stale_roles)
+                .execute(&mut *tx)
+                .await;
 
             let _ = fast_ensure_qr_token(
                 &mut tx,
@@ -1700,7 +1867,7 @@ pub async fn pull_dapodik_records(
             )
             .await;
 
-            let is_tendik = gtk.jenis_ptk_id_str.as_deref().unwrap_or("").to_lowercase() != "guru";
+            let is_tendik = ptk_kind != PtkKind::Guru;
             let tgl_lahir = gtk
                 .tanggal_lahir
                 .as_ref()
@@ -1709,11 +1876,14 @@ pub async fn pull_dapodik_records(
             let new_id = Uuid::now_v7();
 
             if is_tendik {
-                let job_title = subject_val.clone().unwrap_or_else(|| "Tendik".to_string());
+                let job_title = jenis_ptk_raw.clone().unwrap_or_else(|| match ptk_kind {
+                    PtkKind::KepalaSekolah => "Kepala Sekolah".to_string(),
+                    _ => "Tendik".to_string(),
+                });
                 let existing_staff = staff_by_name.get(&nama_upper).copied();
 
                 if let Some(sid) = existing_staff {
-                    let staff_update = sqlx::query("UPDATE staff SET user_id = COALESCE(staff.user_id, $1), job_title = $2, jk = $3, tempat_lahir = $4, tanggal_lahir = $5, agama = $6, updated_at = $7 WHERE id = $8")
+                    let staff_update = sqlx::query("UPDATE staff SET user_id = COALESCE(staff.user_id, $1), job_title = $2, jk = $3, tempat_lahir = $4, tanggal_lahir = $5, agama = $6, updated_at = $7, jenis_ptk = COALESCE($9, staff.jenis_ptk), status_kepegawaian = COALESCE($10, staff.status_kepegawaian), nip = COALESCE($11, staff.nip), nuptk = COALESCE($12, staff.nuptk) WHERE id = $8")
                         .bind(actual_user_id)
                         .bind(truncate_str(&job_title, 255))
                         .bind(gtk.jenis_kelamin.as_deref().map(|s| truncate_str(s, 20)))
@@ -1722,6 +1892,10 @@ pub async fn pull_dapodik_records(
                         .bind(gtk.agama_id_str.as_deref().map(|s| truncate_str(s, 50)))
                         .bind(now)
                         .bind(sid)
+                        .bind(&jenis_ptk_raw)
+                        .bind(&status_kepegawaian_raw)
+                        .bind(&nip)
+                        .bind(&nuptk)
                         .execute(&mut *tx)
                         .await;
 
@@ -1735,8 +1909,8 @@ pub async fn pull_dapodik_records(
                 } else {
                     let staff_insert = sqlx::query(
                         r#"
-                        INSERT INTO staff (id, tenant_id, user_id, full_name, job_title, is_active, created_at, updated_at, jk, tempat_lahir, tanggal_lahir, agama)
-                        VALUES ($1, $2, $3, $4, $5, true, $6, $6, $7, $8, $9, $10)
+                        INSERT INTO staff (id, tenant_id, user_id, full_name, job_title, is_active, created_at, updated_at, jk, tempat_lahir, tanggal_lahir, agama, jenis_ptk, status_kepegawaian, nip, nuptk)
+                        VALUES ($1, $2, $3, $4, $5, true, $6, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                         "#
                     )
                     .bind(new_id)
@@ -1749,6 +1923,10 @@ pub async fn pull_dapodik_records(
                     .bind(gtk.tempat_lahir.as_deref().map(|s| truncate_str(s, 100)))
                     .bind(tgl_lahir)
                     .bind(gtk.agama_id_str.as_deref().map(|s| truncate_str(s, 50)))
+                    .bind(&jenis_ptk_raw)
+                    .bind(&status_kepegawaian_raw)
+                    .bind(&nip)
+                    .bind(&nuptk)
                     .execute(&mut *tx)
                     .await;
 
@@ -1767,12 +1945,13 @@ pub async fn pull_dapodik_records(
                 let _ = sqlx::query(&format!("RELEASE SAVEPOINT {}", sp_gtk))
                     .execute(&mut *tx)
                     .await;
+                let tag = if ptk_kind == PtkKind::KepalaSekolah { "KEPSEK" } else { "TENDIK" };
                 imported_records.push(DapodikSyncRecordDto {
                     id: new_id.to_string(),
                     nisn: nip_str.clone(),
                     nik: nip_str,
-                    nama_school_os: format!("[TENDIK] {}", nama_upper),
-                    nama_dapodik: format!("[TENDIK] {}", nama),
+                    nama_school_os: format!("[{}] {}", tag, nama_upper),
+                    nama_dapodik: format!("[{}] {}", tag, nama),
                     rombel: "-".into(),
                     identity_state: "ACTIVE".into(),
                     mobility_case: "NONE".into(),
@@ -1782,7 +1961,7 @@ pub async fn pull_dapodik_records(
                     last_synced_at: now.to_rfc3339(),
                 });
             } else {
-                let teacher_subject = subject_val.clone();
+                let teacher_subject = mapel_val.clone();
                 let existing_teacher = if let Some(ref n) = nip {
                     teacher_by_nip.get(n).copied()
                 } else if let Some(ref nup) = nuptk {
@@ -1797,7 +1976,7 @@ pub async fn pull_dapodik_records(
                     let teacher_update = sqlx::query(
                         r#"
                         UPDATE teachers 
-                        SET user_id = COALESCE(teachers.user_id, $1), subject = COALESCE($2, teachers.subject), jk = $3, tempat_lahir = $4, tanggal_lahir = $5, agama = $6, updated_at = $7, nuptk = COALESCE($8, teachers.nuptk)
+                        SET user_id = COALESCE(teachers.user_id, $1), subject = COALESCE($2, teachers.subject), jk = $3, tempat_lahir = $4, tanggal_lahir = $5, agama = $6, updated_at = $7, nuptk = COALESCE($8, teachers.nuptk), jenis_ptk = COALESCE($10, teachers.jenis_ptk), status_kepegawaian = COALESCE($11, teachers.status_kepegawaian)
                         WHERE id = $9
                         "#
                     )
@@ -1810,6 +1989,8 @@ pub async fn pull_dapodik_records(
                     .bind(now)
                     .bind(&nuptk)
                     .bind(tid)
+                    .bind(&jenis_ptk_raw)
+                    .bind(&status_kepegawaian_raw)
                     .execute(&mut *tx)
                     .await;
 
@@ -1823,8 +2004,8 @@ pub async fn pull_dapodik_records(
                 } else {
                     let teacher_insert = sqlx::query(
                         r#"
-                        INSERT INTO teachers (id, tenant_id, user_id, nip, full_name, subject, is_active, created_at, updated_at, jk, tempat_lahir, tanggal_lahir, agama, nuptk)
-                        VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7, $8, $9, $10, $11, $12)
+                        INSERT INTO teachers (id, tenant_id, user_id, nip, full_name, subject, is_active, created_at, updated_at, jk, tempat_lahir, tanggal_lahir, agama, nuptk, jenis_ptk, status_kepegawaian)
+                        VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7, $8, $9, $10, $11, $12, $13, $14)
                         "#
                     )
                     .bind(new_id).bind(ctx.tenant_id).bind(actual_user_id).bind(&nip).bind(&nama_upper)
@@ -1835,6 +2016,8 @@ pub async fn pull_dapodik_records(
                     .bind(tgl_lahir)
                     .bind(gtk.agama_id_str.as_deref().map(|s| truncate_str(s, 50)))
                     .bind(&nuptk)
+                    .bind(&jenis_ptk_raw)
+                    .bind(&status_kepegawaian_raw)
                     .execute(&mut *tx)
                     .await;
 

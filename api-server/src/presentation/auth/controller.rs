@@ -400,6 +400,10 @@ pub struct AuthUserDto {
     pub username: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avatar_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phone: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub about: Option<String>,
 }
 
 #[derive(serde::Deserialize, utoipa::ToSchema)]
@@ -412,6 +416,11 @@ pub struct ChangePasswordRequest {
 pub struct UpdateProfileRequest {
     pub full_name: Option<String>,
     pub avatar_url: Option<String>,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    pub username: Option<String>,
+    pub identifier: Option<String>,
+    pub about: Option<String>,
 }
 
 #[utoipa::path(
@@ -678,7 +687,7 @@ async fn get_me(
 
     let record = sqlx::query(
         r#"
-        SELECT u.id, u.email, u.full_name, u.avatar_url, u.is_active, u.created_at,
+        SELECT u.id, u.email, u.full_name, u.avatar_url, u.is_active, u.created_at, u.username,
                COALESCE(r.name, 'Administrator') as role_name,
                COALESCE(
                  (SELECT s.nisn FROM students s WHERE s.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),
@@ -687,6 +696,18 @@ async fn get_me(
                  (SELECT CONCAT('WALI-', s.nisn) FROM guardians g JOIN students s ON s.guardian_id = g.id WHERE g.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),
                  ''
                ) as identifier,
+               COALESCE(
+                 (SELECT s.no_hp FROM students s WHERE s.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),
+                 (SELECT t.no_hp FROM teachers t WHERE t.user_id = u.id ORDER BY t.updated_at DESC LIMIT 1),
+                 (SELECT g.phone_number FROM guardians g WHERE g.user_id = u.id ORDER BY g.updated_at DESC LIMIT 1),
+                 ''
+               ) as phone,
+               COALESCE(
+                 (SELECT s.alamat_jalan FROM students s WHERE s.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),
+                 (SELECT t.alamat_jalan FROM teachers t WHERE t.user_id = u.id ORDER BY t.updated_at DESC LIMIT 1),
+                 (SELECT g.address FROM guardians g WHERE g.user_id = u.id ORDER BY g.updated_at DESC LIMIT 1),
+                 ''
+               ) as about,
                COALESCE(
                  (
                    SELECT c.name 
@@ -755,6 +776,8 @@ async fn get_me(
     let dto = match record {
         Some(r) => {
             let ident: String = r.get("identifier");
+            let phone_str: String = r.try_get("phone").unwrap_or_default();
+            let about_str: String = r.try_get("about").unwrap_or_default();
             AuthUserDto {
                 id: r.get("id"),
                 email: r.get("email"),
@@ -770,8 +793,10 @@ async fn get_me(
                 class_name: r.get("class_name"),
                 child_name: r.get("child_name"),
                 child_id: r.get("child_id"),
-                username: None,
+                username: r.try_get("username").ok().flatten(),
                 avatar_url: r.try_get("avatar_url").ok().flatten(),
+                phone: if phone_str.is_empty() { None } else { Some(phone_str) },
+                about: if about_str.is_empty() { None } else { Some(about_str) },
             }
         }
         None => AuthUserDto {
@@ -969,40 +994,71 @@ async fn update_profile(
     }
 
     if let Some(ref av) = payload.avatar_url {
-        sqlx::query(
+        let _ = sqlx::query(
             "UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE id = $2",
         )
         .bind(av)
         .bind(actor_id)
         .execute(&ctx.pool)
-        .await
-        .map_err(|e| {
-            ApiError::new(
-                school_core::common::error::ApplicationError::Infrastructure(
-                    school_core::common::error::InfrastructureError::Database(e),
-                ),
-                &req_ctx.request_id,
-            )
-        })?;
+        .await;
+    }
+
+    if let Some(ref em) = payload.email {
+        if !em.trim().is_empty() {
+            let clean = em.trim();
+            let _ = sqlx::query("UPDATE users SET email = $1, updated_at = NOW() WHERE id = $2")
+                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+            let _ = sqlx::query("UPDATE students SET email = $1, updated_at = NOW() WHERE user_id = $2")
+                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+            let _ = sqlx::query("UPDATE teachers SET email = $1, updated_at = NOW() WHERE user_id = $2")
+                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+        }
+    }
+
+    let target_username = payload.username.as_ref().or(payload.identifier.as_ref());
+    if let Some(un) = target_username {
+        if !un.trim().is_empty() {
+            let clean = un.trim();
+            let _ = sqlx::query("UPDATE users SET username = $1, updated_at = NOW() WHERE id = $2")
+                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+        }
+    }
+
+    if let Some(ref ph) = payload.phone {
+        if !ph.trim().is_empty() {
+            let clean = ph.trim();
+            let _ = sqlx::query("UPDATE students SET no_hp = $1, updated_at = NOW() WHERE user_id = $2")
+                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+            let _ = sqlx::query("UPDATE teachers SET no_hp = $1, updated_at = NOW() WHERE user_id = $2")
+                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+            let _ = sqlx::query("UPDATE guardians SET phone_number = $1, updated_at = NOW() WHERE user_id = $2")
+                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+        }
+    }
+
+    if let Some(ref ab) = payload.about {
+        if !ab.trim().is_empty() {
+            let clean = ab.trim();
+            let _ = sqlx::query("UPDATE students SET alamat_jalan = $1, updated_at = NOW() WHERE user_id = $2")
+                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+            let _ = sqlx::query("UPDATE teachers SET alamat_jalan = $1, updated_at = NOW() WHERE user_id = $2")
+                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+            let _ = sqlx::query("UPDATE guardians SET address = $1, updated_at = NOW() WHERE user_id = $2")
+                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+        }
     }
 
     if let Some(ref name) = payload.full_name {
         if !name.trim().is_empty() {
-            sqlx::query(
-                "UPDATE users SET full_name = $1, updated_at = NOW() WHERE id = $2",
-            )
-            .bind(name.trim())
-            .bind(actor_id)
-            .execute(&ctx.pool)
-            .await
-            .map_err(|e| {
-                ApiError::new(
-                    school_core::common::error::ApplicationError::Infrastructure(
-                        school_core::common::error::InfrastructureError::Database(e),
-                    ),
-                    &req_ctx.request_id,
-                )
-            })?;
+            let clean = name.trim();
+            let _ = sqlx::query("UPDATE users SET full_name = $1, updated_at = NOW() WHERE id = $2")
+                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+            let _ = sqlx::query("UPDATE students SET full_name = $1, updated_at = NOW() WHERE user_id = $2")
+                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+            let _ = sqlx::query("UPDATE teachers SET full_name = $1, updated_at = NOW() WHERE user_id = $2")
+                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+            let _ = sqlx::query("UPDATE guardians SET full_name = $1, updated_at = NOW() WHERE user_id = $2")
+                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
         }
     }
 
