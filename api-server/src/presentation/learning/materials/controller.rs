@@ -1,5 +1,5 @@
 use axum::{
-    extract::{DefaultBodyLimit, Multipart, Path, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     routing::{get, post},
     Json, Router,
 };
@@ -138,13 +138,14 @@ async fn create(
         }
     };
 
-    let _ = sqlx::query!(
-        r#"UPDATE learning_materials SET class_id = $1, teacher_id = $2, created_by = $3 WHERE id = $4"#,
-        target_class_id,
-        teacher_id,
-        actor_id,
-        material.id
+    let _ = sqlx::query(
+        r#"UPDATE learning_materials SET class_id = $1, subject_id = COALESCE($2, subject_id), teacher_id = $3, created_by = $4 WHERE id = $5"#,
     )
+    .bind(target_class_id)
+    .bind(payload.subject_id)
+    .bind(teacher_id)
+    .bind(actor_id)
+    .bind(material.id)
     .execute(&ctx.pool)
     .await;
 
@@ -888,15 +889,21 @@ pub struct MaterialStudentCompletionDto {
     pub last_read_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct MaterialCompletionsQuery {
+    pub class_id: Option<Uuid>,
+}
+
 async fn get_material_completions(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
     Path(id): Path<Uuid>,
+    Query(query): Query<MaterialCompletionsQuery>,
 ) -> Result<Json<ApiResponse<Vec<MaterialStudentCompletionDto>>>, ApiError> {
-    // 1. Ambil material untuk mengetahui tenant_id dan class_id rombel
+    // 1. Ambil material untuk mengetahui tenant_id, class_id rombel, subject_id, dan teacher_id
     let mat_row = sqlx::query(
         r#"
-        SELECT tenant_id, class_id FROM learning_materials
+        SELECT tenant_id, class_id, subject_id, teacher_id, title, description FROM learning_materials
         WHERE id = $1 AND deleted_at IS NULL
         "#,
     )
@@ -921,12 +928,74 @@ async fn get_material_completions(
         )
     })?;
 
+    let query_class_id: Option<Uuid> = query.class_id;
     let mat_class_id: Option<Uuid> = mat_row.get("class_id");
+    let mat_subject_id: Option<Uuid> = mat_row.get("subject_id");
+    let mat_teacher_id: Option<Uuid> = mat_row.get("teacher_id");
+    let mat_title: String = mat_row.get("title");
+    let mat_desc: Option<String> = mat_row.get("description");
+
+    // Tentukan rombel/kelas target:
+    // 1. Jika dikirim melalui query parameter ?class_id=...
+    // 2. Jika tersimpan di kolom class_id materi
+    // 3. Jika null, coba deteksi dari teks judul/deskripsi rombel
+    // 4. Jika masih kosong, coba ambil rombel dari jadwal (class_schedules) guru & mapel tersebut
+    let mut target_class_ids: Vec<Uuid> = Vec::new();
+
+    if let Some(cid) = query_class_id {
+        target_class_ids.push(cid);
+    } else if let Some(cid) = mat_class_id {
+        target_class_ids.push(cid);
+    } else {
+        let text_search = format!("{} {}", mat_title, mat_desc.as_deref().unwrap_or(""));
+        let matched_classes: Vec<Uuid> = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT id FROM classes 
+            WHERE tenant_id = $1 AND deleted_at IS NULL AND (
+                $2 ILIKE ('%' || name || '%')
+                OR ($2 ILIKE '%Kelas X%' AND (name = 'PAKET C 10' OR name ILIKE '%10%'))
+                OR ($2 ILIKE '%Kelas XI%' AND (name ILIKE '%11%'))
+                OR ($2 ILIKE '%Kelas XII%' AND (name ILIKE '%12%'))
+                OR ($2 ILIKE '%Kelas VII%' AND (name = 'PAKET B 7' OR name ILIKE '%7%'))
+                OR ($2 ILIKE '%Kelas VIII%' AND (name ILIKE '%8%'))
+                OR ($2 ILIKE '%Kelas IX%' AND (name ILIKE '%9%'))
+                OR ($2 ILIKE '%Kelas IV%' AND (name = 'PAKET A 4' OR name ILIKE '%4%'))
+                OR ($2 ILIKE '%Kelas V%' AND (name = 'PAKET A 5' OR name ILIKE '%5%'))
+                OR ($2 ILIKE '%Kelas VI%' AND (name = 'PAKET A 6' OR name ILIKE '%6%'))
+            )
+            "#,
+        )
+        .bind(req_ctx.tenant_id)
+        .bind(&text_search)
+        .fetch_all(&ctx.pool)
+        .await
+        .unwrap_or_default();
+
+        if !matched_classes.is_empty() {
+            target_class_ids.extend(matched_classes);
+        } else if let (Some(tid), Some(sid)) = (mat_teacher_id, mat_subject_id) {
+            let sched_classes: Vec<Uuid> = sqlx::query_scalar::<_, Uuid>(
+                r#"
+                SELECT DISTINCT class_id FROM class_schedules 
+                WHERE teacher_id = $1 AND subject_id = $2 AND deleted_at IS NULL
+                "#,
+            )
+            .bind(tid)
+            .bind(sid)
+            .fetch_all(&ctx.pool)
+            .await
+            .unwrap_or_default();
+            if !sched_classes.is_empty() {
+                target_class_ids.extend(sched_classes);
+            }
+        }
+    }
 
     // 2. Query siswa:
-    // Jika materi terafiliasi dengan kelas tertentu, tampilkan semua siswa rombel tersebut dengan status selesai / progres bacanya.
-    // Jika tidak terafiliasi dengan kelas spesifik, tampilkan seluruh siswa yang telah menyelesaikan atau membaca materi ini.
-    let rows = if let Some(class_id) = mat_class_id {
+    // Jika ada rombel target, tampilkan siswa rombel tersebut dengan status progres bacanya.
+    // Jika tidak ada rombel target yang teridentifikasi, HANYA tampilkan siswa yang SUDAH berinteraksi / membaca / menyelesaikan materi ini.
+    // JANGAN PERNAH menampilkan seluruh siswa 1 sekolah jika belum terasosiasi!
+    let rows = if !target_class_ids.is_empty() {
         sqlx::query(
             r#"
             SELECT 
@@ -951,7 +1020,7 @@ async fn get_material_completions(
                     rp.current_page,
                     rp.last_read_at
                 FROM students s
-                JOIN enrollments en ON en.student_id = s.id AND en.class_id = $2
+                JOIN enrollments en ON en.student_id = s.id AND en.class_id = ANY($2) AND (en.status = 'Active' OR en.status = 'active')
                 JOIN classes c ON c.id = en.class_id
                 LEFT JOIN student_material_completions smc ON smc.student_id = s.id AND smc.material_id = $1
                 LEFT JOIN reading_progress rp ON rp.student_id = s.id AND rp.material_id = $1
@@ -962,7 +1031,7 @@ async fn get_material_completions(
             "#
         )
         .bind(id)
-        .bind(class_id)
+        .bind(&target_class_ids)
         .bind(req_ctx.tenant_id)
         .fetch_all(&ctx.pool)
         .await
@@ -991,11 +1060,12 @@ async fn get_material_completions(
                     rp.current_page,
                     rp.last_read_at
                 FROM students s
-                LEFT JOIN enrollments en ON en.student_id = s.id AND (en.status = 'Active' OR en.status = 'ACTIVE' OR en.status IS NULL)
-                LEFT JOIN classes c ON c.id = en.class_id
+                JOIN enrollments en ON en.student_id = s.id AND (en.status = 'Active' OR en.status = 'active')
+                JOIN classes c ON c.id = en.class_id
                 LEFT JOIN student_material_completions smc ON smc.student_id = s.id AND smc.material_id = $1
                 LEFT JOIN reading_progress rp ON rp.student_id = s.id AND rp.material_id = $1
                 WHERE s.tenant_id = $2 AND s.deleted_at IS NULL AND (s.status = 'active' OR s.status = 'Active' OR s.is_active = true)
+                  AND (smc.id IS NOT NULL OR COALESCE(rp.is_completed, false) = true OR COALESCE(rp.current_page, 0) > 0)
                 ORDER BY s.id, (smc.id IS NOT NULL OR COALESCE(rp.is_completed, false) = true) DESC
             ) sub
             ORDER BY is_completed DESC, student_name ASC

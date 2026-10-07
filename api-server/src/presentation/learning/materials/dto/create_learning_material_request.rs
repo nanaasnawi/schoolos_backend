@@ -15,4 +15,6 @@ pub struct CreateLearningMaterialRequest {
     pub class_id: Option<String>,
     #[serde(default)]
     pub teacher_id: Option<Uuid>,
+    #[serde(default)]
+    pub subject_id: Option<Uuid>,
 }
