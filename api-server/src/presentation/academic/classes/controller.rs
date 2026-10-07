@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
-    routing::{get, patch, post, put},
+    routing::{get, post},
     Json, Router,
 };
 use school_core::academic::application::class::{

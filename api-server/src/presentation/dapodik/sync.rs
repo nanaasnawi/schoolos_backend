@@ -2813,7 +2813,10 @@ pub async fn pull_dapodik_records(
             .unwrap_or_default();
 
             if !removed_students.is_empty() {
-                    let update_std_res =
+                let removed_ids: Vec<Uuid> = removed_students.iter().map(|s| s.id).collect();
+                let removed_names: Vec<String> = removed_students.iter().map(|s| s.full_name.clone()).collect();
+
+                let update_std_res =
                     sqlx::query("UPDATE students SET status = 'inactive', updated_at = NOW() WHERE tenant_id = $1 AND id = ANY($2)")
                         .bind(ctx.tenant_id)
                         .bind(&removed_ids)
