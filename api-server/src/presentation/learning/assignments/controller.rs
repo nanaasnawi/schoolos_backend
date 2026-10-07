@@ -1524,7 +1524,7 @@ async fn get_submissions(
                 FROM students s
                 LEFT JOIN users u ON u.id = s.user_id
                 LEFT JOIN assignment_submissions sub ON sub.assignment_id = $1 AND (sub.student_id = s.id OR (s.user_id IS NOT NULL AND sub.student_id = s.user_id))
-                WHERE s.tenant_id = $2 AND s.deleted_at IS NULL AND s.is_active = true
+                WHERE s.tenant_id = $2 AND s.deleted_at IS NULL AND (s.status = 'active' OR s.status = 'Active' OR s.is_active = true)
                 ORDER BY s.id, (sub.status IS NOT NULL AND sub.status != 'unsubmitted') DESC
             ) subquery
             ORDER BY 

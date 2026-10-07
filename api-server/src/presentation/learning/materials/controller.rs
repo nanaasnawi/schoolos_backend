@@ -955,7 +955,7 @@ async fn get_material_completions(
                 JOIN classes c ON c.id = en.class_id
                 LEFT JOIN student_material_completions smc ON smc.student_id = s.id AND smc.material_id = $1
                 LEFT JOIN reading_progress rp ON rp.student_id = s.id AND rp.material_id = $1
-                WHERE s.tenant_id = $3 AND s.deleted_at IS NULL AND s.is_active = true
+                WHERE s.tenant_id = $3 AND s.deleted_at IS NULL AND (s.status = 'active' OR s.status = 'Active' OR s.is_active = true)
                 ORDER BY s.id, (smc.id IS NOT NULL OR COALESCE(rp.is_completed, false) = true) DESC
             ) sub
             ORDER BY is_completed DESC, student_name ASC
@@ -995,7 +995,7 @@ async fn get_material_completions(
                 LEFT JOIN classes c ON c.id = en.class_id
                 LEFT JOIN student_material_completions smc ON smc.student_id = s.id AND smc.material_id = $1
                 LEFT JOIN reading_progress rp ON rp.student_id = s.id AND rp.material_id = $1
-                WHERE s.tenant_id = $2 AND s.deleted_at IS NULL AND s.is_active = true
+                WHERE s.tenant_id = $2 AND s.deleted_at IS NULL AND (s.status = 'active' OR s.status = 'Active' OR s.is_active = true)
                 ORDER BY s.id, (smc.id IS NOT NULL OR COALESCE(rp.is_completed, false) = true) DESC
             ) sub
             ORDER BY is_completed DESC, student_name ASC
