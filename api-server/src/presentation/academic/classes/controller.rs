@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
-    routing::{get, post},
+    routing::{get, patch, post, put},
     Json, Router,
 };
 use school_core::academic::application::class::{
@@ -43,6 +43,13 @@ pub struct CreateClassRequest {
     pub name: String,
 }
 
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateClassRequest {
+    pub name: Option<String>,
+    pub homeroom_teacher_id: Option<Uuid>,
+    pub capacity: Option<i32>,
+}
+
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct ClassResponse {
     pub id: Uuid,
@@ -68,6 +75,7 @@ pub fn class_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/", post(create).get(list))
         .route("/students", get(list_class_students))
+        .route("/{id}", get(get_by_id).put(update).patch(update))
         .route("/{id}/students", get(get_class_students_by_id))
 }
 
@@ -429,3 +437,154 @@ async fn get_class_students_by_id(
 
     Ok(Json(ApiResponse::success(dtos, req_ctx.request_id)))
 }
+
+#[utoipa::path(
+    get,
+    operation_id = "getClassById",
+    path = "/api/v1/academic/classes/{id}",
+    responses(
+        (status = 200, description = "Class details", body = ApiResponse<ClassResponse>)
+    ),
+    security(("Bearer" = []))
+)]
+async fn get_by_id(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ApiResponse<ClassResponse>>, crate::error::ApiError> {
+    let row = sqlx::query_as::<_, (Uuid, Uuid, Uuid, String, Option<Uuid>)>(
+        "SELECT id, academic_year_id, grade_level_id, name, homeroom_teacher_id FROM classes WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let Some((id, academic_year_id, grade_level_id, name, homeroom_teacher_id)) = row else {
+        return Err(ApiError::new(
+            ApplicationError::NotFound(
+                school_core::common::error_code::ErrorCode::ResourceNotFound,
+                "Class not found".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    };
+
+    Ok(Json(ApiResponse::success(
+        ClassResponse {
+            id,
+            academic_year_id,
+            grade_level_id,
+            name,
+            homeroom_teacher_id,
+        },
+        req_ctx.request_id,
+    )))
+}
+
+#[utoipa::path(
+    put,
+    operation_id = "updateClass",
+    path = "/api/v1/academic/classes/{id}",
+    request_body = UpdateClassRequest,
+    responses(
+        (status = 200, description = "Class updated", body = ApiResponse<ClassResponse>)
+    ),
+    security(("Bearer" = []))
+)]
+async fn update(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateClassRequest>,
+) -> Result<Json<ApiResponse<ClassResponse>>, crate::error::ApiError> {
+    let is_admin_or_staff = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                r.name == "Kepala Sekolah"
+                    || r.name == "Operator/Staff"
+                    || r.name == "Admin"
+                    || r.name == "SuperAdmin"
+                    || r.name == "Bendahara"
+            })
+        })
+        .unwrap_or(false);
+
+    if !is_admin_or_staff {
+        use crate::middleware::require_permission;
+        use school_core::permission::domain::permission_registry::Permission;
+        require_permission(&req_ctx.actor, Permission::AcademicManage).map_err(|_| {
+            crate::error::ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Insufficient permissions".to_string(),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+    }
+
+    let target_teacher = payload.homeroom_teacher_id.and_then(|tid| {
+        if tid.is_nil() {
+            None
+        } else {
+            Some(tid)
+        }
+    });
+
+    let row = sqlx::query_as::<_, (Uuid, Uuid, Uuid, String, Option<Uuid>)>(
+        r#"
+        UPDATE classes
+        SET name = COALESCE($1, name),
+            homeroom_teacher_id = CASE WHEN $2::boolean THEN $3 ELSE homeroom_teacher_id END,
+            capacity = COALESCE($4, capacity),
+            updated_at = NOW()
+        WHERE id = $5 AND tenant_id = $6 AND deleted_at IS NULL
+        RETURNING id, academic_year_id, grade_level_id, name, homeroom_teacher_id
+        "#,
+    )
+    .bind(payload.name)
+    .bind(payload.homeroom_teacher_id.is_some())
+    .bind(target_teacher)
+    .bind(payload.capacity)
+    .bind(id)
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let Some((id, academic_year_id, grade_level_id, name, homeroom_teacher_id)) = row else {
+        return Err(ApiError::new(
+            ApplicationError::NotFound(
+                school_core::common::error_code::ErrorCode::ResourceNotFound,
+                "Class not found".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    };
+
+    Ok(Json(ApiResponse::success(
+        ClassResponse {
+            id,
+            academic_year_id,
+            grade_level_id,
+            name,
+            homeroom_teacher_id,
+        },
+        req_ctx.request_id,
+    )))
+}
+

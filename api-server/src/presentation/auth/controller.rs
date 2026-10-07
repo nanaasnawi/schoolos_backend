@@ -1079,17 +1079,17 @@ async fn update_profile(
         }
     }
 
-    let current_user = sqlx::query!(
+    let current_user: Option<(String, Option<String>)> = sqlx::query_as(
         "SELECT full_name, avatar_url FROM users WHERE id = $1",
-        actor_id
     )
+    .bind(actor_id)
     .fetch_optional(&ctx.pool)
     .await
     .ok()
     .flatten();
 
-    let cur_name = current_user.as_ref().map(|u| u.full_name.clone()).unwrap_or_default();
-    let cur_avatar = current_user.as_ref().and_then(|u| u.avatar_url.clone()).unwrap_or_default();
+    let cur_name = current_user.as_ref().map(|u| u.0.clone()).unwrap_or_default();
+    let cur_avatar = current_user.as_ref().and_then(|u| u.1.clone()).unwrap_or_default();
 
     Ok(Json(ApiResponse::success(
         serde_json::json!({

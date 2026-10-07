@@ -2755,15 +2755,8 @@ pub async fn pull_dapodik_records(
                     .bind(academic_year_id).bind(now).execute(&mut *tx).await;
                 }
             } else {
-                // SISWA BELUM MASUK ROMBEL DI DAPODIK -> KOSONGKAN & JANGAN ASAL ENROLL!
-                let _ = sqlx::query(
-                    "DELETE FROM enrollments WHERE tenant_id = $1 AND student_id = $2 AND academic_year_id = $3"
-                )
-                .bind(ctx.tenant_id)
-                .bind(student_db_id)
-                .bind(academic_year_id)
-                .execute(&mut *tx)
-                .await;
+                // Siswa belum memiliki rombel di Dapodik: pertahankan rombel SchoolOS yang sudah ada agar nilai dan data kelas tidak hilang.
+                tracing::debug!("Siswa {} belum ada rombel di Dapodik, mempertahankan data enrollments yang ada.", student_db_id);
             }
 
             let nisn_str = final_nisn.clone();
@@ -2820,49 +2813,20 @@ pub async fn pull_dapodik_records(
             .unwrap_or_default();
 
             if !removed_students.is_empty() {
-                let removed_ids: Vec<Uuid> = removed_students.iter().map(|s| s.id).collect();
-                let removed_user_ids: Vec<Uuid> =
-                    removed_students.iter().filter_map(|s| s.user_id).collect();
-                let removed_nisns: Vec<String> =
-                    removed_students.iter().map(|s| s.nisn.clone()).collect();
-                let removed_names: Vec<String> = removed_students
-                    .iter()
-                    .map(|s| s.full_name.clone())
-                    .collect();
-
-                let del_std_res =
-                    sqlx::query("DELETE FROM students WHERE tenant_id = $1 AND id = ANY($2)")
+                    let update_std_res =
+                    sqlx::query("UPDATE students SET status = 'inactive', updated_at = NOW() WHERE tenant_id = $1 AND id = ANY($2)")
                         .bind(ctx.tenant_id)
                         .bind(&removed_ids)
                         .execute(&mut *tx)
                         .await;
 
-                if del_std_res.is_ok() {
-                    // 2. Hapus akun login siswa jika ada
-                    if !removed_user_ids.is_empty() {
-                        let _ =
-                            sqlx::query("DELETE FROM users WHERE tenant_id = $1 AND id = ANY($2)")
-                                .bind(ctx.tenant_id)
-                                .bind(&removed_user_ids)
-                                .execute(&mut *tx)
-                                .await;
-                    }
-
-                    // 3. Hapus dari dapodik_sync_records MUTLAK menggunakan NISN (tidak boleh pakai nama agar siswa lain dengan nama serupa tidak ikut terhapus)
-                    let _ = sqlx::query(
-                        "DELETE FROM dapodik_sync_records WHERE tenant_id = $1 AND nisn = ANY($2)",
-                    )
-                    .bind(ctx.tenant_id)
-                    .bind(&removed_nisns)
-                    .execute(&mut *tx)
-                    .await;
-
+                if update_std_res.is_ok() {
                     let _ = sqlx::query("RELEASE SAVEPOINT sp_cleanup_students")
                         .execute(&mut *tx)
                         .await;
 
                     tracing::info!(
-                        "Otomatis menghapus {} siswa termutasi/keluar/lulus dari PostgreSQL: {:?}",
+                        "Memperbarui status {} siswa menjadi 'inactive' (nilai dan riwayat akademik tetap terlindungi): {:?}",
                         removed_students.len(),
                         removed_names
                     );
@@ -2870,9 +2834,6 @@ pub async fn pull_dapodik_records(
                     let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_cleanup_students")
                         .execute(&mut *tx)
                         .await;
-                    tracing::warn!(
-                        "Cleanup of removed students skipped due to constraint dependency"
-                    );
                 }
             } else {
                 let _ = sqlx::query("RELEASE SAVEPOINT sp_cleanup_students")
@@ -2912,41 +2873,16 @@ pub async fn pull_dapodik_records(
             .unwrap_or_default();
 
             if !empty_classes.is_empty() {
-                let empty_class_ids: Vec<Uuid> = empty_classes.iter().map(|c| c.id).collect();
-                let empty_class_names: Vec<String> =
-                    empty_classes.iter().map(|c| c.name.clone()).collect();
-
-                let del_cls_res =
-                    sqlx::query("DELETE FROM classes WHERE tenant_id = $1 AND id = ANY($2)")
-                        .bind(ctx.tenant_id)
-                        .bind(&empty_class_ids)
-                        .execute(&mut *tx)
-                        .await;
-
-                if del_cls_res.is_ok() {
-                    let _ = sqlx::query(
-                        "DELETE FROM dapodik_sync_records WHERE tenant_id = $1 AND rombel = ANY($2)",
-                    )
-                    .bind(ctx.tenant_id)
-                    .bind(&empty_class_names)
+                // JANGAN hapus kelas secara permanen dari PostgreSQL agar gradebook dan relasi akademik tetap terlindungi.
+                let _ = sqlx::query("RELEASE SAVEPOINT sp_cleanup_classes")
                     .execute(&mut *tx)
                     .await;
 
-                    let _ = sqlx::query("RELEASE SAVEPOINT sp_cleanup_classes")
-                        .execute(&mut *tx)
-                        .await;
-
-                    tracing::info!(
-                        "Otomatis menghapus {} kelas kosong (0 siswa) dari PostgreSQL: {:?}",
-                        empty_classes.len(),
-                        empty_class_names
-                    );
-                } else {
-                    let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_cleanup_classes")
-                        .execute(&mut *tx)
-                        .await;
-                    tracing::warn!("Cleanup of empty classes skipped due to constraint dependency");
-                }
+                tracing::info!(
+                    "Terdapat {} kelas tanpa siswa aktif baru dari Dapodik (data kelas dipertahankan untuk keamanan nilai): {:?}",
+                    empty_classes.len(),
+                    empty_classes.iter().map(|c| c.name.clone()).collect::<Vec<_>>()
+                );
             } else {
                 let _ = sqlx::query("RELEASE SAVEPOINT sp_cleanup_classes")
                     .execute(&mut *tx)

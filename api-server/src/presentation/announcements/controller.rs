@@ -1,7 +1,7 @@
 use axum::{
     extract::{Path, State},
     response::sse::{Event, KeepAlive, Sse},
-    routing::{delete, get, patch},
+    routing::{get, patch},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
@@ -137,15 +137,15 @@ async fn get_announcement_by_id(
     req_ctx: RequestContext,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<AnnouncementResponse>>, ApiError> {
-    let row = sqlx::query!(
+    let row = sqlx::query(
         r#"
         SELECT id, title, content, category, target, author, is_pinned, push_status, created_at
         FROM announcements
         WHERE id = $1 AND tenant_id = $2
         "#,
-        id,
-        req_ctx.tenant_id
     )
+    .bind(id)
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| {
@@ -158,25 +158,36 @@ async fn get_announcement_by_id(
     })?
     .ok_or_else(|| {
         ApiError::new(
-            ApplicationError::Domain(school_core::common::error::DomainError::NotFound(
+            ApplicationError::NotFound(
+                school_core::common::error_code::ErrorCode::ResourceNotFound,
                 "Announcement not found".to_string(),
-            )),
+            ),
             &req_ctx.request_id,
         )
     })?;
 
-    let date_str = row.created_at.format("%d %b %Y · %H:%M WIB").to_string();
+    let row_id: Uuid = row.get("id");
+    let row_title: String = row.get("title");
+    let row_content: String = row.get("content");
+    let row_category: String = row.get("category");
+    let row_target: String = row.get("target");
+    let row_author: String = row.get("author");
+    let row_is_pinned: bool = row.get("is_pinned");
+    let row_push_status: bool = row.get("push_status");
+    let row_created_at: DateTime<Utc> = row.get("created_at");
+
+    let date_str = row_created_at.format("%d %b %Y · %H:%M WIB").to_string();
     let item = AnnouncementResponse {
-        id: row.id,
-        title: row.title,
-        content: row.content,
-        category: row.category,
-        target: row.target,
-        author: row.author,
-        is_pinned: row.is_pinned,
-        push_status: row.push_status,
+        id: row_id,
+        title: row_title,
+        content: row_content,
+        category: row_category,
+        target: row_target,
+        author: row_author,
+        is_pinned: row_is_pinned,
+        push_status: row_push_status,
         date: date_str,
-        created_at: row.created_at,
+        created_at: row_created_at,
     };
 
     Ok(Json(ApiResponse::success(item, req_ctx.request_id)))
