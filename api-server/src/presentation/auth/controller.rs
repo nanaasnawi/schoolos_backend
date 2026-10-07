@@ -696,6 +696,7 @@ async fn get_me(
                COALESCE(
                  (SELECT s.nisn FROM students s WHERE s.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),
                  (SELECT t.nip FROM teachers t WHERE t.user_id = u.id ORDER BY t.updated_at DESC LIMIT 1),
+                 (SELECT st.nip FROM staff st WHERE st.user_id = u.id ORDER BY st.updated_at DESC LIMIT 1),
                  (SELECT NULLIF(g.phone_number, '') FROM guardians g WHERE g.user_id = u.id ORDER BY g.updated_at DESC LIMIT 1),
                  (SELECT CONCAT('WALI-', s.nisn) FROM guardians g JOIN students s ON s.guardian_id = g.id WHERE g.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),
                  ''
@@ -703,12 +704,14 @@ async fn get_me(
                COALESCE(
                  (SELECT s.no_hp FROM students s WHERE s.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),
                  (SELECT t.no_hp FROM teachers t WHERE t.user_id = u.id ORDER BY t.updated_at DESC LIMIT 1),
+                 (SELECT st.no_hp FROM staff st WHERE st.user_id = u.id ORDER BY st.updated_at DESC LIMIT 1),
                  (SELECT g.phone_number FROM guardians g WHERE g.user_id = u.id ORDER BY g.updated_at DESC LIMIT 1),
                  ''
                ) as phone,
                COALESCE(
                  (SELECT s.alamat_jalan FROM students s WHERE s.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),
                  (SELECT t.alamat_jalan FROM teachers t WHERE t.user_id = u.id ORDER BY t.updated_at DESC LIMIT 1),
+                 (SELECT st.alamat_jalan FROM staff st WHERE st.user_id = u.id ORDER BY st.updated_at DESC LIMIT 1),
                  (SELECT g.address FROM guardians g WHERE g.user_id = u.id ORDER BY g.updated_at DESC LIMIT 1),
                  ''
                ) as about,
@@ -1018,6 +1021,8 @@ async fn update_profile(
                 .bind(clean).bind(actor_id).execute(&ctx.pool).await;
             let _ = sqlx::query("UPDATE teachers SET email = $1, updated_at = NOW() WHERE user_id = $2")
                 .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+            let _ = sqlx::query("UPDATE staff SET email = $1, updated_at = NOW() WHERE user_id = $2")
+                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
         }
     }
 
@@ -1037,6 +1042,8 @@ async fn update_profile(
                 .bind(clean).bind(actor_id).execute(&ctx.pool).await;
             let _ = sqlx::query("UPDATE teachers SET no_hp = $1, updated_at = NOW() WHERE user_id = $2")
                 .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+            let _ = sqlx::query("UPDATE staff SET no_hp = $1, updated_at = NOW() WHERE user_id = $2")
+                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
             let _ = sqlx::query("UPDATE guardians SET phone_number = $1, updated_at = NOW() WHERE user_id = $2")
                 .bind(clean).bind(actor_id).execute(&ctx.pool).await;
         }
@@ -1048,6 +1055,8 @@ async fn update_profile(
             let _ = sqlx::query("UPDATE students SET alamat_jalan = $1, updated_at = NOW() WHERE user_id = $2")
                 .bind(clean).bind(actor_id).execute(&ctx.pool).await;
             let _ = sqlx::query("UPDATE teachers SET alamat_jalan = $1, updated_at = NOW() WHERE user_id = $2")
+                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+            let _ = sqlx::query("UPDATE staff SET alamat_jalan = $1, updated_at = NOW() WHERE user_id = $2")
                 .bind(clean).bind(actor_id).execute(&ctx.pool).await;
             let _ = sqlx::query("UPDATE guardians SET address = $1, updated_at = NOW() WHERE user_id = $2")
                 .bind(clean).bind(actor_id).execute(&ctx.pool).await;
@@ -1063,16 +1072,30 @@ async fn update_profile(
                 .bind(clean).bind(actor_id).execute(&ctx.pool).await;
             let _ = sqlx::query("UPDATE teachers SET full_name = $1, updated_at = NOW() WHERE user_id = $2")
                 .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+            let _ = sqlx::query("UPDATE staff SET full_name = $1, updated_at = NOW() WHERE user_id = $2")
+                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
             let _ = sqlx::query("UPDATE guardians SET full_name = $1, updated_at = NOW() WHERE user_id = $2")
                 .bind(clean).bind(actor_id).execute(&ctx.pool).await;
         }
     }
 
+    let current_user = sqlx::query!(
+        "SELECT full_name, avatar_url FROM users WHERE id = $1",
+        actor_id
+    )
+    .fetch_optional(&ctx.pool)
+    .await
+    .ok()
+    .flatten();
+
+    let cur_name = current_user.as_ref().map(|u| u.full_name.clone()).unwrap_or_default();
+    let cur_avatar = current_user.as_ref().and_then(|u| u.avatar_url.clone()).unwrap_or_default();
+
     Ok(Json(ApiResponse::success(
         serde_json::json!({
             "message": "Profil berhasil diperbarui",
-            "avatar_url": payload.avatar_url,
-            "full_name": payload.full_name
+            "avatar_url": cur_avatar,
+            "full_name": cur_name
         }),
         req_ctx.request_id,
     )))

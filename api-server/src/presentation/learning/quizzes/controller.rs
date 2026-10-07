@@ -1099,31 +1099,31 @@ async fn grade_attempt(
                 .execute(&ctx.pool)
                 .await;
             }
-
-            let new_score: i32 = if let Some(manual_score) = p.score {
-                manual_score
-            } else {
-                sqlx::query_scalar::<_, i32>(
-                    r#"SELECT COALESCE(SUM(points_earned), 0)::int FROM attempt_answers WHERE attempt_id = $1"#,
-                )
-                .bind(attempt_id)
-                .fetch_one(&ctx.pool)
-                .await
-                .unwrap_or(0)
-            };
-
-            let _ = sqlx::query(
-                r#"
-                UPDATE quiz_attempts 
-                SET score = $1, status = 'graded', completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
-                WHERE id = $2
-                "#
-            )
-            .bind(new_score)
-            .bind(attempt_id)
-            .execute(&ctx.pool)
-            .await;
         }
+
+        let new_score: i32 = if let Some(manual_score) = p.score {
+            manual_score
+        } else {
+            sqlx::query_scalar::<_, i32>(
+                r#"SELECT COALESCE(SUM(points_earned), 0)::int FROM attempt_answers WHERE attempt_id = $1"#,
+            )
+            .bind(attempt_id)
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap_or(0)
+        };
+
+        let _ = sqlx::query(
+            r#"
+            UPDATE quiz_attempts 
+            SET score = $1, status = 'graded', completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
+            WHERE id = $2
+            "#
+        )
+        .bind(new_score)
+        .bind(attempt_id)
+        .execute(&ctx.pool)
+        .await;
     } else {
         let command = GradeAttemptCommand { attempt_id };
         let _ = ctx.grade_attempt.execute(command).await;

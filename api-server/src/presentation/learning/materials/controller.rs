@@ -930,22 +930,35 @@ async fn get_material_completions(
         sqlx::query(
             r#"
             SELECT 
-                s.id as student_id,
-                s.full_name as student_name,
-                s.nisn,
-                s.gender,
-                c.name as class_name,
-                (smc.id IS NOT NULL OR COALESCE(rp.is_completed, false) = true) as is_completed,
-                COALESCE(smc.completed_at, rp.updated_at) as completed_at,
-                rp.current_page,
-                rp.last_read_at
-            FROM students s
-            JOIN enrollments en ON en.student_id = s.id AND en.class_id = $2
-            JOIN classes c ON c.id = en.class_id
-            LEFT JOIN student_material_completions smc ON smc.student_id = s.id AND smc.material_id = $1
-            LEFT JOIN reading_progress rp ON rp.student_id = s.id AND rp.material_id = $1
-            WHERE s.tenant_id = $3
-            ORDER BY is_completed DESC, s.full_name ASC
+                student_id,
+                student_name,
+                nisn,
+                gender,
+                class_name,
+                is_completed,
+                completed_at,
+                current_page,
+                last_read_at
+            FROM (
+                SELECT DISTINCT ON (s.id)
+                    s.id as student_id,
+                    s.full_name as student_name,
+                    s.nisn,
+                    s.gender,
+                    c.name as class_name,
+                    (smc.id IS NOT NULL OR COALESCE(rp.is_completed, false) = true) as is_completed,
+                    COALESCE(smc.completed_at, rp.updated_at) as completed_at,
+                    rp.current_page,
+                    rp.last_read_at
+                FROM students s
+                JOIN enrollments en ON en.student_id = s.id AND en.class_id = $2
+                JOIN classes c ON c.id = en.class_id
+                LEFT JOIN student_material_completions smc ON smc.student_id = s.id AND smc.material_id = $1
+                LEFT JOIN reading_progress rp ON rp.student_id = s.id AND rp.material_id = $1
+                WHERE s.tenant_id = $3 AND s.deleted_at IS NULL AND s.is_active = true
+                ORDER BY s.id, (smc.id IS NOT NULL OR COALESCE(rp.is_completed, false) = true) DESC
+            ) sub
+            ORDER BY is_completed DESC, student_name ASC
             "#
         )
         .bind(id)
@@ -957,22 +970,35 @@ async fn get_material_completions(
         sqlx::query(
             r#"
             SELECT 
-                s.id as student_id,
-                s.full_name as student_name,
-                s.nisn,
-                s.gender,
-                c.name as class_name,
-                (smc.id IS NOT NULL OR COALESCE(rp.is_completed, false) = true) as is_completed,
-                COALESCE(smc.completed_at, rp.updated_at) as completed_at,
-                rp.current_page,
-                rp.last_read_at
-            FROM students s
-            LEFT JOIN enrollments en ON en.student_id = s.id
-            LEFT JOIN classes c ON c.id = en.class_id
-            LEFT JOIN student_material_completions smc ON smc.student_id = s.id AND smc.material_id = $1
-            LEFT JOIN reading_progress rp ON rp.student_id = s.id AND rp.material_id = $1
-            WHERE s.tenant_id = $2 AND (smc.id IS NOT NULL OR rp.id IS NOT NULL)
-            ORDER BY is_completed DESC, s.full_name ASC
+                student_id,
+                student_name,
+                nisn,
+                gender,
+                class_name,
+                is_completed,
+                completed_at,
+                current_page,
+                last_read_at
+            FROM (
+                SELECT DISTINCT ON (s.id)
+                    s.id as student_id,
+                    s.full_name as student_name,
+                    s.nisn,
+                    s.gender,
+                    c.name as class_name,
+                    (smc.id IS NOT NULL OR COALESCE(rp.is_completed, false) = true) as is_completed,
+                    COALESCE(smc.completed_at, rp.updated_at) as completed_at,
+                    rp.current_page,
+                    rp.last_read_at
+                FROM students s
+                LEFT JOIN enrollments en ON en.student_id = s.id AND (en.status = 'Active' OR en.status = 'ACTIVE' OR en.status IS NULL)
+                LEFT JOIN classes c ON c.id = en.class_id
+                LEFT JOIN student_material_completions smc ON smc.student_id = s.id AND smc.material_id = $1
+                LEFT JOIN reading_progress rp ON rp.student_id = s.id AND rp.material_id = $1
+                WHERE s.tenant_id = $2 AND s.deleted_at IS NULL AND s.is_active = true
+                ORDER BY s.id, (smc.id IS NOT NULL OR COALESCE(rp.is_completed, false) = true) DESC
+            ) sub
+            ORDER BY is_completed DESC, student_name ASC
             "#
         )
         .bind(id)

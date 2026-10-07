@@ -128,8 +128,58 @@ pub fn announcement_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/", get(list).post(create))
         .route("/stream", get(stream_announcements))
-        .route("/{id}", delete(delete_announcement))
+        .route("/{id}", get(get_announcement_by_id).delete(delete_announcement))
         .route("/{id}/pin", patch(toggle_pin))
+}
+
+async fn get_announcement_by_id(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ApiResponse<AnnouncementResponse>>, ApiError> {
+    let row = sqlx::query!(
+        r#"
+        SELECT id, title, content, category, target, author, is_pinned, push_status, created_at
+        FROM announcements
+        WHERE id = $1 AND tenant_id = $2
+        "#,
+        id,
+        req_ctx.tenant_id
+    )
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?
+    .ok_or_else(|| {
+        ApiError::new(
+            ApplicationError::Domain(school_core::common::error::DomainError::NotFound(
+                "Announcement not found".to_string(),
+            )),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let date_str = row.created_at.format("%d %b %Y · %H:%M WIB").to_string();
+    let item = AnnouncementResponse {
+        id: row.id,
+        title: row.title,
+        content: row.content,
+        category: row.category,
+        target: row.target,
+        author: row.author,
+        is_pinned: row.is_pinned,
+        push_status: row.push_status,
+        date: date_str,
+        created_at: row.created_at,
+    };
+
+    Ok(Json(ApiResponse::success(item, req_ctx.request_id)))
 }
 
 async fn stream_announcements(
@@ -217,8 +267,29 @@ async fn create(
     let announcement_id = Uuid::new_v4();
     let category = payload.category.unwrap_or_else(|| "AKADEMIK".to_string());
     let raw_target = payload.target.unwrap_or_else(|| "TARGET_ALL".to_string());
-    let target_enum = AnnouncementTarget::parse(&raw_target);
-    let target_display = target_enum.display_label().to_string();
+    let v = raw_target.trim().to_uppercase();
+    let is_explicit_all = v == "TARGET_ALL" || v == "ALL" || v.contains("SEMUA");
+    let has_student = is_explicit_all || v.contains("STUDENT") || v.contains("SISWA");
+    let has_guardian = is_explicit_all || v.contains("GUARDIAN") || v.contains("WALI") || v.contains("ORTU") || v.contains("PARENT");
+    let has_teacher = is_explicit_all || v.contains("TEACHER") || v.contains("GURU");
+
+    let (target_all, target_students, target_guardians, target_teachers) =
+        if is_explicit_all || (has_student && has_guardian && has_teacher) || (!has_student && !has_guardian && !has_teacher) {
+            (true, true, true, true)
+        } else {
+            (false, has_student, has_guardian, has_teacher)
+        };
+
+    let target_display = if target_all {
+        "Semua Siswa & Guru".to_string()
+    } else {
+        let mut labels = Vec::new();
+        if target_students { labels.push("Siswa"); }
+        if target_teachers { labels.push("Dewan Guru"); }
+        if target_guardians { labels.push("Wali Murid"); }
+        if labels.is_empty() { "Semua Siswa & Guru".to_string() } else { labels.join(" & ") }
+    };
+
     let author = payload
         .author
         .unwrap_or_else(|| "Kepala Sekolah".to_string());
@@ -253,8 +324,6 @@ async fn create(
     let mut notifications_sent = 0i64;
 
     if send_push {
-        let target_filter = target_enum.to_filter_str();
-
         let insert_result = sqlx::query(
             r#"
             INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, reference_type, reference_id, is_read, created_at)
@@ -274,16 +343,16 @@ async fn create(
             WHERE u.tenant_id = $1
               AND u.is_active = TRUE
               AND (
-                $4 = 'ALL'
-                OR ($4 = 'STUDENT' AND EXISTS (
+                $4 = TRUE
+                OR ($6 = TRUE AND EXISTS (
                     SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id 
                     WHERE ur.user_id = u.id AND (LOWER(r.name) LIKE '%siswa%' OR LOWER(r.name) LIKE '%student%')
                 ))
-                OR ($4 = 'GUARDIAN' AND EXISTS (
+                OR ($7 = TRUE AND EXISTS (
                     SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id 
                     WHERE ur.user_id = u.id AND (LOWER(r.name) LIKE '%wali%' OR LOWER(r.name) LIKE '%parent%' OR LOWER(r.name) LIKE '%ortu%')
                 ))
-                OR ($4 = 'TEACHER' AND EXISTS (
+                OR ($8 = TRUE AND EXISTS (
                     SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id 
                     WHERE ur.user_id = u.id AND (LOWER(r.name) LIKE '%guru%' OR LOWER(r.name) LIKE '%teacher%')
                 ))
@@ -293,8 +362,11 @@ async fn create(
         .bind(req_ctx.tenant_id)
         .bind(&row.title)
         .bind(&row.content)
-        .bind(target_filter)
+        .bind(target_all)
         .bind(row.id)
+        .bind(target_students)
+        .bind(target_guardians)
+        .bind(target_teachers)
         .execute(&ctx.pool)
         .await;
 

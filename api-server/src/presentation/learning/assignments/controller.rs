@@ -1433,33 +1433,52 @@ async fn get_submissions(
         sqlx::query(
             r#"
             SELECT 
-                COALESCE(sub.id, gen_random_uuid()) as id,
-                COALESCE(sub.tenant_id, s.tenant_id) as tenant_id,
-                $1 as assignment_id,
-                s.id as student_id,
-                sub.content,
-                sub.file_url,
-                COALESCE(sub.submitted_at, NOW()) as submitted_at,
-                COALESCE(sub.status, 'unsubmitted') as status,
-                sub.score,
-                sub.feedback,
-                sub.graded_at,
-                sub.graded_by,
-                s.full_name as student_name,
-                COALESCE(s.nisn, u.username, '-') as student_nisn,
-                s.user_id as student_user_id
-            FROM enrollments en
-            JOIN students s ON s.id = en.student_id
-            JOIN users u ON u.id = s.user_id
-            LEFT JOIN assignment_submissions sub ON sub.assignment_id = $1 AND (sub.student_id = s.id OR sub.student_id = s.user_id)
-            WHERE en.class_id = $2
-              AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                student_id,
+                id,
+                tenant_id,
+                assignment_id,
+                content,
+                file_url,
+                submitted_at,
+                status,
+                score,
+                feedback,
+                graded_at,
+                graded_by,
+                student_name,
+                student_nisn,
+                student_user_id
+            FROM (
+                SELECT DISTINCT ON (s.id)
+                    s.id as student_id,
+                    COALESCE(sub.id, gen_random_uuid()) as id,
+                    COALESCE(sub.tenant_id, s.tenant_id) as tenant_id,
+                    $1 as assignment_id,
+                    sub.content,
+                    sub.file_url,
+                    COALESCE(sub.submitted_at, NOW()) as submitted_at,
+                    COALESCE(sub.status, 'unsubmitted') as status,
+                    sub.score,
+                    sub.feedback,
+                    sub.graded_at,
+                    sub.graded_by,
+                    s.full_name as student_name,
+                    COALESCE(s.nisn, u.username, '-') as student_nisn,
+                    s.user_id as student_user_id
+                FROM enrollments en
+                JOIN students s ON s.id = en.student_id
+                LEFT JOIN users u ON u.id = s.user_id
+                LEFT JOIN assignment_submissions sub ON sub.assignment_id = $1 AND (sub.student_id = s.id OR (s.user_id IS NOT NULL AND sub.student_id = s.user_id))
+                WHERE en.class_id = $2
+                  AND (en.status = 'Active' OR en.status = 'ACTIVE' OR en.status IS NULL)
+                ORDER BY s.id, (sub.status IS NOT NULL AND sub.status != 'unsubmitted') DESC
+            ) subquery
             ORDER BY 
-                CASE WHEN sub.status = 'submitted' THEN 1
-                     WHEN sub.status = 'graded' THEN 2
+                CASE WHEN status = 'submitted' THEN 1
+                     WHEN status = 'graded' THEN 2
                      ELSE 3 END ASC,
-                sub.submitted_at DESC NULLS LAST,
-                s.full_name ASC
+                submitted_at DESC NULLS LAST,
+                student_name ASC
             "#,
         )
         .bind(id)
@@ -1470,20 +1489,54 @@ async fn get_submissions(
         sqlx::query(
             r#"
             SELECT 
-                sub.id, sub.tenant_id, sub.assignment_id, sub.student_id,
-                sub.content, sub.file_url, sub.submitted_at, sub.status,
-                sub.score, sub.feedback, sub.graded_at, sub.graded_by,
-                COALESCE(s.full_name, u.full_name, 'Siswa') as student_name,
-                COALESCE(s.nisn, u.username, '-') as student_nisn,
-                COALESCE(s.user_id, u.id) as student_user_id
-            FROM assignment_submissions sub
-            LEFT JOIN students s ON s.id = sub.student_id OR s.user_id = sub.student_id
-            LEFT JOIN users u ON u.id = sub.student_id OR u.id = s.user_id
-            WHERE sub.assignment_id = $1
-            ORDER BY sub.submitted_at DESC
-            "#,
+                student_id,
+                id,
+                tenant_id,
+                assignment_id,
+                content,
+                file_url,
+                submitted_at,
+                status,
+                score,
+                feedback,
+                graded_at,
+                graded_by,
+                student_name,
+                student_nisn,
+                student_user_id
+            FROM (
+                SELECT DISTINCT ON (s.id)
+                    s.id as student_id,
+                    COALESCE(sub.id, gen_random_uuid()) as id,
+                    COALESCE(sub.tenant_id, s.tenant_id) as tenant_id,
+                    $1 as assignment_id,
+                    sub.content,
+                    sub.file_url,
+                    COALESCE(sub.submitted_at, NOW()) as submitted_at,
+                    COALESCE(sub.status, 'unsubmitted') as status,
+                    sub.score,
+                    sub.feedback,
+                    sub.graded_at,
+                    sub.graded_by,
+                    s.full_name as student_name,
+                    COALESCE(s.nisn, u.username, '-') as student_nisn,
+                    s.user_id as student_user_id
+                FROM students s
+                LEFT JOIN users u ON u.id = s.user_id
+                LEFT JOIN assignment_submissions sub ON sub.assignment_id = $1 AND (sub.student_id = s.id OR (s.user_id IS NOT NULL AND sub.student_id = s.user_id))
+                WHERE s.tenant_id = $2 AND s.deleted_at IS NULL AND s.is_active = true
+                ORDER BY s.id, (sub.status IS NOT NULL AND sub.status != 'unsubmitted') DESC
+            ) subquery
+            ORDER BY 
+                CASE WHEN status = 'submitted' THEN 1
+                     WHEN status = 'graded' THEN 2
+                     ELSE 3 END ASC,
+                submitted_at DESC NULLS LAST,
+                student_name ASC
+            "#
         )
         .bind(id)
+        .bind(req_ctx.tenant_id)
         .fetch_all(&ctx.pool)
         .await
     }
