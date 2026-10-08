@@ -283,15 +283,39 @@ impl Bootstrap {
             self.database_url.split('@').last().unwrap_or("unknown")
         );
 
-        let pool = match PgPoolOptions::new()
-            .max_connections(5)
-            .connect(&self.database_url)
-            .await
-        {
-            Ok(p) => p,
-            Err(e) => {
+        let mut pool_opt = None;
+        let mut last_err = None;
+        for attempt in 1..=5 {
+            match PgPoolOptions::new()
+                .max_connections(5)
+                .acquire_timeout(Duration::from_secs(15))
+                .connect(&self.database_url)
+                .await
+            {
+                Ok(p) => {
+                    pool_opt = Some(p);
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Database connection attempt {}/5 failed (Postgres may be waking up from sleep): {:?}",
+                        attempt,
+                        e
+                    );
+                    last_err = Some(e);
+                    if attempt < 5 {
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                    }
+                }
+            }
+        }
+
+        let pool = match pool_opt {
+            Some(p) => p,
+            None => {
+                let e = last_err.unwrap();
                 tracing::error!(
-                    "Failed to connect to database (URL scheme: '{}', length: {}): {:?}",
+                    "Failed to connect to database after 5 attempts (URL scheme: '{}', length: {}): {:?}",
                     self.database_url.split(':').next().unwrap_or(""),
                     self.database_url.len(),
                     e
