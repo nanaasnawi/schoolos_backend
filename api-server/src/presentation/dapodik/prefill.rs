@@ -204,7 +204,7 @@ pub async fn generate_prefill_dapodik(
                             INSERT INTO students (id, tenant_id, user_id, nisn, full_name, status, created_at, updated_at)
                             VALUES ($1, $2, $3, $4, $5, 'Active', $6, $6)
                             ON CONFLICT (tenant_id, nisn) DO UPDATE 
-                            SET full_name = EXCLUDED.full_name, user_id = COALESCE(students.user_id, EXCLUDED.user_id), updated_at = EXCLUDED.updated_at
+                            SET full_name = EXCLUDED.full_name, user_id = COALESCE(EXCLUDED.user_id, students.user_id), updated_at = EXCLUDED.updated_at
                             "#
                         )
                         .bind(new_id)
