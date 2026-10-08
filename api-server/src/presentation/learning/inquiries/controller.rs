@@ -80,7 +80,7 @@ pub struct CreateInquiryRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct SendInquiryMessageRequest {
-    pub client_message_id: Option<Uuid>,
+    pub client_message_id: Option<String>,
     pub sender_id: Option<String>,
     pub sender_name: Option<String>,
     pub sender_role: String, // "TEACHER" or "STUDENT"
@@ -1102,6 +1102,65 @@ async fn create_inquiry(
         }
     }
 
+    // Push new thread metadata, initial message, and summary to Firebase RTDB
+    let rtdb_th_id = thread_id.to_string();
+    let rtdb_std_id = student_id.to_string();
+    let rtdb_std_name = student_name.clone();
+    let rtdb_std_class = resolved_class_name.clone();
+    let rtdb_tch_id = resolved_teacher_id.map(|t| t.to_string()).unwrap_or_else(|| "teacher-default".to_string());
+    let rtdb_tch_name = resolved_teacher_name.clone();
+    let rtdb_sub_name = resolved_subject_name.clone();
+    let rtdb_inq_type = inquiry_type.clone();
+    let rtdb_ref_title = payload.reference_title.trim().to_string();
+    let rtdb_ref_id = payload.reference_id.clone().unwrap_or_default();
+    let rtdb_init_msg = initial_msg.clone();
+    let rtdb_now_ms = chrono::Utc::now().timestamp_millis();
+
+    tokio::spawn(async move {
+        let client = reqwest::Client::new();
+        let base_url = "https://akselerasi-edu-default-rtdb.asia-southeast1.firebasedatabase.app";
+        
+        let meta_url = format!("{}/inquiries/{}/metadata.json", base_url, rtdb_th_id);
+        let meta_payload = serde_json::json!({
+            "id": rtdb_th_id,
+            "studentId": rtdb_std_id,
+            "studentName": rtdb_std_name,
+            "studentClass": rtdb_std_class,
+            "teacherId": rtdb_tch_id,
+            "teacherName": rtdb_tch_name,
+            "subjectName": rtdb_sub_name,
+            "inquiryType": rtdb_inq_type,
+            "referenceTitle": rtdb_ref_title,
+            "referenceId": rtdb_ref_id,
+            "status": "WAITING_REPLY",
+            "lastUpdated": rtdb_now_ms,
+        });
+        let _ = client.put(&meta_url).json(&meta_payload).send().await;
+
+        let msg_id = uuid::Uuid::new_v4().to_string();
+        let msg_url = format!("{}/inquiries/{}/messages/{}.json", base_url, rtdb_th_id, msg_id);
+        let msg_payload = serde_json::json!({
+            "id": msg_id,
+            "threadId": rtdb_th_id,
+            "senderId": rtdb_std_id,
+            "senderName": rtdb_std_name,
+            "senderRole": "STUDENT",
+            "content": rtdb_init_msg,
+            "timestamp": rtdb_now_ms,
+            "isFromTeacher": false,
+        });
+        let _ = client.put(&msg_url).json(&msg_payload).send().await;
+
+        let summary_url = format!("{}/inquiries/{}/summary.json", base_url, rtdb_th_id);
+        let summary_payload = serde_json::json!({
+            "lastMessageContent": rtdb_init_msg,
+            "lastMessageAt": rtdb_now_ms,
+            "status": "WAITING_REPLY",
+            "lastSenderName": rtdb_std_name,
+        });
+        let _ = client.patch(&summary_url).json(&summary_payload).send().await;
+    });
+
     let dto = InquiryThreadDto {
         id: thread.get("id"),
         student_id: thread.get("student_id"),
@@ -1239,7 +1298,12 @@ async fn send_message(
     }
 
     // Idempotent retry check: if client_message_id exists, return previously saved message
-    if let Some(cid) = payload.client_message_id {
+    let client_uuid = payload.client_message_id.as_deref().and_then(|s| {
+        let clean = s.strip_prefix("temp-").unwrap_or(s);
+        Uuid::parse_str(clean).ok()
+    });
+
+    if let Some(cid) = client_uuid {
         let existing = sqlx::query(
             "SELECT id, thread_id, sender_id, sender_name, sender_role, content, is_from_teacher, created_at FROM inquiry_messages WHERE client_message_id = $1 AND tenant_id = $2 LIMIT 1"
         )
@@ -1305,7 +1369,7 @@ async fn send_message(
     .bind(sender_role)
     .bind(&content)
     .bind(is_from_teacher)
-    .bind(payload.client_message_id)
+    .bind(client_uuid)
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| {
@@ -1465,6 +1529,44 @@ async fn send_message(
             }
         }
     }
+
+    // Push real-time message and thread summary to Firebase Realtime Database
+    let rtdb_thread_id = id.to_string();
+    let rtdb_msg_id = message_id.to_string();
+    let rtdb_sender_id = sender_id.clone();
+    let rtdb_sender_name = sender_name.clone();
+    let rtdb_sender_role = sender_role.to_string();
+    let rtdb_content = content.clone();
+    let rtdb_is_teacher = is_from_teacher;
+    let rtdb_now_ms = chrono::Utc::now().timestamp_millis();
+    let rtdb_status = if is_from_teacher { "ANSWERED" } else { "WAITING_REPLY" }.to_string();
+
+    tokio::spawn(async move {
+        let client = reqwest::Client::new();
+        let base_url = "https://akselerasi-edu-default-rtdb.asia-southeast1.firebasedatabase.app";
+        
+        let msg_url = format!("{}/inquiries/{}/messages/{}.json", base_url, rtdb_thread_id, rtdb_msg_id);
+        let msg_payload = serde_json::json!({
+            "id": rtdb_msg_id,
+            "threadId": rtdb_thread_id,
+            "senderId": rtdb_sender_id,
+            "senderName": rtdb_sender_name,
+            "senderRole": rtdb_sender_role,
+            "content": rtdb_content,
+            "timestamp": rtdb_now_ms,
+            "isFromTeacher": rtdb_is_teacher,
+        });
+        let _ = client.put(&msg_url).json(&msg_payload).send().await;
+
+        let summary_url = format!("{}/inquiries/{}/summary.json", base_url, rtdb_thread_id);
+        let summary_payload = serde_json::json!({
+            "lastMessageContent": rtdb_content,
+            "lastMessageAt": rtdb_now_ms,
+            "status": rtdb_status,
+            "lastSenderName": rtdb_sender_name,
+        });
+        let _ = client.patch(&summary_url).json(&summary_payload).send().await;
+    });
 
     let dto = InquiryMessageDto {
         id: msg.id,
