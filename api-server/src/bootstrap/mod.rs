@@ -314,6 +314,12 @@ impl Bootstrap {
         {
             tracing::warn!("Notice on avatar_url column check: {:?}", e);
         }
+        if let Err(e) = sqlx::query("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_data BYTEA, ADD COLUMN IF NOT EXISTS avatar_mime VARCHAR(50);")
+            .execute(&pool)
+            .await
+        {
+            tracing::warn!("Notice on avatar_data/avatar_mime columns check: {:?}", e);
+        }
 
         // Infrastructure
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);

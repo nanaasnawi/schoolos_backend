@@ -525,22 +525,17 @@ async fn fast_safe_upsert_user(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Uuid, sqlx::Error> {
     let clean_fullname = truncate_str(full_name, 255);
-    let clean_uname = if username.trim().is_empty() {
+    let mut clean_uname = if username.trim().is_empty() {
         fast_generate_unique_username(existing_usernames, &clean_fullname)
     } else {
         truncate_str(username, 100)
     };
     let clean_email = truncate_str(email, 255);
     let clean_email_lower = clean_email.to_lowercase();
-    let clean_uname_lower = clean_uname.to_lowercase();
+    let mut clean_uname_lower = clean_uname.to_lowercase();
 
-    // 1. Check in-memory cache first (0 network latency)
-    let cached_uid = user_by_email
-        .get(&clean_email_lower)
-        .or_else(|| user_by_username.get(&clean_uname_lower))
-        .copied();
-
-    if let Some(uid) = cached_uid {
+    // 1. Check in-memory cache strictly by email (the true identity)
+    if let Some(&uid) = user_by_email.get(&clean_email_lower) {
         sqlx::query(
             r#"
             UPDATE users 
@@ -563,7 +558,19 @@ async fn fast_safe_upsert_user(
         return Ok(uid);
     }
 
-    // 2. Insert with savepoint protection against unique constraint abort
+    // 2. If the chosen username is already claimed by a DIFFERENT user in cache/set,
+    // generate an alternate unique username (e.g. rohman1, rohman2) to avoid collision!
+    if let Some(&other_uid) = user_by_username.get(&clean_uname_lower) {
+        if user_by_email.get(&clean_email_lower) != Some(&other_uid) {
+            clean_uname = fast_generate_unique_username(existing_usernames, &clean_fullname);
+            clean_uname_lower = clean_uname.to_lowercase();
+        }
+    } else if existing_usernames.contains(&clean_uname_lower) {
+        clean_uname = fast_generate_unique_username(existing_usernames, &clean_fullname);
+        clean_uname_lower = clean_uname.to_lowercase();
+    }
+
+    // 3. Insert with savepoint protection against unique constraint abort
     let new_uid = Uuid::now_v7();
     let _ = sqlx::query("SAVEPOINT sp_upsert_user")
         .execute(&mut **tx)
@@ -603,22 +610,62 @@ async fn fast_safe_upsert_user(
             let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_upsert_user")
                 .execute(&mut **tx)
                 .await;
-            // Fallback query if conflict happened on username
-            let fallback_user = sqlx::query_scalar::<_, Uuid>(
-                "SELECT id FROM users WHERE tenant_id = $1 AND (email = $2 OR LOWER(username) = LOWER($3)) LIMIT 1",
-            )
-            .bind(tenant_id)
-            .bind(&clean_email)
-            .bind(&clean_uname)
-            .fetch_optional(&mut **tx)
-            .await?;
 
-            if let Some(uid) = fallback_user {
-                user_by_email.insert(clean_email_lower, uid);
-                user_by_username.insert(clean_uname_lower, uid);
-                Ok(uid)
-            } else {
-                Err(e)
+            // If conflict happened on username, loop with unique suffix to give this person their own account
+            let base_name = clean_name_for_base_username(&clean_fullname);
+            let mut suffix = 1;
+            loop {
+                let candidate = format!("{}{}", base_name, suffix);
+                let cand_lower = candidate.to_lowercase();
+                if existing_usernames.contains(&cand_lower) {
+                    suffix += 1;
+                    continue;
+                }
+
+                let _ = sqlx::query("SAVEPOINT sp_upsert_user_retry")
+                    .execute(&mut **tx)
+                    .await;
+
+                let retry_res = sqlx::query_scalar::<_, Uuid>(
+                    r#"
+                    INSERT INTO users (id, tenant_id, username, email, password_hash, full_name, is_active, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, '$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY', $5, true, $6, $6)
+                    ON CONFLICT (tenant_id, email) DO UPDATE SET
+                        username = COALESCE(users.username, EXCLUDED.username),
+                        full_name = EXCLUDED.full_name,
+                        updated_at = EXCLUDED.updated_at
+                    RETURNING id
+                    "#,
+                )
+                .bind(Uuid::now_v7())
+                .bind(tenant_id)
+                .bind(&candidate)
+                .bind(&clean_email)
+                .bind(&clean_fullname)
+                .bind(now)
+                .fetch_one(&mut **tx)
+                .await;
+
+                match retry_res {
+                    Ok(uid) => {
+                        let _ = sqlx::query("RELEASE SAVEPOINT sp_upsert_user_retry")
+                            .execute(&mut **tx)
+                            .await;
+                        user_by_email.insert(clean_email_lower, uid);
+                        user_by_username.insert(cand_lower.clone(), uid);
+                        existing_usernames.insert(cand_lower);
+                        return Ok(uid);
+                    }
+                    Err(_) => {
+                        let _ = sqlx::query("ROLLBACK TO SAVEPOINT sp_upsert_user_retry")
+                            .execute(&mut **tx)
+                            .await;
+                        suffix += 1;
+                        if suffix > 200 {
+                            return Err(e);
+                        }
+                    }
+                }
             }
         }
     }
@@ -2619,7 +2666,7 @@ pub async fn pull_dapodik_records(
                 let update_res = sqlx::query(
                     r#"
                     UPDATE students 
-                    SET full_name = $1, user_id = COALESCE(students.user_id, $2), nik = $3, gender = $4, place_of_birth = $5, date_of_birth = $6, religion = $7, 
+                    SET full_name = $1, user_id = COALESCE($2, students.user_id), nik = $3, gender = $4, place_of_birth = $5, date_of_birth = $6, religion = $7, 
                         guardian_id = COALESCE($8, students.guardian_id), nipd = COALESCE($9, students.nipd),
                         alamat_jalan = COALESCE($10, students.alamat_jalan), no_hp = COALESCE($11, students.no_hp),
                         email = COALESCE($12, students.email), nama_ayah = COALESCE($13, students.nama_ayah), nama_ibu = COALESCE($14, students.nama_ibu),
@@ -2665,7 +2712,7 @@ pub async fn pull_dapodik_records(
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, 'active', $18, $18)
                     ON CONFLICT (tenant_id, nisn) DO UPDATE
                     SET full_name = EXCLUDED.full_name,
-                        user_id = COALESCE(students.user_id, EXCLUDED.user_id),
+                        user_id = COALESCE(EXCLUDED.user_id, students.user_id),
                         guardian_id = COALESCE(EXCLUDED.guardian_id, students.guardian_id),
                         nik = COALESCE(EXCLUDED.nik, students.nik),
                         gender = COALESCE(EXCLUDED.gender, students.gender),

@@ -33,11 +33,15 @@ pub fn auth_routes(context: ApplicationContext) -> Router<ApplicationContext> {
         .route("/qr-login", post(qr_login))
         .route("/refresh", post(refresh))
         .route("/register", post(register))
+        .route("/avatar/:id", axum::routing::get(get_user_avatar))
         .merge(
             Router::new()
                 .route("/me", axum::routing::get(get_me))
                 .route("/profile", axum::routing::put(update_profile))
-                .route("/avatar", axum::routing::post(upload_avatar))
+                .route(
+                    "/avatar",
+                    axum::routing::post(upload_avatar).delete(delete_avatar),
+                )
                 .route("/users", axum::routing::get(list_users))
                 .route("/change-password", axum::routing::post(change_password))
                 .route("/qr-tokens/generate", post(generate_qr_token_endpoint))
@@ -829,13 +833,13 @@ async fn get_me(
     Ok(Json(ApiResponse::success(dto, req_ctx.request_id)))
 }
 
-/// Upload or change user profile avatar photo
+/// Upload or change user profile avatar photo directly into PostgreSQL database
 #[utoipa::path(
     post,
     operation_id = "uploadUserAvatar",
     path = "/api/v1/auth/avatar",
     responses(
-        (status = 200, description = "Avatar uploaded successfully", body = inline(ApiResponse<serde_json::Value>)),
+        (status = 200, description = "Avatar saved directly to database", body = inline(ApiResponse<serde_json::Value>)),
     ),
     security(
         ("Bearer" = [])
@@ -858,17 +862,8 @@ async fn upload_avatar(
         ));
     }
 
-    let uploads_dir = std::path::PathBuf::from("uploads");
-    tokio::fs::create_dir_all(&uploads_dir).await.map_err(|e| {
-        ApiError::new(
-            school_core::common::error::ApplicationError::Internal(format!(
-                "Failed to create uploads directory: {e}"
-            )),
-            &req_ctx.request_id,
-        )
-    })?;
-
-    let mut avatar_url: Option<String> = None;
+    let mut avatar_bytes: Option<Vec<u8>> = None;
+    let mut avatar_mime: String = "image/jpeg".to_string();
 
     while let Some(field) = multipart.next_field().await.map_err(|e| {
         ApiError::new(
@@ -908,6 +903,14 @@ async fn upload_avatar(
                 ));
             }
 
+            avatar_mime = match ext.as_str() {
+                "jpg" | "jpeg" => "image/jpeg".to_string(),
+                "png" => "image/png".to_string(),
+                "webp" => "image/webp".to_string(),
+                "gif" => "image/gif".to_string(),
+                _ => "image/jpeg".to_string(),
+            };
+
             let bytes = field.bytes().await.map_err(|e| {
                 ApiError::new(
                     school_core::common::error::ApplicationError::Internal(format!(
@@ -917,25 +920,12 @@ async fn upload_avatar(
                 )
             })?;
 
-            let unique_name = format!("avatar_{}_{}.{}", actor_id, chrono::Utc::now().timestamp(), ext);
-            let file_path = uploads_dir.join(&unique_name);
-
-            tokio::fs::write(&file_path, &bytes).await.map_err(|e| {
-                ApiError::new(
-                    school_core::common::error::ApplicationError::Internal(format!(
-                        "Failed to save avatar image file: {e}"
-                    )),
-                    &req_ctx.request_id,
-                )
-            })?;
-
-            let url = format!("/uploads/{unique_name}");
-            avatar_url = Some(url);
+            avatar_bytes = Some(bytes.to_vec());
             break;
         }
     }
 
-    let url = avatar_url.ok_or_else(|| {
+    let bytes = avatar_bytes.ok_or_else(|| {
         ApiError::new(
             school_core::common::error::ApplicationError::Domain(
                 school_core::common::error::DomainError::Validation(
@@ -946,10 +936,13 @@ async fn upload_avatar(
         )
     })?;
 
-    // Update users table in PostgreSQL
+    // Direct PostgreSQL persistence: store bytea binary & MIME directly into database table
+    let url = format!("/api/v1/auth/avatar/{actor_id}");
     sqlx::query(
-        "UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE id = $2",
+        "UPDATE users SET avatar_data = $1, avatar_mime = $2, avatar_url = $3, updated_at = NOW() WHERE id = $4",
     )
+    .bind(&bytes[..])
+    .bind(&avatar_mime)
     .bind(&url)
     .bind(actor_id)
     .execute(&ctx.pool)
@@ -966,7 +959,127 @@ async fn upload_avatar(
     Ok(Json(ApiResponse::success(
         serde_json::json!({
             "avatar_url": url,
-            "message": "Foto profil berhasil diperbarui dan disimpan ke database"
+            "message": "Foto profil berhasil disimpan langsung ke dalam database PostgreSQL"
+        }),
+        req_ctx.request_id,
+    )))
+}
+
+/// Get user avatar image directly from PostgreSQL database
+#[utoipa::path(
+    get,
+    operation_id = "getUserAvatar",
+    path = "/api/v1/auth/avatar/{id}",
+    params(
+        ("id" = uuid::Uuid, Path, description = "User ID")
+    ),
+    responses(
+        (status = 200, description = "User avatar image returned directly from database"),
+        (status = 404, description = "Avatar not found")
+    ),
+    tag = "Auth"
+)]
+async fn get_user_avatar(
+    State(ctx): State<ApplicationContext>,
+    axum::extract::Path(user_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<axum::response::Response, ApiError> {
+    let row = sqlx::query(
+        "SELECT avatar_data, avatar_mime FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &uuid::Uuid::new_v4().to_string(),
+        )
+    })?;
+
+    if let Some(r) = row {
+        let avatar_data: Option<Vec<u8>> = r.try_get("avatar_data").ok().flatten();
+        let avatar_mime: Option<String> = r.try_get("avatar_mime").ok().flatten();
+        if let Some(data) = avatar_data {
+            let mime = avatar_mime.unwrap_or_else(|| "image/jpeg".to_string());
+            let resp = axum::response::Response::builder()
+                .status(axum::http::StatusCode::OK)
+                .header(axum::http::header::CONTENT_TYPE, mime)
+                // Instruct clients (Android Coil, browsers) never to persist or cache in local disk storage
+                .header(axum::http::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
+                .header(axum::http::header::PRAGMA, "no-cache")
+                .header(axum::http::header::EXPIRES, "0")
+                .body(axum::body::Body::from(data))
+                .map_err(|e| {
+                    ApiError::new(
+                        school_core::common::error::ApplicationError::Internal(e.to_string()),
+                        &uuid::Uuid::new_v4().to_string(),
+                    )
+                })?;
+            return Ok(resp);
+        }
+    }
+
+    Ok(axum::response::Response::builder()
+        .status(axum::http::StatusCode::NOT_FOUND)
+        .header(axum::http::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
+        .body(axum::body::Body::empty())
+        .map_err(|e| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Internal(e.to_string()),
+                &uuid::Uuid::new_v4().to_string(),
+            )
+        })?)
+}
+
+/// Delete user avatar photo directly from database
+#[utoipa::path(
+    delete,
+    operation_id = "deleteUserAvatar",
+    path = "/api/v1/auth/avatar",
+    responses(
+        (status = 200, description = "Avatar deleted successfully", body = inline(ApiResponse<serde_json::Value>)),
+    ),
+    security(
+        ("Bearer" = [])
+    ),
+    tag = "Auth"
+)]
+async fn delete_avatar(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
+    if actor_id.is_nil() {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthInvalidToken,
+                "Authentication required".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
+    sqlx::query(
+        "UPDATE users SET avatar_data = NULL, avatar_mime = NULL, avatar_url = NULL, updated_at = NOW() WHERE id = $1",
+    )
+    .bind(actor_id)
+    .execute(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({
+            "message": "Foto profil berhasil dihapus dari database",
+            "avatar_url": null
         }),
         req_ctx.request_id,
     )))
@@ -1003,13 +1116,22 @@ async fn update_profile(
     }
 
     if let Some(ref av) = payload.avatar_url {
-        let _ = sqlx::query(
-            "UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE id = $2",
-        )
-        .bind(av)
-        .bind(actor_id)
-        .execute(&ctx.pool)
-        .await;
+        if av.trim().is_empty() {
+            let _ = sqlx::query(
+                "UPDATE users SET avatar_data = NULL, avatar_mime = NULL, avatar_url = NULL, updated_at = NOW() WHERE id = $1",
+            )
+            .bind(actor_id)
+            .execute(&ctx.pool)
+            .await;
+        } else {
+            let _ = sqlx::query(
+                "UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE id = $2",
+            )
+            .bind(av)
+            .bind(actor_id)
+            .execute(&ctx.pool)
+            .await;
+        }
     }
 
     if let Some(ref em) = payload.email {
