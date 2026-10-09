@@ -17,7 +17,10 @@ use crate::{
     },
     response::ApiResponse,
 };
-use school_core::common::error::{ApplicationError, DomainError};
+use school_core::common::{
+    error::{ApplicationError, DomainError},
+    error_code::ErrorCode,
+};
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct GenerateAiContentRequest {
@@ -58,8 +61,8 @@ pub fn ai_routes() -> Router<ApplicationContext> {
     path = "/api/v1/ai/generate-content",
     request_body = GenerateAiContentRequest,
     responses(
-        (status = 200, description = "Generated AI content successfully", body = ApiResponse<GenerateAiContentResponse>),
-        (status = 400, description = "Validation error", body = ApiResponse<Value>)
+        (status = 200, description = "Generated AI content successfully", body = inline(ApiResponse<GenerateAiContentResponse>)),
+        (status = 400, description = "Validation error")
     ),
     security(("Bearer" = []))
 )]
@@ -160,8 +163,8 @@ async fn generate_content(
     path = "/api/v1/ai/analytics/student",
     request_body = AnalyzeStudentRequest,
     responses(
-        (status = 200, description = "Generated student AI analytics successfully", body = ApiResponse<StudentAnalyticsInsightDto>),
-        (status = 404, description = "Student not found", body = ApiResponse<Value>)
+        (status = 200, description = "Generated student AI analytics successfully", body = inline(ApiResponse<StudentAnalyticsInsightDto>)),
+        (status = 404, description = "Student not found")
     ),
     security(("Bearer" = []))
 )]
@@ -189,7 +192,7 @@ async fn analyze_student(
     .ok_or_else(|| {
         ApiError::new(
             ApplicationError::NotFound(
-                school_core::common::error_code::ErrorCode::NotFound,
+                ErrorCode::StudentNotFound,
                 "Siswa tidak ditemukan".to_string(),
             ),
             &req_ctx.request_id,
