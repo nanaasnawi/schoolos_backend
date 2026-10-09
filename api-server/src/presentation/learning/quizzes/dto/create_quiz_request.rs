@@ -23,6 +23,16 @@ pub struct CreateQuizRequest {
     pub end_at: Option<DateTime<Utc>>,
     pub class_id: Option<String>,
     #[serde(default)]
+    pub session_id: Option<Uuid>,
+    #[serde(default = "default_exam_mode")]
+    pub exam_mode: Option<String>,
+    #[serde(default)]
+    pub exam_token: Option<String>,
+    #[serde(default)]
+    pub token_expires_at: Option<DateTime<Utc>>,
+    #[serde(default = "default_max_token_attempts")]
+    pub max_token_attempts: Option<i32>,
+    #[serde(default)]
     pub questions: Option<Vec<super::quiz_question_dto::CreateQuizQuestionRequest>>,
 }
 
@@ -36,4 +46,12 @@ fn default_passing_score() -> i32 {
 
 fn default_max_attempts() -> i32 {
     1
+}
+
+fn default_exam_mode() -> Option<String> {
+    Some("HOMEWORK_QUIZ".to_string())
+}
+
+fn default_max_token_attempts() -> Option<i32> {
+    Some(5)
 }

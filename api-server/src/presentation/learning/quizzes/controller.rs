@@ -153,19 +153,37 @@ async fn create(
         None
     };
 
-    let _ = sqlx::query!(
-        r#"UPDATE quizzes SET class_id = $1, subject_id = $2, teacher_id = $3, created_by = $4 WHERE id = $5"#,
-        target_class_id,
-        subject_id,
-        teacher_id,
-        actor_id,
-        quiz.id
+    let exam_mode = payload.exam_mode.unwrap_or_else(|| "HOMEWORK_QUIZ".to_string());
+    let exam_token = payload.exam_token.filter(|t| !t.trim().is_empty());
+    let max_token_attempts = payload.max_token_attempts.unwrap_or(5);
+    let session_id = payload.session_id;
+
+    let _ = sqlx::query(
+        r#"UPDATE quizzes 
+           SET class_id = $1, subject_id = $2, teacher_id = $3, created_by = $4,
+               exam_mode = $5, exam_token = $6, max_token_attempts = $7, session_id = $8, token_expires_at = $9
+           WHERE id = $10"#,
     )
+    .bind(target_class_id)
+    .bind(subject_id)
+    .bind(teacher_id)
+    .bind(actor_id)
+    .bind(&exam_mode)
+    .bind(&exam_token)
+    .bind(max_token_attempts)
+    .bind(session_id)
+    .bind(payload.token_expires_at)
+    .bind(quiz.id)
     .execute(&ctx.pool)
     .await;
 
     let mut resp = QuizResponse::from(quiz);
     resp.class_id = target_class_id;
+    resp.session_id = session_id;
+    resp.exam_mode = Some(exam_mode);
+    resp.exam_token = exam_token;
+    resp.token_expires_at = payload.token_expires_at;
+    resp.max_token_attempts = Some(max_token_attempts);
     if let Some(cid) = target_class_id {
         resp.class_name = sqlx::query_scalar!(r#"SELECT name FROM classes WHERE id = $1"#, cid)
             .fetch_optional(&ctx.pool)
@@ -370,6 +388,7 @@ async fn list(
                 q.start_at, q.end_at, q.status, q.questions_count, q.is_active,
                 q.created_at, q.updated_at,
                 q.class_id,
+                q.session_id, q.exam_mode, q.exam_token, q.token_expires_at, q.max_token_attempts,
                 c.name as class_name,
                 sub.name as subject_name,
                 t.full_name as teacher_name
@@ -422,6 +441,11 @@ async fn list(
                     class_name: r.get("class_name"),
                     subject_name: r.get("subject_name"),
                     teacher_name: r.get("teacher_name"),
+                    session_id: r.get("session_id"),
+                    exam_mode: r.get::<Option<String>, _>("exam_mode").or_else(|| Some("HOMEWORK_QUIZ".to_string())),
+                    exam_token: r.get("exam_token"),
+                    token_expires_at: r.get("token_expires_at"),
+                    max_token_attempts: r.get::<Option<i32>, _>("max_token_attempts").or(Some(5)),
                     student_attempt_status: None,
                     student_attempts_count: None,
                     student_has_completed: None,
@@ -439,6 +463,7 @@ async fn list(
                 q.start_at, q.end_at, q.status, q.questions_count, q.is_active,
                 q.created_at, q.updated_at,
                 q.class_id,
+                q.session_id, q.exam_mode, q.exam_token, q.token_expires_at, q.max_token_attempts,
                 c.name as class_name,
                 sub.name as subject_name,
                 t.full_name as teacher_name,
@@ -583,6 +608,11 @@ async fn list(
                     class_name: r.get("class_name"),
                     subject_name: r.get("subject_name"),
                     teacher_name: r.get("teacher_name"),
+                    session_id: r.get("session_id"),
+                    exam_mode: r.get::<Option<String>, _>("exam_mode").or_else(|| Some("HOMEWORK_QUIZ".to_string())),
+                    exam_token: r.get("exam_token"),
+                    token_expires_at: r.get("token_expires_at"),
+                    max_token_attempts: r.get::<Option<i32>, _>("max_token_attempts").or(Some(5)),
                     student_attempt_status,
                     student_attempts_count,
                     student_has_completed: Some(is_completed),
@@ -592,7 +622,7 @@ async fn list(
             })
             .collect()
     } else {
-        let rows = sqlx::query!(
+        let rows = sqlx::query(
             r#"
             SELECT 
                 q.id, q.tenant_id, q.lesson_id, q.title, q.description, q.time_limit_minutes,
@@ -600,9 +630,10 @@ async fn list(
                 q.start_at, q.end_at, q.status, q.questions_count, q.is_active,
                 q.created_at, q.updated_at,
                 q.class_id,
-                c.name as "class_name?",
-                sub.name as "subject_name?",
-                t.full_name as "teacher_name?"
+                q.session_id, q.exam_mode, q.exam_token, q.token_expires_at, q.max_token_attempts,
+                c.name as class_name,
+                sub.name as subject_name,
+                t.full_name as teacher_name
             FROM quizzes q
             LEFT JOIN classes c ON c.id = q.class_id
             LEFT JOIN subjects sub ON sub.id = q.subject_id
@@ -610,8 +641,8 @@ async fn list(
             WHERE q.tenant_id = $1 AND q.deleted_at IS NULL
             ORDER BY q.created_at DESC
             "#,
-            req_ctx.tenant_id
         )
+        .bind(req_ctx.tenant_id)
         .fetch_all(&ctx.pool)
         .await
         .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
@@ -620,31 +651,36 @@ async fn list(
 
         rows.into_iter()
             .map(|r| {
-                let dur = r.time_limit_minutes.unwrap_or(30);
+                let dur = r.get::<Option<i32>, _>("time_limit_minutes").unwrap_or(30);
                 QuizResponse {
-                    id: r.id,
-                    tenant_id: r.tenant_id,
-                    lesson_id: r.lesson_id,
-                    title: r.title,
-                    description: r.description,
+                    id: r.get("id"),
+                    tenant_id: r.get("tenant_id"),
+                    lesson_id: r.get("lesson_id"),
+                    title: r.get("title"),
+                    description: r.get("description"),
                     duration_minutes: dur,
                     time_limit_minutes: dur,
-                    passing_score: r.passing_score,
-                    max_score: r.max_score,
-                    max_attempts: r.max_attempts,
-                    shuffle_questions: r.shuffle_questions,
-                    shuffle_choices: r.shuffle_choices,
-                    start_at: r.start_at,
-                    end_at: r.end_at,
-                    status: r.status,
-                    questions_count: r.questions_count,
-                    is_active: r.is_active,
-                    created_at: r.created_at,
-                    updated_at: r.updated_at,
-                    class_id: r.class_id,
-                    class_name: r.class_name,
-                    subject_name: r.subject_name,
-                    teacher_name: r.teacher_name,
+                    passing_score: r.get("passing_score"),
+                    max_score: r.get("max_score"),
+                    max_attempts: r.get("max_attempts"),
+                    shuffle_questions: r.get("shuffle_questions"),
+                    shuffle_choices: r.get("shuffle_choices"),
+                    start_at: r.get("start_at"),
+                    end_at: r.get("end_at"),
+                    status: r.get("status"),
+                    questions_count: r.get("questions_count"),
+                    is_active: r.get("is_active"),
+                    created_at: r.get("created_at"),
+                    updated_at: r.get("updated_at"),
+                    class_id: r.get("class_id"),
+                    class_name: r.get("class_name"),
+                    subject_name: r.get("subject_name"),
+                    teacher_name: r.get("teacher_name"),
+                    session_id: r.get("session_id"),
+                    exam_mode: r.get::<Option<String>, _>("exam_mode").or_else(|| Some("HOMEWORK_QUIZ".to_string())),
+                    exam_token: r.get("exam_token"),
+                    token_expires_at: r.get("token_expires_at"),
+                    max_token_attempts: r.get::<Option<i32>, _>("max_token_attempts").or(Some(5)),
                     student_attempt_status: None,
                     student_attempts_count: None,
                     student_has_completed: None,
@@ -676,7 +712,7 @@ async fn get_by_id(
     })?;
 
     let meta = sqlx::query(
-        "SELECT tenant_id, class_id, teacher_id, created_by FROM quizzes WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+        "SELECT tenant_id, class_id, teacher_id, created_by, session_id, exam_mode, exam_token, token_expires_at, max_token_attempts FROM quizzes WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
     )
     .bind(id)
     .bind(req_ctx.tenant_id)
@@ -724,6 +760,12 @@ async fn get_by_id(
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
     let mut resp = QuizResponse::from(quiz);
+    resp.session_id = meta.get("session_id");
+    resp.exam_mode = meta.get::<Option<String>, _>("exam_mode").or_else(|| Some("HOMEWORK_QUIZ".to_string()));
+    resp.exam_token = meta.get("exam_token");
+    resp.token_expires_at = meta.get("token_expires_at");
+    resp.max_token_attempts = meta.get::<Option<i32>, _>("max_token_attempts").or(Some(5));
+    resp.class_id = meta_class_id;
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
 
     let attempt_info = sqlx::query(
