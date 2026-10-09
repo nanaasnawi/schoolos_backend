@@ -98,17 +98,17 @@ async fn create(
     };
     let teacher_id = resolved_actor_teacher_id.or(payload.teacher_id);
 
-    // Resolve class_id from UUID or class name string (e.g. "PAKET C10")
+    // Resolve target_class_id from UUID or class name string (e.g. "PAKET C10" or "Kelas 5")
     let target_class_id: Option<Uuid> = match payload.class_id {
         Some(ref cid_str) if !cid_str.trim().is_empty() => {
             if let Ok(u) = Uuid::parse_str(cid_str.trim()) {
                 Some(u)
             } else {
-                sqlx::query_scalar!(
-                    r#"SELECT id FROM classes WHERE tenant_id = $1 AND (name = $2 OR name ILIKE $2) LIMIT 1"#,
-                    req_ctx.tenant_id,
-                    cid_str.trim()
+                sqlx::query_scalar::<_, Uuid>(
+                    r#"SELECT id FROM classes WHERE tenant_id = $1 AND (name = $2 OR name ILIKE $2) LIMIT 1"#
                 )
+                .bind(req_ctx.tenant_id)
+                .bind(cid_str.trim())
                 .fetch_optional(&ctx.pool)
                 .await
                 .ok()
@@ -120,11 +120,11 @@ async fn create(
                 let parts: Vec<&str> = desc.split(" • ").collect();
                 if parts.len() >= 2 {
                     let cand = parts[1].trim();
-                    sqlx::query_scalar!(
-                        r#"SELECT id FROM classes WHERE tenant_id = $1 AND (name = $2 OR name ILIKE $2) LIMIT 1"#,
-                        req_ctx.tenant_id,
-                        cand
+                    sqlx::query_scalar::<_, Uuid>(
+                        r#"SELECT id FROM classes WHERE tenant_id = $1 AND (name = $2 OR name ILIKE $2) LIMIT 1"#
                     )
+                    .bind(req_ctx.tenant_id)
+                    .bind(cand)
                     .fetch_optional(&ctx.pool)
                     .await
                     .ok()
@@ -138,13 +138,47 @@ async fn create(
         }
     };
 
+    // Fallback: Resolve subject_id from description if not provided
+    let target_subject_id: Option<Uuid> = if payload.subject_id.is_some() {
+        payload.subject_id
+    } else if let Some(ref desc) = payload.description {
+        let parts: Vec<&str> = desc.split(" • ").collect();
+        if !parts.is_empty() {
+            let subj_name = parts[0].trim();
+            sqlx::query_scalar::<_, Uuid>(
+                r#"SELECT id FROM subjects WHERE tenant_id = $1 AND (name ILIKE $2) LIMIT 1"#
+            )
+            .bind(req_ctx.tenant_id)
+            .bind(subj_name)
+            .fetch_optional(&ctx.pool)
+            .await
+            .ok()
+            .flatten()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let _ = sqlx::query(
-        r#"UPDATE learning_materials SET class_id = $1, subject_id = COALESCE($2, subject_id), teacher_id = $3, created_by = $4 WHERE id = $5"#,
+        r#"
+        UPDATE learning_materials 
+        SET class_id = $1, 
+            subject_id = COALESCE($2, subject_id), 
+            teacher_id = $3, 
+            created_by = $4,
+            session_id = $5,
+            release_at = COALESCE($6, NOW())
+        WHERE id = $7
+        "#
     )
     .bind(target_class_id)
-    .bind(payload.subject_id)
+    .bind(target_subject_id)
     .bind(teacher_id)
     .bind(actor_id)
+    .bind(payload.session_id)
+    .bind(payload.release_at)
     .bind(material.id)
     .execute(&ctx.pool)
     .await;
@@ -206,7 +240,7 @@ async fn create(
                 NOW()
             FROM students s
             JOIN enrollments en ON en.student_id = s.id
-            WHERE en.class_id = $3 AND (en.status = 'Active' OR en.status = 'ACTIVE')
+            WHERE en.class_id = $3 AND (en.status ILIKE 'active')
             "#
         )
         .bind(&notif_title)
@@ -258,8 +292,68 @@ async fn create(
         );
     }
 
+    let full_created = sqlx::query(
+        r#"
+        SELECT 
+            m.id, m.tenant_id, m.lesson_id, m.material_type, m.title, m.description, 
+            m.storage_key, COALESCE(m.external_url, lb.file_url) as external_url,
+            m.order_index, m.visibility, m.is_active, 
+            m.created_at, m.updated_at,
+            m.class_id, c.name as class_name,
+            m.teacher_id,
+            COALESCE(ut.full_name, uc.full_name, 'Guru Pengampu') as teacher_name,
+            COALESCE(s.name, lb.subject_name, 'Umum') as subject_name,
+            m.start_page, m.end_page,
+            m.session_id, m.release_at
+        FROM learning_materials m
+        LEFT JOIN classes c ON c.id = m.class_id
+        LEFT JOIN subjects s ON s.id = m.subject_id
+        LEFT JOIN teachers t ON t.id = m.teacher_id
+        LEFT JOIN users ut ON ut.id = t.user_id
+        LEFT JOIN users uc ON uc.id = m.created_by
+        LEFT JOIN library_books lb ON lb.id = m.library_book_id
+        WHERE m.id = $1 AND m.tenant_id = $2
+        "#,
+    )
+    .bind(material.id)
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .ok()
+    .flatten();
+
+    let resp = match full_created {
+        Some(r) => LearningMaterialResponse {
+            id: r.get("id"),
+            tenant_id: r.get("tenant_id"),
+            lesson_id: r.get("lesson_id"),
+            material_type: r.get("material_type"),
+            title: r.get("title"),
+            description: r.get("description"),
+            storage_key: r.get("storage_key"),
+            external_url: r.get("external_url"),
+            order_index: r.get("order_index"),
+            visibility: r.get("visibility"),
+            is_active: r.get("is_active"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
+            is_completed: None,
+            completed_count: Some(0),
+            teacher_name: r.get("teacher_name"),
+            teacher_id: r.get("teacher_id"),
+            class_name: r.get("class_name"),
+            class_id: r.get("class_id"),
+            subject_name: r.get("subject_name"),
+            start_page: r.get("start_page"),
+            end_page: r.get("end_page"),
+            session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
+            release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
+        },
+        None => LearningMaterialResponse::from(material),
+    };
+
     Ok(Json(ApiResponse::success(
-        LearningMaterialResponse::from(material),
+        resp,
         req_ctx.request_id,
     )))
 }
@@ -333,7 +427,7 @@ async fn list(
             .unwrap_or(false);
 
     let items: Vec<LearningMaterialResponse> = if is_teacher {
-        // Teacher strictly sees ONLY materials they created or are assigned to them
+        // Teacher sees materials they created, are assigned to, or published in tenant
         let rows = sqlx::query(
             r#"
             SELECT 
@@ -361,6 +455,7 @@ async fn list(
                   m.created_by = $2 
                   OR m.teacher_id IN (SELECT id FROM teachers WHERE (user_id = $2 OR id = $2) AND tenant_id = $1)
                   OR m.teacher_id = $2
+                  OR m.visibility = 'published'
               )
             ORDER BY m.created_at DESC
             "#
@@ -402,7 +497,7 @@ async fn list(
             })
             .collect()
     } else if is_student && !is_admin {
-        // Student sees materials ONLY for their active enrolled classes (Paket A / B / C strictly isolated)
+        // Student sees materials for their active enrolled classes or general materials
         let rows = sqlx::query(
             r#"
             SELECT 
@@ -426,15 +521,18 @@ async fn list(
             LEFT JOIN library_books lb ON lb.id = m.library_book_id
             LEFT JOIN student_material_completions smc 
                 ON smc.material_id = m.id 
-                AND smc.student_id IN (SELECT id FROM students WHERE user_id = $2)
+                AND smc.student_id IN (SELECT id FROM students WHERE user_id = $2 OR id = $2)
             WHERE m.tenant_id = $1 
               AND m.deleted_at IS NULL
               AND m.is_active = true
-              AND m.class_id IN (
-                  SELECT en.class_id 
-                  FROM students s
-                  JOIN enrollments en ON en.student_id = s.id
-                  WHERE s.user_id = $2 AND (en.status = 'Active' OR en.status = 'ACTIVE')
+              AND (
+                  m.class_id IS NULL
+                  OR m.class_id IN (
+                      SELECT en.class_id 
+                      FROM students s
+                      JOIN enrollments en ON en.student_id = s.id
+                      WHERE (s.user_id = $2 OR s.id = $2) AND en.status ILIKE 'active'
+                  )
               )
             ORDER BY m.created_at DESC
             "#,
