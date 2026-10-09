@@ -66,6 +66,10 @@ impl SubmitAttemptUseCase {
             })?;
 
         if attempt.status != "in_progress" {
+            if attempt.status == "completed" {
+                // Idempotent submit: return existing completed attempt without error
+                return Ok(attempt);
+            }
             return Err(ApplicationError::Domain(
                 crate::common::error::DomainError::Validation(
                     "Attempt is not in progress".to_string(),

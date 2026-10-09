@@ -21,20 +21,33 @@ impl SessionRepository for PgSessionRepository {
     async fn create(&self, session: &LearningSession) -> Result<(), InfrastructureError> {
         sqlx::query(
             r#"
-            INSERT INTO learning_sessions (id, tenant_id, lesson_id, class_id, teacher_id, scheduled_at, started_at, ended_at, status, notes, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            INSERT INTO learning_sessions (
+                id, tenant_id, session_type, schedule_id, lesson_id, class_id, subject_id, teacher_id,
+                substitute_teacher_id, session_date, session_number, start_time, end_time,
+                scheduled_at, started_at, ended_at, status, notes, cancellation_reason, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
             "#
         )
         .bind(session.id)
         .bind(session.tenant_id)
+        .bind(&session.session_type)
+        .bind(session.schedule_id)
         .bind(session.lesson_id)
         .bind(session.class_id)
+        .bind(session.subject_id)
         .bind(session.teacher_id)
+        .bind(session.substitute_teacher_id)
+        .bind(session.session_date)
+        .bind(session.session_number)
+        .bind(session.start_time)
+        .bind(session.end_time)
         .bind(session.scheduled_at)
         .bind(session.started_at)
         .bind(session.ended_at)
         .bind(&session.status)
         .bind(&session.notes)
+        .bind(&session.cancellation_reason)
         .bind(session.created_at)
         .bind(session.updated_at)
         .execute(&self.pool)
@@ -48,14 +61,17 @@ impl SessionRepository for PgSessionRepository {
         sqlx::query(
             r#"
             UPDATE learning_sessions
-            SET status = $1, started_at = $2, ended_at = $3, notes = $4, updated_at = $5
-            WHERE id = $6 AND deleted_at IS NULL
+            SET status = $1, started_at = $2, ended_at = $3, notes = $4,
+                substitute_teacher_id = $5, cancellation_reason = $6, updated_at = $7
+            WHERE id = $8 AND deleted_at IS NULL
             "#,
         )
         .bind(&session.status)
         .bind(session.started_at)
         .bind(session.ended_at)
         .bind(&session.notes)
+        .bind(session.substitute_teacher_id)
+        .bind(&session.cancellation_reason)
         .bind(session.updated_at)
         .bind(session.id)
         .execute(&self.pool)
@@ -67,7 +83,10 @@ impl SessionRepository for PgSessionRepository {
 
     async fn find_by_id(&self, id: Uuid) -> Result<Option<LearningSession>, InfrastructureError> {
         let record = sqlx::query(
-            r#"SELECT id, tenant_id, lesson_id, class_id, teacher_id, scheduled_at, started_at, ended_at, status, notes, created_at, updated_at, deleted_at, deleted_by
+            r#"SELECT id, tenant_id, session_type, schedule_id, lesson_id, class_id, subject_id, teacher_id,
+                      substitute_teacher_id, session_date, session_number, start_time, end_time,
+                      scheduled_at, started_at, ended_at, status, notes, cancellation_reason,
+                      created_at, updated_at, deleted_at, deleted_by
                FROM learning_sessions WHERE id = $1 AND deleted_at IS NULL"#
         )
         .bind(id)
@@ -78,14 +97,23 @@ impl SessionRepository for PgSessionRepository {
         Ok(record.map(|r| LearningSession {
             id: r.get("id"),
             tenant_id: r.get("tenant_id"),
+            session_type: r.get::<Option<String>, _>("session_type").unwrap_or_else(|| "scheduled".to_string()),
+            schedule_id: r.get("schedule_id"),
             lesson_id: r.get("lesson_id"),
             class_id: r.get("class_id"),
+            subject_id: r.get("subject_id"),
             teacher_id: r.get("teacher_id"),
+            substitute_teacher_id: r.get("substitute_teacher_id"),
+            session_date: r.get::<Option<chrono::NaiveDate>, _>("session_date").unwrap_or_else(|| chrono::Utc::now().date_naive()),
+            session_number: r.get::<Option<i32>, _>("session_number").unwrap_or(1),
+            start_time: r.get("start_time"),
+            end_time: r.get("end_time"),
             scheduled_at: r.get("scheduled_at"),
             started_at: r.get("started_at"),
             ended_at: r.get("ended_at"),
             status: r.get("status"),
             notes: r.get("notes"),
+            cancellation_reason: r.get("cancellation_reason"),
             created_at: r.get("created_at"),
             updated_at: r.get("updated_at"),
             deleted_at: r.get("deleted_at"),
@@ -100,9 +128,12 @@ impl SessionRepository for PgSessionRepository {
         tenant_id: Uuid,
     ) -> Result<Vec<LearningSession>, InfrastructureError> {
         let records = sqlx::query(
-            r#"SELECT id, tenant_id, lesson_id, class_id, teacher_id, scheduled_at, started_at, ended_at, status, notes, created_at, updated_at, deleted_at, deleted_by
+            r#"SELECT id, tenant_id, session_type, schedule_id, lesson_id, class_id, subject_id, teacher_id,
+                      substitute_teacher_id, session_date, session_number, start_time, end_time,
+                      scheduled_at, started_at, ended_at, status, notes, cancellation_reason,
+                      created_at, updated_at, deleted_at, deleted_by
                FROM learning_sessions WHERE tenant_id = $1 AND deleted_at IS NULL
-               ORDER BY created_at DESC"#
+               ORDER BY session_date DESC, created_at DESC"#
         )
         .bind(tenant_id)
         .fetch_all(&self.pool)
@@ -114,14 +145,23 @@ impl SessionRepository for PgSessionRepository {
             .map(|r| LearningSession {
                 id: r.get("id"),
                 tenant_id: r.get("tenant_id"),
+                session_type: r.get::<Option<String>, _>("session_type").unwrap_or_else(|| "scheduled".to_string()),
+                schedule_id: r.get("schedule_id"),
                 lesson_id: r.get("lesson_id"),
                 class_id: r.get("class_id"),
+                subject_id: r.get("subject_id"),
                 teacher_id: r.get("teacher_id"),
+                substitute_teacher_id: r.get("substitute_teacher_id"),
+                session_date: r.get::<Option<chrono::NaiveDate>, _>("session_date").unwrap_or_else(|| chrono::Utc::now().date_naive()),
+                session_number: r.get::<Option<i32>, _>("session_number").unwrap_or(1),
+                start_time: r.get("start_time"),
+                end_time: r.get("end_time"),
                 scheduled_at: r.get("scheduled_at"),
                 started_at: r.get("started_at"),
                 ended_at: r.get("ended_at"),
                 status: r.get("status"),
                 notes: r.get("notes"),
+                cancellation_reason: r.get("cancellation_reason"),
                 created_at: r.get("created_at"),
                 updated_at: r.get("updated_at"),
                 deleted_at: r.get("deleted_at"),
