@@ -455,7 +455,6 @@ async fn list(
                   m.created_by = $2 
                   OR m.teacher_id IN (SELECT id FROM teachers WHERE (user_id = $2 OR id = $2) AND tenant_id = $1)
                   OR m.teacher_id = $2
-                  OR m.visibility = 'published'
               )
             ORDER BY m.created_at DESC
             "#
