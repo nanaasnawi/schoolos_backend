@@ -1,4 +1,5 @@
 pub mod academic;
+pub mod ai;
 pub mod analytics;
 pub mod announcements;
 pub mod auth;

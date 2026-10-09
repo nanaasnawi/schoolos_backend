@@ -38,6 +38,8 @@ use utoipa::OpenApi;
         crate::presentation::people::teacher::controller::list,
         crate::presentation::system::controller::list_tenants,
         crate::presentation::auth::controller::list_users,
+        crate::presentation::ai::controller::generate_content,
+        crate::presentation::ai::controller::analyze_student,
     ),
     components(
         schemas(
@@ -68,6 +70,17 @@ use utoipa::OpenApi;
             crate::presentation::system::dto::system_responses::TenantSummaryResponse,
             crate::presentation::system::dto::system_responses::ActivateMasterResponse,
             crate::presentation::system::dto::activate_master_request::ActivateMasterRequest,
+            crate::presentation::ai::controller::GenerateAiContentRequest,
+            crate::presentation::ai::controller::GenerateAiContentResponse,
+            crate::presentation::ai::controller::AnalyzeStudentRequest,
+            crate::infrastructure::nvidia_ai::GeneratedInfographicDto,
+            crate::infrastructure::nvidia_ai::InfographicBlockDto,
+            crate::infrastructure::nvidia_ai::GeneratedArticleDto,
+            crate::infrastructure::nvidia_ai::GeneratedAssignmentDto,
+            crate::infrastructure::nvidia_ai::GeneratedCbtQuizDto,
+            crate::infrastructure::nvidia_ai::CbtQuestionDto,
+            crate::infrastructure::nvidia_ai::CbtQuestionChoiceDto,
+            crate::infrastructure::nvidia_ai::StudentAnalyticsInsightDto,
         )
     ),
     tags(

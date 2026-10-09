@@ -165,6 +165,7 @@ use crate::presentation::{
     academic::grade_levels::controller::grade_level_routes,
     academic::schedules::controller::schedule_routes,
     academic::subjects::controller::subject_routes, academic::terms::controller::term_routes,
+    ai::controller::ai_routes,
     analytics::controller::analytics_routes, announcements::controller::announcement_routes,
     auth::controller::auth_routes, dapodik::controller::dapodik_routes,
     health::controller::health_routes, learning::achievement::controller::achievement_routes,
@@ -747,6 +748,13 @@ impl Bootstrap {
 
         let app = Router::new()
             .nest("/api/v1/auth", auth_routes(context.clone()))
+            .nest(
+                "/api/v1/ai",
+                ai_routes().layer(axum::middleware::from_fn_with_state(
+                    context.clone(),
+                    auth_middleware,
+                )),
+            )
             .nest(
                 "/api/v1/analytics",
                 analytics_routes().layer(axum::middleware::from_fn_with_state(
