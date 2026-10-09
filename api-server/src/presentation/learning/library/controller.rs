@@ -12,7 +12,7 @@ use crate::{
     bootstrap::ApplicationContext, error::ApiError, extractors::RequestContext,
     response::ApiResponse,
 };
-use school_core::common::error::ApplicationError;
+use school_core::common::error::{ApplicationError, DomainError};
 use school_core::common::error_code::ErrorCode;
 
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
@@ -52,6 +52,13 @@ pub struct AssignReadingMaterialRequest {
     pub teacher_id: Option<Uuid>,
     pub start_page: i32,
     pub end_page: i32,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateReadingProgressRequest {
+    pub material_id: Uuid,
+    pub current_page: i32,
+    pub is_completed: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
@@ -549,10 +556,10 @@ async fn assign_reading_material(
     if let (Some(b_lvl), Some(c_lvl)) = (book_class_level, target_level) {
         if b_lvl != c_lvl {
             return Err(ApiError::new(
-                ApplicationError::Validation(format!(
+                ApplicationError::Domain(DomainError::Validation(format!(
                     "Buku SIBI \"{}\" (Kelas {}) tidak sesuai dengan kelas tujuan \"{}\" (Kelas {}). Mohon gunakan buku yang sesuai dengan kelas yang diampu.",
                     book_title, b_lvl, class_name, c_lvl
-                )),
+                ))),
                 &req_ctx.request_id,
             ));
         }
