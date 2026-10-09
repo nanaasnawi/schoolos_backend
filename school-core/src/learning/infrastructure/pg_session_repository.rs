@@ -328,9 +328,12 @@ impl SessionRepository for PgSessionRepository {
         class_id: Uuid,
     ) -> Result<Vec<LearningSession>, InfrastructureError> {
         let records = sqlx::query(
-            r#"SELECT id, tenant_id, lesson_id, class_id, teacher_id, scheduled_at, started_at, ended_at, status, notes, created_at, updated_at, deleted_at, deleted_by
+            r#"SELECT id, tenant_id, session_type, schedule_id, lesson_id, class_id, subject_id, teacher_id,
+                      substitute_teacher_id, session_date, session_number, start_time, end_time,
+                      scheduled_at, started_at, ended_at, status, notes, cancellation_reason,
+                      created_at, updated_at, deleted_at, deleted_by
                FROM learning_sessions WHERE class_id = $1 AND deleted_at IS NULL
-               ORDER BY created_at DESC"#
+               ORDER BY session_date DESC, created_at DESC"#
         )
         .bind(class_id)
         .fetch_all(&self.pool)
@@ -342,14 +345,23 @@ impl SessionRepository for PgSessionRepository {
             .map(|r| LearningSession {
                 id: r.get("id"),
                 tenant_id: r.get("tenant_id"),
+                session_type: r.get::<Option<String>, _>("session_type").unwrap_or_else(|| "scheduled".to_string()),
+                schedule_id: r.get("schedule_id"),
                 lesson_id: r.get("lesson_id"),
                 class_id: r.get("class_id"),
+                subject_id: r.get("subject_id"),
                 teacher_id: r.get("teacher_id"),
+                substitute_teacher_id: r.get("substitute_teacher_id"),
+                session_date: r.get::<Option<chrono::NaiveDate>, _>("session_date").unwrap_or_else(|| chrono::Utc::now().date_naive()),
+                session_number: r.get::<Option<i32>, _>("session_number").unwrap_or(1),
+                start_time: r.get("start_time"),
+                end_time: r.get("end_time"),
                 scheduled_at: r.get("scheduled_at"),
                 started_at: r.get("started_at"),
                 ended_at: r.get("ended_at"),
                 status: r.get("status"),
                 notes: r.get("notes"),
+                cancellation_reason: r.get("cancellation_reason"),
                 created_at: r.get("created_at"),
                 updated_at: r.get("updated_at"),
                 deleted_at: r.get("deleted_at"),
