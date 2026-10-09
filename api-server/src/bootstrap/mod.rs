@@ -781,16 +781,11 @@ impl Bootstrap {
             )
             .nest(
                 "/api/v1/teacher",
-                Router::new()
-                    .route(
-                        "/remind",
-                        axum::routing::post(crate::presentation::people::teacher::remind::remind_students)
-                            .get(crate::presentation::people::teacher::remind::get_reminders),
-                    )
-                    .layer(axum::middleware::from_fn_with_state(
-                        context.clone(),
-                        auth_middleware,
-                    )),
+                Router::new().route(
+                    "/remind",
+                    axum::routing::post(crate::presentation::people::teacher::remind::remind_students)
+                        .get(crate::presentation::people::teacher::remind::get_reminders),
+                ),
             )
             .nest(
                 "/api/v1/teachers",
