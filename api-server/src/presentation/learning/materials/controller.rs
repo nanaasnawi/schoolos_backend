@@ -346,6 +346,7 @@ async fn list(
                 COALESCE(ut.full_name, uc.full_name, 'Guru Pengampu') as teacher_name,
                 COALESCE(s.name, lb.subject_name, 'Umum') as subject_name,
                 m.start_page, m.end_page,
+                m.session_id, m.release_at,
                 (SELECT COUNT(*)::bigint FROM student_material_completions smc WHERE smc.material_id = m.id) as completed_count
             FROM learning_materials m
             LEFT JOIN classes c ON c.id = m.class_id
@@ -396,6 +397,8 @@ async fn list(
                 subject_name: r.get("subject_name"),
                 start_page: r.get("start_page"),
                 end_page: r.get("end_page"),
+                session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
+                release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
             })
             .collect()
     } else if is_student && !is_admin {
@@ -412,6 +415,7 @@ async fn list(
                 COALESCE(ut.full_name, uc.full_name, 'Guru Pengampu') as teacher_name,
                 COALESCE(s.name, lb.subject_name, 'Umum') as subject_name,
                 m.start_page, m.end_page,
+                m.session_id, m.release_at,
                 (smc.id IS NOT NULL) as is_completed
             FROM learning_materials m
             LEFT JOIN classes c ON c.id = m.class_id
@@ -472,6 +476,8 @@ async fn list(
                 subject_name: r.get("subject_name"),
                 start_page: r.get("start_page"),
                 end_page: r.get("end_page"),
+                session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
+                release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
             })
             .collect()
     } else if is_admin {
@@ -488,6 +494,7 @@ async fn list(
                 COALESCE(ut.full_name, uc.full_name, 'Guru Pengampu') as teacher_name,
                 COALESCE(s.name, lb.subject_name, 'Umum') as subject_name,
                 m.start_page, m.end_page,
+                m.session_id, m.release_at,
                 (SELECT COUNT(*)::bigint FROM student_material_completions smc WHERE smc.material_id = m.id) as completed_count
             FROM learning_materials m
             LEFT JOIN classes c ON c.id = m.class_id
@@ -531,6 +538,8 @@ async fn list(
                 subject_name: r.get("subject_name"),
                 start_page: r.get("start_page"),
                 end_page: r.get("end_page"),
+                session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
+                release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
             })
             .collect()
     } else {
@@ -660,7 +669,8 @@ async fn get_by_id(
             m.teacher_id,
             COALESCE(ut.full_name, uc.full_name, 'Guru Pengampu') as teacher_name,
             COALESCE(s.name, lb.subject_name, 'Umum') as subject_name,
-            m.start_page, m.end_page
+            m.start_page, m.end_page,
+            m.session_id, m.release_at
         FROM learning_materials m
         LEFT JOIN classes c ON c.id = m.class_id
         LEFT JOIN subjects s ON s.id = m.subject_id
@@ -695,14 +705,14 @@ async fn get_by_id(
     })?;
 
     let is_completed = if is_student {
-        sqlx::query_scalar!(
+        sqlx::query_scalar::<_, bool>(
             r#"SELECT EXISTS(
                 SELECT 1 FROM student_material_completions 
                 WHERE material_id = $1 AND student_id IN (SELECT id FROM students WHERE user_id = $2)
-            ) as "exists!""#,
-            id,
-            actor_id
+            )"#,
         )
+        .bind(id)
+        .bind(actor_id)
         .fetch_one(&ctx.pool)
         .await
         .ok()
@@ -710,10 +720,10 @@ async fn get_by_id(
         None
     };
 
-    let completed_count = sqlx::query_scalar!(
-        r#"SELECT COUNT(*)::bigint as "count!" FROM student_material_completions WHERE material_id = $1"#,
-        id
+    let completed_count = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(*)::bigint FROM student_material_completions WHERE material_id = $1"#,
     )
+    .bind(id)
     .fetch_one(&ctx.pool)
     .await
     .ok();
@@ -741,6 +751,8 @@ async fn get_by_id(
         subject_name: row.get("subject_name"),
         start_page: row.get("start_page"),
         end_page: row.get("end_page"),
+        session_id: row.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
+        release_at: row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
     };
 
     Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))

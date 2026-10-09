@@ -3,7 +3,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use chrono::{Datelike, NaiveDate, NaiveTime, Utc};
+use chrono::{NaiveDate, NaiveTime, Utc};
 use serde::Deserialize;
 use sqlx::Row;
 use uuid::Uuid;
@@ -107,10 +107,10 @@ async fn start(
 
     // Kasus 1: Sesi Terjadwal (Scheduled Session) dari Template Jadwal
     if let Some(sched_id) = payload.schedule_id {
-        let schedule_row = sqlx::query!(
+        let schedule_row = sqlx::query(
             r#"
             SELECT cs.id, cs.tenant_id, cs.class_id, cs.subject_id, cs.teacher_id,
-                   cs.start_time, cs.end_time, COALESCE(cs.room, 'Ruang Kelas') as "room!",
+                   cs.start_time, cs.end_time, COALESCE(cs.room, 'Ruang Kelas') as room,
                    c.name as class_name, s.name as subject_name, t.full_name as teacher_name
             FROM class_schedules cs
             JOIN classes c ON c.id = cs.class_id
@@ -118,9 +118,9 @@ async fn start(
             JOIN teachers t ON t.id = cs.teacher_id
             WHERE cs.id = $1 AND cs.tenant_id = $2 AND cs.deleted_at IS NULL
             "#,
-            sched_id,
-            req_ctx.tenant_id
         )
+        .bind(sched_id)
+        .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await
         .map_err(|e| {
@@ -134,16 +134,22 @@ async fn start(
         .ok_or_else(|| {
             ApiError::new(
                 school_core::common::error::ApplicationError::NotFound(
-                    school_core::common::error_code::ErrorCode::ScheduleNotFound,
+                    school_core::common::error_code::ErrorCode::ResourceNotFound,
                     format!("Jadwal {} tidak ditemukan", sched_id),
                 ),
                 &req_ctx.request_id,
             )
         })?;
 
-        let class_id = payload.class_id.unwrap_or(schedule_row.class_id);
-        let subject_id = payload.subject_id.or(Some(schedule_row.subject_id));
-        let teacher_id = payload.teacher_id.unwrap_or(schedule_row.teacher_id);
+        let sched_class_id: Uuid = schedule_row.try_get("class_id").unwrap_or_default();
+        let sched_subject_id: Uuid = schedule_row.try_get("subject_id").unwrap_or_default();
+        let sched_teacher_id: Uuid = schedule_row.try_get("teacher_id").unwrap_or_default();
+        let sched_start_time: String = schedule_row.try_get("start_time").unwrap_or_default();
+        let sched_end_time: String = schedule_row.try_get("end_time").unwrap_or_default();
+
+        let class_id = payload.class_id.unwrap_or(sched_class_id);
+        let subject_id = payload.subject_id.or(Some(sched_subject_id));
+        let teacher_id = payload.teacher_id.unwrap_or(sched_teacher_id);
         let substitute_teacher_id = payload.substitute_teacher_id;
         let session_number = payload.session_number.unwrap_or(1);
 
@@ -151,13 +157,13 @@ async fn start(
             .start_time
             .as_deref()
             .and_then(parse_naive_time)
-            .or_else(|| parse_naive_time(&schedule_row.start_time));
+            .or_else(|| parse_naive_time(&sched_start_time));
 
         let end_time_parsed = payload
             .end_time
             .as_deref()
             .and_then(parse_naive_time)
-            .or_else(|| parse_naive_time(&schedule_row.end_time));
+            .or_else(|| parse_naive_time(&sched_end_time));
 
         let scheduled_at = start_time_parsed.and_then(|st| {
             session_date.and_time(st).and_local_timezone(Utc).single()
@@ -447,7 +453,7 @@ async fn list(
 
     let student_class_id: Option<Uuid> = if is_student {
         if let Some(uid) = user_id {
-            sqlx::query_scalar!(
+            sqlx::query_scalar::<_, Uuid>(
                 r#"
                 SELECT e.class_id 
                 FROM enrollments e 
@@ -455,8 +461,8 @@ async fn list(
                 WHERE s.user_id = $1 AND e.status ILIKE 'active'
                 LIMIT 1
                 "#,
-                uid
             )
+            .bind(uid)
             .fetch_optional(&ctx.pool)
             .await
             .ok()
@@ -1052,29 +1058,36 @@ async fn resolve_effective_session_id(
     }
 
     // 2. Jika bukan, apakah id adalah class_schedules.id?
-    let sched_opt = sqlx::query!(
+    let sched_row = sqlx::query(
         r#"
         SELECT id, class_id, subject_id, teacher_id, start_time, end_time
         FROM class_schedules
         WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
         "#,
-        id,
-        tenant_id
     )
+    .bind(id)
+    .bind(tenant_id)
     .fetch_optional(pool)
     .await
     .map_err(|e| school_core::common::error::ApplicationError::Infrastructure(
         school_core::common::error::InfrastructureError::Database(e),
     ))?;
 
-    if let Some(sched) = sched_opt {
+    if let Some(sched) = sched_row {
+        let sched_id: Uuid = sched.try_get("id").unwrap_or_default();
+        let sched_class_id: Uuid = sched.try_get("class_id").unwrap_or_default();
+        let sched_subject_id: Uuid = sched.try_get("subject_id").unwrap_or_default();
+        let sched_teacher_id: Uuid = sched.try_get("teacher_id").unwrap_or_default();
+        let sched_start_time: String = sched.try_get("start_time").unwrap_or_default();
+        let sched_end_time: String = sched.try_get("end_time").unwrap_or_default();
+
         let today = Utc::now().date_naive();
         // Cek apakah sesi hari ini sudah ada
         let existing = sqlx::query_scalar::<_, Uuid>(
             "SELECT id FROM learning_sessions WHERE tenant_id = $1 AND schedule_id = $2 AND session_date = $3 AND deleted_at IS NULL LIMIT 1"
         )
         .bind(tenant_id)
-        .bind(sched.id)
+        .bind(sched_id)
         .bind(today)
         .fetch_optional(pool)
         .await
@@ -1088,8 +1101,8 @@ async fn resolve_effective_session_id(
 
         // Buat sesi otomatis untuk hari ini
         let new_id = Uuid::new_v4();
-        let st = parse_naive_time(&sched.start_time);
-        let et = parse_naive_time(&sched.end_time);
+        let st = parse_naive_time(&sched_start_time);
+        let et = parse_naive_time(&sched_end_time);
         let scheduled_at = st.and_then(|t| today.and_time(t).and_local_timezone(Utc).single());
 
         let created_id = sqlx::query_scalar::<_, Uuid>(
@@ -1107,10 +1120,10 @@ async fn resolve_effective_session_id(
         )
         .bind(new_id)
         .bind(tenant_id)
-        .bind(sched.id)
-        .bind(sched.class_id)
-        .bind(sched.subject_id)
-        .bind(sched.teacher_id)
+        .bind(sched_id)
+        .bind(sched_class_id)
+        .bind(sched_subject_id)
+        .bind(sched_teacher_id)
         .bind(today)
         .bind(st)
         .bind(et)

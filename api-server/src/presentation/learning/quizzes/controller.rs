@@ -940,16 +940,16 @@ async fn verify_token(
     .unwrap_or(actor_id);
 
     // 1. Cek status percobaan token pada quiz_token_attempts
-    let attempt_record = sqlx::query!(
+    let attempt_record = sqlx::query(
         r#"
         SELECT failed_attempts, locked_until
         FROM quiz_token_attempts
         WHERE tenant_id = $1 AND quiz_id = $2 AND student_id = $3
         "#,
-        req_ctx.tenant_id,
-        id,
-        student_id
     )
+    .bind(req_ctx.tenant_id)
+    .bind(id)
+    .bind(student_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| {
@@ -962,8 +962,9 @@ async fn verify_token(
     })?;
 
     let now_utc = chrono::Utc::now();
-    if let Some(ref rec) = attempt_record {
-        if let Some(locked_until) = rec.locked_until {
+    let current_fails_count: i32 = if let Some(ref rec) = attempt_record {
+        let locked_until: Option<chrono::DateTime<chrono::Utc>> = rec.try_get("locked_until").ok().flatten();
+        if let Some(locked_until) = locked_until {
             if locked_until > now_utc {
                 let remaining_secs = (locked_until - now_utc).num_seconds();
                 let remaining_mins = (remaining_secs / 60) + 1;
@@ -980,7 +981,10 @@ async fn verify_token(
                 ));
             }
         }
-    }
+        rec.try_get("failed_attempts").unwrap_or(0)
+    } else {
+        0
+    };
 
     // 2. Ambil token kuis sebenarnya dari tabel quizzes
     let exam_token_db: Option<String> = sqlx::query_scalar(
@@ -1031,7 +1035,7 @@ async fn verify_token(
             req_ctx.request_id,
         )))
     } else {
-        let current_fails = attempt_record.map(|r| r.failed_attempts).unwrap_or(0) + 1;
+        let current_fails = current_fails_count + 1;
         let lock_time = if current_fails >= 5 {
             Some(now_utc + chrono::Duration::minutes(15))
         } else {

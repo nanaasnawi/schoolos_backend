@@ -500,7 +500,7 @@ async fn list(
                 CASE WHEN a.status = 'draft' AND a.class_id IS NOT NULL THEN 'published' ELSE a.status END as status,
                 a.is_active,
                 a.created_at, a.updated_at,
-                a.class_id,
+                a.class_id, a.session_id, a.release_at, a.allow_late_submission,
                 c.name as class_name,
                 sub.name as subject_name,
                 COALESCE(
@@ -555,6 +555,9 @@ async fn list(
                 class_name: r.get("class_name"),
                 subject_name: r.get("subject_name"),
                 teacher_name: r.get("teacher_name"),
+                session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
+                release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
+                allow_late_submission: r.try_get::<Option<bool>, _>("allow_late_submission").ok().flatten(),
                 questions: Vec::new(),
             })
             .collect()
@@ -584,7 +587,7 @@ async fn list(
                 ) as status,
                 a.is_active,
                 a.created_at, a.updated_at,
-                a.class_id,
+                a.class_id, a.session_id, a.release_at, a.allow_late_submission,
                 c.name as class_name,
                 sub.name as subject_name,
                 COALESCE(
@@ -652,6 +655,9 @@ async fn list(
                 class_name: r.get("class_name"),
                 subject_name: r.get("subject_name"),
                 teacher_name: r.get("teacher_name"),
+                session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
+                release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
+                allow_late_submission: r.try_get::<Option<bool>, _>("allow_late_submission").ok().flatten(),
                 questions: Vec::new(),
             })
             .collect()
@@ -664,7 +670,7 @@ async fn list(
                 CASE WHEN a.status = 'draft' AND a.class_id IS NOT NULL THEN 'published' ELSE a.status END as status,
                 a.is_active,
                 a.created_at, a.updated_at,
-                a.class_id,
+                a.class_id, a.session_id, a.release_at, a.allow_late_submission,
                 c.name as class_name,
                 sub.name as subject_name,
                 COALESCE(
@@ -715,6 +721,9 @@ async fn list(
                 class_name: r.get("class_name"),
                 subject_name: r.get("subject_name"),
                 teacher_name: r.get("teacher_name"),
+                session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
+                release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
+                allow_late_submission: r.try_get::<Option<bool>, _>("allow_late_submission").ok().flatten(),
                 questions: Vec::new(),
             })
             .collect()
@@ -784,7 +793,7 @@ async fn get_by_id(
             ) as status,
             a.is_active,
             a.created_at, a.updated_at,
-            a.class_id, a.teacher_id, a.created_by,
+            a.class_id, a.teacher_id, a.created_by, a.session_id, a.release_at, a.allow_late_submission,
             c.name as class_name,
             sub.name as subject_name,
             COALESCE(
@@ -875,6 +884,9 @@ async fn get_by_id(
                 class_name: r.get("class_name"),
                 subject_name: r.get("subject_name"),
                 teacher_name: resolved_teacher_name,
+                session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
+                release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
+                allow_late_submission: r.try_get::<Option<bool>, _>("allow_late_submission").ok().flatten(),
                 questions,
             };
             Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
