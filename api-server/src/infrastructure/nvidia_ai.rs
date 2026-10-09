@@ -121,6 +121,7 @@ fn extract_clean_json(text: &str) -> &str {
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct InfographicBlockDto {
     pub id: String,
+    #[serde(rename = "type", alias = "block_type")]
     pub block_type: String, // "TEXT" | "IMAGE"
     pub content: String,
 }
@@ -211,22 +212,52 @@ Output HANYA JSON tanpa teks pembuka/penutup."#
     let now_ts = chrono::Utc::now().timestamp_millis();
     let mut blocks = Vec::new();
 
+    // 1. Hero Cover Image for the Magazine / Infographic Header
+    let topic_slug: String = topic
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => c,
+            _ => ' ',
+        })
+        .collect();
+    let topic_encoded = topic_slug.split_whitespace().collect::<Vec<_>>().join("%20");
+    let cover_url = format!(
+        "https://image.pollinations.ai/prompt/{topic_encoded}%20educational%20infographic%20magazine%20cover%20vibrant%20clean%20aesthetic?width=1200&height=630&nologo=true"
+    );
+    blocks.push(InfographicBlockDto {
+        id: format!("ai-block-hero-cover-{}", now_ts),
+        block_type: "IMAGE".to_string(),
+        content: cover_url,
+    });
+
     for (idx, card) in parsed.cards.into_iter().enumerate() {
+        if let Some(img_desc) = card.image_suggestion {
+            if !img_desc.trim().is_empty() {
+                let img_slug: String = img_desc
+                    .chars()
+                    .map(|c| match c {
+                        'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => c,
+                        _ => ' ',
+                    })
+                    .collect();
+                let img_encoded = img_slug.split_whitespace().collect::<Vec<_>>().join("%20");
+                let image_url = format!(
+                    "https://image.pollinations.ai/prompt/{}%20educational%20magazine%20illustration%20vibrant%20clean?width=1000&height=600&nologo=true",
+                    img_encoded
+                );
+                blocks.push(InfographicBlockDto {
+                    id: format!("ai-block-img-{}-{}", idx + 1, now_ts),
+                    block_type: "IMAGE".to_string(),
+                    content: image_url,
+                });
+            }
+        }
+
         blocks.push(InfographicBlockDto {
             id: format!("ai-block-text-{}-{}", idx + 1, now_ts),
             block_type: "TEXT".to_string(),
             content: format!("### 📌 {}. {}\n\n{}", card.step_number, card.headline, card.summary),
         });
-
-        if let Some(img_desc) = card.image_suggestion {
-            if !img_desc.trim().is_empty() {
-                blocks.push(InfographicBlockDto {
-                    id: format!("ai-block-img-{}-{}", idx + 1, now_ts),
-                    block_type: "IMAGE".to_string(),
-                    content: img_desc,
-                });
-            }
-        }
     }
 
     Ok(GeneratedInfographicDto {
