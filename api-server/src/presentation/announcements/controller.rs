@@ -569,5 +569,3 @@ async fn delete_announcement(
 
     Ok(Json(ApiResponse::success(true, req_ctx.request_id)))
 }
-
-use crate::infrastructure::fcm::trigger_fcm_push_notification;
