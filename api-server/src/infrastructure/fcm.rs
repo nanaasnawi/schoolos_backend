@@ -244,10 +244,11 @@ pub enum FcmCategory {
     Grade,
     Session,
     Reminder,
+    Inquiry,
 }
 
 impl FcmCategory {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             FcmCategory::Announcement => "ANNOUNCEMENT",
             FcmCategory::Material => "LEARNING_MATERIAL",
@@ -256,17 +257,18 @@ impl FcmCategory {
             FcmCategory::Grade => "GRADE_UPDATE",
             FcmCategory::Session => "SESSION_STARTED",
             FcmCategory::Reminder => "SMART_REMINDER",
+            FcmCategory::Inquiry => "INQUIRY",
         }
     }
 
-    fn channel_id(&self) -> &'static str {
+    pub fn channel_id(&self) -> &'static str {
         match self {
             FcmCategory::Announcement => "school_os_announcements_v4",
             _ => "school_os_learning_v2",
         }
     }
 
-    fn click_action(&self) -> &'static str {
+    pub fn click_action(&self) -> &'static str {
         match self {
             FcmCategory::Announcement => "OPEN_NOTIFICATIONS",
             FcmCategory::Material => "OPEN_MATERIALS",
@@ -275,10 +277,11 @@ impl FcmCategory {
             FcmCategory::Grade => "OPEN_GRADES",
             FcmCategory::Session => "OPEN_SESSIONS",
             FcmCategory::Reminder => "OPEN_SCHEDULE",
+            FcmCategory::Inquiry => "OPEN_CHAT",
         }
     }
 
-    fn navigate_to(&self) -> &'static str {
+    pub fn navigate_to(&self) -> &'static str {
         match self {
             FcmCategory::Announcement => "notifications",
             FcmCategory::Material => "materials",
@@ -287,13 +290,32 @@ impl FcmCategory {
             FcmCategory::Grade => "grades",
             FcmCategory::Session => "sessions",
             FcmCategory::Reminder => "schedule",
+            FcmCategory::Inquiry => "chat",
         }
     }
 }
 
+/// Target tujuan pengiriman FCM Push Notification:
+/// Mencegah broadcast menyeluruh ke semua pengguna jika notifikasi hanya untuk kelas, role, atau pengguna tertentu.
+#[derive(Debug, Clone)]
+pub enum FcmTarget {
+    /// Broadcast ke seluruh sekolah (default pengumuman umum)
+    All,
+    /// Spesifik satu atau lebih role: "student", "teacher", "parent"
+    Roles(Vec<String>),
+    /// Spesifik untuk 1 rombel / kelas: "class_{class_id}"
+    Class(Uuid),
+    /// Spesifik untuk 1 pengguna (private 1-to-1 chat, tanya-jawab murid/guru): "user_{user_id}"
+    User(Uuid),
+    /// Custom topic
+    Topic(String),
+}
+
 fn parse_category(raw: &str) -> FcmCategory {
     let r = raw.to_lowercase();
-    if r.contains("materi") || r.contains("material") || r.contains("pembelajaran") {
+    if r.contains("tanya") || r.contains("inquiry") || r.contains("chat") || r.contains("pesan") {
+        FcmCategory::Inquiry
+    } else if r.contains("materi") || r.contains("material") || r.contains("pembelajaran") {
         FcmCategory::Material
     } else if r.contains("tugas") || r.contains("assignment") {
         FcmCategory::Assignment
@@ -326,7 +348,7 @@ pub fn trigger_fcm_push_notification(
     reference_id: Uuid,
 ) {
     let cat = parse_category(&category);
-    trigger_fcm_push_categorized(title, content, cat, reference_id);
+    trigger_fcm_push_targeted(title, content, cat, reference_id, FcmTarget::All);
 }
 
 /// Varian eksplisit agar setiap tipe event (tugas/kuis/nilai/sesi) dapat channel & deep-link sendiri.
@@ -335,6 +357,17 @@ pub fn trigger_fcm_push_categorized(
     content: String,
     category: FcmCategory,
     reference_id: Uuid,
+) {
+    trigger_fcm_push_targeted(title, content, category, reference_id, FcmTarget::All);
+}
+
+/// Kirim FCM push notification tertarget (per kelas, per role, atau 1-to-1 per user).
+pub fn trigger_fcm_push_targeted(
+    title: String,
+    content: String,
+    category: FcmCategory,
+    reference_id: Uuid,
+    target: FcmTarget,
 ) {
     tokio::spawn(async move {
         let client = reqwest::Client::new();
@@ -346,13 +379,6 @@ pub fn trigger_fcm_push_categorized(
             }
         };
 
-        // HYBRID FCM PAYLOAD (Notification + Data) Sesuai Standar Resmi Google Play:
-        // Saat aplikasi dalam kondisi CLOSED/KILLED/BACKGROUND:
-        // Google Play Services di level OS Android langsung merender notifikasi ke System Tray
-        // dan LOCKSCREEN dengan VISIBILITY_PUBLIC tanpa perlu membangunkan process aplikasi,
-        // sehingga 100% patuh Google Play Policy dan tidak terblokir oleh batasan OS Android 12+/OEM.
-        // Saat notifikasi ditap di lockscreen, payload `data` otomatis diteruskan ke MainActivity via intent extras.
-        // Saat aplikasi FOREGROUND: onMessageReceived() tetap dipanggil untuk handle in-app update.
         let fcm_url = format!(
             "https://fcm.googleapis.com/v1/projects/{}/messages:send",
             project_id
@@ -361,40 +387,87 @@ pub fn trigger_fcm_push_categorized(
         let category_str = category.as_str();
         let click_action = category.click_action();
         let navigate_to = category.navigate_to();
-        let payload = serde_json::json!({
-            "message": {
-                "topic": "school_announcements",
+
+        // Deep-link langsung ke halaman detail sesuai kategori
+        let deep_link = match category {
+            FcmCategory::Announcement => format!("announcement_detail:{}", reference_id),
+            FcmCategory::Material => format!("material_detail:{}", reference_id),
+            FcmCategory::Assignment => format!("assignment_detail:{}", reference_id),
+            FcmCategory::Quiz => format!("quiz_detail:{}", reference_id),
+            FcmCategory::Inquiry => format!("chat_detail:{}", reference_id),
+            FcmCategory::Session => format!("session_detail:{}", reference_id),
+            FcmCategory::Grade => format!("grade_detail:{}", reference_id),
+            FcmCategory::Reminder => "schedule".to_string(),
+        };
+
+        let mut message_obj = serde_json::json!({
+            "notification": {
+                "title": &title,
+                "body": &content
+            },
+            "data": {
+                "id": reference_id.to_string(),
+                "title": &title,
+                "body": &content,
+                "content": &content,
+                "category": category_str,
+                "reference_type": category_str.to_lowercase(),
+                "reference_id": reference_id.to_string(),
+                "channel_id": channel_id,
+                "click_action": click_action,
+                "navigate_to": navigate_to,
+                "deep_link": deep_link
+            },
+            "android": {
+                "priority": "HIGH",
+                "ttl": "86400s",
+                "direct_boot_ok": true,
                 "notification": {
-                    "title": &title,
-                    "body": &content
-                },
-                "data": {
-                    "id": reference_id.to_string(),
-                    "title": &title,
-                    "body": &content,
-                    "content": &content,
-                    "category": category_str,
-                    "reference_type": category_str.to_lowercase(),
-                    "reference_id": reference_id.to_string(),
                     "channel_id": channel_id,
-                    "click_action": click_action,
-                    "navigate_to": navigate_to
-                },
-                "android": {
-                    "priority": "HIGH",
-                    "ttl": "86400s",
-                    "direct_boot_ok": true,
-                    "notification": {
-                        "channel_id": channel_id,
-                        "visibility": "PUBLIC",
-                        "notification_priority": "PRIORITY_MAX",
-                        "default_sound": true,
-                        "default_vibrate_timings": true,
-                        "default_light_settings": true,
-                        "click_action": click_action
-                    }
+                    "visibility": "PUBLIC",
+                    "notification_priority": "PRIORITY_MAX",
+                    "default_sound": true,
+                    "default_vibrate_timings": true,
+                    "default_light_settings": true,
+                    "click_action": click_action
                 }
             }
+        });
+
+        match target {
+            FcmTarget::All => {
+                message_obj["topic"] = serde_json::Value::String("school_announcements".to_string());
+            }
+            FcmTarget::Class(cid) => {
+                let clean = cid.to_string().replace('-', "");
+                message_obj["topic"] = serde_json::Value::String(format!("class_{}", clean));
+            }
+            FcmTarget::User(uid) => {
+                let clean = uid.to_string().replace('-', "");
+                message_obj["topic"] = serde_json::Value::String(format!("user_{}", clean));
+            }
+            FcmTarget::Roles(roles) => {
+                if roles.is_empty() {
+                    message_obj["topic"] = serde_json::Value::String("school_announcements".to_string());
+                } else if roles.len() == 1 {
+                    let r = roles[0].to_lowercase();
+                    message_obj["topic"] = serde_json::Value::String(format!("role_{}", r));
+                } else {
+                    let cond = roles
+                        .iter()
+                        .map(|r| format!("'role_{}' in topics", r.to_lowercase()))
+                        .collect::<Vec<_>>()
+                        .join(" || ");
+                    message_obj["condition"] = serde_json::Value::String(cond);
+                }
+            }
+            FcmTarget::Topic(t) => {
+                message_obj["topic"] = serde_json::Value::String(t);
+            }
+        }
+
+        let payload = serde_json::json!({
+            "message": message_obj
         });
 
         match client

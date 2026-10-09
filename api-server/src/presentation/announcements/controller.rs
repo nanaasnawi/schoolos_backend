@@ -404,11 +404,32 @@ async fn create(
     let _ = ANNOUNCEMENT_BROADCAST.send(broadcast_event);
 
     if row.push_status {
-        trigger_fcm_push_notification(
+        let fcm_target = if target_all {
+            crate::infrastructure::fcm::FcmTarget::All
+        } else {
+            let mut roles = Vec::new();
+            if target_students {
+                roles.push("student".to_string());
+            }
+            if target_teachers {
+                roles.push("teacher".to_string());
+            }
+            if target_guardians {
+                roles.push("parent".to_string());
+            }
+            if roles.is_empty() {
+                crate::infrastructure::fcm::FcmTarget::All
+            } else {
+                crate::infrastructure::fcm::FcmTarget::Roles(roles)
+            }
+        };
+
+        crate::infrastructure::fcm::trigger_fcm_push_targeted(
             format!("📢 {}", row.title),
             row.content.clone(),
-            row.category.clone(),
+            crate::infrastructure::fcm::FcmCategory::Announcement,
             row.id,
+            fcm_target,
         );
     }
 

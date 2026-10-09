@@ -879,11 +879,18 @@ async fn publish(
             .execute(&ctx.pool)
             .await;
         }
-        crate::infrastructure::fcm::trigger_fcm_push_categorized(
+
+        let fcm_target = if let Some(class_uuid) = cid {
+            crate::infrastructure::fcm::FcmTarget::Class(class_uuid)
+        } else {
+            crate::infrastructure::fcm::FcmTarget::Roles(vec!["student".to_string()])
+        };
+        crate::infrastructure::fcm::trigger_fcm_push_targeted(
             t,
             b,
             crate::infrastructure::fcm::FcmCategory::Quiz,
             id,
+            fcm_target,
         );
     }
 

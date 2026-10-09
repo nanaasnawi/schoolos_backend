@@ -397,11 +397,18 @@ async fn create(
         .bind(cid)
         .execute(&ctx.pool)
         .await;
-        crate::infrastructure::fcm::trigger_fcm_push_categorized(
+
+        let fcm_target = if let Some(class_uuid) = cid {
+            crate::infrastructure::fcm::FcmTarget::Class(class_uuid)
+        } else {
+            crate::infrastructure::fcm::FcmTarget::Roles(vec!["student".to_string()])
+        };
+        crate::infrastructure::fcm::trigger_fcm_push_targeted(
             t,
             b,
             crate::infrastructure::fcm::FcmCategory::Assignment,
             assignment_id_for_notif,
+            fcm_target,
         );
     }
 

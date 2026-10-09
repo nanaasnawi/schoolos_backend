@@ -258,11 +258,12 @@ async fn create(
         .execute(&ctx.pool)
         .await;
 
-        crate::infrastructure::fcm::trigger_fcm_push_notification(
+        crate::infrastructure::fcm::trigger_fcm_push_targeted(
             notif_title,
             notif_body,
-            "Materi Pembelajaran".to_string(),
+            crate::infrastructure::fcm::FcmCategory::Material,
             material.id,
+            crate::infrastructure::fcm::FcmTarget::Class(cid),
         );
     } else {
         let notif_body = format!(
@@ -293,11 +294,12 @@ async fn create(
         .execute(&ctx.pool)
         .await;
 
-        crate::infrastructure::fcm::trigger_fcm_push_notification(
+        crate::infrastructure::fcm::trigger_fcm_push_targeted(
             notif_title,
             notif_body,
-            "Materi Pembelajaran".to_string(),
+            crate::infrastructure::fcm::FcmCategory::Material,
             material.id,
+            crate::infrastructure::fcm::FcmTarget::Roles(vec!["student".to_string()]),
         );
     }
 
