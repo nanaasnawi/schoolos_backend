@@ -1,5 +1,6 @@
 use std::time::Duration;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 use school_core::common::error::{ApplicationError, DomainError};
 
 const DEFAULT_NVIDIA_API_KEY: &str = "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";
