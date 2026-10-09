@@ -33,6 +33,14 @@ pub struct InquiryThreadDto {
     pub message_count: i64,
     pub student_avatar_url: Option<String>,
     pub teacher_avatar_url: Option<String>,
+    #[serde(default)]
+    pub student_last_read_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub teacher_last_read_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub is_read: bool,
+    #[serde(default)]
+    pub read_status_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -45,6 +53,10 @@ pub struct InquiryMessageDto {
     pub content: String,
     pub is_from_teacher: bool,
     pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub is_read: bool,
+    #[serde(default)]
+    pub read_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -201,6 +213,7 @@ async fn list_inquiries(
                 t.teacher_id, t.teacher_name, t.subject_name, t.inquiry_type,
                 t.reference_title, t.reference_id, t.status,
                 t.last_message_content, t.last_message_at, t.created_at,
+                t.student_last_read_at, t.teacher_last_read_at,
                 (SELECT COUNT(*)::bigint FROM inquiry_messages m WHERE m.thread_id = t.id) as message_count,
                 (SELECT u.avatar_url FROM users u WHERE u.id = t.student_id OR u.id IN (SELECT s.user_id FROM students s WHERE s.id = t.student_id) LIMIT 1) as student_avatar_url,
                 (SELECT u.avatar_url FROM users u WHERE u.id = t.teacher_id OR u.id IN (SELECT tch.user_id FROM teachers tch WHERE tch.id = t.teacher_id) LIMIT 1) as teacher_avatar_url
@@ -244,24 +257,43 @@ async fn list_inquiries(
 
         let items = rows
             .into_iter()
-            .map(|r| InquiryThreadDto {
-                id: r.get("id"),
-                student_id: r.get("student_id"),
-                student_name: r.get("student_name"),
-                student_class: r.get("student_class"),
-                teacher_id: r.get("teacher_id"),
-                teacher_name: r.get("teacher_name"),
-                subject_name: r.get("subject_name"),
-                inquiry_type: r.get("inquiry_type"),
-                reference_title: r.get("reference_title"),
-                reference_id: r.get("reference_id"),
-                status: r.get("status"),
-                last_message_content: r.get("last_message_content"),
-                last_message_at: r.get("last_message_at"),
-                created_at: r.get("created_at"),
-                message_count: r.get("message_count"),
-                student_avatar_url: r.try_get("student_avatar_url").ok().flatten(),
-                teacher_avatar_url: r.try_get("teacher_avatar_url").ok().flatten(),
+            .map(|r| {
+                let student_read_at: Option<DateTime<Utc>> = r.try_get("student_last_read_at").ok().flatten();
+                let teacher_read_at: Option<DateTime<Utc>> = r.try_get("teacher_last_read_at").ok().flatten();
+                let last_message_at: DateTime<Utc> = r.get("last_message_at");
+                let status: String = r.get("status");
+                let is_read = student_read_at.map_or(false, |st| st >= last_message_at);
+                let label = if status == "ANSWERED" {
+                    if is_read { "✓ Jawaban Sudah Dibaca" } else { "Pesan Baru dari Guru" }
+                } else if teacher_read_at.map_or(false, |tt| tt >= last_message_at) {
+                    "✓ Dibaca Guru"
+                } else {
+                    "Menunggu Dibaca Guru"
+                };
+
+                InquiryThreadDto {
+                    id: r.get("id"),
+                    student_id: r.get("student_id"),
+                    student_name: r.get("student_name"),
+                    student_class: r.get("student_class"),
+                    teacher_id: r.get("teacher_id"),
+                    teacher_name: r.get("teacher_name"),
+                    subject_name: r.get("subject_name"),
+                    inquiry_type: r.get("inquiry_type"),
+                    reference_title: r.get("reference_title"),
+                    reference_id: r.get("reference_id"),
+                    status,
+                    last_message_content: r.get("last_message_content"),
+                    last_message_at,
+                    created_at: r.get("created_at"),
+                    message_count: r.get("message_count"),
+                    student_avatar_url: r.try_get("student_avatar_url").ok().flatten(),
+                    teacher_avatar_url: r.try_get("teacher_avatar_url").ok().flatten(),
+                    student_last_read_at: student_read_at,
+                    teacher_last_read_at: teacher_read_at,
+                    is_read,
+                    read_status_label: Some(label.to_string()),
+                }
             })
             .collect();
 
@@ -315,6 +347,7 @@ async fn list_inquiries(
             t.teacher_id, t.teacher_name, t.subject_name, t.inquiry_type,
             t.reference_title, t.reference_id, t.status,
             t.last_message_content, t.last_message_at, t.created_at,
+            t.student_last_read_at, t.teacher_last_read_at,
             (SELECT COUNT(*)::bigint FROM inquiry_messages m WHERE m.thread_id = t.id) as message_count,
             (SELECT u.avatar_url FROM users u WHERE u.id = t.student_id OR u.id IN (SELECT s.user_id FROM students s WHERE s.id = t.student_id) LIMIT 1) as student_avatar_url,
             (SELECT u.avatar_url FROM users u WHERE u.id = t.teacher_id OR u.id IN (SELECT tch.user_id FROM teachers tch WHERE tch.id = t.teacher_id) LIMIT 1) as teacher_avatar_url
@@ -374,24 +407,47 @@ async fn list_inquiries(
 
     let items = rows
         .into_iter()
-        .map(|r| InquiryThreadDto {
-            id: r.get("id"),
-            student_id: r.get("student_id"),
-            student_name: r.get("student_name"),
-            student_class: r.get("student_class"),
-            teacher_id: r.get("teacher_id"),
-            teacher_name: r.get("teacher_name"),
-            subject_name: r.get("subject_name"),
-            inquiry_type: r.get("inquiry_type"),
-            reference_title: r.get("reference_title"),
-            reference_id: r.get("reference_id"),
-            status: r.get("status"),
-            last_message_content: r.get("last_message_content"),
-            last_message_at: r.get("last_message_at"),
-            created_at: r.get("created_at"),
-            message_count: r.get("message_count"),
-            student_avatar_url: r.try_get("student_avatar_url").ok().flatten(),
-            teacher_avatar_url: r.try_get("teacher_avatar_url").ok().flatten(),
+        .map(|r| {
+            let student_read_at: Option<DateTime<Utc>> = r.try_get("student_last_read_at").ok().flatten();
+            let teacher_read_at: Option<DateTime<Utc>> = r.try_get("teacher_last_read_at").ok().flatten();
+            let last_message_at: DateTime<Utc> = r.get("last_message_at");
+            let status: String = r.get("status");
+            let is_read = teacher_read_at.map_or(false, |tt| tt >= last_message_at);
+            let label = if status == "ANSWERED" {
+                if student_read_at.map_or(false, |st| st >= last_message_at) {
+                    "✓ Jawaban Dibaca Siswa"
+                } else {
+                    "✓ Terkirim ke Siswa (Belum Dibaca)"
+                }
+            } else if is_read {
+                "✓ Sedang Ditinjau Guru"
+            } else {
+                "Pertanyaan Baru dari Siswa"
+            };
+
+            InquiryThreadDto {
+                id: r.get("id"),
+                student_id: r.get("student_id"),
+                student_name: r.get("student_name"),
+                student_class: r.get("student_class"),
+                teacher_id: r.get("teacher_id"),
+                teacher_name: r.get("teacher_name"),
+                subject_name: r.get("subject_name"),
+                inquiry_type: r.get("inquiry_type"),
+                reference_title: r.get("reference_title"),
+                reference_id: r.get("reference_id"),
+                status,
+                last_message_content: r.get("last_message_content"),
+                last_message_at,
+                created_at: r.get("created_at"),
+                message_count: r.get("message_count"),
+                student_avatar_url: r.try_get("student_avatar_url").ok().flatten(),
+                teacher_avatar_url: r.try_get("teacher_avatar_url").ok().flatten(),
+                student_last_read_at: student_read_at,
+                teacher_last_read_at: teacher_read_at,
+                is_read,
+                read_status_label: Some(label.to_string()),
+            }
         })
         .collect();
 
@@ -420,6 +476,7 @@ async fn get_inquiry_detail(
             t.subject_name, t.inquiry_type,
             t.reference_title, t.reference_id, t.status,
             t.last_message_content, t.last_message_at, t.created_at,
+            t.student_last_read_at, t.teacher_last_read_at,
             (SELECT COUNT(*)::bigint FROM inquiry_messages m WHERE m.thread_id = t.id) as message_count,
             (SELECT u.avatar_url FROM users u WHERE u.id = t.student_id OR u.id IN (SELECT s.user_id FROM students s WHERE s.id = t.student_id) LIMIT 1) as student_avatar_url,
             (SELECT u.avatar_url FROM users u WHERE u.id = t.teacher_id OR u.id IN (SELECT tch.user_id FROM teachers tch WHERE tch.id = t.teacher_id) LIMIT 1) as teacher_avatar_url
@@ -449,27 +506,12 @@ async fn get_inquiry_detail(
         )
     })?;
 
-    let thread = InquiryThreadDto {
-        id: thread_row.get("id"),
-        student_id: thread_row.get("student_id"),
-        student_name: thread_row.get("student_name"),
-        student_class: thread_row.get("student_class"),
-        teacher_id: thread_row.get("teacher_id"),
-        teacher_name: thread_row.get("teacher_name"),
-        subject_name: thread_row.get("subject_name"),
-        inquiry_type: thread_row.get("inquiry_type"),
-        reference_title: thread_row.get("reference_title"),
-        reference_id: thread_row.get("reference_id"),
-        status: thread_row.get("status"),
-        last_message_content: thread_row.get("last_message_content"),
-        last_message_at: thread_row.get("last_message_at"),
-        created_at: thread_row.get("created_at"),
-        message_count: thread_row.get("message_count"),
-        student_avatar_url: thread_row.try_get("student_avatar_url").ok().flatten(),
-        teacher_avatar_url: thread_row.try_get("teacher_avatar_url").ok().flatten(),
-    };
+    let thread_student_id: Uuid = thread_row.get("student_id");
 
-    // Cross-user access control check
+    // Cross-user access control check and role detection
+    let mut caller_is_teacher = false;
+    let mut caller_is_student = false;
+
     if let Some(ref actor) = req_ctx.actor {
         let is_admin = actor.roles.iter().any(|r| {
             let n = r.name.to_lowercase();
@@ -492,7 +534,9 @@ async fn get_inquiry_detail(
             .await
             .unwrap_or(false);
 
-            if !is_teacher {
+            if is_teacher {
+                caller_is_teacher = true;
+            } else {
                 let student_id =
                     crate::authorization_helpers::AuthorizationScope::resolve_student_id(
                         &ctx.pool,
@@ -503,12 +547,12 @@ async fn get_inquiry_detail(
                     .ok()
                     .flatten();
 
-                let is_owner = student_id == Some(thread.student_id)
-                    || actor.id == thread.student_id
+                let is_owner = student_id == Some(thread_student_id)
+                    || actor.id == thread_student_id
                     || sqlx::query_scalar::<_, bool>(
                         r#"SELECT EXISTS(SELECT 1 FROM students WHERE (id = $1 OR user_id = $1) AND (user_id = $2 OR id = $2))"#,
                     )
-                    .bind(thread.student_id)
+                    .bind(thread_student_id)
                     .bind(actor.id)
                     .fetch_one(&ctx.pool)
                     .await
@@ -523,9 +567,66 @@ async fn get_inquiry_detail(
                         &req_ctx.request_id,
                     ));
                 }
+                caller_is_student = true;
             }
+        } else {
+            caller_is_teacher = true;
         }
     }
+
+    // Auto mark-as-read when opening detail
+    let now = Utc::now();
+    let mut student_read_at: Option<DateTime<Utc>> = thread_row.try_get("student_last_read_at").ok().flatten();
+    let mut teacher_read_at: Option<DateTime<Utc>> = thread_row.try_get("teacher_last_read_at").ok().flatten();
+
+    if caller_is_teacher {
+        let _ = sqlx::query(
+            "UPDATE inquiry_threads SET teacher_last_read_at = NOW() WHERE id = $1 AND tenant_id = $2"
+        )
+        .bind(id)
+        .bind(req_ctx.tenant_id)
+        .execute(&ctx.pool)
+        .await;
+        teacher_read_at = Some(now);
+    } else if caller_is_student {
+        let _ = sqlx::query(
+            "UPDATE inquiry_threads SET student_last_read_at = NOW() WHERE id = $1 AND tenant_id = $2"
+        )
+        .bind(id)
+        .bind(req_ctx.tenant_id)
+        .execute(&ctx.pool)
+        .await;
+        student_read_at = Some(now);
+    }
+
+    let last_message_at: DateTime<Utc> = thread_row.get("last_message_at");
+    let status: String = thread_row.get("status");
+
+    let is_thread_read = if caller_is_teacher {
+        teacher_read_at.map_or(false, |tt| tt >= last_message_at)
+    } else {
+        student_read_at.map_or(false, |st| st >= last_message_at)
+    };
+
+    let thread_label = if caller_is_teacher {
+        if status == "ANSWERED" {
+            if student_read_at.map_or(false, |st| st >= last_message_at) {
+                "✓ Jawaban Dibaca Siswa"
+            } else {
+                "✓ Terkirim ke Siswa (Belum Dibaca)"
+            }
+        } else {
+            "✓ Sedang Ditinjau Guru"
+        }
+    } else {
+        if status == "ANSWERED" {
+            "✓ Jawaban Sudah Dibaca"
+        } else if teacher_read_at.map_or(false, |tt| tt >= last_message_at) {
+            "✓ Dibaca Guru"
+        } else {
+            "Menunggu Dibaca Guru"
+        }
+    };
 
     let messages = sqlx::query!(
         r#"
@@ -549,35 +650,58 @@ async fn get_inquiry_detail(
 
     let dto = InquiryDetailDto {
         thread: InquiryThreadDto {
-            id: thread.id,
-            student_id: thread.student_id,
-            student_name: thread.student_name,
-            student_class: thread.student_class,
-            teacher_id: thread.teacher_id,
-            teacher_name: thread.teacher_name,
-            subject_name: thread.subject_name,
-            inquiry_type: thread.inquiry_type,
-            reference_title: thread.reference_title,
-            reference_id: thread.reference_id,
-            status: thread.status,
-            last_message_content: thread.last_message_content,
-            last_message_at: thread.last_message_at,
-            created_at: thread.created_at,
-            message_count: thread.message_count,
-            student_avatar_url: thread.student_avatar_url.clone(),
-            teacher_avatar_url: thread.teacher_avatar_url.clone(),
+            id: thread_row.get("id"),
+            student_id: thread_student_id,
+            student_name: thread_row.get("student_name"),
+            student_class: thread_row.get("student_class"),
+            teacher_id: thread_row.get("teacher_id"),
+            teacher_name: thread_row.get("teacher_name"),
+            subject_name: thread_row.get("subject_name"),
+            inquiry_type: thread_row.get("inquiry_type"),
+            reference_title: thread_row.get("reference_title"),
+            reference_id: thread_row.get("reference_id"),
+            status,
+            last_message_content: thread_row.get("last_message_content"),
+            last_message_at,
+            created_at: thread_row.get("created_at"),
+            message_count: thread_row.get("message_count"),
+            student_avatar_url: thread_row.try_get("student_avatar_url").ok().flatten(),
+            teacher_avatar_url: thread_row.try_get("teacher_avatar_url").ok().flatten(),
+            student_last_read_at: student_read_at,
+            teacher_last_read_at: teacher_read_at,
+            is_read: is_thread_read,
+            read_status_label: Some(thread_label.to_string()),
         },
         messages: messages
             .into_iter()
-            .map(|m| InquiryMessageDto {
-                id: m.id,
-                thread_id: m.thread_id,
-                sender_id: m.sender_id,
-                sender_name: m.sender_name,
-                sender_role: m.sender_role,
-                content: m.content,
-                is_from_teacher: m.is_from_teacher,
-                created_at: m.created_at,
+            .map(|m| {
+                let is_read = if m.is_from_teacher {
+                    student_read_at.map_or(false, |st| st >= m.created_at)
+                } else {
+                    teacher_read_at.map_or(false, |tt| tt >= m.created_at)
+                };
+                let read_at = if is_read {
+                    if m.is_from_teacher {
+                        student_read_at
+                    } else {
+                        teacher_read_at
+                    }
+                } else {
+                    None
+                };
+
+                InquiryMessageDto {
+                    id: m.id,
+                    thread_id: m.thread_id,
+                    sender_id: m.sender_id,
+                    sender_name: m.sender_name,
+                    sender_role: m.sender_role,
+                    content: m.content,
+                    is_from_teacher: m.is_from_teacher,
+                    created_at: m.created_at,
+                    is_read,
+                    read_at,
+                }
             })
             .collect(),
     };
@@ -1091,12 +1215,13 @@ async fn create_inquiry(
                 .execute(&ctx.pool)
                 .await;
 
-                // Trigger HIGH-PRIORITY FCM push notification for lock screen / standby
-                crate::infrastructure::fcm::trigger_fcm_push_notification(
+                // Trigger HIGH-PRIORITY FCM push notification targeted exclusively to teacher
+                crate::infrastructure::fcm::trigger_fcm_push_targeted(
                     notif_title,
                     notif_body,
-                    "INQUIRY".to_string(),
+                    crate::infrastructure::fcm::FcmCategory::Inquiry,
                     thread_id,
+                    crate::infrastructure::fcm::FcmTarget::User(t_uid),
                 );
             }
         }
@@ -1179,6 +1304,10 @@ async fn create_inquiry(
         message_count: 1,
         student_avatar_url: None,
         teacher_avatar_url: None,
+        student_last_read_at: Some(chrono::Utc::now()),
+        teacher_last_read_at: None,
+        is_read: false,
+        read_status_label: Some("Menunggu Dibaca Guru".to_string()),
     };
 
     Ok(Json(ApiResponse::success(dto, req_ctx.request_id)))
@@ -1326,6 +1455,8 @@ async fn send_message(
                     content: row.get("content"),
                     is_from_teacher: row.get("is_from_teacher"),
                     created_at: row.get("created_at"),
+                    is_read: false,
+                    read_at: None,
                 },
                 req_ctx.request_id,
             )));
@@ -1391,26 +1522,36 @@ async fn send_message(
         content: msg_row.get("content"),
         is_from_teacher: msg_row.get("is_from_teacher"),
         created_at: msg_row.get("created_at"),
+        is_read: false,
+        read_at: None,
     };
 
-    // Update thread status & timestamp
-    let new_status = if is_teacher {
-        "ANSWERED"
+    // Update thread status, message summary, and sender's read timestamp
+    if is_teacher {
+        let _ = sqlx::query!(
+            r#"
+            UPDATE inquiry_threads
+            SET status = 'ANSWERED', last_message_content = $1, last_message_at = NOW(), teacher_last_read_at = NOW(), updated_at = NOW()
+            WHERE id = $2
+            "#,
+            content,
+            id
+        )
+        .execute(&ctx.pool)
+        .await;
     } else {
-        "WAITING_REPLY"
-    };
-    let _ = sqlx::query!(
-        r#"
-        UPDATE inquiry_threads
-        SET status = $1, last_message_content = $2, last_message_at = NOW(), updated_at = NOW()
-        WHERE id = $3
-        "#,
-        new_status,
-        content,
-        id
-    )
-    .execute(&ctx.pool)
-    .await;
+        let _ = sqlx::query!(
+            r#"
+            UPDATE inquiry_threads
+            SET status = 'WAITING_REPLY', last_message_content = $1, last_message_at = NOW(), student_last_read_at = NOW(), updated_at = NOW()
+            WHERE id = $2
+            "#,
+            content,
+            id
+        )
+        .execute(&ctx.pool)
+        .await;
+    }
 
     // If teacher replies and thread currently has generic teacher name, update to actual teacher name
     if is_teacher && !sender_name.is_empty() && !sender_name.eq_ignore_ascii_case("Guru Pengampu") {
@@ -1438,9 +1579,9 @@ async fn send_message(
         .await;
     }
 
-    // Create real-time in-app notification for recipient
+    // Create real-time in-app notification & FCM push for recipient only (never echo back to sender)
     if is_teacher {
-        // Teacher replied -> notify student
+        // Teacher replied -> notify ONLY the inquiring student
         if let Ok(Some(student_user_id)) = sqlx::query_scalar::<_, Option<Uuid>>(
             r#"
             SELECT s.user_id 
@@ -1474,17 +1615,19 @@ async fn send_message(
                 .bind(id)
                 .execute(&ctx.pool)
                 .await;
-                // Trigger HIGH-PRIORITY FCM push notification for lock screen / standby
-                crate::infrastructure::fcm::trigger_fcm_push_notification(
+
+                // Trigger HIGH-PRIORITY FCM push targeted exclusively to student
+                crate::infrastructure::fcm::trigger_fcm_push_targeted(
                     notif_title,
                     notif_body,
-                    "INQUIRY".to_string(),
+                    crate::infrastructure::fcm::FcmCategory::Inquiry,
                     id,
+                    crate::infrastructure::fcm::FcmTarget::User(s_uid),
                 );
             }
         }
     } else {
-        // Student replied -> notify teacher
+        // Student replied -> notify ONLY the designated teacher
         if let Ok(Some(teacher_user_id)) = sqlx::query_scalar::<_, Option<Uuid>>(
             r#"
             SELECT t.user_id 
@@ -1519,12 +1662,13 @@ async fn send_message(
                 .execute(&ctx.pool)
                 .await;
 
-                // Trigger HIGH-PRIORITY FCM push notification for lock screen / standby
-                crate::infrastructure::fcm::trigger_fcm_push_notification(
+                // Trigger HIGH-PRIORITY FCM push targeted exclusively to teacher
+                crate::infrastructure::fcm::trigger_fcm_push_targeted(
                     notif_title,
                     notif_body,
-                    "INQUIRY".to_string(),
+                    crate::infrastructure::fcm::FcmCategory::Inquiry,
                     id,
+                    crate::infrastructure::fcm::FcmTarget::User(t_uid),
                 );
             }
         }
@@ -1577,6 +1721,8 @@ async fn send_message(
         content: msg.content,
         is_from_teacher: msg.is_from_teacher,
         created_at: msg.created_at,
+        is_read: false,
+        read_at: None,
     };
 
     Ok(Json(ApiResponse::success(dto, req_ctx.request_id)))
