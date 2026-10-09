@@ -210,6 +210,37 @@ async fn list(
             .map(|a| a.roles.iter().any(|r| r.name == "Guru" || r.name == "Teacher"))
             .unwrap_or(false);
 
+    let is_student = !is_admin_or_staff && !is_teacher
+        && req_ctx
+            .actor
+            .as_ref()
+            .map(|a| {
+                let n = a.roles.iter().map(|r| r.name.to_lowercase()).collect::<Vec<_>>().join(" ");
+                n.contains("siswa") || n.contains("student") || n.contains("murid")
+            })
+            .unwrap_or(false);
+
+    let mut filter_class_id = query.class_id;
+    if is_student && filter_class_id.is_none() {
+        let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
+        let c_id = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT e.class_id 
+            FROM enrollments e
+            JOIN students s ON s.id = e.student_id
+            WHERE s.user_id = $1 AND e.status ILIKE 'active'
+            LIMIT 1
+            "#,
+        )
+        .bind(user_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten();
+
+        filter_class_id = c_id;
+    }
+
     let mut filter_teacher_id = query.teacher_id;
     if is_teacher && filter_teacher_id.is_none() {
         let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
@@ -275,7 +306,7 @@ async fn list(
         "#,
     )
     .bind(req_ctx.tenant_id)
-    .bind(query.class_id)
+    .bind(filter_class_id)
     .bind(filter_teacher_id)
     .bind(query.day)
     .fetch_all(&ctx.pool)

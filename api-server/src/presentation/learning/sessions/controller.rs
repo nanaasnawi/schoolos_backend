@@ -486,6 +486,90 @@ async fn list(
         }
     });
 
+    // Otomatis sinkronisasi sesi pembelajaran dari jadwal sekolah (class_schedules).
+    // Kepala Sekolah, Guru, dan Siswa tidak perlu mengklik tombol "Mulai Sesi" secara manual
+    // agar sesi hari ini otomatis tercipta dan berstatus sesuai jam operasional.
+    let target_sync_date = filter.date.or(filter.from_date);
+    let sync_sql = r#"
+        INSERT INTO learning_sessions (
+            id, tenant_id, session_type, schedule_id, class_id, subject_id, teacher_id,
+            session_date, start_time, end_time, scheduled_at, status, created_at, updated_at
+        )
+        SELECT 
+            gen_random_uuid(),
+            cs.tenant_id,
+            'scheduled',
+            cs.id,
+            cs.class_id,
+            cs.subject_id,
+            cs.teacher_id,
+            COALESCE($2::date, (NOW() AT TIME ZONE 'Asia/Jakarta')::date),
+            cs.start_time::time,
+            cs.end_time::time,
+            (COALESCE($2::date, (NOW() AT TIME ZONE 'Asia/Jakarta')::date) + cs.start_time::time) AT TIME ZONE 'Asia/Jakarta',
+            CASE 
+                WHEN COALESCE($2::date, (NOW() AT TIME ZONE 'Asia/Jakarta')::date) < (NOW() AT TIME ZONE 'Asia/Jakarta')::date THEN 'completed'
+                WHEN COALESCE($2::date, (NOW() AT TIME ZONE 'Asia/Jakarta')::date) > (NOW() AT TIME ZONE 'Asia/Jakarta')::date THEN 'scheduled'
+                WHEN (NOW() AT TIME ZONE 'Asia/Jakarta')::time > cs.end_time::time THEN 'completed'
+                WHEN (NOW() AT TIME ZONE 'Asia/Jakarta')::time >= cs.start_time::time THEN 'active'
+                ELSE 'scheduled'
+            END,
+            NOW(),
+            NOW()
+        FROM class_schedules cs
+        WHERE cs.tenant_id = $1
+          AND cs.deleted_at IS NULL
+          AND cs.day_of_week = CASE EXTRACT(DOW FROM COALESCE($2::date, (NOW() AT TIME ZONE 'Asia/Jakarta')::date))::integer
+            WHEN 0 THEN 'Minggu'
+            WHEN 1 THEN 'Senin'
+            WHEN 2 THEN 'Selasa'
+            WHEN 3 THEN 'Rabu'
+            WHEN 4 THEN 'Kamis'
+            WHEN 5 THEN 'Jumat'
+            WHEN 6 THEN 'Sabtu'
+          END
+          AND NOT EXISTS (
+            SELECT 1 FROM learning_sessions ls 
+            WHERE ls.tenant_id = cs.tenant_id 
+              AND ls.schedule_id = cs.id 
+              AND ls.session_date = COALESCE($2::date, (NOW() AT TIME ZONE 'Asia/Jakarta')::date)
+              AND ls.deleted_at IS NULL
+          )
+    "#;
+
+    let _ = sqlx::query(sync_sql)
+        .bind(req_ctx.tenant_id)
+        .bind(target_sync_date)
+        .execute(&ctx.pool)
+        .await;
+
+    // Sinkronisasi status riil terhadap jam sekarang untuk sesi hari ini
+    let update_status_sql = r#"
+        UPDATE learning_sessions ls
+        SET status = CASE 
+                WHEN ls.session_date < (NOW() AT TIME ZONE 'Asia/Jakarta')::date THEN 'completed'
+                WHEN ls.session_date = (NOW() AT TIME ZONE 'Asia/Jakarta')::date AND (NOW() AT TIME ZONE 'Asia/Jakarta')::time > ls.end_time THEN 'completed'
+                WHEN ls.session_date = (NOW() AT TIME ZONE 'Asia/Jakarta')::date AND (NOW() AT TIME ZONE 'Asia/Jakarta')::time >= ls.start_time THEN 'active'
+                ELSE ls.status
+            END,
+            updated_at = NOW()
+        WHERE ls.tenant_id = $1
+          AND ls.session_date = COALESCE($2::date, (NOW() AT TIME ZONE 'Asia/Jakarta')::date)
+          AND ls.status NOT IN ('cancelled')
+          AND ls.deleted_at IS NULL
+          AND (
+              (ls.session_date < (NOW() AT TIME ZONE 'Asia/Jakarta')::date AND ls.status != 'completed')
+              OR (ls.session_date = (NOW() AT TIME ZONE 'Asia/Jakarta')::date AND (NOW() AT TIME ZONE 'Asia/Jakarta')::time > ls.end_time AND ls.status != 'completed')
+              OR (ls.session_date = (NOW() AT TIME ZONE 'Asia/Jakarta')::date AND (NOW() AT TIME ZONE 'Asia/Jakarta')::time >= ls.start_time AND (NOW() AT TIME ZONE 'Asia/Jakarta')::time <= ls.end_time AND ls.status != 'active')
+          )
+    "#;
+
+    let _ = sqlx::query(update_status_sql)
+        .bind(req_ctx.tenant_id)
+        .bind(target_sync_date)
+        .execute(&ctx.pool)
+        .await;
+
     let rows = sqlx::query(
         r#"
         SELECT 
