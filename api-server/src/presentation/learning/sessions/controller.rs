@@ -213,8 +213,9 @@ async fn start(
             )
         })?;
 
+        let is_new_session = inserted.is_some();
         let final_session_id = match inserted {
-            Some(row) => row.get::<Uuid, _>("id"),
+            Some(ref row) => row.get::<Uuid, _>("id"),
             None => {
                 // Konflik unique index -> ambil baris sesi yang sudah ada
                 let existing_id: Uuid = sqlx::query_scalar(
@@ -242,7 +243,7 @@ async fn start(
         };
 
         // Kirim FCM jika baru dibuat
-        if inserted.is_some() {
+        if is_new_session {
             let tid = req_ctx.tenant_id;
             let cname = sched_class_name;
             let sname = sched_subject_name;
