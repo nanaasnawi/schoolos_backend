@@ -27,8 +27,13 @@ pub struct AssignmentResponse {
     pub class_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subject_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub teacher_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_late_submission: Option<bool>,
     #[serde(default)]
     pub questions: Vec<AssignmentQuestionDto>,
 }
@@ -53,6 +58,9 @@ impl From<Assignment> for AssignmentResponse {
             class_name: None,
             subject_name: None,
             teacher_name: None,
+            session_id: None,
+            release_at: None,
+            allow_late_submission: Some(true),
             questions: Vec::new(),
         }
     }

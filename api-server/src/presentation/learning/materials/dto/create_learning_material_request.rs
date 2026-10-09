@@ -17,4 +17,6 @@ pub struct CreateLearningMaterialRequest {
     pub teacher_id: Option<Uuid>,
     #[serde(default)]
     pub subject_id: Option<Uuid>,
+    pub session_id: Option<Uuid>,
+    pub release_at: Option<chrono::DateTime<chrono::Utc>>,
 }

@@ -9,9 +9,16 @@ use uuid::Uuid;
 
 pub struct StartSessionCommand {
     pub tenant_id: Uuid,
-    pub lesson_id: Uuid,
+    pub session_type: Option<String>,
+    pub schedule_id: Option<Uuid>,
+    pub lesson_id: Option<Uuid>,
     pub class_id: Uuid,
+    pub subject_id: Option<Uuid>,
     pub teacher_id: Uuid,
+    pub session_date: Option<chrono::NaiveDate>,
+    pub session_number: Option<i32>,
+    pub start_time: Option<chrono::NaiveTime>,
+    pub end_time: Option<chrono::NaiveTime>,
     pub notes: Option<String>,
 }
 
@@ -38,11 +45,28 @@ impl StartSessionUseCase {
         &self,
         command: StartSessionCommand,
     ) -> Result<LearningSession, ApplicationError> {
+        let now_date = self.clock.now().date_naive();
+        let session_date = command.session_date.unwrap_or(now_date);
+        let session_type = command.session_type.unwrap_or_else(|| {
+            if command.schedule_id.is_some() {
+                "scheduled".to_string()
+            } else {
+                "adhoc".to_string()
+            }
+        });
+
         let mut session = LearningSession::start_new(
             command.tenant_id,
+            session_type,
+            command.schedule_id,
             command.lesson_id,
             command.class_id,
+            command.subject_id,
             command.teacher_id,
+            session_date,
+            command.session_number.unwrap_or(1),
+            command.start_time,
+            command.end_time,
             command.notes,
             &*self.clock,
         );

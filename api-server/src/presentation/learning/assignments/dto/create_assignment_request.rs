@@ -15,7 +15,15 @@ pub struct CreateAssignmentRequest {
     #[serde(default = "default_assignment_type")]
     pub assignment_type: String,
     pub class_id: Option<String>,
+    pub session_id: Option<Uuid>,
+    pub release_at: Option<DateTime<Utc>>,
+    #[serde(default = "default_allow_late")]
+    pub allow_late_submission: Option<bool>,
     pub questions: Option<Vec<super::assignment_question_dto::AssignmentQuestionDto>>,
+}
+
+fn default_allow_late() -> Option<bool> {
+    Some(true)
 }
 
 fn default_lesson_id() -> Option<Uuid> {

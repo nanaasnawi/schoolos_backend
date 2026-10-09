@@ -32,6 +32,7 @@ pub fn quiz_routes() -> Router<ApplicationContext> {
         .route("/", post(create).get(list))
         .route("/{id}", get(get_by_id))
         .route("/{id}/publish", post(publish))
+        .route("/{id}/verify-token", post(verify_token))
         .route("/{id}/questions", post(add_question).get(get_questions))
         .route("/{id}/attempts", post(start_attempt).get(get_attempts))
         .route("/{id}/attempts/{attempt_id}", get(get_attempt_by_id))
@@ -850,6 +851,183 @@ async fn publish(
     )))
 }
 
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct VerifyQuizTokenRequest {
+    pub token: String,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct VerifyQuizTokenResponse {
+    pub valid: bool,
+    pub message: String,
+}
+
+async fn verify_token(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<VerifyQuizTokenRequest>,
+) -> Result<Json<ApiResponse<VerifyQuizTokenResponse>>, ApiError> {
+    use crate::middleware::require_permission;
+    use school_core::permission::domain::permission_registry::Permission;
+    require_permission(&req_ctx.actor, Permission::LearningQuizRead).map_err(|_| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Insufficient permissions".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
+    let student_id = crate::authorization_helpers::AuthorizationScope::resolve_student_id(
+        &ctx.pool,
+        req_ctx.tenant_id,
+        actor_id,
+    )
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?
+    .unwrap_or(actor_id);
+
+    // 1. Cek status percobaan token pada quiz_token_attempts
+    let attempt_record = sqlx::query!(
+        r#"
+        SELECT failed_attempts, locked_until
+        FROM quiz_token_attempts
+        WHERE tenant_id = $1 AND quiz_id = $2 AND student_id = $3
+        "#,
+        req_ctx.tenant_id,
+        id,
+        student_id
+    )
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let now_utc = chrono::Utc::now();
+    if let Some(ref rec) = attempt_record {
+        if let Some(locked_until) = rec.locked_until {
+            if locked_until > now_utc {
+                let remaining_secs = (locked_until - now_utc).num_seconds();
+                let remaining_mins = (remaining_secs / 60) + 1;
+                return Err(ApiError::new(
+                    school_core::common::error::ApplicationError::Domain(
+                        school_core::common::error::DomainError::Validation(
+                            format!(
+                                "Token ujian terkunci selama {} menit karena 5 kali salah input berturut-turut.",
+                                remaining_mins
+                            ),
+                        ),
+                    ),
+                    &req_ctx.request_id,
+                ));
+            }
+        }
+    }
+
+    // 2. Ambil token kuis sebenarnya dari tabel quizzes
+    let exam_token_db: Option<String> = sqlx::query_scalar(
+        "SELECT exam_token FROM quizzes WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL"
+    )
+    .bind(id)
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?
+    .flatten();
+
+    let input_token = payload.token.trim().to_uppercase();
+    let is_valid = match exam_token_db {
+        Some(ref expected) if !expected.trim().is_empty() => {
+            expected.trim().to_uppercase() == input_token
+        }
+        _ => true,
+    };
+
+    if is_valid {
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO quiz_token_attempts (id, tenant_id, quiz_id, student_id, failed_attempts, locked_until, last_attempt_at)
+            VALUES (gen_random_uuid(), $1, $2, $3, 0, NULL, NOW())
+            ON CONFLICT (tenant_id, quiz_id, student_id)
+            DO UPDATE SET failed_attempts = 0, locked_until = NULL, last_attempt_at = NOW()
+            "#,
+        )
+        .bind(req_ctx.tenant_id)
+        .bind(id)
+        .bind(student_id)
+        .execute(&ctx.pool)
+        .await;
+
+        Ok(Json(ApiResponse::success(
+            VerifyQuizTokenResponse {
+                valid: true,
+                message: "Token ujian valid. Selamat mengerjakan!".to_string(),
+            },
+            req_ctx.request_id,
+        )))
+    } else {
+        let current_fails = attempt_record.map(|r| r.failed_attempts).unwrap_or(0) + 1;
+        let lock_time = if current_fails >= 5 {
+            Some(now_utc + chrono::Duration::minutes(15))
+        } else {
+            None
+        };
+
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO quiz_token_attempts (id, tenant_id, quiz_id, student_id, failed_attempts, locked_until, last_attempt_at)
+            VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, NOW())
+            ON CONFLICT (tenant_id, quiz_id, student_id)
+            DO UPDATE SET failed_attempts = $4, locked_until = $5, last_attempt_at = NOW()
+            "#,
+        )
+        .bind(req_ctx.tenant_id)
+        .bind(id)
+        .bind(student_id)
+        .bind(current_fails)
+        .bind(lock_time)
+        .execute(&ctx.pool)
+        .await;
+
+        let rem = 5 - current_fails;
+        let msg = if rem <= 0 {
+            "Token ujian salah. Akun Anda terkunci dari memasukkan token selama 15 menit.".to_string()
+        } else {
+            format!("Token ujian salah. Sisa kesempatan mencoba: {} kali.", rem)
+        };
+
+        Err(ApiError::new(
+            school_core::common::error::ApplicationError::Domain(
+                school_core::common::error::DomainError::Validation(msg),
+            ),
+            &req_ctx.request_id,
+        ))
+    }
+}
+
 async fn start_attempt(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
@@ -926,6 +1104,28 @@ async fn start_attempt(
             )
         })?
         .unwrap_or(payload.student_id);
+
+    // Cek apakah siswa terkunci karena token rate limit
+    let is_locked = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM quiz_token_attempts WHERE tenant_id = $1 AND quiz_id = $2 AND student_id = $3 AND locked_until > NOW())"
+    )
+    .bind(req_ctx.tenant_id)
+    .bind(id)
+    .bind(effective_student_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .unwrap_or(false);
+
+    if is_locked {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Domain(
+                school_core::common::error::DomainError::Validation(
+                    "Siswa terkunci dari ujian ini karena 5 kali gagal memasukkan token. Silakan tunggu 15 menit.".to_string(),
+                ),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
 
     let command = StartAttemptCommand {
         tenant_id: req_ctx.tenant_id,

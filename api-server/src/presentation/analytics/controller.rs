@@ -1,4 +1,9 @@
-use axum::{extract::State, routing::get, Json, Router};
+use axum::{
+    extract::{Query, State},
+    routing::get,
+    Json, Router,
+};
+use chrono::Datelike;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use uuid::Uuid;
@@ -120,6 +125,7 @@ pub fn analytics_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/overview", get(get_overview))
         .route("/dashboard", get(get_dashboard))
+        .route("/schedule-compliance", get(get_schedule_compliance))
 }
 
 #[utoipa::path(
@@ -571,5 +577,275 @@ async fn get_dashboard(
             recent_activities,
         },
         req_ctx.correlation_id,
+    )))
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ScheduleComplianceFilterQuery {
+    pub date: Option<chrono::NaiveDate>,
+    pub class_id: Option<Uuid>,
+    pub teacher_id: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ComplianceItemDto {
+    pub schedule_id: Uuid,
+    pub session_id: Option<Uuid>,
+    pub class_id: Uuid,
+    pub class_name: String,
+    pub subject_id: Uuid,
+    pub subject_name: String,
+    pub teacher_id: Uuid,
+    pub teacher_name: String,
+    pub substitute_teacher_id: Option<Uuid>,
+    pub substitute_teacher_name: Option<String>,
+    pub day_of_week: String,
+    pub date: chrono::NaiveDate,
+    pub start_time: String,
+    pub end_time: String,
+    pub room: String,
+    pub state: String,
+    pub attendance_count: i64,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ScheduleComplianceResponse {
+    pub date: chrono::NaiveDate,
+    pub total_scheduled: i64,
+    pub completed_count: i64,
+    pub in_progress_count: i64,
+    pub scheduled_count: i64,
+    pub substituted_count: i64,
+    pub cancelled_count: i64,
+    pub overdue_unrecorded_count: i64,
+    pub compliance_rate: f64,
+    pub items: Vec<ComplianceItemDto>,
+}
+
+async fn get_schedule_compliance(
+    State(ctx): State<ApplicationContext>,
+    Query(filter): Query<ScheduleComplianceFilterQuery>,
+    req_ctx: RequestContext,
+) -> Result<Json<ApiResponse<ScheduleComplianceResponse>>, ApiError> {
+    use crate::middleware::require_permission;
+    use school_core::permission::domain::permission_registry::Permission;
+
+    require_permission(&req_ctx.actor, Permission::AcademicManage)
+        .or_else(|_| require_permission(&req_ctx.actor, Permission::TeacherRead))
+        .map_err(|_| {
+            ApiError::new(
+                ApplicationError::Unauthorized(
+                    ErrorCode::AuthPermissionDenied,
+                    "Insufficient permissions to view schedule compliance".to_string(),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+
+    let now_utc = chrono::Utc::now();
+    let today = now_utc.date_naive();
+    let target_date = filter.date.unwrap_or(today);
+
+    let day_name = match target_date.weekday() {
+        chrono::Weekday::Mon => "senin",
+        chrono::Weekday::Tue => "selasa",
+        chrono::Weekday::Wed => "rabu",
+        chrono::Weekday::Thu => "kamis",
+        chrono::Weekday::Fri => "jumat",
+        chrono::Weekday::Sat => "sabtu",
+        chrono::Weekday::Sun => "minggu",
+    };
+
+    let current_time_wib = (now_utc + chrono::Duration::hours(7)).time();
+
+    let rows = sqlx::query(
+        r#"
+        SELECT 
+            cs.id as schedule_id,
+            cs.class_id,
+            c.name as class_name,
+            cs.subject_id,
+            s.name as subject_name,
+            cs.teacher_id,
+            t.full_name as teacher_name,
+            cs.day_of_week,
+            cs.start_time,
+            cs.end_time,
+            COALESCE(cs.room, 'Ruang Kelas') as room,
+            ls.id as session_id,
+            ls.substitute_teacher_id,
+            st.full_name as substitute_teacher_name,
+            ls.status as session_status,
+            ls.started_at,
+            ls.ended_at,
+            ls.notes,
+            COALESCE((
+                SELECT COUNT(*)::bigint 
+                FROM session_attendances sa 
+                WHERE sa.session_id = ls.id AND sa.tenant_id = cs.tenant_id
+            ), 0) as attendance_count
+        FROM class_schedules cs
+        JOIN classes c ON c.id = cs.class_id
+        JOIN subjects s ON s.id = cs.subject_id
+        JOIN teachers t ON t.id = cs.teacher_id
+        LEFT JOIN learning_sessions ls ON ls.schedule_id = cs.id 
+                                      AND ls.session_date = $2 
+                                      AND ls.tenant_id = cs.tenant_id 
+                                      AND ls.deleted_at IS NULL
+        LEFT JOIN teachers st ON st.id = ls.substitute_teacher_id
+        WHERE cs.tenant_id = $1
+          AND LOWER(TRIM(cs.day_of_week)) = $3
+          AND cs.deleted_at IS NULL
+          AND ($4::uuid IS NULL OR cs.class_id = $4)
+          AND ($5::uuid IS NULL OR cs.teacher_id = $5)
+        ORDER BY cs.start_time ASC
+        "#
+    )
+    .bind(req_ctx.tenant_id)
+    .bind(target_date)
+    .bind(day_name)
+    .bind(filter.class_id)
+    .bind(filter.teacher_id)
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let mut items = Vec::new();
+    let mut completed_count = 0i64;
+    let mut in_progress_count = 0i64;
+    let mut scheduled_count = 0i64;
+    let mut substituted_count = 0i64;
+    let mut cancelled_count = 0i64;
+    let mut overdue_unrecorded_count = 0i64;
+
+    for r in rows {
+        let schedule_id: Uuid = r.get("schedule_id");
+        let class_id: Uuid = r.get("class_id");
+        let class_name: String = r.get("class_name");
+        let subject_id: Uuid = r.get("subject_id");
+        let subject_name: String = r.get("subject_name");
+        let teacher_id: Uuid = r.get("teacher_id");
+        let teacher_name: String = r.get("teacher_name");
+        let day_of_week: String = r.get("day_of_week");
+        let start_time: String = r.get("start_time");
+        let end_time: String = r.get("end_time");
+        let room: String = r.get("room");
+        let session_id: Option<Uuid> = r.get("session_id");
+        let substitute_teacher_id: Option<Uuid> = r.get("substitute_teacher_id");
+        let substitute_teacher_name: Option<String> = r.get("substitute_teacher_name");
+        let session_status: Option<String> = r.get("session_status");
+        let ended_at: Option<chrono::DateTime<chrono::Utc>> = r.get("ended_at");
+        let started_at: Option<chrono::DateTime<chrono::Utc>> = r.get("started_at");
+        let notes: Option<String> = r.get("notes");
+        let attendance_count: i64 = r.get("attendance_count");
+
+        let state = if let Some(ref st) = session_status {
+            if st == "cancelled" {
+                cancelled_count += 1;
+                "CANCELLED"
+            } else if substitute_teacher_id.is_some() {
+                substituted_count += 1;
+                "SUBSTITUTED"
+            } else if st == "completed" || ended_at.is_some() {
+                completed_count += 1;
+                "COMPLETED"
+            } else if st == "active" || started_at.is_some() {
+                in_progress_count += 1;
+                "IN_PROGRESS"
+            } else {
+                let parsed_end = chrono::NaiveTime::parse_from_str(end_time.trim(), "%H:%M:%S")
+                    .or_else(|_| chrono::NaiveTime::parse_from_str(end_time.trim(), "%H:%M"))
+                    .ok();
+
+                let is_overdue = if target_date < today {
+                    true
+                } else if target_date == today {
+                    parsed_end.map(|et| current_time_wib > et).unwrap_or(false)
+                } else {
+                    false
+                };
+
+                if is_overdue {
+                    overdue_unrecorded_count += 1;
+                    "OVERDUE_UNRECORDED"
+                } else {
+                    scheduled_count += 1;
+                    "SCHEDULED"
+                }
+            }
+        } else {
+            let parsed_end = chrono::NaiveTime::parse_from_str(end_time.trim(), "%H:%M:%S")
+                .or_else(|_| chrono::NaiveTime::parse_from_str(end_time.trim(), "%H:%M"))
+                .ok();
+
+            let is_overdue = if target_date < today {
+                true
+            } else if target_date == today {
+                parsed_end.map(|et| current_time_wib > et).unwrap_or(false)
+            } else {
+                false
+            };
+
+            if is_overdue {
+                overdue_unrecorded_count += 1;
+                "OVERDUE_UNRECORDED"
+            } else {
+                scheduled_count += 1;
+                "SCHEDULED"
+            }
+        };
+
+        items.push(ComplianceItemDto {
+            schedule_id,
+            session_id,
+            class_id,
+            class_name,
+            subject_id,
+            subject_name,
+            teacher_id,
+            teacher_name,
+            substitute_teacher_id,
+            substitute_teacher_name,
+            day_of_week,
+            date: target_date,
+            start_time,
+            end_time,
+            room,
+            state: state.to_string(),
+            attendance_count,
+            notes,
+        });
+    }
+
+    let total_scheduled = items.len() as i64;
+    let effective_denominator = total_scheduled - cancelled_count;
+    let compliance_rate = if effective_denominator > 0 {
+        ((completed_count + substituted_count) as f64 / effective_denominator as f64) * 100.0
+    } else {
+        100.0
+    };
+
+    Ok(Json(ApiResponse::success(
+        ScheduleComplianceResponse {
+            date: target_date,
+            total_scheduled,
+            completed_count,
+            in_progress_count,
+            scheduled_count,
+            substituted_count,
+            cancelled_count,
+            overdue_unrecorded_count,
+            compliance_rate,
+            items,
+        },
+        req_ctx.request_id,
     )))
 }
