@@ -167,9 +167,10 @@ pub async fn remind_students(
 
     if rows.is_empty() {
         return Err(ApiError::new(
-            ApplicationError::Domain(school_core::common::error::DomainError::NotFound(
+            ApplicationError::NotFound(
+                school_core::common::error_code::ErrorCode::StudentNotFound,
                 "Data siswa tidak ditemukan di sistem".to_string(),
-            )),
+            ),
             &req_ctx.request_id,
         ));
     }
