@@ -146,6 +146,8 @@ async fn start(
         let sched_teacher_id: Uuid = schedule_row.try_get("teacher_id").unwrap_or_default();
         let sched_start_time: String = schedule_row.try_get("start_time").unwrap_or_default();
         let sched_end_time: String = schedule_row.try_get("end_time").unwrap_or_default();
+        let sched_class_name: String = schedule_row.try_get("class_name").unwrap_or_else(|_| "Kelas".to_string());
+        let sched_subject_name: String = schedule_row.try_get("subject_name").unwrap_or_else(|_| "Pelajaran".to_string());
 
         let class_id = payload.class_id.unwrap_or(sched_class_id);
         let subject_id = payload.subject_id.or(Some(sched_subject_id));
@@ -242,8 +244,8 @@ async fn start(
         // Kirim FCM jika baru dibuat
         if inserted.is_some() {
             let tid = req_ctx.tenant_id;
-            let cname = schedule_row.class_name.clone();
-            let sname = schedule_row.subject_name.clone();
+            let cname = sched_class_name;
+            let sname = sched_subject_name;
             let t = format!("🎓 Sesi Dimulai: {} - {}", cname, sname);
             let b = "Jadwal pelajaran dimulai. Presensi dibuka — segera bergabung!".to_string();
             let title_c = t.clone();
