@@ -1528,27 +1528,27 @@ async fn send_message(
 
     // Update thread status, message summary, and sender's read timestamp
     if is_teacher {
-        let _ = sqlx::query!(
+        let _ = sqlx::query(
             r#"
             UPDATE inquiry_threads
             SET status = 'ANSWERED', last_message_content = $1, last_message_at = NOW(), teacher_last_read_at = NOW(), updated_at = NOW()
             WHERE id = $2
             "#,
-            content,
-            id
         )
+        .bind(&content)
+        .bind(id)
         .execute(&ctx.pool)
         .await;
     } else {
-        let _ = sqlx::query!(
+        let _ = sqlx::query(
             r#"
             UPDATE inquiry_threads
             SET status = 'WAITING_REPLY', last_message_content = $1, last_message_at = NOW(), student_last_read_at = NOW(), updated_at = NOW()
             WHERE id = $2
             "#,
-            content,
-            id
         )
+        .bind(&content)
+        .bind(id)
         .execute(&ctx.pool)
         .await;
     }

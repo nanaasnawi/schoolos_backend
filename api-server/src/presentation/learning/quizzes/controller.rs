@@ -852,12 +852,12 @@ async fn publish(
             }
             None => (None, None),
         };
+        let cid = q_class;
         let t = format!("💻 Kuis/CBT Baru: {}", quiz.title);
         let b =
             "Kuis/CBT baru sudah dipublish. Buka aplikasi untuk mengerjakan sebelum batas waktu!"
                 .to_string();
         if let Some(tid) = q_tenant.or(Some(req_ctx.tenant_id)) {
-            let cid = q_class;
             let _ = sqlx::query(
                 r#"
                 INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, reference_type, reference_id, is_read, created_at)
