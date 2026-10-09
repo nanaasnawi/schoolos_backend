@@ -32,6 +32,7 @@ pub struct TeacherFilter {
 pub fn teacher_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/", post(create).get(list))
+        .route("/remind", post(super::remind::remind_students).get(super::remind::get_reminders))
         .route("/{id}", get(get_by_id).patch(update).put(update))
 }
 
