@@ -72,7 +72,7 @@ pub async fn get_reminders(
         FROM notifications n
         JOIN students s ON s.user_id = n.user_id AND s.tenant_id = n.tenant_id
         WHERE n.notification_type IN ('SMART_REMINDER', 'MATERIAL_REMINDER', 'ASSIGNMENT_REMINDER', 'AT_RISK_REMINDER')
-          AND n.tenant_id = $1
+          AND ($1::uuid = '00000000-0000-0000-0000-000000000000'::uuid OR n.tenant_id = $1)
           AND n.created_at >= NOW() - INTERVAL '7 days'
         ORDER BY n.created_at DESC
         "#,
@@ -149,7 +149,9 @@ pub async fn remind_students(
         r#"
         SELECT s.id, s.user_id, s.full_name, s.tenant_id
         FROM students s
-        WHERE s.id = ANY($1) AND s.tenant_id = $2 AND s.deleted_at IS NULL
+        WHERE s.id = ANY($1) 
+          AND ($2::uuid = '00000000-0000-0000-0000-000000000000'::uuid OR s.tenant_id = $2) 
+          AND s.deleted_at IS NULL
         "#,
     )
     .bind(&target_ids)
