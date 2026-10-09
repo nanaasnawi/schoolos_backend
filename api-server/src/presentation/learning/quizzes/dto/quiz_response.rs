@@ -34,6 +34,16 @@ pub struct QuizResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub teacher_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<Uuid>,
+    #[serde(default = "default_exam_mode")]
+    pub exam_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exam_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_expires_at: Option<DateTime<Utc>>,
+    #[serde(default = "default_max_token_attempts")]
+    pub max_token_attempts: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub student_attempt_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub student_attempts_count: Option<i32>,
@@ -43,6 +53,14 @@ pub struct QuizResponse {
     pub student_last_score: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub student_last_attempt_id: Option<Uuid>,
+}
+
+fn default_exam_mode() -> Option<String> {
+    Some("HOMEWORK_QUIZ".to_string())
+}
+
+fn default_max_token_attempts() -> Option<i32> {
+    Some(5)
 }
 
 impl From<Quiz> for QuizResponse {
@@ -71,6 +89,11 @@ impl From<Quiz> for QuizResponse {
             class_name: None,
             subject_name: None,
             teacher_name: None,
+            session_id: None,
+            exam_mode: Some("HOMEWORK_QUIZ".to_string()),
+            exam_token: None,
+            token_expires_at: None,
+            max_token_attempts: Some(5),
             student_attempt_status: None,
             student_attempts_count: None,
             student_has_completed: None,
