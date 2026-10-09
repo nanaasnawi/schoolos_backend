@@ -4,8 +4,17 @@ use axum::{
     Json, Router,
 };
 use chrono::{DateTime, Utc};
+use serde::Deserialize;
 use sqlx::Row;
 use uuid::Uuid;
+
+#[derive(Debug, Deserialize, Default)]
+pub struct MaterialFilterQuery {
+    pub class_id: Option<Uuid>,
+    pub subject_id: Option<Uuid>,
+    pub teacher_id: Option<Uuid>,
+    pub lesson_id: Option<Uuid>,
+}
 
 use super::dto::{
     create_learning_material_request::CreateLearningMaterialRequest,
@@ -360,6 +369,7 @@ async fn create(
 
 async fn list(
     State(ctx): State<ApplicationContext>,
+    Query(filter): Query<MaterialFilterQuery>,
     req_ctx: RequestContext,
 ) -> Result<Json<ApiResponse<Vec<LearningMaterialResponse>>>, ApiError> {
     use crate::middleware::require_permission;
@@ -391,6 +401,19 @@ async fn list(
         })
         .unwrap_or(false);
 
+    let resolved_actor_teacher_id = if let Some(aid) = actor_id {
+        crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            aid,
+        )
+        .await
+        .ok()
+        .flatten()
+    } else {
+        None
+    };
+
     let is_teacher = !is_admin && (
         req_ctx
             .actor
@@ -402,15 +425,7 @@ async fn list(
                 })
             })
             .unwrap_or(false)
-            || crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(
-                &ctx.pool,
-                req_ctx.tenant_id,
-                actor_id.unwrap_or_default(),
-            )
-            .await
-            .ok()
-            .flatten()
-            .is_some()
+            || resolved_actor_teacher_id.is_some()
     );
 
     let is_student = !is_admin
@@ -427,7 +442,8 @@ async fn list(
             .unwrap_or(false);
 
     let items: Vec<LearningMaterialResponse> = if is_teacher {
-        // Teacher sees materials they created, are assigned to, or published in tenant
+        // Teacher strictly sees only their own materials:
+        // Either created by them, or assigned to their teacher record (even if uploaded by admin)
         let rows = sqlx::query(
             r#"
             SELECT 
@@ -453,14 +469,28 @@ async fn list(
               AND m.deleted_at IS NULL
               AND (
                   m.created_by = $2 
-                  OR m.teacher_id IN (SELECT id FROM teachers WHERE (user_id = $2 OR id = $2) AND tenant_id = $1)
+                  OR ($3::uuid IS NOT NULL AND m.teacher_id = $3)
                   OR m.teacher_id = $2
+                  OR m.teacher_id IN (
+                      SELECT id FROM teachers 
+                      WHERE (user_id = $2 OR id = $2 
+                             OR lower(trim(full_name)) = (SELECT lower(trim(full_name)) FROM users WHERE id = $2)
+                             OR (email IS NOT NULL AND email != '-' AND lower(trim(email)) = (SELECT lower(trim(email)) FROM users WHERE id = $2)))
+                        AND tenant_id = $1 AND deleted_at IS NULL
+                  )
               )
+              AND ($4::uuid IS NULL OR m.class_id = $4)
+              AND ($5::uuid IS NULL OR m.subject_id = $5)
+              AND ($6::uuid IS NULL OR m.lesson_id = $6)
             ORDER BY m.created_at DESC
             "#
         )
         .bind(req_ctx.tenant_id)
         .bind(actor_id)
+        .bind(resolved_actor_teacher_id)
+        .bind(filter.class_id)
+        .bind(filter.subject_id)
+        .bind(filter.lesson_id)
         .fetch_all(&ctx.pool)
         .await
         .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
@@ -533,11 +563,17 @@ async fn list(
                       WHERE (s.user_id = $2 OR s.id = $2) AND en.status ILIKE 'active'
                   )
               )
+              AND ($3::uuid IS NULL OR m.class_id = $3)
+              AND ($4::uuid IS NULL OR m.subject_id = $4)
+              AND ($5::uuid IS NULL OR m.lesson_id = $5)
             ORDER BY m.created_at DESC
             "#,
         )
         .bind(req_ctx.tenant_id)
         .bind(actor_id)
+        .bind(filter.class_id)
+        .bind(filter.subject_id)
+        .bind(filter.lesson_id)
         .fetch_all(&ctx.pool)
         .await
         .map_err(|e| {
@@ -600,11 +636,20 @@ async fn list(
             LEFT JOIN users ut ON ut.id = t.user_id
             LEFT JOIN users uc ON uc.id = m.created_by
             LEFT JOIN library_books lb ON lb.id = m.library_book_id
-            WHERE m.tenant_id = $1 AND m.deleted_at IS NULL
+            WHERE m.tenant_id = $1 
+              AND m.deleted_at IS NULL
+              AND ($2::uuid IS NULL OR m.teacher_id = $2 OR m.created_by = $2)
+              AND ($3::uuid IS NULL OR m.class_id = $3)
+              AND ($4::uuid IS NULL OR m.subject_id = $4)
+              AND ($5::uuid IS NULL OR m.lesson_id = $5)
             ORDER BY m.created_at DESC
             "#
         )
         .bind(req_ctx.tenant_id)
+        .bind(filter.teacher_id)
+        .bind(filter.class_id)
+        .bind(filter.subject_id)
+        .bind(filter.lesson_id)
         .fetch_all(&ctx.pool)
         .await
         .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
@@ -675,16 +720,32 @@ async fn get_by_id(
         })
         .unwrap_or(false);
 
-    let is_teacher = req_ctx
-        .actor
-        .as_ref()
-        .map(|a| {
-            a.roles.iter().any(|r| {
-                let n = r.name.to_lowercase();
-                n == "guru" || n.contains("teacher")
+    let resolved_actor_teacher_id = if let Some(aid) = actor_id {
+        crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            aid,
+        )
+        .await
+        .ok()
+        .flatten()
+    } else {
+        None
+    };
+
+    let is_teacher = !is_admin && (
+        req_ctx
+            .actor
+            .as_ref()
+            .map(|a| {
+                a.roles.iter().any(|r| {
+                    let n = r.name.to_lowercase();
+                    n.contains("guru") || n.contains("teacher") || n.contains("pengajar")
+                })
             })
-        })
-        .unwrap_or(false);
+            .unwrap_or(false)
+            || resolved_actor_teacher_id.is_some()
+    );
 
     let is_student = req_ctx
         .actor
@@ -702,12 +763,24 @@ async fn get_by_id(
             r#"SELECT EXISTS(
                 SELECT 1 FROM learning_materials
                 WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-                  AND (created_by = $3 OR teacher_id IN (SELECT id FROM teachers WHERE user_id = $3))
+                  AND (
+                      created_by = $3 
+                      OR ($4::uuid IS NOT NULL AND teacher_id = $4)
+                      OR teacher_id = $3
+                      OR teacher_id IN (
+                          SELECT id FROM teachers 
+                          WHERE (user_id = $3 OR id = $3 
+                                 OR lower(trim(full_name)) = (SELECT lower(trim(full_name)) FROM users WHERE id = $3)
+                                 OR (email IS NOT NULL AND email != '-' AND lower(trim(email)) = (SELECT lower(trim(email)) FROM users WHERE id = $3)))
+                            AND tenant_id = $2 AND deleted_at IS NULL
+                      )
+                  )
             )"#,
         )
         .bind(id)
         .bind(req_ctx.tenant_id)
         .bind(actor_id)
+        .bind(resolved_actor_teacher_id)
         .fetch_one(&ctx.pool)
         .await
         .unwrap_or(false);
@@ -1237,28 +1310,56 @@ async fn update(
         })
         .unwrap_or(false);
 
-    let is_teacher = req_ctx
-        .actor
-        .as_ref()
-        .map(|a| {
-            a.roles.iter().any(|r| {
-                let n = r.name.to_lowercase();
-                n == "guru" || n.contains("teacher")
+    let resolved_actor_teacher_id = if let Some(aid) = actor_id {
+        crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            aid,
+        )
+        .await
+        .ok()
+        .flatten()
+    } else {
+        None
+    };
+
+    let is_teacher = !is_admin && (
+        req_ctx
+            .actor
+            .as_ref()
+            .map(|a| {
+                a.roles.iter().any(|r| {
+                    let n = r.name.to_lowercase();
+                    n.contains("guru") || n.contains("teacher") || n.contains("pengajar")
+                })
             })
-        })
-        .unwrap_or(false);
+            .unwrap_or(false)
+            || resolved_actor_teacher_id.is_some()
+    );
 
     if is_teacher && !is_admin {
         let owns = sqlx::query_scalar::<_, bool>(
             r#"SELECT EXISTS(
                 SELECT 1 FROM learning_materials
                 WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-                  AND (created_by = $3 OR teacher_id IN (SELECT id FROM teachers WHERE user_id = $3))
+                  AND (
+                      created_by = $3 
+                      OR ($4::uuid IS NOT NULL AND teacher_id = $4)
+                      OR teacher_id = $3
+                      OR teacher_id IN (
+                          SELECT id FROM teachers 
+                          WHERE (user_id = $3 OR id = $3 
+                                 OR lower(trim(full_name)) = (SELECT lower(trim(full_name)) FROM users WHERE id = $3)
+                                 OR (email IS NOT NULL AND email != '-' AND lower(trim(email)) = (SELECT lower(trim(email)) FROM users WHERE id = $3)))
+                            AND tenant_id = $2 AND deleted_at IS NULL
+                      )
+                  )
             )"#,
         )
         .bind(id)
         .bind(req_ctx.tenant_id)
         .bind(actor_id)
+        .bind(resolved_actor_teacher_id)
         .fetch_one(&ctx.pool)
         .await
         .unwrap_or(false);
@@ -1344,28 +1445,52 @@ async fn delete(
         })
         .unwrap_or(false);
 
-    let is_teacher = req_ctx
-        .actor
-        .as_ref()
-        .map(|a| {
-            a.roles.iter().any(|r| {
-                let n = r.name.to_lowercase();
-                n == "guru" || n.contains("teacher")
+    let resolved_actor_teacher_id = crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(
+        &ctx.pool,
+        req_ctx.tenant_id,
+        actor_id,
+    )
+    .await
+    .ok()
+    .flatten();
+
+    let is_teacher = !is_admin && (
+        req_ctx
+            .actor
+            .as_ref()
+            .map(|a| {
+                a.roles.iter().any(|r| {
+                    let n = r.name.to_lowercase();
+                    n.contains("guru") || n.contains("teacher") || n.contains("pengajar")
+                })
             })
-        })
-        .unwrap_or(false);
+            .unwrap_or(false)
+            || resolved_actor_teacher_id.is_some()
+    );
 
     if is_teacher && !is_admin {
         let owns = sqlx::query_scalar::<_, bool>(
             r#"SELECT EXISTS(
                 SELECT 1 FROM learning_materials
                 WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-                  AND (created_by = $3 OR teacher_id IN (SELECT id FROM teachers WHERE user_id = $3))
+                  AND (
+                      created_by = $3 
+                      OR ($4::uuid IS NOT NULL AND teacher_id = $4)
+                      OR teacher_id = $3
+                      OR teacher_id IN (
+                          SELECT id FROM teachers 
+                          WHERE (user_id = $3 OR id = $3 
+                                 OR lower(trim(full_name)) = (SELECT lower(trim(full_name)) FROM users WHERE id = $3)
+                                 OR (email IS NOT NULL AND email != '-' AND lower(trim(email)) = (SELECT lower(trim(email)) FROM users WHERE id = $3)))
+                            AND tenant_id = $2 AND deleted_at IS NULL
+                      )
+                  )
             )"#,
         )
         .bind(id)
         .bind(req_ctx.tenant_id)
         .bind(actor_id)
+        .bind(resolved_actor_teacher_id)
         .fetch_one(&ctx.pool)
         .await
         .unwrap_or(false);
