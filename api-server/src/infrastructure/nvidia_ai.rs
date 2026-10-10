@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use school_core::common::error::{ApplicationError, DomainError};
 
-const DEFAULT_NVIDIA_API_KEY: &str = "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";
 const DEFAULT_NVIDIA_MODEL: &str = "nvidia/ising-calibration-1.5-31b";
 const DEFAULT_NVIDIA_URL: &str = "https://integrate.api.nvidia.com/v1/chat/completions";
 
@@ -36,11 +35,19 @@ struct ChatCompletionResponse {
     choices: Vec<ChatChoice>,
 }
 
-fn get_config() -> (String, String, String) {
-    let key = std::env::var("NVIDIA_API_KEY").unwrap_or_else(|_| DEFAULT_NVIDIA_API_KEY.to_string());
+fn get_config() -> Result<(String, String, String), ApplicationError> {
+    let key = std::env::var("NVIDIA_API_KEY")
+        .map_err(|_| ApplicationError::Internal(
+            "NVIDIA_API_KEY environment variable is not configured. Silakan konfigurasikan di file .env atau environment server.".to_string()
+        ))?;
+    if key.trim().is_empty() {
+        return Err(ApplicationError::Internal(
+            "NVIDIA_API_KEY environment variable is empty. Silakan pasang API key yang valid di environment server.".to_string()
+        ));
+    }
     let model = std::env::var("NVIDIA_MODEL").unwrap_or_else(|_| DEFAULT_NVIDIA_MODEL.to_string());
     let url = std::env::var("NVIDIA_API_URL").unwrap_or_else(|_| DEFAULT_NVIDIA_URL.to_string());
-    (key, model, url)
+    Ok((key, model, url))
 }
 
 /// Call NVIDIA NIM API
@@ -49,7 +56,7 @@ pub async fn call_nvidia_nim(
     temperature: f32,
     max_tokens: u32,
 ) -> Result<String, ApplicationError> {
-    let (api_key, model, api_url) = get_config();
+    let (api_key, model, api_url) = get_config()?;
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(90))
