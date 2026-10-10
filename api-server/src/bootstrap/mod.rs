@@ -160,6 +160,7 @@ use crate::infrastructure::observability::tracing::tracing_middleware;
 use crate::presentation::system::controller::system_routes;
 use crate::presentation::{
     academic::academic_years::controller::academic_year_routes,
+    academic::calendar::controller::calendar_routes,
     academic::classes::controller::class_routes,
     academic::enrollments::controller::enrollment_routes,
     academic::grade_levels::controller::grade_level_routes,
@@ -834,6 +835,18 @@ impl Bootstrap {
             .nest(
                 "/api/v1/academic/years",
                 academic_year_routes()
+                    .layer(axum::middleware::from_fn_with_state(
+                        context.clone(),
+                        idempotency::idempotency_middleware,
+                    ))
+                    .layer(axum::middleware::from_fn_with_state(
+                        context.clone(),
+                        auth_middleware,
+                    )),
+            )
+            .nest(
+                "/api/v1/academic/calendar",
+                calendar_routes()
                     .layer(axum::middleware::from_fn_with_state(
                         context.clone(),
                         idempotency::idempotency_middleware,
