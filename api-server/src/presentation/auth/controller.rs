@@ -167,6 +167,35 @@ async fn login(
                    LIMIT 1
                  )
                ) as class_name,
+               COALESCE(
+                 (
+                   SELECT c.id::text 
+                   FROM students s 
+                   JOIN enrollments en ON en.student_id = s.id 
+                   JOIN classes c ON c.id = en.class_id 
+                   WHERE s.user_id = u.id AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                   ORDER BY en.enrolled_at DESC 
+                   LIMIT 1
+                 ),
+                 (
+                   SELECT c.id::text 
+                   FROM teachers t 
+                   JOIN classes c ON c.homeroom_teacher_id = t.id 
+                   WHERE t.user_id = u.id 
+                   ORDER BY c.name ASC 
+                   LIMIT 1
+                 ),
+                 (
+                   SELECT c.id::text 
+                   FROM guardians g 
+                   JOIN students s ON s.guardian_id = g.id
+                   JOIN enrollments en ON en.student_id = s.id 
+                   JOIN classes c ON c.id = en.class_id 
+                   WHERE g.user_id = u.id AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                   ORDER BY en.enrolled_at DESC 
+                   LIMIT 1
+                 )
+               ) as class_id,
                (
                  SELECT s.full_name 
                  FROM guardians g 
@@ -202,7 +231,7 @@ async fn login(
     .ok()
     .flatten();
 
-    let (user_id, tenant_id, name, email, username, role, user_identifier, class_name, child_name, child_id) =
+    let (user_id, tenant_id, name, email, username, role, user_identifier, class_name, class_id, child_name, child_id) =
         if let Some(u) = &user_row {
             let u_id: uuid::Uuid = u.get("id");
             let u_tenant_id: Option<uuid::Uuid> = u.get("tenant_id");
@@ -224,6 +253,7 @@ async fn login(
                     Some(u_ident)
                 },
                 u.get::<Option<String>, _>("class_name"),
+                u.get::<Option<String>, _>("class_id"),
                 u.get::<Option<String>, _>("child_name"),
                 u.get::<Option<String>, _>("child_id"),
             )
@@ -235,6 +265,7 @@ async fn login(
                 Some(auth_user.email.clone()),
                 auth_user.username.clone(),
                 Some("Siswa".to_string()),
+                None,
                 None,
                 None,
                 None,
@@ -288,6 +319,7 @@ async fn login(
         school_logo_url,
         identifier: user_identifier,
         class_name,
+        class_id,
         child_name,
         child_id,
         avatar_url: user_row.as_ref().and_then(|u| u.try_get("avatar_url").ok().flatten()),
@@ -397,6 +429,8 @@ pub struct AuthUserDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub class_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub child_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub child_id: Option<String>,
@@ -479,6 +513,7 @@ async fn list_users(
             school_logo_url: None,
             identifier: None,
             class_name: None,
+            class_id: None,
             child_name: None,
             child_id: None,
             username: r.get("username"),
@@ -682,6 +717,7 @@ async fn get_me(
                 school_logo_url: school_info.and_then(|s| s.logo_url),
                 identifier: None,
                 class_name: None,
+                class_id: None,
                 child_name: None,
                 child_id: None,
                 username: None,
@@ -748,6 +784,35 @@ async fn get_me(
                    LIMIT 1
                  )
                ) as class_name,
+               COALESCE(
+                 (
+                   SELECT c.id::text 
+                   FROM students s 
+                   JOIN enrollments en ON en.student_id = s.id 
+                   JOIN classes c ON c.id = en.class_id 
+                   WHERE s.user_id = u.id AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                   ORDER BY en.enrolled_at DESC 
+                   LIMIT 1
+                 ),
+                 (
+                   SELECT c.id::text 
+                   FROM teachers t 
+                   JOIN classes c ON c.homeroom_teacher_id = t.id 
+                   WHERE t.user_id = u.id 
+                   ORDER BY c.name ASC 
+                   LIMIT 1
+                 ),
+                 (
+                   SELECT c.id::text 
+                   FROM guardians g 
+                   JOIN students s ON s.guardian_id = g.id
+                   JOIN enrollments en ON en.student_id = s.id 
+                   JOIN classes c ON c.id = en.class_id 
+                   WHERE g.user_id = u.id AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                   ORDER BY en.enrolled_at DESC 
+                   LIMIT 1
+                 )
+               ) as class_id,
                (
                  SELECT s.full_name 
                  FROM guardians g 
@@ -802,6 +867,7 @@ async fn get_me(
                 school_logo_url: school_info.and_then(|s| s.logo_url),
                 identifier: if ident.is_empty() { None } else { Some(ident) },
                 class_name: r.get("class_name"),
+                class_id: r.get("class_id"),
                 child_name: r.get("child_name"),
                 child_id: r.get("child_id"),
                 username: r.try_get("username").ok().flatten(),
@@ -821,6 +887,7 @@ async fn get_me(
             school_logo_url: school_info.and_then(|s| s.logo_url),
             identifier: None,
             class_name: None,
+            class_id: None,
             child_name: None,
             child_id: None,
             username: None,
@@ -1332,6 +1399,35 @@ async fn qr_login(
                     LIMIT 1
                 )
             ) as class_name,
+            COALESCE(
+                (
+                    SELECT c.id::text 
+                    FROM students s 
+                    JOIN enrollments en ON en.student_id = s.id 
+                    JOIN classes c ON c.id = en.class_id 
+                    WHERE s.user_id = $1 AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                    ORDER BY en.enrolled_at DESC 
+                    LIMIT 1
+                ),
+                (
+                    SELECT c.id::text 
+                    FROM teachers t 
+                    JOIN classes c ON c.homeroom_teacher_id = t.id 
+                    WHERE t.user_id = $1 
+                    ORDER BY c.name ASC 
+                    LIMIT 1
+                ),
+                (
+                    SELECT c.id::text 
+                    FROM guardians g 
+                    JOIN students s ON s.guardian_id = g.id
+                    JOIN enrollments en ON en.student_id = s.id 
+                    JOIN classes c ON c.id = en.class_id 
+                    WHERE g.user_id = $1 AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                    ORDER BY en.enrolled_at DESC 
+                    LIMIT 1
+                )
+            ) as class_id,
             (
                 SELECT s.full_name 
                 FROM guardians g 
@@ -1364,18 +1460,19 @@ async fn qr_login(
     .ok()
     .flatten();
 
-    let (user_identifier, class_name, child_name, child_id, qr_username, qr_avatar_url) = if let Some(e) = user_extra {
+    let (user_identifier, class_name, class_id, child_name, child_id, qr_username, qr_avatar_url) = if let Some(e) = user_extra {
         let ident: String = e.get("identifier");
         (
             if ident.is_empty() { None } else { Some(ident) },
             e.get("class_name"),
+            e.get("class_id"),
             e.get("child_name"),
             e.get("child_id"),
             e.try_get("username").ok().flatten(),
             e.try_get("avatar_url").ok().flatten(),
         )
     } else {
-        (None, None, None, None, None, None)
+        (None, None, None, None, None, None, None)
     };
 
     let refresh_claims = school_core::identity::application::auth::authenticate_user::Claims {
@@ -1408,6 +1505,7 @@ async fn qr_login(
         school_logo_url: school_info.and_then(|s| s.logo_url),
         identifier: user_identifier,
         class_name,
+        class_id,
         child_name,
         child_id,
         avatar_url: qr_avatar_url,

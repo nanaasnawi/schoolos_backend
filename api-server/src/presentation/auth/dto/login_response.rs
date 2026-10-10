@@ -46,6 +46,9 @@ pub struct LoginResponse {
     pub class_name: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_id: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub child_name: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]

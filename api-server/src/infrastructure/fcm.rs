@@ -440,6 +440,22 @@ pub fn trigger_fcm_push_targeted(
                     "default_vibrate_timings": true,
                     "click_action": click_action
                 }
+            },
+            "apns": {
+                "headers": {
+                    "apns-priority": "10"
+                },
+                "payload": {
+                    "aps": {
+                        "sound": "default",
+                        "content-available": 1
+                    }
+                }
+            },
+            "webpush": {
+                "headers": {
+                    "Urgency": "high"
+                }
             }
         });
 
