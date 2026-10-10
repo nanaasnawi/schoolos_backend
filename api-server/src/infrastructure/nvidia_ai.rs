@@ -292,6 +292,92 @@ struct RawArticleResponse {
     markdown_article: String,
 }
 
+fn parse_or_extract_article(raw: &str, default_topic: &str, default_subject: &str) -> GeneratedArticleDto {
+    let cleaned = extract_clean_json(raw);
+    if let Ok(parsed) = serde_json::from_str::<RawArticleResponse>(cleaned) {
+        return GeneratedArticleDto {
+            title: parsed.title,
+            description: parsed.description,
+            article_content: parsed.markdown_article,
+        };
+    }
+
+    // Jika parse langsung gagal (misal EOF parsing string karena token terpotong):
+    // Coba tutup string dan JSON object
+    let mut repaired = cleaned.to_string();
+    if !repaired.ends_with('}') {
+        repaired.push_str("\"}");
+        if let Ok(parsed) = serde_json::from_str::<RawArticleResponse>(&repaired) {
+            return GeneratedArticleDto {
+                title: parsed.title,
+                description: parsed.description,
+                article_content: parsed.markdown_article,
+            };
+        }
+    }
+
+    // Fallback: Ekstraksi manual yang sangat aman
+    let title = if let Some(idx) = raw.find("\"title\"") {
+        let rest = &raw[idx + 7..];
+        if let Some(start) = rest.find('"') {
+            let after_quote = &rest[start + 1..];
+            if let Some(end) = after_quote.find('"') {
+                after_quote[..end].to_string()
+            } else {
+                default_topic.to_string()
+            }
+        } else {
+            default_topic.to_string()
+        }
+    } else {
+        default_topic.to_string()
+    };
+
+    let description = if let Some(idx) = raw.find("\"description\"") {
+        let rest = &raw[idx + 13..];
+        if let Some(start) = rest.find('"') {
+            let after_quote = &rest[start + 1..];
+            if let Some(end) = after_quote.find('"') {
+                after_quote[..end].to_string()
+            } else {
+                format!("Naskah artikel pembelajaran {default_subject}")
+            }
+        } else {
+            format!("Naskah artikel pembelajaran {default_subject}")
+        }
+    } else {
+        format!("Naskah artikel pembelajaran {default_subject}")
+    };
+
+    let mut article_content = if let Some(idx) = raw.find("\"markdown_article\"") {
+        let rest = &raw[idx + 18..];
+        if let Some(start) = rest.find('"') {
+            let after_quote = &rest[start + 1..];
+            let content_str = if let Some(end) = after_quote.rfind('"') {
+                if end > 0 { &after_quote[..end] } else { after_quote }
+            } else {
+                after_quote
+            };
+            content_str.replace("\\n", "\n").replace("\\\"", "\"").replace("\\\\", "\\")
+        } else {
+            raw.to_string()
+        }
+    } else {
+        raw.to_string()
+    };
+
+    if article_content.ends_with('}') {
+        article_content.pop();
+    }
+    let article_content = article_content.trim().to_string();
+
+    GeneratedArticleDto {
+        title,
+        description,
+        article_content,
+    }
+}
+
 pub async fn generate_article(
     topic: &str,
     grade_level: &str,
@@ -305,10 +391,10 @@ Format output HARUS berupa JSON murni dengan skema:
 {{
   "title": "Judul Naskah Pembelajaran",
   "description": "Deskripsi pengantar singkat 1-2 kalimat.",
-  "markdown_article": "Isi lengkap artikel berformat Markdown terstruktur:\\n# Judul\\n## 1. Pengantar & Apersepsi Menarik\\n## 2. Pembahasan Konsep Inti\\n## 3. Contoh Nyata & Aplikasi\\n## 4. Rangkuman Intisari\\n## 5. Glosarium / Kamus Kata Sulit"
+  "markdown_article": "Isi lengkap artikel berformat Markdown terstruktur:\n# Judul\n## 1. Pengantar & Apersepsi Menarik\n## 2. Pembahasan Konsep Inti\n## 3. Contoh Nyata & Aplikasi\n## 4. Rangkuman Intisari\n## 5. Glosarium / Kamus Kata Sulit"
 }}
 
-Output HANYA JSON tanpa teks lain."#
+Pastikan teks padat, jelas, format JSON valid dengan escape karakter benar, dan selalu ditutup sempurna. Output HANYA JSON tanpa teks lain."#
     );
 
     let messages = vec![
@@ -322,17 +408,10 @@ Output HANYA JSON tanpa teks lain."#
         },
     ];
 
-    let raw = call_nvidia_nim(messages, 0.4, 2500).await?;
-    let cleaned = extract_clean_json(&raw);
+    let raw = call_nvidia_nim(messages, 0.4, 4000).await?;
+    let result = parse_or_extract_article(&raw, topic, subject_name);
 
-    let parsed: RawArticleResponse = serde_json::from_str(cleaned)
-        .map_err(|e| ApplicationError::Domain(DomainError::Validation(format!("Invalid AI Article JSON: {e}"))))?;
-
-    Ok(GeneratedArticleDto {
-        title: parsed.title,
-        description: parsed.description,
-        article_content: parsed.markdown_article,
-    })
+    Ok(result)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
