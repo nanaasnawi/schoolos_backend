@@ -16,6 +16,7 @@ use super::dto::{
     quiz_response::QuizResponse,
     start_attempt_request::StartAttemptRequest,
     submit_attempt_request::SubmitAttemptRequest,
+    update_quiz_request::UpdateQuizRequest,
 };
 use crate::{
     bootstrap::ApplicationContext, error::ApiError, extractors::RequestContext,
@@ -30,7 +31,7 @@ use school_core::learning::application::quiz::{
 pub fn quiz_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/", post(create).get(list))
-        .route("/{id}", get(get_by_id))
+        .route("/{id}", get(get_by_id).patch(update).put(update))
         .route("/{id}/publish", post(publish))
         .route("/{id}/verify-token", post(verify_token))
         .route("/{id}/questions", post(add_question).get(get_questions))
@@ -811,6 +812,140 @@ async fn get_by_id(
         resp,
         req_ctx.request_id,
     )))
+}
+
+async fn update(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateQuizRequest>,
+) -> Result<Json<ApiResponse<QuizResponse>>, ApiError> {
+    use crate::middleware::require_permission;
+    use school_core::permission::domain::permission_registry::Permission;
+    require_permission(&req_ctx.actor, Permission::LearningQuizUpdate).map_err(|_| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Insufficient permissions".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let meta = sqlx::query(
+        "SELECT tenant_id, class_id, teacher_id, created_by FROM quizzes WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?
+    .ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::NotFound(
+                school_core::common::error_code::ErrorCode::QuizNotFound,
+                format!("Quiz {} not found", id),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let meta_tenant_id: Uuid = meta.get("tenant_id");
+    let meta_class_id: Option<Uuid> = meta.get("class_id");
+    let meta_teacher_id: Option<Uuid> = meta.get("teacher_id");
+    let meta_created_by: Option<Uuid> = meta.get("created_by");
+
+    crate::authorization_helpers::AuthorizationScope::verify_learning_resource_access(
+        &ctx.pool,
+        &req_ctx,
+        meta_tenant_id,
+        meta_class_id,
+        meta_teacher_id,
+        meta_created_by,
+    )
+    .await?;
+
+    let target_class_id: Option<Uuid> = match payload.class_id {
+        Some(ref cid_str) if !cid_str.trim().is_empty() => {
+            if let Ok(u) = Uuid::parse_str(cid_str.trim()) {
+                Some(u)
+            } else {
+                sqlx::query_scalar(
+                    r#"SELECT id FROM classes WHERE tenant_id = $1 AND (name = $2 OR name ILIKE $2) LIMIT 1"#,
+                )
+                .bind(req_ctx.tenant_id)
+                .bind(cid_str.trim())
+                .fetch_optional(&ctx.pool)
+                .await
+                .ok()
+                .flatten()
+            }
+        }
+        _ => None,
+    };
+
+    let _ = sqlx::query(
+        r#"
+        UPDATE quizzes
+        SET title = COALESCE($1, title),
+            description = COALESCE($2, description),
+            time_limit_minutes = COALESCE($3, time_limit_minutes),
+            passing_score = COALESCE($4, passing_score),
+            max_attempts = COALESCE($5, max_attempts),
+            shuffle_questions = COALESCE($6, shuffle_questions),
+            shuffle_choices = COALESCE($7, shuffle_choices),
+            start_at = CASE WHEN $8 THEN $9 ELSE start_at END,
+            end_at = CASE WHEN $10 THEN $11 ELSE end_at END,
+            class_id = COALESCE($12, class_id),
+            session_id = COALESCE($13, session_id),
+            exam_mode = COALESCE($14, exam_mode),
+            exam_token = COALESCE($15, exam_token),
+            token_expires_at = COALESCE($16, token_expires_at),
+            max_token_attempts = COALESCE($17, max_token_attempts),
+            status = COALESCE($18, status),
+            updated_at = NOW()
+        WHERE id = $19 AND tenant_id = $20 AND deleted_at IS NULL
+        "#
+    )
+    .bind(payload.title)
+    .bind(payload.description)
+    .bind(payload.duration_minutes)
+    .bind(payload.passing_score)
+    .bind(payload.max_attempts)
+    .bind(payload.shuffle_questions)
+    .bind(payload.shuffle_choices)
+    .bind(payload.start_at.is_some())
+    .bind(payload.start_at)
+    .bind(payload.end_at.is_some())
+    .bind(payload.end_at)
+    .bind(target_class_id)
+    .bind(payload.session_id)
+    .bind(payload.exam_mode)
+    .bind(payload.exam_token)
+    .bind(payload.token_expires_at)
+    .bind(payload.max_token_attempts)
+    .bind(payload.status)
+    .bind(id)
+    .bind(req_ctx.tenant_id)
+    .execute(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    get_by_id(State(ctx), req_ctx, Path(id)).await
 }
 
 async fn publish(
