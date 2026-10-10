@@ -4,3 +4,4 @@ pub mod quiz_question_dto;
 pub mod quiz_response;
 pub mod start_attempt_request;
 pub mod submit_attempt_request;
+pub mod update_quiz_request;
