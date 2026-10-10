@@ -179,6 +179,7 @@ use crate::presentation::{
     learning::progress::controller::progress_routes, learning::quizzes::controller::quiz_routes,
     learning::sessions::controller::session_routes,
     learning::syllabuses::controller::syllabus_routes,
+    learning::pedagogy::controller::pedagogy_routes,
     notifications::controller::notification_routes, people::guardian::controller::guardian_routes,
     people::staff::controller::staff_routes, people::students::controller::student_routes,
     people::teacher::controller::teacher_routes, school::controller::get_school_public_info,
@@ -943,6 +944,18 @@ impl Bootstrap {
             .nest(
                 "/api/v1/learning/syllabuses",
                 syllabus_routes()
+                    .layer(axum::middleware::from_fn_with_state(
+                        context.clone(),
+                        idempotency::idempotency_middleware,
+                    ))
+                    .layer(axum::middleware::from_fn_with_state(
+                        context.clone(),
+                        auth_middleware,
+                    )),
+            )
+            .nest(
+                "/api/v1/learning/pedagogy",
+                pedagogy_routes()
                     .layer(axum::middleware::from_fn_with_state(
                         context.clone(),
                         idempotency::idempotency_middleware,

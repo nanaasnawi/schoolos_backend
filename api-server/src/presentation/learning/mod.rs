@@ -11,3 +11,4 @@ pub mod progress;
 pub mod quizzes;
 pub mod sessions;
 pub mod syllabuses;
+pub mod pedagogy;
