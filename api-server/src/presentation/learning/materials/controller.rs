@@ -236,7 +236,7 @@ async fn create(
 
         let _ = sqlx::query(
             r#"
-            INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, is_read, created_at)
+            INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, reference_type, reference_id, is_read, created_at)
             SELECT 
                 gen_random_uuid(),
                 s.tenant_id,
@@ -245,21 +245,24 @@ async fn create(
                 $2,
                 'LEARNING_MATERIAL',
                 'in_app',
+                'material',
+                $3,
                 FALSE,
                 NOW()
             FROM students s
             JOIN enrollments en ON en.student_id = s.id
-            WHERE en.class_id = $3 AND (en.status ILIKE 'active')
+            WHERE en.class_id = $4 AND (en.status ILIKE 'active')
             "#
         )
         .bind(&notif_title)
         .bind(&notif_body)
+        .bind(material.id)
         .bind(cid)
         .execute(&ctx.pool)
         .await;
 
         crate::infrastructure::fcm::trigger_fcm_push_targeted(
-            notif_title,
+            notif_title.clone(),
             notif_body,
             crate::infrastructure::fcm::FcmCategory::Material,
             material.id,
@@ -273,7 +276,7 @@ async fn create(
 
         let _ = sqlx::query(
             r#"
-            INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, is_read, created_at)
+            INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, reference_type, reference_id, is_read, created_at)
             SELECT 
                 gen_random_uuid(),
                 s.tenant_id,
@@ -282,14 +285,17 @@ async fn create(
                 $2,
                 'LEARNING_MATERIAL',
                 'in_app',
+                'material',
+                $3,
                 FALSE,
                 NOW()
             FROM students s
-            WHERE s.tenant_id = $3
+            WHERE s.tenant_id = $4
             "#
         )
         .bind(&notif_title)
         .bind(&notif_body)
+        .bind(material.id)
         .bind(req_ctx.tenant_id)
         .execute(&ctx.pool)
         .await;

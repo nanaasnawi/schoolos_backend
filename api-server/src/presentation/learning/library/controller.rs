@@ -688,7 +688,7 @@ async fn assign_reading_material(
     // Insert in-app notifications for all active enrolled students in this class
     let _ = sqlx::query(
         r#"
-        INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, is_read, created_at)
+        INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, reference_type, reference_id, is_read, created_at)
         SELECT 
             gen_random_uuid(),
             s.tenant_id,
@@ -697,15 +697,18 @@ async fn assign_reading_material(
             $2,
             'LEARNING_MATERIAL',
             'in_app',
+            'material',
+            $3,
             FALSE,
             NOW()
         FROM students s
         JOIN enrollments en ON en.student_id = s.id
-        WHERE en.class_id = $3 AND (en.status = 'Active' OR en.status = 'ACTIVE')
+        WHERE en.class_id = $4 AND (en.status = 'Active' OR en.status = 'ACTIVE')
         "#
     )
     .bind(&notif_title)
     .bind(&notif_body)
+    .bind(material_id)
     .bind(payload.class_id)
     .execute(&ctx.pool)
     .await;

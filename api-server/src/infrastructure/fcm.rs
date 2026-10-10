@@ -400,11 +400,10 @@ pub fn trigger_fcm_push_targeted(
             FcmCategory::Reminder => "schedule".to_string(),
         };
 
+        // DATA-ONLY payload agar Android system daemon (Google Play Services) tidak
+        // membuat notifikasi duplikat di status bar. Pembuatan notifikasi ditangani
+        // tunggal secara eksklusif oleh SchoolOsFirebaseMessagingService.onMessageReceived.
         let mut message_obj = serde_json::json!({
-            "notification": {
-                "title": &title,
-                "body": &content
-            },
             "data": {
                 "id": reference_id.to_string(),
                 "title": &title,
@@ -421,16 +420,7 @@ pub fn trigger_fcm_push_targeted(
             "android": {
                 "priority": "HIGH",
                 "ttl": "86400s",
-                "direct_boot_ok": true,
-                "notification": {
-                    "channel_id": channel_id,
-                    "visibility": "PUBLIC",
-                    "notification_priority": "PRIORITY_MAX",
-                    "default_sound": true,
-                    "default_vibrate_timings": true,
-                    "default_light_settings": true,
-                    "click_action": click_action
-                }
+                "direct_boot_ok": true
             }
         });
 
@@ -550,10 +540,6 @@ mod tests {
             "validate_only": true,
             "message": {
                 "topic": "school_announcements",
-                "notification": {
-                    "title": "Test Title",
-                    "body": "Test Body"
-                },
                 "data": {
                     "id": uuid::Uuid::new_v4().to_string(),
                     "title": "Test Title",
@@ -563,15 +549,7 @@ mod tests {
                 "android": {
                     "priority": "HIGH",
                     "ttl": "86400s",
-                    "direct_boot_ok": true,
-                    "notification": {
-                        "channel_id": "school_os_announcements_v4",
-                        "visibility": "PUBLIC",
-                        "notification_priority": "PRIORITY_MAX",
-                        "default_sound": true,
-                        "default_vibrate_timings": true,
-                        "default_light_settings": true
-                    }
+                    "direct_boot_ok": true
                 }
             }
         });
