@@ -400,10 +400,19 @@ pub fn trigger_fcm_push_targeted(
             FcmCategory::Reminder => "schedule".to_string(),
         };
 
-        // DATA-ONLY payload agar Android system daemon (Google Play Services) tidak
-        // membuat notifikasi duplikat di status bar. Pembuatan notifikasi ditangani
-        // tunggal secara eksklusif oleh SchoolOsFirebaseMessagingService.onMessageReceived.
+        let notif_tag = format!("schoolos_{}", reference_id);
+
+        // Payload FCM lengkap:
+        // 1. Key `notification`: Memungkinkan Google Play Services daemon langsung
+        //    membangunkan layar & menampilkan notifikasi saat HP terkunci / Doze / aplikasi mati.
+        // 2. Key `android.notification`: Menjamin channel_id sesuai, priority MAX,
+        //    dan tag unik `schoolos_<id>` agar tidak terjadi duplikasi di status bar.
+        // 3. Key `data`: Memuat metadata lengkap untuk deep linking saat notifikasi diklik.
         let mut message_obj = serde_json::json!({
+            "notification": {
+                "title": &title,
+                "body": &content
+            },
             "data": {
                 "id": reference_id.to_string(),
                 "title": &title,
@@ -415,12 +424,22 @@ pub fn trigger_fcm_push_targeted(
                 "channel_id": channel_id,
                 "click_action": click_action,
                 "navigate_to": navigate_to,
-                "deep_link": deep_link
+                "deep_link": deep_link,
+                "tag": &notif_tag
             },
             "android": {
                 "priority": "HIGH",
                 "ttl": "86400s",
-                "direct_boot_ok": true
+                "direct_boot_ok": true,
+                "notification": {
+                    "channel_id": channel_id,
+                    "tag": &notif_tag,
+                    "notification_priority": "PRIORITY_MAX",
+                    "visibility": "PUBLIC",
+                    "default_sound": true,
+                    "default_vibrate_timings": true,
+                    "click_action": click_action
+                }
             }
         });
 
