@@ -845,21 +845,22 @@ OUTPUT HANYA JSON MURNI TANPA PEMBUKA/PENUTUP MARKDOWN."#,
         )
     })?;
 
+    let total_tps = proposed_tps.len();
     Ok(Json(ApiResponse::success(
         SynthesizeCpResponse {
             cache_hit: false,
             source_cp_id: cp_id,
-            source_cp_element: cp_element_name,
+            source_cp_element: cp_element_name.clone(),
             source_verification_status: cp_verification_status,
             grade_level: grade_level.to_string(),
             academic_year: academic_year.to_string(),
             version: next_version,
-            proposed_tps_count: proposed_tps.len(),
+            proposed_tps_count: total_tps,
             proposed_tps,
             message: format!(
                 "Berhasil mendekonstruksi CP '{}' menjadi {} butir usulan TP & ATP (Status: DRAFT v{}).",
                 cp_element_name,
-                parsed.tps.len(),
+                total_tps,
                 next_version
             ),
         },
