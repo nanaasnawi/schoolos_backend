@@ -1,4 +1,5 @@
 pub mod academic_years;
+pub mod calendar;
 pub mod classes;
 pub mod enrollments;
 pub mod grade_levels;
