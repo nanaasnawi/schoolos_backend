@@ -691,8 +691,8 @@ OUTPUT HANYA JSON MURNI TANPA PEMBUKA/PENUTUP MARKDOWN."#,
     let ai_meta = serde_json::json!({
         "model_name": model_name,
         "prompt_version": prompt_version,
-        "source_cp_id": cp_row.id,
-        "source_cp_version": cp_row.source_version,
+        "source_cp_id": cp_id,
+        "source_cp_version": cp_source_version,
         "trace_id": trace_id,
         "generated_at": chrono::Utc::now()
     });
