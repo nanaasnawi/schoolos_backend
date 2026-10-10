@@ -4,6 +4,7 @@ use axum::{
     Json, Router,
 };
 use uuid::Uuid;
+use sqlx::Row;
 
 use crate::{
     bootstrap::ApplicationContext,
@@ -66,7 +67,7 @@ pub async fn lookup_cp(
 
     // Query learning_outcomes scoped to tenant or global official templates
     // Order: NATIONAL_VERIFIED first, then SCHOOL_VERIFIED, then others
-    let rows = sqlx::query!(
+    let rows = sqlx::query(
         r#"
         SELECT 
             id,
@@ -107,12 +108,12 @@ pub async fn lookup_cp(
             END,
             order_index ASC
         "#,
-        req_ctx.tenant_id,
-        phase,
-        subject_pattern,
-        subject_raw,
-        verification_filter
     )
+    .bind(req_ctx.tenant_id)
+    .bind(&phase)
+    .bind(&subject_pattern)
+    .bind(&subject_raw)
+    .bind(&verification_filter)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| {
@@ -127,28 +128,29 @@ pub async fn lookup_cp(
     let elements: Vec<LearningOutcomeElementDto> = rows
         .into_iter()
         .map(|r| {
-            let is_eligible = r.verification_status == "NATIONAL_VERIFIED"
-                || r.verification_status == "SCHOOL_VERIFIED";
+            let verification_status: String = r.get("verification_status");
+            let is_eligible = verification_status == "NATIONAL_VERIFIED"
+                || verification_status == "SCHOOL_VERIFIED";
 
             LearningOutcomeElementDto {
-                id: r.id,
-                tenant_id: r.tenant_id,
-                subject_code: r.subject_code,
-                subject_name: r.subject_name,
-                phase: r.phase,
-                target_grades: r.target_grades,
-                element_name: r.element_name,
-                element_code: r.element_code,
-                description: r.description,
-                source_origin: r.source_origin,
-                source_version: r.source_version,
-                source_document: r.source_document,
-                document_page_ref: r.document_page_ref,
-                verification_status: r.verification_status,
+                id: r.get("id"),
+                tenant_id: r.get("tenant_id"),
+                subject_code: r.get("subject_code"),
+                subject_name: r.get("subject_name"),
+                phase: r.get("phase"),
+                target_grades: r.get("target_grades"),
+                element_name: r.get("element_name"),
+                element_code: r.get("element_code"),
+                description: r.get("description"),
+                source_origin: r.get("source_origin"),
+                source_version: r.get("source_version"),
+                source_document: r.get("source_document"),
+                document_page_ref: r.get("document_page_ref"),
+                verification_status,
                 is_eligible_source: is_eligible,
-                order_index: r.order_index,
-                created_at: r.created_at,
-                updated_at: r.updated_at,
+                order_index: r.get("order_index"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
             }
         })
         .collect();
@@ -218,16 +220,18 @@ pub async fn register_school_cp(
         ));
     }
 
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
+
     let initial_audit = serde_json::json!([
         {
             "action": "SCHOOL_REGISTRATION",
-            "actor_id": req_ctx.actor.id,
+            "actor_id": actor_id,
             "timestamp": chrono::Utc::now(),
             "notes": "Didaftarkan langsung oleh satuan pendidikan sebagai bagian dari KOSP sekolah"
         }
     ]);
 
-    let row = sqlx::query!(
+    let row = sqlx::query(
         r#"
         INSERT INTO learning_outcomes (
             tenant_id,
@@ -258,20 +262,20 @@ pub async fn register_school_cp(
             source_document, document_page_ref, verification_status, order_index,
             created_at, updated_at
         "#,
-        req_ctx.tenant_id,
-        payload.subject_code.as_deref(),
-        subject_name,
-        phase,
-        payload.target_grades.trim(),
-        element_name,
-        payload.element_code.as_deref(),
-        description,
-        payload.source_document.as_deref().unwrap_or("Dokumen KOSP Satuan Pendidikan"),
-        payload.document_page_ref.as_deref(),
-        req_ctx.actor.id,
-        initial_audit,
-        payload.order_index.unwrap_or(0)
     )
+    .bind(req_ctx.tenant_id)
+    .bind(payload.subject_code.as_deref())
+    .bind(subject_name)
+    .bind(&phase)
+    .bind(payload.target_grades.trim())
+    .bind(element_name)
+    .bind(payload.element_code.as_deref())
+    .bind(description)
+    .bind(payload.source_document.as_deref().unwrap_or("Dokumen KOSP Satuan Pendidikan"))
+    .bind(payload.document_page_ref.as_deref())
+    .bind(actor_id)
+    .bind(&initial_audit)
+    .bind(payload.order_index.unwrap_or(0))
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| {
@@ -284,24 +288,24 @@ pub async fn register_school_cp(
     })?;
 
     let dto = LearningOutcomeElementDto {
-        id: row.id,
-        tenant_id: row.tenant_id,
-        subject_code: row.subject_code,
-        subject_name: row.subject_name,
-        phase: row.phase,
-        target_grades: row.target_grades,
-        element_name: row.element_name,
-        element_code: row.element_code,
-        description: row.description,
-        source_origin: row.source_origin,
-        source_version: row.source_version,
-        source_document: row.source_document,
-        document_page_ref: row.document_page_ref,
-        verification_status: row.verification_status,
+        id: row.get("id"),
+        tenant_id: row.get("tenant_id"),
+        subject_code: row.get("subject_code"),
+        subject_name: row.get("subject_name"),
+        phase: row.get("phase"),
+        target_grades: row.get("target_grades"),
+        element_name: row.get("element_name"),
+        element_code: row.get("element_code"),
+        description: row.get("description"),
+        source_origin: row.get("source_origin"),
+        source_version: row.get("source_version"),
+        source_document: row.get("source_document"),
+        document_page_ref: row.get("document_page_ref"),
+        verification_status: row.get("verification_status"),
         is_eligible_source: true,
-        order_index: row.order_index,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
+        order_index: row.get("order_index"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
     };
 
     Ok(Json(ApiResponse::success(dto, req_ctx.request_id)))
@@ -337,7 +341,7 @@ pub async fn synthesize_cp(
     let force_regenerate = payload.force_regenerate.unwrap_or(false);
 
     // 1. Validasi Keberadaan & Kelayakan CP di Registry
-    let cp_row = sqlx::query!(
+    let cp_row = sqlx::query(
         r#"
         SELECT 
             id, tenant_id, subject_code, subject_name, phase, target_grades,
@@ -346,8 +350,8 @@ pub async fn synthesize_cp(
         FROM learning_outcomes
         WHERE id = $1 AND deleted_at IS NULL
         "#,
-        payload.source_cp_id
     )
+    .bind(payload.source_cp_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| {
@@ -368,14 +372,22 @@ pub async fn synthesize_cp(
         )
     })?;
 
-    let is_eligible = cp_row.verification_status == "NATIONAL_VERIFIED"
-        || cp_row.verification_status == "SCHOOL_VERIFIED";
+    let cp_id: Uuid = cp_row.get("id");
+    let cp_element_name: String = cp_row.get("element_name");
+    let cp_verification_status: String = cp_row.get("verification_status");
+    let cp_source_version: String = cp_row.get("source_version");
+    let cp_phase: String = cp_row.get("phase");
+    let cp_subject_name: String = cp_row.get("subject_name");
+    let cp_description: String = cp_row.get("description");
+
+    let is_eligible = cp_verification_status == "NATIONAL_VERIFIED"
+        || cp_verification_status == "SCHOOL_VERIFIED";
 
     if !is_eligible {
         return Err(ApiError::new(
             ApplicationError::Domain(DomainError::Validation(format!(
                 "Capaian Pembelajaran '{}' berstatus '{}'. Hanya CP berstatus NATIONAL_VERIFIED atau SCHOOL_VERIFIED yang boleh dijadikan basis dekonstruksi AI.",
-                cp_row.element_name, cp_row.verification_status
+                cp_element_name, cp_verification_status
             ))),
             &req_ctx.request_id,
         ));
@@ -388,7 +400,7 @@ pub async fn synthesize_cp(
 
     let cache_seed = format!(
         "{}:{}:{}:{}:{}:{}:{}",
-        tenant_id_str, cp_row.id, cp_row.source_version, grade_level, academic_year, model_name, prompt_version
+        tenant_id_str, cp_id, cp_source_version, grade_level, academic_year, model_name, prompt_version
     );
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -396,13 +408,13 @@ pub async fn synthesize_cp(
     let cache_key = hex::encode(hasher.finalize());
 
     if !force_regenerate {
-        let cached = sqlx::query!(
+        let cached = sqlx::query(
             r#"
             SELECT id, status FROM curriculum_ai_cache
             WHERE cache_key = $1 AND status = 'DRAFT_GENERATED'
             "#,
-            cache_key
         )
+        .bind(&cache_key)
         .fetch_optional(&ctx.pool)
         .await
         .map_err(|e| {
@@ -415,7 +427,7 @@ pub async fn synthesize_cp(
         })?;
 
         if cached.is_some() {
-            let existing_tps = sqlx::query!(
+            let existing_tps = sqlx::query(
                 r#"
                 SELECT 
                     tp.id, tp.code, tp.competency, tp.bloom_level, tp.content_scope,
@@ -430,9 +442,9 @@ pub async fn synthesize_cp(
                   AND (tp.tenant_id = $2 OR tp.tenant_id IS NULL)
                 ORDER BY atp.semester ASC, atp.sequence_order ASC, tp.order_index ASC
                 "#,
-                cp_row.id,
-                req_ctx.tenant_id
             )
+            .bind(cp_id)
+            .bind(req_ctx.tenant_id)
             .fetch_all(&ctx.pool)
             .await
             .map_err(|e| {
@@ -445,32 +457,38 @@ pub async fn synthesize_cp(
             })?;
 
             if !existing_tps.is_empty() {
-                let current_version = existing_tps[0].version;
+                let current_version: i32 = existing_tps[0].get("version");
                 let mapped_tps: Vec<ProposedTpDto> = existing_tps
                     .into_iter()
-                    .map(|r| ProposedTpDto {
-                        id: r.id,
-                        code: r.code,
-                        competency: r.competency.unwrap_or_else(|| "Memahami".to_string()),
-                        bloom_level: r.bloom_level.unwrap_or_else(|| "C3".to_string()),
-                        content_scope: r.content_scope,
-                        statement: r.statement,
-                        pancasila_profiles: r.pancasila_profiles.unwrap_or_default(),
-                        evidence_indicators: r.evidence_indicators.unwrap_or_default(),
-                        estimated_hours: r.estimated_hours,
-                        publication_status: r.publication_status,
-                        version: r.version,
-                        semester: r.semester.unwrap_or_else(|| "ODD".to_string()),
-                        sequence_order: r.sequence_order.unwrap_or(1),
+                    .map(|r| {
+                        let profiles: Option<Vec<String>> = r.get("pancasila_profiles");
+                        let indicators: Option<Vec<String>> = r.get("evidence_indicators");
+                        let semester: Option<String> = r.get("semester");
+                        let seq: Option<i32> = r.get("sequence_order");
+                        ProposedTpDto {
+                            id: r.get("id"),
+                            code: r.get("code"),
+                            competency: r.get::<Option<String>, _>("competency").unwrap_or_else(|| "Memahami".to_string()),
+                            bloom_level: r.get::<Option<String>, _>("bloom_level").unwrap_or_else(|| "C3".to_string()),
+                            content_scope: r.get("content_scope"),
+                            statement: r.get("statement"),
+                            pancasila_profiles: profiles.unwrap_or_default(),
+                            evidence_indicators: indicators.unwrap_or_default(),
+                            estimated_hours: r.get("estimated_hours"),
+                            publication_status: r.get("publication_status"),
+                            version: r.get("version"),
+                            semester: semester.unwrap_or_else(|| "ODD".to_string()),
+                            sequence_order: seq.unwrap_or(1),
+                        }
                     })
                     .collect();
 
                 return Ok(Json(ApiResponse::success(
                     SynthesizeCpResponse {
                         cache_hit: true,
-                        source_cp_id: cp_row.id,
-                        source_cp_element: cp_row.element_name,
-                        source_verification_status: cp_row.verification_status,
+                        source_cp_id: cp_id,
+                        source_cp_element: cp_element_name,
+                        source_verification_status: cp_verification_status,
                         grade_level: grade_level.to_string(),
                         academic_year: academic_year.to_string(),
                         version: current_version,
@@ -529,12 +547,12 @@ FORMAT KELUARAN HARUS BERUPA JSON MURNI DENGAN SKEMA:
 }}
 
 OUTPUT HANYA JSON MURNI TANPA PEMBUKA/PENUTUP MARKDOWN."#,
-        subject_name = cp_row.subject_name,
-        phase = cp_row.phase,
+        subject_name = cp_subject_name,
+        phase = cp_phase,
         grade_level = grade_level,
-        element_name = cp_row.element_name,
-        description = cp_row.description,
-        code_prefix = cp_row.subject_name.chars().filter(|c| c.is_alphabetic()).take(4).collect::<String>().to_uppercase(),
+        element_name = cp_element_name,
+        description = cp_description,
+        code_prefix = cp_subject_name.chars().filter(|c| c.is_alphabetic()).take(4).collect::<String>().to_uppercase(),
         grade_digit = grade_level.chars().filter(|c| c.is_ascii_digit()).collect::<String>()
     );
 
@@ -602,15 +620,15 @@ OUTPUT HANYA JSON MURNI TANPA PEMBUKA/PENUTUP MARKDOWN."#,
     })?;
 
     // Hitung next version
-    let ver_row = sqlx::query!(
+    let ver_row = sqlx::query(
         r#"
         SELECT COALESCE(MAX(version), 0) + 1 AS next_version
         FROM learning_objectives
         WHERE learning_outcome_id = $1 AND (tenant_id = $2 OR tenant_id IS NULL)
         "#,
-        cp_row.id,
-        req_ctx.tenant_id
     )
+    .bind(cp_id)
+    .bind(req_ctx.tenant_id)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
@@ -620,10 +638,10 @@ OUTPUT HANYA JSON MURNI TANPA PEMBUKA/PENUTUP MARKDOWN."#,
         )
     })?;
 
-    let next_version = ver_row.next_version.unwrap_or(1);
+    let next_version: i32 = ver_row.get::<Option<i32>, _>("next_version").unwrap_or(1);
 
     // Tandai draf lama sebagai is_superseded = true
-    sqlx::query!(
+    sqlx::query(
         r#"
         UPDATE learning_objectives
         SET is_superseded = true, updated_at = NOW()
@@ -632,9 +650,9 @@ OUTPUT HANYA JSON MURNI TANPA PEMBUKA/PENUTUP MARKDOWN."#,
           AND is_superseded = false
           AND (tenant_id = $2 OR tenant_id IS NULL)
         "#,
-        cp_row.id,
-        req_ctx.tenant_id
     )
+    .bind(cp_id)
+    .bind(req_ctx.tenant_id)
     .execute(&mut *tx)
     .await
     .map_err(|e| {
@@ -644,7 +662,7 @@ OUTPUT HANYA JSON MURNI TANPA PEMBUKA/PENUTUP MARKDOWN."#,
         )
     })?;
 
-    sqlx::query!(
+    sqlx::query(
         r#"
         UPDATE learning_objective_flows
         SET is_superseded = true, updated_at = NOW()
@@ -655,9 +673,9 @@ OUTPUT HANYA JSON MURNI TANPA PEMBUKA/PENUTUP MARKDOWN."#,
         AND is_superseded = false
         AND (tenant_id = $2 OR tenant_id IS NULL)
         "#,
-        cp_row.id,
-        req_ctx.tenant_id
     )
+    .bind(cp_id)
+    .bind(req_ctx.tenant_id)
     .execute(&mut *tx)
     .await
     .map_err(|e| {
@@ -698,7 +716,7 @@ OUTPUT HANYA JSON MURNI TANPA PEMBUKA/PENUTUP MARKDOWN."#,
         let seq = item.sequence_order.unwrap_or((idx + 1) as i32);
         let approach = item.pedagogical_approach.unwrap_or_else(|| "Problem-Based Learning".to_string());
 
-        let tp_row = sqlx::query!(
+        let tp_row = sqlx::query(
             r#"
             INSERT INTO learning_objectives (
                 tenant_id, learning_outcome_id, code, competency, bloom_level,
@@ -710,20 +728,20 @@ OUTPUT HANYA JSON MURNI TANPA PEMBUKA/PENUTUP MARKDOWN."#,
             RETURNING id, code, competency, bloom_level, content_scope, statement,
                       pancasila_profiles, evidence_indicators, estimated_hours, publication_status, version
             "#,
-            req_ctx.tenant_id,
-            cp_row.id,
-            code,
-            competency,
-            bloom_level,
-            content_scope,
-            statement,
-            &profiles,
-            &indicators,
-            hours,
-            (idx + 1) as i32,
-            next_version,
-            ai_meta
         )
+        .bind(req_ctx.tenant_id)
+        .bind(cp_id)
+        .bind(&code)
+        .bind(&competency)
+        .bind(&bloom_level)
+        .bind(&content_scope)
+        .bind(&statement)
+        .bind(&profiles)
+        .bind(&indicators)
+        .bind(hours)
+        .bind((idx + 1) as i32)
+        .bind(next_version)
+        .bind(&ai_meta)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| {
@@ -733,7 +751,9 @@ OUTPUT HANYA JSON MURNI TANPA PEMBUKA/PENUTUP MARKDOWN."#,
             )
         })?;
 
-        let atp_row = sqlx::query!(
+        let tp_inserted_id: Uuid = tp_row.get("id");
+
+        let atp_row = sqlx::query(
             r#"
             INSERT INTO learning_objective_flows (
                 tenant_id, learning_objective_id, academic_year, grade_level, semester,
@@ -743,16 +763,16 @@ OUTPUT HANYA JSON MURNI TANPA PEMBUKA/PENUTUP MARKDOWN."#,
             )
             RETURNING id, semester, sequence_order, allocated_hours
             "#,
-            req_ctx.tenant_id,
-            tp_row.id,
-            academic_year,
-            grade_level,
-            semester_clean,
-            seq,
-            hours,
-            approach,
-            next_version
         )
+        .bind(req_ctx.tenant_id)
+        .bind(tp_inserted_id)
+        .bind(academic_year)
+        .bind(grade_level)
+        .bind(&semester_clean)
+        .bind(seq)
+        .bind(hours)
+        .bind(&approach)
+        .bind(next_version)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| {
@@ -762,26 +782,29 @@ OUTPUT HANYA JSON MURNI TANPA PEMBUKA/PENUTUP MARKDOWN."#,
             )
         })?;
 
+        let tp_profiles: Option<Vec<String>> = tp_row.get("pancasila_profiles");
+        let tp_indicators: Option<Vec<String>> = tp_row.get("evidence_indicators");
+
         proposed_tps.push(ProposedTpDto {
-            id: tp_row.id,
-            code: tp_row.code,
-            competency: tp_row.competency.unwrap_or_default(),
-            bloom_level: tp_row.bloom_level.unwrap_or_default(),
-            content_scope: tp_row.content_scope,
-            statement: tp_row.statement,
-            pancasila_profiles: tp_row.pancasila_profiles.unwrap_or_default(),
-            evidence_indicators: tp_row.evidence_indicators.unwrap_or_default(),
-            estimated_hours: tp_row.estimated_hours,
-            publication_status: tp_row.publication_status,
-            version: tp_row.version,
-            semester: atp_row.semester,
-            sequence_order: atp_row.sequence_order,
+            id: tp_inserted_id,
+            code: tp_row.get("code"),
+            competency: tp_row.get::<Option<String>, _>("competency").unwrap_or_default(),
+            bloom_level: tp_row.get::<Option<String>, _>("bloom_level").unwrap_or_default(),
+            content_scope: tp_row.get("content_scope"),
+            statement: tp_row.get("statement"),
+            pancasila_profiles: tp_profiles.unwrap_or_default(),
+            evidence_indicators: tp_indicators.unwrap_or_default(),
+            estimated_hours: tp_row.get("estimated_hours"),
+            publication_status: tp_row.get("publication_status"),
+            version: tp_row.get("version"),
+            semester: atp_row.get("semester"),
+            sequence_order: atp_row.get("sequence_order"),
         });
     }
 
     // Simpan entri cache
     let raw_val: serde_json::Value = serde_json::from_str(cleaned_json).unwrap_or(serde_json::Value::Null);
-    sqlx::query!(
+    sqlx::query(
         r#"
         INSERT INTO curriculum_ai_cache (
             tenant_id, cache_key, source_cp_id, source_cp_version,
@@ -795,17 +818,17 @@ OUTPUT HANYA JSON MURNI TANPA PEMBUKA/PENUTUP MARKDOWN."#,
             raw_response = EXCLUDED.raw_response,
             created_at = NOW()
         "#,
-        req_ctx.tenant_id,
-        cache_key,
-        cp_row.id,
-        cp_row.source_version,
-        cp_row.phase,
-        grade_level,
-        academic_year,
-        model_name,
-        prompt_version,
-        raw_val
     )
+    .bind(req_ctx.tenant_id)
+    .bind(&cache_key)
+    .bind(cp_id)
+    .bind(&cp_source_version)
+    .bind(&cp_phase)
+    .bind(grade_level)
+    .bind(academic_year)
+    .bind(&model_name)
+    .bind(prompt_version)
+    .bind(&raw_val)
     .execute(&mut *tx)
     .await
     .map_err(|e| {
@@ -825,9 +848,9 @@ OUTPUT HANYA JSON MURNI TANPA PEMBUKA/PENUTUP MARKDOWN."#,
     Ok(Json(ApiResponse::success(
         SynthesizeCpResponse {
             cache_hit: false,
-            source_cp_id: cp_row.id,
-            source_cp_element: cp_row.element_name,
-            source_verification_status: cp_row.verification_status,
+            source_cp_id: cp_id,
+            source_cp_element: cp_element_name,
+            source_verification_status: cp_verification_status,
             grade_level: grade_level.to_string(),
             academic_year: academic_year.to_string(),
             version: next_version,
@@ -835,7 +858,7 @@ OUTPUT HANYA JSON MURNI TANPA PEMBUKA/PENUTUP MARKDOWN."#,
             proposed_tps,
             message: format!(
                 "Berhasil mendekonstruksi CP '{}' menjadi {} butir usulan TP & ATP (Status: DRAFT v{}).",
-                cp_row.element_name,
+                cp_element_name,
                 parsed.tps.len(),
                 next_version
             ),
