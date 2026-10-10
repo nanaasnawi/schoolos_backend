@@ -94,3 +94,85 @@ pub struct SynthesizeCpResponse {
     pub proposed_tps: Vec<ProposedTpDto>,
     pub message: String,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct KaldikBudgetQuery {
+    pub subject_code: Option<String>,
+    pub academic_year: Option<String>,
+    pub semester: Option<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema, Clone)]
+pub struct KaldikBudgetResponse {
+    pub academic_year: String,
+    pub semester: String,
+    pub meb_weeks: i32,
+    pub heb_days: i32,
+    pub weekly_hours: i32,
+    pub total_capacity_jp: i32,
+    pub allocated_jp: i32,
+    pub remaining_available_jp: i32,
+    pub allocation_percentage: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema, Clone)]
+pub struct ModulAjarDto {
+    pub id: Uuid,
+    pub tenant_id: Option<Uuid>,
+    pub learning_objective_id: Uuid,
+    pub tp_code: Option<String>,
+    pub tp_statement: Option<String>,
+    pub tp_publication_status: Option<String>,
+    pub academic_year: String,
+    pub semester: String,
+    pub title: String,
+    pub grade_level: String,
+    pub subject_code: String,
+    pub subject_name: String,
+    pub phase: String,
+    pub allocated_hours: i32,
+    pub total_meetings: i32,
+    pub hours_per_meeting: i32,
+    pub pancasila_profiles: Vec<String>,
+    pub meaningful_understanding: String,
+    pub trigger_questions: serde_json::Value,
+    pub differentiation_strategies: serde_json::Value,
+    pub learning_activities: serde_json::Value,
+    pub assessment_plan: serde_json::Value,
+    pub lkpd_attachments: serde_json::Value,
+    pub status: String,
+    pub suspension_reason: Option<String>,
+    pub version: i32,
+    pub is_ai_generated: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SynthesizeModulAjarPayload {
+    pub learning_objective_id: Uuid,
+    pub academic_year: Option<String>,
+    pub semester: String,
+    pub grade_level: String,
+    pub subject_name: String,
+    pub subject_code: String,
+    pub allocated_hours: i32,
+    pub total_meetings: i32,
+    pub hours_per_meeting: i32,
+    pub user_instructions: Option<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateModulAjarPayload {
+    pub title: Option<String>,
+    pub meaningful_understanding: Option<String>,
+    pub trigger_questions: Option<serde_json::Value>,
+    pub differentiation_strategies: Option<serde_json::Value>,
+    pub learning_activities: Option<serde_json::Value>,
+    pub assessment_plan: Option<serde_json::Value>,
+    pub lkpd_attachments: Option<serde_json::Value>,
+    pub allocated_hours: Option<i32>,
+    pub total_meetings: Option<i32>,
+    pub hours_per_meeting: Option<i32>,
+}
+
