@@ -7,9 +7,9 @@ const DEFAULT_NVIDIA_MODEL: &str = "nvidia/ising-calibration-1.5-31b";
 const DEFAULT_NVIDIA_URL: &str = "https://integrate.api.nvidia.com/v1/chat/completions";
 
 #[derive(Debug, Serialize)]
-struct ChatMessage<'a> {
-    role: &'a str,
-    content: &'a str,
+pub struct ChatMessage<'a> {
+    pub role: &'a str,
+    pub content: &'a str,
 }
 
 #[derive(Debug, Serialize)]
@@ -102,7 +102,7 @@ pub async fn call_nvidia_nim(
     Ok(content)
 }
 
-fn extract_clean_json(text: &str) -> &str {
+pub fn extract_clean_json(text: &str) -> &str {
     let mut trimmed = text.trim();
     if trimmed.starts_with("```json") {
         trimmed = trimmed.trim_start_matches("```json").trim();
