@@ -263,8 +263,8 @@ impl FcmCategory {
 
     pub fn channel_id(&self) -> &'static str {
         match self {
-            FcmCategory::Announcement => "school_os_announcements_v4",
-            _ => "school_os_learning_v2",
+            FcmCategory::Announcement => "school_os_announcements_v5",
+            _ => "school_os_learning_v3",
         }
     }
 
@@ -402,17 +402,14 @@ pub fn trigger_fcm_push_targeted(
 
         let notif_tag = format!("schoolos_{}", reference_id);
 
-        // Payload FCM lengkap:
-        // 1. Key `notification`: Memungkinkan Google Play Services daemon langsung
-        //    membangunkan layar & menampilkan notifikasi saat HP terkunci / Doze / aplikasi mati.
-        // 2. Key `android.notification`: Menjamin channel_id sesuai, priority MAX,
-        //    dan tag unik `schoolos_<id>` agar tidak terjadi duplikasi di status bar.
-        // 3. Key `data`: Memuat metadata lengkap untuk deep linking saat notifikasi diklik.
+        // Payload FCM Data-Only Berprioritas Tinggi:
+        // Google Play Services mewajibkan pesan berbentuk DATA-ONLY (tanpa root key "notification")
+        // agar FirebaseMessagingService.onMessageReceived() di HP Android DIJAMIN selalu dipanggil
+        // saat layar terkunci, Doze mode aktif, maupun saat aplikasi dalam keadaan mati/tertutup.
+        // Di dalam onMessageReceived(), SystemNotificationHelper membangunkan layar perangkat
+        // (PowerManager.ACQUIRE_CAUSES_WAKEUP), menampilkan heads-up banner publik di lockscreen,
+        // serta memutar ringtone notifikasi kustom.
         let mut message_obj = serde_json::json!({
-            "notification": {
-                "title": &title,
-                "body": &content
-            },
             "data": {
                 "id": reference_id.to_string(),
                 "title": &title,
@@ -430,16 +427,7 @@ pub fn trigger_fcm_push_targeted(
             "android": {
                 "priority": "HIGH",
                 "ttl": "86400s",
-                "direct_boot_ok": true,
-                "notification": {
-                    "channel_id": channel_id,
-                    "tag": &notif_tag,
-                    "notification_priority": "PRIORITY_MAX",
-                    "visibility": "PUBLIC",
-                    "default_sound": true,
-                    "default_vibrate_timings": true,
-                    "click_action": click_action
-                }
+                "direct_boot_ok": true
             },
             "apns": {
                 "headers": {
@@ -447,6 +435,10 @@ pub fn trigger_fcm_push_targeted(
                 },
                 "payload": {
                     "aps": {
+                        "alert": {
+                            "title": &title,
+                            "body": &content
+                        },
                         "sound": "default",
                         "content-available": 1
                     }
@@ -455,17 +447,42 @@ pub fn trigger_fcm_push_targeted(
             "webpush": {
                 "headers": {
                     "Urgency": "high"
+                },
+                "notification": {
+                    "title": &title,
+                    "body": &content,
+                    "icon": "/icons/icon-192x192.png"
                 }
             }
         });
 
         match target {
             FcmTarget::All => {
-                message_obj["topic"] = serde_json::Value::String("school_announcements".to_string());
+                let cat_topic = match category {
+                    FcmCategory::Material => "school_materials",
+                    FcmCategory::Assignment => "school_assignments",
+                    FcmCategory::Quiz => "school_quizzes",
+                    FcmCategory::Session => "school_sessions",
+                    FcmCategory::Grade => "school_grades",
+                    FcmCategory::Reminder => "school_sessions",
+                    _ => "school_announcements",
+                };
+                if cat_topic == "school_announcements" {
+                    message_obj["topic"] = serde_json::Value::String("school_announcements".to_string());
+                } else {
+                    let cond = format!("'{}' in topics || 'school_announcements' in topics", cat_topic);
+                    message_obj["condition"] = serde_json::Value::String(cond);
+                }
             }
             FcmTarget::Class(cid) => {
                 let clean = cid.to_string().replace('-', "");
-                message_obj["topic"] = serde_json::Value::String(format!("class_{}", clean));
+                let raw = cid.to_string().to_lowercase();
+                if clean != raw {
+                    let cond = format!("'class_{}' in topics || 'class_{}' in topics", clean, raw);
+                    message_obj["condition"] = serde_json::Value::String(cond);
+                } else {
+                    message_obj["topic"] = serde_json::Value::String(format!("class_{}", clean));
+                }
             }
             FcmTarget::User(uid) => {
                 let clean = uid.to_string().replace('-', "");
