@@ -1028,14 +1028,29 @@ async fn publish(
 
     // FCM saat tugas di-PUBLISH (kasus guru buat draft lalu publish).
     {
+        let target_class_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT class_id FROM assignments WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(assignment.id)
+        .bind(req_ctx.tenant_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten();
+
         let t = format!("📝 Tugas Dipublish: {}", assignment.title);
         let b = "Tugas baru sudah dipublish. Buka aplikasi untuk mengerjakan.".to_string();
+        let fcm_target = if let Some(cid) = target_class_id {
+            crate::infrastructure::fcm::FcmTarget::Class(cid)
+        } else {
+            crate::infrastructure::fcm::FcmTarget::Roles(vec!["student".to_string()])
+        };
         crate::infrastructure::fcm::trigger_fcm_push_targeted(
             t,
             b,
             crate::infrastructure::fcm::FcmCategory::Assignment,
             assignment.id,
-            crate::infrastructure::fcm::FcmTarget::Class(assignment.class_id),
+            fcm_target,
         );
     }
 
