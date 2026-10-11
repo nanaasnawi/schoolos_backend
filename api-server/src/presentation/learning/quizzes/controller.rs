@@ -1576,10 +1576,17 @@ async fn grade_attempt(
                 .bind(tid_v).bind(uid).bind(&t).bind(&b).bind(attempt_id)
                 .execute(&ctx.pool).await;
             }
-            crate::infrastructure::fcm::trigger_fcm_push_categorized(
+
+            let fcm_target = if let Some(uid) = user_id {
+                crate::infrastructure::fcm::FcmTarget::User(uid)
+            } else {
+                crate::infrastructure::fcm::FcmTarget::Roles(vec!["student".to_string()])
+            };
+            crate::infrastructure::fcm::trigger_fcm_push_targeted(
                 t, b,
                 crate::infrastructure::fcm::FcmCategory::Grade,
                 attempt_id,
+                fcm_target,
             );
         }
     }

@@ -162,3 +162,55 @@ fn test_teacher_assignment_isolation_logic() {
         "Teacher B must NOT have access to Teacher A's assignment"
     );
 }
+
+#[test]
+fn test_reminder_window_exact_15_minutes() {
+    use chrono::NaiveTime;
+    let scheduled = NaiveTime::from_hms_opt(7, 30, 0).unwrap();
+    // 07:15 WIB is exactly 15 minutes before 07:30 WIB
+    let current_15m = NaiveTime::from_hms_opt(7, 15, 0).unwrap();
+    assert!(SmartReminderWorker::is_within_reminder_window(scheduled, current_15m));
+
+    // 07:14 WIB (16 mins remaining) is within window
+    let current_16m = NaiveTime::from_hms_opt(7, 14, 0).unwrap();
+    assert!(SmartReminderWorker::is_within_reminder_window(scheduled, current_16m));
+
+    // 07:17 WIB (13 mins remaining) is within window
+    let current_13m = NaiveTime::from_hms_opt(7, 17, 0).unwrap();
+    assert!(SmartReminderWorker::is_within_reminder_window(scheduled, current_13m));
+}
+
+#[test]
+fn test_reminder_window_midnight_and_irrelevant_times_rejected() {
+    use chrono::NaiveTime;
+    let scheduled = NaiveTime::from_hms_opt(7, 30, 0).unwrap();
+    // 00:21 WIB (midnight bug!) must NEVER trigger
+    let midnight = NaiveTime::from_hms_opt(0, 21, 0).unwrap();
+    assert!(!SmartReminderWorker::is_within_reminder_window(scheduled, midnight));
+
+    // 06:00 WIB (90 mins early) must not trigger
+    let too_early = NaiveTime::from_hms_opt(6, 0, 0).unwrap();
+    assert!(!SmartReminderWorker::is_within_reminder_window(scheduled, too_early));
+
+    // 07:35 WIB (class already started) must not trigger
+    let past = NaiveTime::from_hms_opt(7, 35, 0).unwrap();
+    assert!(!SmartReminderWorker::is_within_reminder_window(scheduled, past));
+}
+
+#[test]
+fn test_parse_time_str_various_formats() {
+    use chrono::NaiveTime;
+    assert_eq!(
+        SmartReminderWorker::parse_time_str("07:30"),
+        Some(NaiveTime::from_hms_opt(7, 30, 0).unwrap())
+    );
+    assert_eq!(
+        SmartReminderWorker::parse_time_str("08:15:00"),
+        Some(NaiveTime::from_hms_opt(8, 15, 0).unwrap())
+    );
+    assert_eq!(
+        SmartReminderWorker::parse_time_str("  13:45  "),
+        Some(NaiveTime::from_hms_opt(13, 45, 0).unwrap())
+    );
+    assert_eq!(SmartReminderWorker::parse_time_str("invalid"), None);
+}

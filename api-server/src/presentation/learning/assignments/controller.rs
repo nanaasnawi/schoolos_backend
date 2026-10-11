@@ -1029,11 +1029,13 @@ async fn publish(
     // FCM saat tugas di-PUBLISH (kasus guru buat draft lalu publish).
     {
         let t = format!("📝 Tugas Dipublish: {}", assignment.title);
-        crate::infrastructure::fcm::trigger_fcm_push_categorized(
+        let b = "Tugas baru sudah dipublish. Buka aplikasi untuk mengerjakan.".to_string();
+        crate::infrastructure::fcm::trigger_fcm_push_targeted(
             t,
-            "Tugas baru sudah dipublish. Buka aplikasi untuk mengerjakan.".to_string(),
+            b,
             crate::infrastructure::fcm::FcmCategory::Assignment,
             assignment.id,
+            crate::infrastructure::fcm::FcmTarget::Class(assignment.class_id),
         );
     }
 
