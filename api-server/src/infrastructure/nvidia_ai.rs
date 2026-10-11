@@ -3,10 +3,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use school_core::common::error::{ApplicationError, DomainError};
 
-const DEFAULT_NVIDIA_MODEL: &str = "nvidia/ising-calibration-1.5-31b";
+const DEFAULT_NVIDIA_MODEL: &str = "meta/llama-3.2-11b-vision-instruct";
 const DEFAULT_NVIDIA_URL: &str = "https://integrate.api.nvidia.com/v1/chat/completions";
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct ChatMessage<'a> {
     pub role: &'a str,
     pub content: &'a str,
@@ -50,56 +50,79 @@ fn get_config() -> Result<(String, String, String), ApplicationError> {
     Ok((key, model, url))
 }
 
-/// Call NVIDIA NIM API
+/// Call NVIDIA NIM API with model fallback
 pub async fn call_nvidia_nim(
     messages: Vec<ChatMessage<'_>>,
     temperature: f32,
     max_tokens: u32,
 ) -> Result<String, ApplicationError> {
-    let (api_key, model, api_url) = get_config()?;
+    let (api_key, configured_model, api_url) = get_config()?;
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(90))
         .build()
         .map_err(|e| ApplicationError::Internal(format!("Failed to build HTTP client: {e}")))?;
 
-    let payload = ChatCompletionRequest {
-        model: &model,
-        messages,
-        temperature,
-        max_tokens,
-    };
-
-    let resp = client
-        .post(&api_url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| ApplicationError::Internal(format!("Failed to send request to NVIDIA NIM: {e}")))?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        let err_body = resp.text().await.unwrap_or_default();
-        return Err(ApplicationError::Internal(format!(
-            "NVIDIA NIM API responded with HTTP {status}: {err_body}"
-        )));
+    let mut candidate_models = vec![configured_model.as_str()];
+    if !candidate_models.contains(&"meta/llama-3.2-11b-vision-instruct") {
+        candidate_models.push("meta/llama-3.2-11b-vision-instruct");
+    }
+    if !candidate_models.contains(&"nvidia/llama-3.1-nemotron-70b-instruct") {
+        candidate_models.push("nvidia/llama-3.1-nemotron-70b-instruct");
     }
 
-    let parsed: ChatCompletionResponse = resp
-        .json()
-        .await
-        .map_err(|e| ApplicationError::Internal(format!("Failed to parse NVIDIA NIM response: {e}")))?;
+    let mut last_error = String::new();
 
-    let content = parsed
-        .choices
-        .into_iter()
-        .next()
-        .and_then(|c| c.message.content)
-        .ok_or_else(|| ApplicationError::Internal("NVIDIA NIM returned empty choices content".to_string()))?;
+    for candidate in candidate_models {
+        let payload = ChatCompletionRequest {
+            model: candidate,
+            messages: messages.clone(),
+            temperature,
+            max_tokens,
+        };
 
-    Ok(content)
+        let resp = match client
+            .post(&api_url)
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                last_error = format!("Failed to send request to NVIDIA NIM: {e}");
+                continue;
+            }
+        };
+
+        let status = resp.status();
+        if !status.is_success() {
+            let err_body = resp.text().await.unwrap_or_default();
+            last_error = format!("NVIDIA NIM API responded with HTTP {status}: {err_body}");
+            continue;
+        }
+
+        let parsed: ChatCompletionResponse = match resp.json().await {
+            Ok(p) => p,
+            Err(e) => {
+                last_error = format!("Failed to parse NVIDIA NIM response: {e}");
+                continue;
+            }
+        };
+
+        if let Some(content) = parsed.choices.into_iter().next().and_then(|c| c.message.content) {
+            if !content.trim().is_empty() {
+                return Ok(content);
+            }
+        }
+    }
+
+    Err(ApplicationError::Internal(if last_error.is_empty() {
+        "NVIDIA NIM returned empty response across all candidate models".to_string()
+    } else {
+        last_error
+    }))
 }
 
 pub fn extract_clean_json(text: &str) -> &str {
