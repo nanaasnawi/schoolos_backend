@@ -945,6 +945,49 @@ async fn update(
         )
     })?;
 
+    if payload.status.as_deref().map(|s| s.eq_ignore_ascii_case("Published")).unwrap_or(false) {
+        let meta = sqlx::query("SELECT tenant_id, class_id, title FROM quizzes WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .ok()
+            .flatten();
+        if let Some(r) = meta {
+            let q_tenant: Option<uuid::Uuid> = r.try_get("tenant_id").ok();
+            let q_class: Option<uuid::Uuid> = r.try_get("class_id").ok();
+            let q_title: String = r.try_get("title").unwrap_or_else(|_| "Kuis".to_string());
+            let cid = q_class;
+            let t = format!("💻 Kuis/CBT Baru: {}", q_title);
+            let b = "Kuis/CBT baru sudah dipublish. Buka aplikasi untuk mengerjakan sebelum batas waktu!".to_string();
+            if let Some(tid) = q_tenant.or(Some(req_ctx.tenant_id)) {
+                let _ = sqlx::query(
+                    r#"
+                    INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, reference_type, reference_id, is_read, created_at)
+                    SELECT
+                        gen_random_uuid(), s.tenant_id, s.user_id, $1, $2,
+                        'QUIZ', 'in_app', 'quiz', $4, FALSE, NOW()
+                    FROM students s
+                    JOIN enrollments en ON en.student_id = s.id
+                    WHERE s.tenant_id = $3
+                      AND ($5::uuid IS NULL OR en.class_id = $5)
+                      AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                    "#,
+                )
+                .bind(&t).bind(&b).bind(tid).bind(id).bind(cid)
+                .execute(&ctx.pool)
+                .await;
+            }
+            let fcm_target = if let Some(class_uuid) = cid {
+                crate::infrastructure::fcm::FcmTarget::Class(class_uuid)
+            } else {
+                crate::infrastructure::fcm::FcmTarget::Roles(vec!["student".to_string()])
+            };
+            crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                t, b, crate::infrastructure::fcm::FcmCategory::Quiz, id, fcm_target,
+            );
+        }
+    }
+
     get_by_id(State(ctx), req_ctx, Path(id)).await
 }
 
