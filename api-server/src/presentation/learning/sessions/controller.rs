@@ -547,36 +547,6 @@ async fn list(
         .execute(&ctx.pool)
         .await;
 
-    // Sinkronisasi status riil terhadap jam sekarang untuk sesi pekan ini
-    let update_status_sql = r#"
-        UPDATE learning_sessions ls
-        SET status = CASE 
-                WHEN ls.session_date < (NOW() AT TIME ZONE 'Asia/Jakarta')::date THEN 'completed'
-                WHEN ls.session_date > (NOW() AT TIME ZONE 'Asia/Jakarta')::date THEN 'scheduled'
-                WHEN ls.session_date = (NOW() AT TIME ZONE 'Asia/Jakarta')::date AND (NOW() AT TIME ZONE 'Asia/Jakarta')::time > ls.end_time THEN 'completed'
-                WHEN ls.session_date = (NOW() AT TIME ZONE 'Asia/Jakarta')::date AND (NOW() AT TIME ZONE 'Asia/Jakarta')::time >= ls.start_time THEN 'active'
-                ELSE ls.status
-            END,
-            updated_at = NOW()
-        WHERE ls.tenant_id = $1
-          AND ls.session_date BETWEEN date_trunc('week', COALESCE($2::date, (NOW() AT TIME ZONE 'Asia/Jakarta')::date))::date
-                                  AND (date_trunc('week', COALESCE($2::date, (NOW() AT TIME ZONE 'Asia/Jakarta')::date))::date + 5)
-          AND ls.status NOT IN ('cancelled')
-          AND ls.deleted_at IS NULL
-          AND (
-              (ls.session_date < (NOW() AT TIME ZONE 'Asia/Jakarta')::date AND ls.status != 'completed')
-              OR (ls.session_date > (NOW() AT TIME ZONE 'Asia/Jakarta')::date AND ls.status != 'scheduled')
-              OR (ls.session_date = (NOW() AT TIME ZONE 'Asia/Jakarta')::date AND (NOW() AT TIME ZONE 'Asia/Jakarta')::time > ls.end_time AND ls.status != 'completed')
-              OR (ls.session_date = (NOW() AT TIME ZONE 'Asia/Jakarta')::date AND (NOW() AT TIME ZONE 'Asia/Jakarta')::time >= ls.start_time AND (NOW() AT TIME ZONE 'Asia/Jakarta')::time <= ls.end_time AND ls.status != 'active')
-          )
-    "#;
-
-    let _ = sqlx::query(update_status_sql)
-        .bind(req_ctx.tenant_id)
-        .bind(target_sync_date)
-        .execute(&ctx.pool)
-        .await;
-
     let rows = sqlx::query(
         r#"
         SELECT 
@@ -596,7 +566,14 @@ async fn list(
             ls.scheduled_at,
             ls.started_at,
             ls.ended_at,
-            ls.status,
+            CASE 
+                WHEN ls.status = 'cancelled' THEN 'cancelled'
+                WHEN ls.session_date < (NOW() AT TIME ZONE 'Asia/Jakarta')::date THEN 'completed'
+                WHEN ls.session_date > (NOW() AT TIME ZONE 'Asia/Jakarta')::date THEN 'scheduled'
+                WHEN ls.session_date = (NOW() AT TIME ZONE 'Asia/Jakarta')::date AND (NOW() AT TIME ZONE 'Asia/Jakarta')::time > ls.end_time THEN 'completed'
+                WHEN ls.session_date = (NOW() AT TIME ZONE 'Asia/Jakarta')::date AND (NOW() AT TIME ZONE 'Asia/Jakarta')::time >= ls.start_time THEN 'active'
+                ELSE ls.status
+            END as status,
             ls.notes,
             ls.cancellation_reason,
             ls.created_at,
@@ -1229,6 +1206,114 @@ async fn resolve_effective_session_id(
         ))?;
 
         return Ok(created_id);
+    }
+
+    // 3. Jika bukan, apakah id adalah classes.id?
+    let class_row = sqlx::query(
+        r#"
+        SELECT id, name, homeroom_teacher_id
+        FROM classes
+        WHERE id = $1 AND tenant_id = $2
+        "#,
+    )
+    .bind(id)
+    .bind(tenant_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| school_core::common::error::ApplicationError::Infrastructure(
+        school_core::common::error::InfrastructureError::Database(e),
+    ))?;
+
+    if let Some(c) = class_row {
+        let class_id: Uuid = c.try_get("id").unwrap_or_default();
+        let homeroom_teacher_id: Option<Uuid> = c.try_get("homeroom_teacher_id").ok().flatten();
+        let today = Utc::now().date_naive();
+
+        // Cek apakah sudah ada sesi untuk kelas ini hari ini
+        let existing = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM learning_sessions WHERE tenant_id = $1 AND class_id = $2 AND session_date = $3 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1"
+        )
+        .bind(tenant_id)
+        .bind(class_id)
+        .bind(today)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| school_core::common::error::ApplicationError::Infrastructure(
+            school_core::common::error::InfrastructureError::Database(e),
+        ))?;
+
+        if let Some(sid) = existing {
+            return Ok(sid);
+        }
+
+        // Cari subject_id dan teacher_id default dari jadwal rombel ini
+        let default_sched = sqlx::query(
+            "SELECT subject_id, teacher_id FROM class_schedules WHERE class_id = $1 AND tenant_id = $2 AND deleted_at IS NULL LIMIT 1"
+        )
+        .bind(class_id)
+        .bind(tenant_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+
+        let target_subject_id: Option<Uuid> = if let Some(ref sched) = default_sched {
+            sched.try_get("subject_id").ok()
+        } else {
+            sqlx::query_scalar::<_, Uuid>("SELECT id FROM subjects WHERE tenant_id = $1 LIMIT 1")
+                .bind(tenant_id)
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten()
+        };
+
+        let target_teacher_id: Option<Uuid> = if let Some(htid) = homeroom_teacher_id {
+            Some(htid)
+        } else if let Some(ref sched) = default_sched {
+            sched.try_get("teacher_id").ok()
+        } else {
+            sqlx::query_scalar::<_, Uuid>("SELECT id FROM teachers WHERE tenant_id = $1 LIMIT 1")
+                .bind(tenant_id)
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten()
+        };
+
+        if let (Some(sub_id), Some(t_id)) = (target_subject_id, target_teacher_id) {
+            let new_id = Uuid::new_v4();
+            let st = parse_naive_time("07:30");
+            let et = parse_naive_time("15:00");
+            let scheduled_at = st.and_then(|t| today.and_time(t).and_local_timezone(Utc).single());
+
+            let created_id = sqlx::query_scalar::<_, Uuid>(
+                r#"
+                INSERT INTO learning_sessions (
+                    id, tenant_id, session_type, schedule_id, lesson_id, class_id, subject_id, teacher_id,
+                    session_date, session_number, start_time, end_time, scheduled_at, started_at, status, created_at, updated_at
+                )
+                VALUES ($1, $2, 'adhoc', NULL, NULL, $3, $4, $5, $6, 1, $7, $8, $9, NOW(), 'active', NOW(), NOW())
+                RETURNING id
+                "#
+            )
+            .bind(new_id)
+            .bind(tenant_id)
+            .bind(class_id)
+            .bind(sub_id)
+            .bind(t_id)
+            .bind(today)
+            .bind(st)
+            .bind(et)
+            .bind(scheduled_at)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ))?;
+
+            return Ok(created_id);
+        }
     }
 
     Err(school_core::common::error::ApplicationError::NotFound(

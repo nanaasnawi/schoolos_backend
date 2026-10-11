@@ -155,37 +155,6 @@ async fn list_inquiries(
 
     let is_student = !is_admin && !is_teacher;
 
-    // Auto-repair any inquiry thread where teacher_name is "Guru Pengampu" or null
-    let _ = sqlx::query(
-        r#"
-        UPDATE inquiry_threads it
-        SET 
-            teacher_name = COALESCE(
-                (SELECT t.full_name FROM assignments a JOIN teachers t ON t.id = a.teacher_id WHERE a.id::text = it.reference_id OR a.title = it.reference_title LIMIT 1),
-                (SELECT t2.full_name FROM assignments a JOIN class_schedules cs ON cs.class_id = a.class_id AND cs.subject_id = a.subject_id JOIN teachers t2 ON t2.id = cs.teacher_id WHERE a.id::text = it.reference_id OR a.title = it.reference_title LIMIT 1),
-                (SELECT t2b.full_name FROM class_schedules cs JOIN teachers t2b ON t2b.id = cs.teacher_id JOIN classes c ON c.id = cs.class_id JOIN subjects sub ON sub.id = cs.subject_id WHERE c.name = it.student_class AND (sub.name ILIKE '%' || it.subject_name || '%' OR it.subject_name ILIKE '%' || sub.name || '%' OR it.reference_title ILIKE '%' || sub.name || '%') LIMIT 1),
-                (SELECT t3.full_name FROM teachers t3 WHERE t3.id = it.teacher_id LIMIT 1),
-                (SELECT t4.full_name FROM teachers t4 WHERE t4.user_id = (SELECT a.created_by FROM assignments a WHERE a.id::text = it.reference_id OR a.title = it.reference_title LIMIT 1) LIMIT 1),
-                (SELECT t5.full_name FROM teachers t5 WHERE t5.tenant_id = it.tenant_id AND (t5.subject ILIKE '%' || it.subject_name || '%' OR it.subject_name ILIKE '%' || t5.subject || '%') LIMIT 1),
-                (SELECT t6.full_name FROM teachers t6 WHERE t6.tenant_id = it.tenant_id ORDER BY t6.created_at ASC LIMIT 1),
-                it.teacher_name
-            ),
-            teacher_id = COALESCE(
-                it.teacher_id,
-                (SELECT a.teacher_id FROM assignments a WHERE a.id::text = it.reference_id OR a.title = it.reference_title LIMIT 1),
-                (SELECT cs.teacher_id FROM assignments a JOIN class_schedules cs ON cs.class_id = a.class_id AND cs.subject_id = a.subject_id WHERE a.id::text = it.reference_id OR a.title = it.reference_title LIMIT 1),
-                (SELECT t2b.id FROM class_schedules cs JOIN teachers t2b ON t2b.id = cs.teacher_id JOIN classes c ON c.id = cs.class_id JOIN subjects sub ON sub.id = cs.subject_id WHERE c.name = it.student_class AND (sub.name ILIKE '%' || it.subject_name || '%' OR it.subject_name ILIKE '%' || sub.name || '%' OR it.reference_title ILIKE '%' || sub.name || '%') LIMIT 1),
-                (SELECT t5.id FROM teachers t5 WHERE t5.tenant_id = it.tenant_id AND (t5.subject ILIKE '%' || it.subject_name || '%' OR it.subject_name ILIKE '%' || t5.subject || '%') LIMIT 1),
-                (SELECT t6.id FROM teachers t6 WHERE t6.tenant_id = it.tenant_id ORDER BY t6.created_at ASC LIMIT 1)
-            )
-        WHERE it.tenant_id = $1 
-          AND (it.teacher_name = 'Guru Pengampu' OR it.teacher_name IS NULL OR it.teacher_name = '' OR it.teacher_id IS NULL)
-        "#
-    )
-    .bind(tenant_id)
-    .execute(&ctx.pool)
-    .await;
-
     if is_student {
         let actor_user_id = actor.map(|a| a.id);
         let student_db_id = if let Some(a) = actor {

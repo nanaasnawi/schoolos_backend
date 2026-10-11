@@ -286,12 +286,31 @@ impl Bootstrap {
             self.database_url.split('@').last().unwrap_or("unknown")
         );
 
+        let max_connections = std::env::var("DATABASE_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(25);
+        let min_connections = std::env::var("DATABASE_MIN_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(3);
+        let acquire_timeout_secs = std::env::var("DATABASE_ACQUIRE_TIMEOUT_SECONDS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(15);
+        let idle_timeout_secs = std::env::var("DATABASE_IDLE_TIMEOUT_SECONDS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(300);
+
         let mut pool_opt = None;
         let mut last_err = None;
         for attempt in 1..=5 {
             match PgPoolOptions::new()
-                .max_connections(5)
-                .acquire_timeout(Duration::from_secs(15))
+                .max_connections(max_connections)
+                .min_connections(min_connections)
+                .acquire_timeout(Duration::from_secs(acquire_timeout_secs))
+                .idle_timeout(Duration::from_secs(idle_timeout_secs))
                 .connect(&self.database_url)
                 .await
             {
@@ -392,6 +411,73 @@ impl Bootstrap {
                     "Starting idempotency cleanup service"
                 );
                 cleanup_service.start().await;
+            }
+        });
+
+        // ── Smart Reminder Worker ───────────────────────────────────────────
+        // Evaluasi jadwal mengajar dan kirim pengingat 15 menit sebelum kelas.
+        let reminder_pool = pool.clone();
+        tokio::spawn(async move {
+            tracing::info!(
+                component = "smart_reminder_worker",
+                "Starting smart reminder worker background service"
+            );
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                if let Err(e) =
+                    crate::infrastructure::smart_reminder_worker::SmartReminderWorker::run_reminder_cycle(
+                        &reminder_pool,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        component = "smart_reminder_worker",
+                        "Smart reminder cycle warning: {:?}",
+                        e
+                    );
+                }
+            }
+        });
+
+        // ── Outbox Cleanup Worker ───────────────────────────────────────────
+        // Menghapus event outbox yang berstatus 'succeeded' lebih dari 7 hari
+        // untuk mencegah table bloat pada database PostgreSQL.
+        let outbox_cleanup_pool = pool.clone();
+        tokio::spawn(async move {
+            tracing::info!(
+                component = "outbox_cleanup",
+                "Starting outbox cleanup background worker"
+            );
+            let mut interval = tokio::time::interval(Duration::from_secs(86400));
+            loop {
+                interval.tick().await;
+                let res = sqlx::query(
+                    r#"
+                    DELETE FROM outbox_events
+                    WHERE status = 'succeeded' AND processed_at < NOW() - INTERVAL '7 days'
+                    "#,
+                )
+                .execute(&outbox_cleanup_pool)
+                .await;
+                match res {
+                    Ok(r) => {
+                        if r.rows_affected() > 0 {
+                            tracing::info!(
+                                component = "outbox_cleanup",
+                                "Purged {} old succeeded outbox events",
+                                r.rows_affected()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            component = "outbox_cleanup",
+                            "Failed to purge old outbox events: {:?}",
+                            e
+                        );
+                    }
+                }
             }
         });
 

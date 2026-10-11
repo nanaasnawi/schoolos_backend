@@ -77,6 +77,21 @@ impl SubmitAttemptUseCase {
             ));
         }
 
+        // Validasi batas waktu pengerjaan CBT di server (toleransi 2 menit untuk latensi jaringan)
+        if quiz.duration_minutes > 0 {
+            let max_allowed = chrono::Duration::minutes((quiz.duration_minutes + 2) as i64);
+            let elapsed = self.clock.now() - attempt.started_at;
+            if elapsed > max_allowed {
+                return Err(ApplicationError::Domain(
+                    crate::common::error::DomainError::Validation(format!(
+                        "Batas waktu pengerjaan kuis telah berakhir (maksimal {} menit, terlampaui {} menit)",
+                        quiz.duration_minutes,
+                        elapsed.num_minutes()
+                    )),
+                ));
+            }
+        }
+
         for answer in command.answers {
             let ans = AttemptAnswer::new(
                 command.attempt_id,

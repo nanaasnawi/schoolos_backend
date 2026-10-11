@@ -361,25 +361,6 @@ async fn list(
             .flatten()
             .is_some());
 
-    // Auto-link any orphan quizzes with class_id IS NULL if their description or title contains the class name
-    let _ = sqlx::query(
-        r#"
-        UPDATE quizzes q
-        SET class_id = c.id
-        FROM classes c
-        WHERE q.tenant_id = $1 
-          AND q.class_id IS NULL
-          AND c.tenant_id = $1
-          AND (
-              q.description ILIKE '%' || c.name || '%' 
-              OR q.title ILIKE '%' || c.name || '%'
-          )
-        "#,
-    )
-    .bind(req_ctx.tenant_id)
-    .execute(&ctx.pool)
-    .await;
-
     let items: Vec<QuizResponse> = if is_teacher {
         let rows = sqlx::query(
             r#"
