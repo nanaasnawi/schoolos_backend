@@ -891,6 +891,12 @@ async fn update(
         _ => None,
     };
 
+    let is_published_status = payload
+        .status
+        .as_deref()
+        .map(|s| s.eq_ignore_ascii_case("Published"))
+        .unwrap_or(false);
+
     let _ = sqlx::query(
         r#"
         UPDATE quizzes
@@ -945,7 +951,7 @@ async fn update(
         )
     })?;
 
-    if payload.status.as_deref().map(|s| s.eq_ignore_ascii_case("Published")).unwrap_or(false) {
+    if is_published_status {
         let meta = sqlx::query("SELECT tenant_id, class_id, title FROM quizzes WHERE id = $1")
             .bind(id)
             .fetch_optional(&ctx.pool)
