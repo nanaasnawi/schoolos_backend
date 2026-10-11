@@ -269,11 +269,12 @@ async fn start(
             .bind(class_id)
             .execute(&ctx.pool)
             .await;
-            crate::infrastructure::fcm::trigger_fcm_push_categorized(
+            crate::infrastructure::fcm::trigger_fcm_push_targeted(
                 t,
                 b,
                 crate::infrastructure::fcm::FcmCategory::Session,
                 final_session_id,
+                crate::infrastructure::fcm::FcmTarget::Class(class_id),
             );
         }
 

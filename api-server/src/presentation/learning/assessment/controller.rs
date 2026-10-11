@@ -497,11 +497,17 @@ async fn save_gradebook(
         }
         // FCM topic broadcast agar SEMUA siswa standby tetap dibangunkan walau
         // insert in-app di atas hanya contoh 1 baris (hemat query batch).
-        crate::infrastructure::fcm::trigger_fcm_push_categorized(
+        let fcm_target = if let Some(cid) = entry_class_ids.first().copied() {
+            crate::infrastructure::fcm::FcmTarget::Class(cid)
+        } else {
+            crate::infrastructure::fcm::FcmTarget::Roles(vec!["student".to_string()])
+        };
+        crate::infrastructure::fcm::trigger_fcm_push_targeted(
             t,
             b,
             crate::infrastructure::fcm::FcmCategory::Grade,
             first_student.unwrap_or_else(Uuid::new_v4),
+            fcm_target,
         );
     }
 
