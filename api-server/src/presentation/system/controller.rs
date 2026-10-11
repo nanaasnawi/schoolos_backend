@@ -915,34 +915,11 @@ async fn get_maintenance_status(
         .ok()
         .flatten();
 
-    let flat_row = sqlx::query!("SELECT value FROM system_settings WHERE key = 'maintenance_mode'")
-        .fetch_optional(&ctx.pool)
-        .await
-        .ok()
-        .flatten();
-
-    let flat_msg_row = sqlx::query!("SELECT value FROM system_settings WHERE key = 'maintenance_message'")
-        .fetch_optional(&ctx.pool)
-        .await
-        .ok()
-        .flatten();
-
-    let mode = row
-        .as_ref()
-        .and_then(|r| r.value.get("maintenance_mode").and_then(|v| v.as_bool()))
-        .or_else(|| flat_row.and_then(|r| r.value.as_bool()))
-        .unwrap_or(false);
-
-    let message = row
-        .as_ref()
-        .and_then(|r| r.value.get("maintenance_message").and_then(|v| v.as_str()))
-        .map(|s| s.to_string())
-        .or_else(|| flat_msg_row.and_then(|r| r.value.as_str().map(|s| s.to_string())))
-        .unwrap_or_else(|| "Sistem sedang dalam peningkatan performa server terjadwal. Silakan kembali dalam beberapa menit.".to_string());
-
-    let val = serde_json::json!({
-        "maintenance_mode": mode,
-        "maintenance_message": message
+    let val = row.map(|r| r.value).unwrap_or_else(|| {
+        serde_json::json!({
+            "maintenance_mode": false,
+            "maintenance_message": "Sistem sedang dalam peningkatan performa server terjadwal. Silakan kembali dalam beberapa menit."
+        })
     });
 
     Ok(Json(ApiResponse::success(val, req_ctx.request_id)))
@@ -1064,14 +1041,15 @@ async fn update_system_settings(
                 "maintenance_message": msg
             });
 
-            let _ = sqlx::query!(
+            let _ = sqlx::query(
                 r#"
                 INSERT INTO system_settings (key, value, updated_at)
-                VALUES ('maintenance', $1, NOW())
+                VALUES ($1, $2, NOW())
                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
                 "#,
-                maint_json
             )
+            .bind("maintenance")
+            .bind(maint_json)
             .execute(&ctx.pool)
             .await;
 
