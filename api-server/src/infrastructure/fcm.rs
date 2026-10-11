@@ -146,7 +146,35 @@ fn load_service_account() -> Option<ServiceAccountKey> {
     None
 }
 
+static FCM_TOKEN_CACHE: std::sync::OnceLock<std::sync::RwLock<Option<(String, String, std::time::Instant)>>> =
+    std::sync::OnceLock::new();
+
+fn get_fcm_cache() -> &'static std::sync::RwLock<Option<(String, String, std::time::Instant)>> {
+    FCM_TOKEN_CACHE.get_or_init(|| std::sync::RwLock::new(None))
+}
+
 async fn get_access_token(client: &reqwest::Client) -> Result<(String, String), String> {
+    // 1. Cek token di memori cache (berlaku 50 menit / 3000 detik)
+    if let Ok(guard) = get_fcm_cache().read() {
+        if let Some((token, project_id, timestamp)) = guard.as_ref() {
+            if timestamp.elapsed().as_secs() < 3000 {
+                return Ok((token.clone(), project_id.clone()));
+            }
+        }
+    }
+
+    // 2. Jika belum ada atau kadaluarsa, lakukan kalkulasi RSA/request baru
+    let (access_token, project_id) = fetch_fresh_access_token(client).await?;
+
+    // 3. Simpan token baru ke memori cache
+    if let Ok(mut guard) = get_fcm_cache().write() {
+        *guard = Some((access_token.clone(), project_id.clone(), std::time::Instant::now()));
+    }
+
+    Ok((access_token, project_id))
+}
+
+async fn fetch_fresh_access_token(client: &reqwest::Client) -> Result<(String, String), String> {
     // Check if we have a service account key
     if let Some(mut sa) = load_service_account() {
         if sa.project_id.is_empty() {

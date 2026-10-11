@@ -915,11 +915,34 @@ async fn get_maintenance_status(
         .ok()
         .flatten();
 
-    let val = row.map(|r| r.value).unwrap_or_else(|| {
-        serde_json::json!({
-            "maintenance_mode": false,
-            "maintenance_message": "Sistem sedang dalam peningkatan performa server terjadwal. Silakan kembali dalam beberapa menit."
-        })
+    let flat_row = sqlx::query!("SELECT value FROM system_settings WHERE key = 'maintenance_mode'")
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten();
+
+    let flat_msg_row = sqlx::query!("SELECT value FROM system_settings WHERE key = 'maintenance_message'")
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten();
+
+    let mode = row
+        .as_ref()
+        .and_then(|r| r.value.get("maintenance_mode").and_then(|v| v.as_bool()))
+        .or_else(|| flat_row.and_then(|r| r.value.as_bool()))
+        .unwrap_or(false);
+
+    let message = row
+        .as_ref()
+        .and_then(|r| r.value.get("maintenance_message").and_then(|v| v.as_str()))
+        .map(|s| s.to_string())
+        .or_else(|| flat_msg_row.and_then(|r| r.value.as_str().map(|s| s.to_string())))
+        .unwrap_or_else(|| "Sistem sedang dalam peningkatan performa server terjadwal. Silakan kembali dalam beberapa menit.".to_string());
+
+    let val = serde_json::json!({
+        "maintenance_mode": mode,
+        "maintenance_message": message
     });
 
     Ok(Json(ApiResponse::success(val, req_ctx.request_id)))
@@ -970,7 +993,14 @@ async fn get_system_settings(
 
     let mut map = serde_json::Map::new();
     for r in rows {
-        map.insert(r.key, r.value);
+        map.insert(r.key.clone(), r.value.clone());
+        if let Some(sub_obj) = r.value.as_object() {
+            for (sub_k, sub_v) in sub_obj {
+                if !map.contains_key(sub_k) {
+                    map.insert(sub_k.clone(), sub_v.clone());
+                }
+            }
+        }
     }
 
     Ok(Json(ApiResponse::success(
@@ -996,6 +1026,7 @@ async fn update_system_settings(
     }
 
     if let Some(obj) = payload.as_object() {
+        // 1. Simpan setiap field di payload
         for (k, v) in obj {
             let _ = sqlx::query!(
                 r#"
@@ -1008,6 +1039,48 @@ async fn update_system_settings(
             )
             .execute(&ctx.pool)
             .await;
+        }
+
+        // 2. Sinkronisasi key grup 'maintenance' yang menjadi standar sistem
+        let mut maintenance_mode = obj.get("maintenance_mode").and_then(|v| v.as_bool());
+        let mut maintenance_message = obj.get("maintenance_message").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+        if let Some(m_obj) = obj.get("maintenance").and_then(|v| v.as_object()) {
+            if let Some(mm) = m_obj.get("maintenance_mode").and_then(|v| v.as_bool()) {
+                maintenance_mode = Some(mm);
+            }
+            if let Some(msg) = m_obj.get("maintenance_message").and_then(|v| v.as_str()) {
+                maintenance_message = Some(msg.to_string());
+            }
+        }
+
+        if let Some(m_active) = maintenance_mode {
+            let msg = maintenance_message.unwrap_or_else(|| {
+                "Sistem Akselerasi-Edu sedang dalam pemeliharaan berkala.".to_string()
+            });
+
+            let maint_json = serde_json::json!({
+                "maintenance_mode": m_active,
+                "maintenance_message": msg
+            });
+
+            let _ = sqlx::query!(
+                r#"
+                INSERT INTO system_settings (key, value, updated_at)
+                VALUES ('maintenance', $1, NOW())
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+                "#,
+                maint_json
+            )
+            .execute(&ctx.pool)
+            .await;
+
+            // Invalidate dan set auth cache segera
+            ctx.auth_cache.set_maintenance_mode(m_active).await;
+            tracing::info!(
+                maintenance_mode = m_active,
+                "Maintenance mode updated and synced to system_settings 'maintenance'"
+            );
         }
     }
 

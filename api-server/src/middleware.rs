@@ -115,64 +115,79 @@ pub async fn auth_middleware(
     mut req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let auth_header = req.headers().get(header::AUTHORIZATION);
-    let mut actor_opt = None;
+    let mut token_opt: Option<String> = None;
 
-    if let Some(auth_header) = auth_header {
+    if let Some(auth_header) = req.headers().get(header::AUTHORIZATION) {
         if let Ok(auth_str) = auth_header.to_str() {
             if let Some(token) = auth_str.strip_prefix("Bearer ") {
-                let token_data = decode::<Claims>(
-                    token,
-                    &DecodingKey::from_secret(ctx.jwt_secret.as_bytes()),
-                    &Validation::default(),
-                );
-
-                if let Ok(token_data) = token_data {
-                    if let Ok(user_id) = Uuid::parse_str(&token_data.claims.sub) {
-                        if let Ok(tenant_id) = Uuid::parse_str(&token_data.claims.tenant_id) {
-                            // 1. In-memory Cache lookup for roles & permissions
-                            let (roles, permissions) = if let Some(cached) = ctx
-                                .auth_cache
-                                .get_actor_roles_and_permissions(&user_id)
-                                .await
-                            {
-                                cached
-                            } else {
-                                let r = ctx
-                                    .role_repo
-                                    .find_roles_by_user_id(user_id)
-                                    .await
-                                    .unwrap_or_default();
-                                let p = ctx
-                                    .role_repo
-                                    .find_permissions_by_user_id(user_id)
-                                    .await
-                                    .unwrap_or_default();
-                                ctx.auth_cache
-                                    .set_actor_roles_and_permissions(user_id, r.clone(), p.clone())
-                                    .await;
-                                (r, p)
-                            };
-
-                            actor_opt = Some(Actor {
-                                id: user_id,
-                                tenant_id,
-                                roles,
-                                permissions,
-                            });
-                        } else {
-                            tracing::error!(
-                                "Failed to parse tenant_id: {}",
-                                token_data.claims.tenant_id
-                            );
-                        }
-                    } else {
-                        tracing::error!("Failed to parse user_id: {}", token_data.claims.sub);
-                    }
-                } else {
-                    tracing::error!("Failed to decode JWT token: {:?}", token_data.err());
+                token_opt = Some(token.to_string());
+            }
+        }
+    } else if let Some(query) = req.uri().query() {
+        for pair in query.split('&') {
+            let mut parts = pair.splitn(2, '=');
+            if parts.next() == Some("token") {
+                if let Some(val) = parts.next() {
+                    token_opt = Some(val.to_string());
+                    break;
                 }
             }
+        }
+    }
+
+    let mut actor_opt = None;
+
+    if let Some(token) = token_opt {
+        let token_data = decode::<Claims>(
+            &token,
+            &DecodingKey::from_secret(ctx.jwt_secret.as_bytes()),
+            &Validation::default(),
+        );
+
+        if let Ok(token_data) = token_data {
+            if let Ok(user_id) = Uuid::parse_str(&token_data.claims.sub) {
+                if let Ok(tenant_id) = Uuid::parse_str(&token_data.claims.tenant_id) {
+                    // 1. In-memory Cache lookup for roles & permissions
+                    let (roles, permissions) = if let Some(cached) = ctx
+                        .auth_cache
+                        .get_actor_roles_and_permissions(&user_id)
+                        .await
+                    {
+                        cached
+                    } else {
+                        let r = ctx
+                            .role_repo
+                            .find_roles_by_user_id(user_id)
+                            .await
+                            .unwrap_or_default();
+                        let p = ctx
+                            .role_repo
+                            .find_permissions_by_user_id(user_id)
+                            .await
+                            .unwrap_or_default();
+                        ctx.auth_cache
+                            .set_actor_roles_and_permissions(user_id, r.clone(), p.clone())
+                            .await;
+                        (r, p)
+                    };
+
+                    actor_opt = Some(Actor {
+                        id: user_id,
+                        tenant_id,
+                        roles,
+                        permissions,
+                    });
+                } else {
+                    tracing::error!(
+                        "Failed to parse tenant_id: {}",
+                        token_data.claims.tenant_id
+                    );
+                }
+            } else {
+                tracing::error!("Failed to parse user_id: {}", token_data.claims.sub);
+            }
+        } else {
+            tracing::error!("Failed to decode JWT token: {:?}", token_data.err());
         }
     }
 
