@@ -1453,14 +1453,13 @@ async fn list_system_broadcasts(
         let push_status: bool = r.get("push_status");
         let created_at: chrono::DateTime<chrono::Utc> = r.get("created_at");
 
-        let count: i64 = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM notifications WHERE (reference_id = $1 OR title = $2)",
-            id,
-            title
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM notifications WHERE (reference_id = $1 OR title = $2)"
         )
+        .bind(id)
+        .bind(&title)
         .fetch_one(&ctx.pool)
         .await
-        .unwrap_or(Some(0))
         .unwrap_or(0);
 
         let target_roles = target

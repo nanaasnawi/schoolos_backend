@@ -25,6 +25,7 @@ use crate::{
     bootstrap::ApplicationContext, error::ApiError, extractors::RequestContext,
     response::ApiResponse,
 };
+use school_core::common::error::{ApplicationError, ErrorCode};
 use school_core::learning::application::learning_material::{
     create_learning_material::CreateLearningMaterialCommand,
     delete_learning_material::DeleteLearningMaterialCommand,
@@ -996,11 +997,11 @@ async fn toggle_complete(
     })?;
 
     // Check if already completed
-    let existing = sqlx::query_scalar!(
-        r#"SELECT id FROM student_material_completions WHERE student_id = $1 AND material_id = $2"#,
-        student_id,
-        id
+    let existing: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT id FROM student_material_completions WHERE student_id = $1 AND material_id = $2"#
     )
+    .bind(student_id)
+    .bind(id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| {
@@ -1014,55 +1015,55 @@ async fn toggle_complete(
 
     let is_completed = if existing.is_some() {
         // Toggle OFF (unmark completed)
-        sqlx::query!(
-            r#"DELETE FROM student_material_completions WHERE student_id = $1 AND material_id = $2"#,
-            student_id,
-            id
+        sqlx::query(
+            r#"DELETE FROM student_material_completions WHERE student_id = $1 AND material_id = $2"#
         )
+        .bind(student_id)
+        .bind(id)
         .execute(&ctx.pool)
         .await
         .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
             school_core::common::error::InfrastructureError::Database(e)
         ), &req_ctx.request_id))?;
 
-        let _ = sqlx::query!(
+        let _ = sqlx::query(
             r#"
             UPDATE reading_progress 
             SET is_completed = false, updated_at = NOW()
             WHERE student_id = $1 AND material_id = $2
-            "#,
-            student_id,
-            id
+            "#
         )
+        .bind(student_id)
+        .bind(id)
         .execute(&ctx.pool)
         .await;
 
         false
     } else {
         // Toggle ON (mark completed)
-        sqlx::query!(
-            r#"INSERT INTO student_material_completions (tenant_id, student_id, material_id) VALUES ($1, $2, $3)"#,
-            req_ctx.tenant_id,
-            student_id,
-            id
+        sqlx::query(
+            r#"INSERT INTO student_material_completions (tenant_id, student_id, material_id) VALUES ($1, $2, $3)"#
         )
+        .bind(req_ctx.tenant_id)
+        .bind(student_id)
+        .bind(id)
         .execute(&ctx.pool)
         .await
         .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
             school_core::common::error::InfrastructureError::Database(e)
         ), &req_ctx.request_id))?;
 
-        let total_pages: i32 = sqlx::query_scalar!(
-            r#"SELECT (COALESCE(end_page, 15) - COALESCE(start_page, 1) + 1)::integer as "tp!" FROM learning_materials WHERE id = $1"#,
-            id
+        let total_pages: i32 = sqlx::query_scalar(
+            r#"SELECT (COALESCE(end_page, 15) - COALESCE(start_page, 1) + 1)::integer FROM learning_materials WHERE id = $1"#
         )
+        .bind(id)
         .fetch_optional(&ctx.pool)
         .await
         .ok()
         .flatten()
         .unwrap_or(15);
 
-        let _ = sqlx::query!(
+        let _ = sqlx::query(
             r#"
             INSERT INTO reading_progress (id, tenant_id, student_id, material_id, current_page, is_completed, last_read_at, created_at, updated_at)
             VALUES (gen_random_uuid(), $1, $2, $3, $4, true, NOW(), NOW(), NOW())
@@ -1071,12 +1072,12 @@ async fn toggle_complete(
                 is_completed = true,
                 last_read_at = NOW(),
                 updated_at = NOW()
-            "#,
-            req_ctx.tenant_id,
-            student_id,
-            id,
-            total_pages
+            "#
         )
+        .bind(req_ctx.tenant_id)
+        .bind(student_id)
+        .bind(id)
+        .bind(total_pages)
         .execute(&ctx.pool)
         .await;
 
