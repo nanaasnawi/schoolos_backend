@@ -1,6 +1,5 @@
-use chrono::{Datelike, Utc};
 use sqlx::{PgPool, Row};
-use tracing::{info, warn};
+use tracing::info;
 use uuid::Uuid;
 
 /// 1. Deteksi kehadiran siswa yang mengikuti pembelajaran online dengan cara membaca materi di hari jadwal pembelajaran tersebut.
