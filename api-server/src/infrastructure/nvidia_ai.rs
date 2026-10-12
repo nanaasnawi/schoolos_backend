@@ -163,11 +163,223 @@ pub struct GeneratedInfographicDto {
     pub blocks: Vec<InfographicBlockDto>,
 }
 
+// ── Subject-Pedagogical Prompt Intelligence ──
+pub fn build_subject_pedagogical_instructions(subject: &str, grade: &str) -> String {
+    let lower_subject = subject.trim().to_lowercase();
+
+    if lower_subject.contains("inggris") || lower_subject.contains("english") {
+        format!(
+            r#"### ATURAN WAJIB MAPEL (BAHASA INGGRIS / ENGLISH):
+- Seluruh konten: judul, deskripsi, naskah bacaan (reading passage/dialogue), butir soal, penugasan, dan SEMUA opsi jawaban (A, B, C, D) WAJIB DITULIS DALAM BAHASA INGGRIS (Full English Language).
+- DILARANG KERAS menggunakan bahasa Indonesia untuk teks bacaan, butir tugas, atau opsi soal Bahasa Inggris.
+- Sesuaikan tingkat kosakata (vocabulary) dan tata bahasa (grammar) dengan tingkat siswa {grade}.
+- Cantumkan aspek komunikatif autentik (misal: Reading Comprehension, Grammar in Context, Vocabulary Building, Text Types seperti Narrative, Descriptive, Recount, Report, Procedure)."#
+        )
+    } else if lower_subject.contains("matematika") || lower_subject.contains("math") || lower_subject.contains("aljabar") || lower_subject.contains("geometri") || lower_subject.contains("kalkulus") {
+        format!(
+            r#"### ATURAN WAJIB MAPEL (MATEMATIKA / MATHEMATICS):
+- Matematika adalah ilmu eksak terapan, BUKAN esai naratif umum.
+- Materi WAJIB menyertakan: rumus matematika yang jelas, angka konkret, persamaan matematis, dan contoh perhitungan langkah demi langkah (step-by-step).
+- Soal kuis & tugas HARUS berupa soal perhitungan matematis nyata, pemecahan masalah (problem-solving), atau soal cerita kontekstual (word problems) sesuai level {grade}.
+- Opsi jawaban A, B, C, D kuis CBT harus berupa nilai kuantitatif/angka/persamaan yang presisi. Bagian pembahasan (explanation) wajib menyertakan langkah hitung yang runtut."#
+        )
+    } else if lower_subject.contains("cirebon") || lower_subject.contains("daerah") || lower_subject.contains("jawa") || lower_subject.contains("sunda") {
+        format!(
+            r#"### ATURAN WAJIB MAPEL (BAHASA DAERAH / MUATAN LOKAL):
+- Gunakan kosakata dan ragam bahasa daerah yang tepat ({subject}) serta nilai kearifan lokal (tradisi, seni, tatakrama/unggah-ungguh basa).
+- Lengkapi dengan arti kata/glosarium kosakata daerah agar siswa {grade} dapat memahami dengan optimal."#
+        )
+    } else if lower_subject.contains("fisika") || lower_subject.contains("kimia") || lower_subject.contains("biologi") || lower_subject.contains("ipa") || lower_subject.contains("sains") || lower_subject.contains("science") {
+        format!(
+            r#"### ATURAN WAJIB MAPEL (IPA / SAINS / FISIKA / BIOLOGI / KIMIA):
+- Gunakan prinsip ilmiah yang akurat: fenomena alam nyata, hukum fisika/reaksi kimia/proses biologis empiris, serta metode ilmiah.
+- Jelaskan konsep sebab-akibat (kausalitas) dan aplikasi nyata dalam kehidupan sehari-hari siswa {grade}.
+- Cantumkan istilah ilmiah yang baku beserta definisi/konteksnya yang mudah dimengerti."#
+        )
+    } else if lower_subject.contains("indonesia") {
+        format!(
+            r#"### ATURAN WAJIB MAPEL (BAHASA INDONESIA):
+- Fokus pada keterampilan literasi berbahasa: pemahaman teks, kaidah kebahasaan (PUEBI/EYD), struktur jenis teks, majas, dan kosakata baku sesuai jenjang {grade}.
+- Soal kuis & tugas harus menguji kemampuan analisis teks, ide pokok, kalimat efektif, dan penalaran kritis."#
+        )
+    } else if lower_subject.contains("agama") || lower_subject.contains("pai") || lower_subject.contains("akhlak") {
+        format!(
+            r#"### ATURAN WAJIB MAPEL (PENDIDIKAN AGAMA & BUDI PEKERTI):
+- Tekankan nilai-nilai moral, akhlak mulia, dalil dan keteladanan yang relevan, serta pengamalan ibadah praktis dalam kehidupan sehari-hari siswa {grade}."#
+        )
+    } else if lower_subject.contains("sejarah") || lower_subject.contains("ips") || lower_subject.contains("geografi") || lower_subject.contains("ekonomi") || lower_subject.contains("sosiologi") {
+        format!(
+            r#"### ATURAN WAJIB MAPEL (IPS / SEJARAH / SOSIAL):
+- Sertakan kronologi waktu peristiwa, tokoh penting, lokasi geografis, dan analisis dampak sosial-ekonomi nyata yang relevan bagi siswa {grade}."#
+        )
+    } else {
+        format!(
+            r#"### ATURAN MAPEL ({subject}):
+- Sesuaikan materi, kedalaman konsep, dan bahasa pengantar secara ketat dengan karakteristik mata pelajaran {subject} pada jenjang {grade}."#
+        )
+    }
+}
+
+// ── Real Educational Image Search Engine (Wikipedia, Wikimedia Commons, Curated Educational CDN) ──
+async fn search_wikipedia_pageimage(
+    client: &reqwest::Client,
+    lang: &str,
+    query: &str,
+) -> Option<String> {
+    let url = format!("https://{lang}.wikipedia.org/w/api.php");
+    let resp = client
+        .get(&url)
+        .query(&[
+            ("action", "query"),
+            ("generator", "search"),
+            ("gsrsearch", query),
+            ("gsrlimit", "1"),
+            ("prop", "pageimages"),
+            ("piprop", "original|thumbnail"),
+            ("pithumbsize", "900"),
+            ("format", "json"),
+        ])
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    let json: serde_json::Value = resp.json().await.ok()?;
+    let pages = json.get("query")?.get("pages")?.as_object()?;
+
+    for (_page_id, page_val) in pages {
+        if let Some(orig) = page_val.get("original").and_then(|o| o.get("source")).and_then(|s| s.as_str()) {
+            if !orig.is_empty() {
+                return Some(orig.to_string());
+            }
+        }
+        if let Some(thumb) = page_val.get("thumbnail").and_then(|t| t.get("source")).and_then(|s| s.as_str()) {
+            if !thumb.is_empty() {
+                return Some(thumb.to_string());
+            }
+        }
+    }
+    None
+}
+
+async fn search_wikimedia_commons(
+    client: &reqwest::Client,
+    query: &str,
+) -> Option<String> {
+    let url = "https://commons.wikimedia.org/w/api.php";
+    let resp = client
+        .get(url)
+        .query(&[
+            ("action", "query"),
+            ("generator", "search"),
+            ("gsrnamespace", "6"),
+            ("gsrsearch", query),
+            ("gsrlimit", "1"),
+            ("prop", "imageinfo"),
+            ("iiprop", "url"),
+            ("format", "json"),
+        ])
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    let json: serde_json::Value = resp.json().await.ok()?;
+    let pages = json.get("query")?.get("pages")?.as_object()?;
+
+    for (_page_id, page_val) in pages {
+        if let Some(infos) = page_val.get("imageinfo").and_then(|i| i.as_array()) {
+            for info in infos {
+                if let Some(img_url) = info.get("url").and_then(|u| u.as_str()) {
+                    let lower = img_url.to_lowercase();
+                    if lower.ends_with(".jpg")
+                        || lower.ends_with(".jpeg")
+                        || lower.ends_with(".png")
+                        || lower.ends_with(".webp")
+                        || lower.ends_with(".svg")
+                    {
+                        return Some(img_url.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn get_educational_fallback_image(subject: &str, query: &str) -> String {
+    let s = subject.to_lowercase();
+    let q = query.to_lowercase();
+
+    if q.contains("planet") || q.contains("surya") || q.contains("solar") || q.contains("bintang") || q.contains("antariksa") || q.contains("space") {
+        "https://images.unsplash.com/photo-1614728894747-a83421e2b9c9?auto=format&fit=crop&w=1200&q=80".to_string()
+    } else if s.contains("matematika") || s.contains("math") || q.contains("hitung") || q.contains("rumus") || q.contains("aljabar") || q.contains("geometri") {
+        "https://images.unsplash.com/photo-1635070041078-e363dbe005cb?auto=format&fit=crop&w=1200&q=80".to_string()
+    } else if s.contains("inggris") || s.contains("english") || q.contains("grammar") || q.contains("vocabulary") {
+        "https://images.unsplash.com/photo-1456513080510-7bf3a84b82f8?auto=format&fit=crop&w=1200&q=80".to_string()
+    } else if s.contains("kimia") || q.contains("molekul") || q.contains("larutan") || q.contains("reaksi") {
+        "https://images.unsplash.com/photo-1603126857599-f6e157fa2fe6?auto=format&fit=crop&w=1200&q=80".to_string()
+    } else if s.contains("fisika") || q.contains("gaya") || q.contains("newton") || q.contains("energi") || q.contains("listrik") {
+        "https://images.unsplash.com/photo-1507668077129-56e32842fceb?auto=format&fit=crop&w=1200&q=80".to_string()
+    } else if s.contains("biologi") || s.contains("ipa") || s.contains("sains") || q.contains("sel") || q.contains("hewan") || q.contains("tumbuhan") || q.contains("organ") {
+        "https://images.unsplash.com/photo-1532094349884-543bc11b234d?auto=format&fit=crop&w=1200&q=80".to_string()
+    } else if s.contains("cirebon") || s.contains("jawa") || s.contains("sunda") || s.contains("daerah") || q.contains("budaya") || q.contains("candi") || q.contains("tradisi") {
+        "https://images.unsplash.com/photo-1596402184320-417e7178b2cd?auto=format&fit=crop&w=1200&q=80".to_string()
+    } else if s.contains("sejarah") || s.contains("ips") || s.contains("geografi") || q.contains("peta") {
+        "https://images.unsplash.com/photo-1461360370896-922624d12aa1?auto=format&fit=crop&w=1200&q=80".to_string()
+    } else if s.contains("agama") || s.contains("pai") {
+        "https://images.unsplash.com/photo-1584551246679-0daf3d275d0f?auto=format&fit=crop&w=1200&q=80".to_string()
+    } else {
+        "https://images.unsplash.com/photo-1503676260728-1c00da094a0b?auto=format&fit=crop&w=1200&q=80".to_string()
+    }
+}
+
+pub async fn search_real_educational_image(query: &str, subject_name: &str) -> String {
+    let clean_query = query.trim();
+    if clean_query.is_empty() {
+        return get_educational_fallback_image(subject_name, query);
+    }
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(4))
+        .user_agent("AkselerasiEdu/1.0 (contact@akselerasiedu.id; Indonesian Educational Platform)")
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return get_educational_fallback_image(subject_name, clean_query),
+    };
+
+    // 1. Coba cari di Wikipedia Bahasa Indonesia (ensiklopedia edukatif resmi)
+    if let Some(url) = search_wikipedia_pageimage(&client, "id", clean_query).await {
+        return url;
+    }
+
+    // 2. Coba cari di Wikipedia Bahasa Inggris (untuk sains, matematika, bahasa inggris)
+    if let Some(url) = search_wikipedia_pageimage(&client, "en", clean_query).await {
+        return url;
+    }
+
+    // 3. Coba cari di Wikimedia Commons Image Repository
+    if let Some(url) = search_wikimedia_commons(&client, clean_query).await {
+        return url;
+    }
+
+    // 4. Fallback ke gambar edukasi berkualitas tinggi yang terverifikasi sesuai subjek
+    get_educational_fallback_image(subject_name, clean_query)
+}
+
 #[derive(Deserialize)]
 struct RawInfographicCard {
     step_number: u32,
     headline: String,
     summary: String,
+    image_search_keyword: Option<String>,
     image_suggestion: Option<String>,
 }
 
@@ -183,9 +395,12 @@ pub async fn generate_infographic(
     grade_level: &str,
     subject_name: &str,
 ) -> Result<GeneratedInfographicDto, ApplicationError> {
+    let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
     let prompt = format!(
         r#"Anda adalah pendidik spesialis penyusun media pembelajaran visual Kurikulum Merdeka di Indonesia.
 Buatkan materi INFOGRAFIS INTERAKTIF untuk siswa jenjang {grade_level} pada mata pelajaran {subject_name} dengan topik: "{topic}".
+
+{subject_guideline}
 
 Format output HARUS berupa JSON murni dengan skema persis:
 {{
@@ -195,26 +410,26 @@ Format output HARUS berupa JSON murni dengan skema persis:
     {{
       "step_number": 1,
       "headline": "Judul Poin Visual 1",
-      "summary": "Penjelasan ringkas 2-3 kalimat yang mudah dipahami anak.",
-      "image_suggestion": "Deskripsi ide ilustrasi atau diagram yang cocok"
+      "summary": "Penjelasan ringkas 2-3 kalimat yang mendalam dan mudah dipahami siswa.",
+      "image_search_keyword": "1-3 kata kunci pencarian gambar ensiklopedia nyata (contoh: 'Tata Surya' / 'Photosynthesis Diagram' / 'Water Cycle')"
     }},
     {{
       "step_number": 2,
       "headline": "Judul Poin Visual 2",
-      "summary": "Penjelasan ringkas 2-3 kalimat yang mudah dipahami anak.",
-      "image_suggestion": "Deskripsi ide ilustrasi atau diagram yang cocok"
+      "summary": "Penjelasan ringkas 2-3 kalimat yang mendalam dan mudah dipahami siswa.",
+      "image_search_keyword": "1-3 kata kunci pencarian gambar ensiklopedia nyata"
     }},
     {{
       "step_number": 3,
       "headline": "Judul Poin Visual 3",
-      "summary": "Penjelasan ringkas 2-3 kalimat yang mudah dipahami anak.",
-      "image_suggestion": "Deskripsi ide ilustrasi atau diagram yang cocok"
+      "summary": "Penjelasan ringkas 2-3 kalimat yang mendalam dan mudah dipahami siswa.",
+      "image_search_keyword": "1-3 kata kunci pencarian gambar ensiklopedia nyata"
     }},
     {{
       "step_number": 4,
       "headline": "Kesimpulan & Tahukah Kamu?",
       "summary": "Fakta menarik dan intisari penting untuk diingat siswa.",
-      "image_suggestion": "Deskripsi ide ilustrasi atau diagram yang cocok"
+      "image_search_keyword": "1-3 kata kunci pencarian gambar ensiklopedia nyata"
     }}
   ]
 }}
@@ -225,7 +440,7 @@ Output HANYA JSON tanpa teks pembuka/penutup."#
     let messages = vec![
         ChatMessage {
             role: "system",
-            content: "You are an educational designer creating structured infographic cards in strict JSON.",
+            content: "You are an educational designer creating structured infographic cards in strict JSON, strictly respecting the subject matter rules.",
         },
         ChatMessage {
             role: "user",
@@ -242,18 +457,8 @@ Output HANYA JSON tanpa teks pembuka/penutup."#
     let now_ts = chrono::Utc::now().timestamp_millis();
     let mut blocks = Vec::new();
 
-    // 1. Hero Cover Image for the Magazine / Infographic Header
-    let topic_slug: String = topic
-        .chars()
-        .map(|c| match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => c,
-            _ => ' ',
-        })
-        .collect();
-    let topic_encoded = topic_slug.split_whitespace().collect::<Vec<_>>().join("%20");
-    let cover_url = format!(
-        "https://image.pollinations.ai/prompt/{topic_encoded}%20educational%20infographic%20magazine%20cover%20vibrant%20clean%20aesthetic?width=1200&height=630&nologo=true"
-    );
+    // 1. Hero Cover Image for the Magazine / Infographic Header (Searched from Google/Wikipedia)
+    let cover_url = search_real_educational_image(topic, subject_name).await;
     blocks.push(InfographicBlockDto {
         id: format!("ai-block-hero-cover-{}", now_ts),
         block_type: "IMAGE".to_string(),
@@ -261,27 +466,17 @@ Output HANYA JSON tanpa teks pembuka/penutup."#
     });
 
     for (idx, card) in parsed.cards.into_iter().enumerate() {
-        if let Some(img_desc) = card.image_suggestion {
-            if !img_desc.trim().is_empty() {
-                let img_slug: String = img_desc
-                    .chars()
-                    .map(|c| match c {
-                        'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => c,
-                        _ => ' ',
-                    })
-                    .collect();
-                let img_encoded = img_slug.split_whitespace().collect::<Vec<_>>().join("%20");
-                let image_url = format!(
-                    "https://image.pollinations.ai/prompt/{}%20educational%20magazine%20illustration%20vibrant%20clean?width=1000&height=600&nologo=true",
-                    img_encoded
-                );
-                blocks.push(InfographicBlockDto {
-                    id: format!("ai-block-img-{}-{}", idx + 1, now_ts),
-                    block_type: "IMAGE".to_string(),
-                    content: image_url,
-                });
-            }
-        }
+        let card_query = card.image_search_keyword.as_deref()
+            .or(card.image_suggestion.as_deref())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(topic);
+
+        let image_url = search_real_educational_image(card_query, subject_name).await;
+        blocks.push(InfographicBlockDto {
+            id: format!("ai-block-img-{}-{}", idx + 1, now_ts),
+            block_type: "IMAGE".to_string(),
+            content: image_url,
+        });
 
         blocks.push(InfographicBlockDto {
             id: format!("ai-block-text-{}-{}", idx + 1, now_ts),
@@ -406,24 +601,27 @@ pub async fn generate_article(
     grade_level: &str,
     subject_name: &str,
 ) -> Result<GeneratedArticleDto, ApplicationError> {
+    let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
     let prompt = format!(
         r#"Anda adalah guru ahli Kurikulum Merdeka di Indonesia.
 Tuliskan naskah ARTIKEL PEMBELAJARAN lengkap untuk jenjang {grade_level} mata pelajaran {subject_name} dengan topik: "{topic}".
+
+{subject_guideline}
 
 Format output HARUS berupa JSON murni dengan skema:
 {{
   "title": "Judul Naskah Pembelajaran",
   "description": "Deskripsi pengantar singkat 1-2 kalimat.",
-  "markdown_article": "Isi lengkap artikel berformat Markdown terstruktur:\n# Judul\n## 1. Pengantar & Apersepsi Menarik\n## 2. Pembahasan Konsep Inti\n## 3. Contoh Nyata & Aplikasi\n## 4. Rangkuman Intisari\n## 5. Glosarium / Kamus Kata Sulit"
+  "markdown_article": "Isi lengkap artikel berformat Markdown terstruktur:\n# Judul\n## 1. Pengantar & Apersepsi Menarik\n## 2. Pembahasan Konsep Inti (Disertai contoh nyata, rumus bila eksak, atau bacaan bahasa)\n## 3. Contoh Kasus & Aplikasi Nyata / Langkah Perhitungan\n## 4. Rangkuman Intisari\n## 5. Glosarium / Kamus Kata Kunci"
 }}
 
-Pastikan teks padat, jelas, format JSON valid dengan escape karakter benar, dan selalu ditutup sempurna. Output HANYA JSON tanpa teks lain."#
+Pastikan teks padat, mendalam, format JSON valid dengan escape karakter benar, dan selalu ditutup sempurna. Output HANYA JSON tanpa teks lain."#
     );
 
     let messages = vec![
         ChatMessage {
             role: "system",
-            content: "You are an expert Indonesian teacher creating educational articles in strict JSON.",
+            content: "You are an expert educational content writer creating deep, subject-specific learning articles in strict JSON.",
         },
         ChatMessage {
             role: "user",
@@ -454,18 +652,21 @@ pub async fn generate_assignment(
     grade_level: &str,
     subject_name: &str,
 ) -> Result<GeneratedAssignmentDto, ApplicationError> {
+    let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
     let prompt = format!(
-        r#"Anda adalah guru pengembang tugas siswa Kurikulum Merdeka.
+        r#"Anda adalah guru pengembang lembar tugas siswa Kurikulum Merdeka.
 Buatkan LEMBAR PENUGASAN SISWA untuk jenjang {grade_level} mata pelajaran {subject_name} dengan topik: "{topic}".
+
+{subject_guideline}
 
 Format output HARUS berupa JSON murni dengan skema:
 {{
   "title": "Judul Tugas Siswa",
   "instructions": "Petunjuk pengerjaan langkah demi langkah bagi siswa.",
   "tasks": [
-    "Tugas 1: ...",
-    "Tugas 2: ...",
-    "Tugas 3: ..."
+    "Tugas 1: Butir tugas operasional terukur sesuai karakteristik mapel...",
+    "Tugas 2: Butir tugas pemecahan masalah / aplikasi nyata...",
+    "Tugas 3: Refleksi / penarikan kesimpulan siswa..."
   ],
   "rubric": "Rubrik penilaian objektif (Skala 1-100 dengan indikator Sangat Baik, Baik, Cukup)."
 }}
@@ -476,7 +677,7 @@ Output HANYA JSON tanpa teks lain."#
     let messages = vec![
         ChatMessage {
             role: "system",
-            content: "You are an educational assessor creating student assignments in strict JSON.",
+            content: "You are an educational assessor creating student assignments strictly adhering to the subject matter rules in strict JSON.",
         },
         ChatMessage {
             role: "user",
@@ -545,17 +746,20 @@ pub async fn generate_cbt_quiz(
     num_questions: usize,
     difficulty: &str,
 ) -> Result<GeneratedCbtQuizDto, ApplicationError> {
+    let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
     let prompt = format!(
         r#"Anda adalah tim pembuat soal ujian CBT resmi sekolah (Kurikulum Merdeka).
 Buatkan {num_questions} butir soal pilihan ganda (opsi A-D) untuk jenjang {grade_level} mata pelajaran {subject_name} dengan topik: "{topic}" tingkat kesulitan: {difficulty}.
 
+{subject_guideline}
+
 Format output HARUS berupa JSON murni dengan skema:
 {{
   "title": "Paket Soal CBT: {topic}",
-  "description": "Ujian pilihan ganda {num_questions} butir soal materi {topic}.",
+  "description": "Ujian pilihan ganda {num_questions} butir soal materi {topic} ({subject_name}).",
   "questions": [
     {{
-      "question_text": "Teks soal yang jelas...",
+      "question_text": "Teks soal yang jelas, spesifik, dan tidak ambigu (bahasa sesuai mapel)...",
       "options": {{
         "A": "Pilihan A",
         "B": "Pilihan B",
@@ -563,7 +767,7 @@ Format output HARUS berupa JSON murni dengan skema:
         "D": "Pilihan D"
       }},
       "correct_key": "B",
-      "explanation": "Pembahasan lengkap kenapa jawaban B benar.",
+      "explanation": "Pembahasan lengkap kenapa jawaban B benar, termasuk cara hitung / analisis grammar.",
       "bloom_level": "C3",
       "points": 20
     }}
@@ -576,7 +780,7 @@ Output HANYA JSON tanpa teks lain."#
     let messages = vec![
         ChatMessage {
             role: "system",
-            content: "You are a professional CBT exam author producing valid JSON question banks.",
+            content: "You are a professional CBT exam author producing valid JSON question banks strictly respecting the subject matter rules.",
         },
         ChatMessage {
             role: "user",
