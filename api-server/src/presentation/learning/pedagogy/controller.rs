@@ -2657,12 +2657,12 @@ pub async fn get_diagnostic_clustering(
 
     let students_rows = sqlx::query(
         r#"
-        SELECT s.id, u.full_name, s.nisn
+        SELECT s.id, COALESCE(u.full_name, s.full_name) AS full_name, s.nisn
         FROM enrollments e
         JOIN students s ON e.student_id = s.id
-        JOIN users u ON s.user_id = u.id
+        LEFT JOIN users u ON s.user_id = u.id
         WHERE e.class_id = $1 AND (e.status IS NULL OR LOWER(e.status) = 'active') AND s.deleted_at IS NULL
-        ORDER BY u.full_name ASC
+        ORDER BY full_name ASC
         "#,
     )
     .bind(query.class_id)
@@ -2836,12 +2836,12 @@ pub async fn get_rapor_preview(
 
     let students = sqlx::query(
         r#"
-        SELECT s.id, u.full_name, s.nisn
+        SELECT s.id, COALESCE(u.full_name, s.full_name) AS full_name, s.nisn
         FROM enrollments e
         JOIN students s ON e.student_id = s.id
-        JOIN users u ON s.user_id = u.id
+        LEFT JOIN users u ON s.user_id = u.id
         WHERE e.class_id = $1 AND (e.status IS NULL OR LOWER(e.status) = 'active') AND s.deleted_at IS NULL
-        ORDER BY u.full_name ASC
+        ORDER BY full_name ASC
         "#,
     )
     .bind(query.class_id)
@@ -3053,9 +3053,9 @@ pub async fn get_semester_narrative(
     let students = if let Some(s_id) = query.student_id {
         sqlx::query(
             r#"
-            SELECT s.id, u.full_name, s.nisn
+            SELECT s.id, COALESCE(u.full_name, s.full_name) AS full_name, s.nisn
             FROM students s
-            JOIN users u ON s.user_id = u.id
+            LEFT JOIN users u ON s.user_id = u.id
             WHERE s.id = $1 AND s.deleted_at IS NULL
             "#,
         )
@@ -3071,12 +3071,12 @@ pub async fn get_semester_narrative(
     } else {
         sqlx::query(
             r#"
-            SELECT s.id, u.full_name, s.nisn
+            SELECT s.id, COALESCE(u.full_name, s.full_name) AS full_name, s.nisn
             FROM enrollments e
             JOIN students s ON e.student_id = s.id
-            JOIN users u ON s.user_id = u.id
+            LEFT JOIN users u ON s.user_id = u.id
             WHERE e.class_id = $1 AND (e.status IS NULL OR LOWER(e.status) = 'active') AND s.deleted_at IS NULL
-            ORDER BY u.full_name ASC
+            ORDER BY full_name ASC
             "#,
         )
         .bind(query.class_id)
@@ -3206,9 +3206,9 @@ pub async fn send_habit_reminder(
             let _ = sqlx::query(
                 r#"
                 INSERT INTO notifications (
-                    tenant_id, user_id, title, body, notification_type, channel, priority, is_read, created_at
+                    id, tenant_id, user_id, title, body, notification_type, channel, priority, is_read, created_at
                 ) VALUES (
-                    $1, $2, $3, $4, 'HABIT_VERIFICATION_REMINDER', 'ALL', 'HIGH', false, NOW()
+                    gen_random_uuid(), $1, $2, $3, $4, 'HABIT_VERIFICATION_REMINDER', 'in_app', 'HIGH', false, NOW()
                 )
                 "#,
             )
