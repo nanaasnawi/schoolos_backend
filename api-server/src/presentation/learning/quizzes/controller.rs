@@ -1474,10 +1474,50 @@ async fn submit_attempt(
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
-    Ok(Json(ApiResponse::success(
-        AttemptResponse::from(attempt),
-        req_ctx.request_id,
-    )))
+    let answer_rows = sqlx::query(
+        r#"
+        SELECT 
+            ans.question_id,
+            q.question_text,
+            q.question_type,
+            q.points as max_points,
+            ans.chosen_choice_id,
+            c.choice_text as chosen_choice_text,
+            COALESCE(ans.is_correct, c.is_correct) as is_correct,
+            ans.text_answer,
+            ans.points_earned
+        FROM attempt_answers ans
+        JOIN quiz_questions q ON q.id = ans.question_id
+        LEFT JOIN quiz_choices c ON c.id = ans.chosen_choice_id
+        WHERE ans.attempt_id = $1
+        ORDER BY q.order_index ASC, q.created_at ASC
+        "#,
+    )
+    .bind(attempt_id)
+    .fetch_all(&ctx.pool)
+    .await
+    .unwrap_or_default();
+
+    let answers: Vec<AttemptAnswerDetailDto> = answer_rows
+        .into_iter()
+        .map(|a| AttemptAnswerDetailDto {
+            question_id: a.get("question_id"),
+            question_text: a.get("question_text"),
+            question_type: a.get("question_type"),
+            max_points: a.get("max_points"),
+            chosen_choice_id: a.get("chosen_choice_id"),
+            chosen_choice_text: a.get("chosen_choice_text"),
+            is_correct: a.get("is_correct"),
+            text_answer: a.get("text_answer"),
+            points_earned: a.get::<Option<i32>, _>("points_earned").unwrap_or(0),
+            teacher_feedback: None,
+        })
+        .collect();
+
+    let mut resp = AttemptResponse::from(attempt);
+    resp.answers = answers;
+
+    Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
 }
 
 async fn grade_attempt(
@@ -1864,7 +1904,7 @@ async fn get_attempt_by_id(
             q.points as max_points,
             ans.chosen_choice_id,
             c.choice_text as chosen_choice_text,
-            c.is_correct as is_correct,
+            COALESCE(ans.is_correct, c.is_correct) as is_correct,
             ans.text_answer,
             ans.points_earned
         FROM attempt_answers ans

@@ -12,3 +12,4 @@ pub mod quizzes;
 pub mod sessions;
 pub mod syllabuses;
 pub mod pedagogy;
+pub mod attendance_automation;

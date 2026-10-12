@@ -791,6 +791,14 @@ async fn update_reading_progress(
         )
     })?;
 
+    let _ = crate::presentation::learning::attendance_automation::record_online_material_presence(
+        &ctx.pool,
+        req_ctx.tenant_id,
+        actor_id,
+        payload.material_id,
+    )
+    .await;
+
     let resp = ReadingProgressResponse {
         student_id: row.get("student_id"),
         material_id: row.get("material_id"),

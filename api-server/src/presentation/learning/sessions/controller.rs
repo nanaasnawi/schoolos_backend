@@ -34,6 +34,13 @@ pub fn session_routes() -> Router<ApplicationContext> {
             post(record_attendance).get(get_attendance),
         )
         .route("/{id}/attendance/bulk", post(record_attendance_bulk))
+        .route("/{id}/excuse", post(submit_excuse))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SubmitExcuseRequest {
+    pub status: String,
+    pub notes: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -548,6 +555,13 @@ async fn list(
         .execute(&ctx.pool)
         .await;
 
+    // Evaluasi aturan auto-alpa (24 jam) untuk sesi-sesi yang telah lewat
+    let _ = crate::presentation::learning::attendance_automation::process_auto_alpa_for_expired_sessions(
+        &ctx.pool,
+        req_ctx.tenant_id,
+    )
+    .await;
+
     let rows = sqlx::query(
         r#"
         SELECT 
@@ -960,6 +974,12 @@ async fn get_attendance(
     let target_session_id = resolve_effective_session_id(&ctx.pool, req_ctx.tenant_id, id).await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
+    let _ = crate::presentation::learning::attendance_automation::process_auto_alpa_for_expired_sessions(
+        &ctx.pool,
+        req_ctx.tenant_id,
+    )
+    .await;
+
     let query = GetAttendanceQuery {
         tenant_id: req_ctx.tenant_id,
         session_id: target_session_id,
@@ -1322,3 +1342,37 @@ async fn resolve_effective_session_id(
         format!("Sesi pembelajaran dengan ID {} tidak ditemukan", id),
     ))
 }
+
+async fn submit_excuse(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<SubmitExcuseRequest>,
+) -> Result<Json<ApiResponse<bool>>, ApiError> {
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id).ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Autentikasi diperlukan".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let target_session_id = resolve_effective_session_id(&ctx.pool, req_ctx.tenant_id, id).await
+        .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
+
+    let success = crate::presentation::learning::attendance_automation::record_student_mobile_excuse(
+        &ctx.pool,
+        req_ctx.tenant_id,
+        actor_id,
+        target_session_id,
+        &payload.status,
+        payload.notes.as_deref(),
+    )
+    .await
+    .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
+
+    Ok(Json(ApiResponse::success(success, req_ctx.request_id)))
+}
+
