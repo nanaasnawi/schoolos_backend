@@ -29,8 +29,13 @@ pub struct GenerateAiContentRequest {
     pub grade_level: Option<String>,
     pub subject_name: Option<String>,
     pub num_questions: Option<usize>,
+    pub num_mcq: Option<usize>,
+    pub num_essay: Option<usize>,
     pub difficulty: Option<String>,
+    pub assignment_format: Option<String>,
+    pub include_images: Option<bool>,
 }
+
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct GenerateAiContentResponse {
@@ -118,9 +123,23 @@ async fn generate_content(
             )))
         }
         "ASSIGNMENT" => {
-            let task = nvidia_ai::generate_assignment(topic, grade, subject)
-                .await
-                .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
+            let num_mcq = payload.num_mcq.unwrap_or(4).clamp(0, 15);
+            let num_essay = payload.num_essay.unwrap_or(2).clamp(0, 10);
+            let format = payload.assignment_format.as_deref().unwrap_or("STRUCTURED_QUESTIONS");
+            let include_images = payload.include_images.unwrap_or(false);
+
+            let task = nvidia_ai::generate_assignment(
+                topic,
+                grade,
+                subject,
+                Some(format),
+                num_mcq,
+                num_essay,
+                diff,
+                include_images,
+            )
+            .await
+            .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
             Ok(Json(ApiResponse::success(
                 GenerateAiContentResponse {
@@ -134,7 +153,8 @@ async fn generate_content(
             )))
         }
         "QUIZ" => {
-            let quiz = nvidia_ai::generate_cbt_quiz(topic, grade, subject, num_q, diff)
+            let total_q = payload.num_mcq.or(payload.num_questions).unwrap_or(num_q).clamp(1, 20);
+            let quiz = nvidia_ai::generate_cbt_quiz(topic, grade, subject, total_q, diff)
                 .await
                 .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
@@ -149,6 +169,7 @@ async fn generate_content(
                 req_ctx.request_id,
             )))
         }
+
         other => Err(ApiError::new(
             ApplicationError::Domain(DomainError::Validation(format!(
                 "Mode '{other}' tidak didukung. Pilihan: INFOGRAPHIC, ARTICLE, ASSIGNMENT, QUIZ"

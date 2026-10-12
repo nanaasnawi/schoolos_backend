@@ -77,6 +77,7 @@ use utoipa::OpenApi;
             crate::infrastructure::nvidia_ai::InfographicBlockDto,
             crate::infrastructure::nvidia_ai::GeneratedArticleDto,
             crate::infrastructure::nvidia_ai::GeneratedAssignmentDto,
+            crate::infrastructure::nvidia_ai::AssignmentQuestionDto,
             crate::infrastructure::nvidia_ai::GeneratedCbtQuizDto,
             crate::infrastructure::nvidia_ai::CbtQuestionDto,
             crate::infrastructure::nvidia_ai::CbtQuestionChoiceDto,

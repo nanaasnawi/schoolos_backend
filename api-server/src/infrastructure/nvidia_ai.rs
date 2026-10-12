@@ -577,66 +577,8 @@ Pastikan teks padat, mendalam, format JSON valid dengan escape karakter benar, d
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. ASSIGNMENT GENERATION DTOs & FUNCTION
 // ─────────────────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct GeneratedAssignmentDto {
-    pub title: String,
-    pub instructions: String,
-    pub rubric: String,
-    pub tasks: Vec<String>,
-}
-
-pub async fn generate_assignment(
-    topic: &str,
-    grade_level: &str,
-    subject_name: &str,
-) -> Result<GeneratedAssignmentDto, ApplicationError> {
-    let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
-    let prompt = format!(
-        r#"Anda adalah guru pengembang lembar tugas siswa Kurikulum Merdeka.
-Buatkan LEMBAR PENUGASAN SISWA untuk jenjang {grade_level} mata pelajaran {subject_name} dengan topik: "{topic}".
-
-{subject_guideline}
-
-Format output HARUS berupa JSON murni dengan skema:
-{{
-  "title": "Judul Tugas Siswa",
-  "instructions": "Petunjuk pengerjaan langkah demi langkah bagi siswa.",
-  "tasks": [
-    "Tugas 1: Butir tugas operasional terukur sesuai karakteristik mapel...",
-    "Tugas 2: Butir tugas pemecahan masalah / aplikasi nyata...",
-    "Tugas 3: Refleksi / penarikan kesimpulan siswa..."
-  ],
-  "rubric": "Rubrik penilaian objektif (Skala 1-100 dengan indikator Sangat Baik, Baik, Cukup)."
-}}
-
-Output HANYA JSON tanpa teks lain."#
-    );
-
-    let messages = vec![
-        ChatMessage {
-            role: "system",
-            content: "You are an educational assessor creating student assignments strictly adhering to the subject matter rules in strict JSON.",
-        },
-        ChatMessage {
-            role: "user",
-            content: &prompt,
-        },
-    ];
-
-    let raw = call_nvidia_nim(messages, 0.3, 1800).await?;
-    let cleaned = extract_clean_json(&raw);
-
-    let parsed: GeneratedAssignmentDto = serde_json::from_str(cleaned)
-        .map_err(|e| ApplicationError::Domain(DomainError::Validation(format!("Invalid AI Assignment JSON: {e}"))))?;
-
-    Ok(parsed)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 4. CBT QUIZ / EXAM GENERATION DTOs & FUNCTION
+// 3. SHARED QUESTION & ASSIGNMENT GENERATION DTOs & FUNCTION
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -644,6 +586,179 @@ pub struct CbtQuestionChoiceDto {
     pub choice_text: String,
     pub is_correct: bool,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct AssignmentQuestionDto {
+    pub id: String,
+    pub question_text: String,
+    pub question_type: String, // "MULTIPLE_CHOICE" | "ESSAY"
+    pub points: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
+    #[serde(default)]
+    pub choices: Vec<CbtQuestionChoiceDto>,
+    #[serde(default)]
+    pub explanation: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GeneratedAssignmentDto {
+    pub title: String,
+    pub instructions: String,
+    pub assignment_type: String, // "STRUCTURED_QUESTIONS" | "HOMEWORK_PR"
+    pub rubric: String,
+    #[serde(default)]
+    pub tasks: Vec<String>,
+    #[serde(default)]
+    pub questions: Vec<AssignmentQuestionDto>,
+}
+
+pub async fn generate_assignment(
+    topic: &str,
+    grade_level: &str,
+    subject_name: &str,
+    assignment_format: Option<&str>,
+    num_mcq: usize,
+    num_essay: usize,
+    difficulty: &str,
+    include_images: bool,
+) -> Result<GeneratedAssignmentDto, ApplicationError> {
+    let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
+    let is_homework = assignment_format.map(|f| f.to_uppercase() == "HOMEWORK_PR").unwrap_or(false);
+
+    let format_instruction = if is_homework {
+        "Format Penugasan: TUGAS MANDIRI / LEMBAR KERJA SISWA (PR).\nSediakan petunjuk pengerjaan langkah-demi-langkah, tugas mandiri pemecahan masalah / observasi, dan rubrik penilaian komprehensif.".to_string()
+    } else {
+        format!(
+            "Format Penugasan: SOAL TERSTRUKTUR (Kombinasi Pilihan Ganda dan Uraian/Essay).\n- Jumlah Soal Pilihan Ganda (PG): {num_mcq} butir\n- Jumlah Soal Uraian / Essay: {num_essay} butir\nTiap butir PG harus memiliki tepat 4 opsi dengan kunci is_correct tepat 1 true."
+        )
+    };
+
+    let prompt = format!(
+        r#"Anda adalah guru pengembang asesmen Kurikulum Merdeka Indonesia.
+Buatkan paket penugasan siswa terstruktur untuk mata pelajaran: "{subject_name}", topik: "{topic}", jenjang: "{grade_level}", tingkat kesulitan: "{difficulty}".
+
+{subject_guideline}
+
+{format_instruction}
+
+Format output HARUS berupa JSON murni dengan skema:
+{{
+  "title": "Tugas Siswa: {topic}",
+  "instructions": "Petunjuk pengerjaan penugasan langkah demi langkah...",
+  "assignment_type": "{assignment_type_val}",
+  "rubric": "Rubrik Penilaian: Skor 100 dengan kriteria...",
+  "tasks": [
+    "Tugas 1: Butir tugas operasional terukur...",
+    "Tugas 2: Butir tugas pemecahan masalah / aplikasi nyata..."
+  ],
+  "questions": [
+    {{
+      "id": "q1",
+      "question_text": "Teks soal pilihan ganda...",
+      "question_type": "MULTIPLE_CHOICE",
+      "points": 20,
+      "choices": [
+        {{ "choice_text": "A. Pilihan A", "is_correct": true }},
+        {{ "choice_text": "B. Pilihan B", "is_correct": false }},
+        {{ "choice_text": "C. Pilihan C", "is_correct": false }},
+        {{ "choice_text": "D. Pilihan D", "is_correct": false }}
+      ],
+      "explanation": "Pembahasan kunci jawaban..."
+    }}
+  ]
+}}
+
+PENTING:
+- Pastikan teks soal dan pilihan jawaban SESUAI ATURAN MAPEL ({subject_name}).
+- Output HANYA JSON tanpa teks lain."#,
+        assignment_type_val = if is_homework { "HOMEWORK_PR" } else { "STRUCTURED_QUESTIONS" }
+    );
+
+    let messages = vec![
+        ChatMessage {
+            role: "system",
+            content: "You are an educational assessor creating student assignments strictly adhering to Indonesian Kurikulum Merdeka in strict JSON.",
+        },
+        ChatMessage {
+            role: "user",
+            content: &prompt,
+        },
+    ];
+
+    let raw = call_nvidia_nim(messages, 0.3, 3500).await?;
+    let cleaned = extract_clean_json(&raw);
+
+    #[derive(Deserialize)]
+    struct RawAssignmentQuestion {
+        id: Option<String>,
+        question_text: String,
+        #[serde(default)]
+        question_type: Option<String>,
+        points: Option<i32>,
+        #[serde(default)]
+        choices: Vec<CbtQuestionChoiceDto>,
+        explanation: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct RawAssignmentResponse {
+        title: String,
+        instructions: String,
+        #[serde(default)]
+        assignment_type: Option<String>,
+        rubric: String,
+        #[serde(default)]
+        tasks: Vec<String>,
+        #[serde(default)]
+        questions: Vec<RawAssignmentQuestion>,
+    }
+
+    let parsed: RawAssignmentResponse = serde_json::from_str(cleaned)
+        .map_err(|e| ApplicationError::Domain(DomainError::Validation(format!("Invalid AI Assignment JSON: {e}"))))?;
+
+    let safe_visual_url = if include_images {
+        Some(get_safe_curated_educational_image(subject_name, topic))
+    } else {
+        None
+    };
+
+    let questions: Vec<AssignmentQuestionDto> = parsed
+        .questions
+        .into_iter()
+        .enumerate()
+        .map(|(idx, q)| {
+            let img = if include_images && idx < 2 { safe_visual_url.clone() } else { None };
+            AssignmentQuestionDto {
+                id: q.id.unwrap_or_else(|| format!("asg-q-{}", idx + 1)),
+                question_text: q.question_text,
+                question_type: q.question_type.unwrap_or_else(|| {
+                    if q.choices.is_empty() { "ESSAY".to_string() } else { "MULTIPLE_CHOICE".to_string() }
+                }),
+                points: q.points.unwrap_or(20),
+                image_url: img,
+                choices: q.choices,
+                explanation: q.explanation.unwrap_or_default(),
+            }
+        })
+        .collect();
+
+    Ok(GeneratedAssignmentDto {
+        title: parsed.title,
+        instructions: parsed.instructions,
+        assignment_type: parsed.assignment_type.unwrap_or_else(|| {
+            if is_homework { "HOMEWORK_PR".to_string() } else { "STRUCTURED_QUESTIONS".to_string() }
+        }),
+        rubric: parsed.rubric,
+        tasks: parsed.tasks,
+        questions,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4. CBT QUIZ / EXAM GENERATION DTOs & FUNCTION
+// ─────────────────────────────────────────────────────────────────────────────
+
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CbtQuestionDto {
