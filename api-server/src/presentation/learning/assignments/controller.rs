@@ -1250,90 +1250,34 @@ async fn submit(
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
-    let mut auto_score: i32 = 0;
-    let mut has_essay = false;
-    let mut answered_any = false;
-
     if let Some(answers) = payload.answers {
         for ans in answers {
-            answered_any = true;
-            let q_info = sqlx::query(
-                r#"
-                SELECT q.question_type, q.points, c.is_correct
-                FROM assignment_questions q
-                LEFT JOIN assignment_question_choices c ON c.id = $2 AND c.question_id = q.id
-                WHERE q.id = $1
-                "#,
-            )
-            .bind(ans.question_id)
-            .bind(ans.chosen_choice_id)
-            .fetch_optional(&ctx.pool)
-            .await
-            .ok()
-            .flatten();
 
-            let points_earned: i32 = if let Some(ref info) = q_info {
-                let q_type: String = info.get("question_type");
-                let pts: i32 = info.get("points");
-                let is_corr: Option<bool> = info.get("is_correct");
-                if q_type == "MULTIPLE_CHOICE" {
-                    if is_corr.unwrap_or(false) {
-                        pts
-                    } else {
-                        0
-                    }
-                } else {
-                    has_essay = true;
-                    0
-                }
-            } else {
-                0
-            };
-
-            auto_score += points_earned;
-
+            // Simpan jawaban siswa secara aman ke database.
+            // Poin dan nilai TIDAK dihitung otomatis di sini agar koreksi diserahkan ke Guru.
             let _ = sqlx::query(
                 r#"
                 INSERT INTO assignment_submission_answers (
                     submission_id, question_id, chosen_choice_id, text_answer, points_earned
                 )
-                VALUES ($1, $2, $3, $4, $5)
+                VALUES ($1, $2, $3, $4, 0)
                 ON CONFLICT (submission_id, question_id) DO UPDATE SET
                     chosen_choice_id = EXCLUDED.chosen_choice_id,
-                    text_answer = EXCLUDED.text_answer,
-                    points_earned = EXCLUDED.points_earned
+                    text_answer = EXCLUDED.text_answer
                 "#,
             )
             .bind(submission.id)
             .bind(ans.question_id)
             .bind(ans.chosen_choice_id)
             .bind(&ans.text_answer)
-            .bind(points_earned)
             .execute(&ctx.pool)
             .await;
         }
     }
 
-    let final_submission = if answered_any && !has_essay && payload.file_url.is_none() {
-        let _ = sqlx::query(
-            r#"
-            UPDATE assignment_submissions
-            SET score = $1, status = 'graded', graded_at = NOW()
-            WHERE id = $2
-            "#,
-        )
-        .bind(auto_score)
-        .bind(submission.id)
-        .execute(&ctx.pool)
-        .await;
-
-        let mut s = submission;
-        s.score = Some(auto_score);
-        s.status = "graded".to_string();
-        s
-    } else {
-        submission
-    };
+    // Status pengerjaan tugas tetap 'submitted' (Menunggu Koreksi Guru).
+    // Nilai score tetap None sampai Guru melakukan koreksi dan penilaian resmi.
+    let final_submission = submission;
 
     let mut resp = SubmissionResponse::from(final_submission);
 

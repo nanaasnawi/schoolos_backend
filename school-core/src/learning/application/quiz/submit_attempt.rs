@@ -103,13 +103,11 @@ impl SubmitAttemptUseCase {
             attempt.add_answer(ans);
         }
 
+        // Jangan hitung nilai secara otomatis saat siswa submit.
+        // Penilaian dan evaluasi diserahkan sepenuhnya kepada Guru pengampu.
         attempt
-            .auto_grade(&quiz, &*self.clock)
+            .submit(&*self.clock)
             .map_err(ApplicationError::Domain)?;
-
-        for graded_ans in &attempt.answers {
-            self.repo.save_answer(graded_ans).await?;
-        }
 
         self.repo.update_attempt(&attempt).await?;
 
