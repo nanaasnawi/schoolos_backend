@@ -25,7 +25,8 @@ use crate::{
     bootstrap::ApplicationContext, error::ApiError, extractors::RequestContext,
     response::ApiResponse,
 };
-use school_core::common::error::{ApplicationError, ErrorCode};
+use school_core::common::error::ApplicationError;
+use school_core::common::error_code::ErrorCode;
 use school_core::learning::application::learning_material::{
     create_learning_material::CreateLearningMaterialCommand,
     delete_learning_material::DeleteLearningMaterialCommand,
