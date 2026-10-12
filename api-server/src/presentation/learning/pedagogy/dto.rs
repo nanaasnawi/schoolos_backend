@@ -467,5 +467,91 @@ pub struct OverrideHabitTeacherPayload {
     pub override_reason: Option<String>,
 }
 
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SuperviseModulAjarRequest {
+    pub status: Option<String>,
+    pub notes: Option<String>,
+    pub supervisor_id: Option<Uuid>,
+    pub supervisor_name: Option<String>,
+}
 
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct KaldikBudgetQuery {
+    pub academic_year: Option<String>,
+    pub semester: Option<String>,
+    pub subject_code: Option<String>,
+    pub subject_name: Option<String>,
+}
 
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct KaldikBudgetDetails {
+    pub academic_year: String,
+    pub semester: String,
+    pub meb_weeks: i32,
+    pub heb_days: i32,
+    pub weekly_hours: i32,
+    pub total_capacity_jp: i32,
+    pub allocated_jp: i32,
+    pub remaining_available_jp: i32,
+    pub allocation_percentage: i32,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SynthesizeModulAjarPayload {
+    pub tp_id: Option<Uuid>,
+    pub learning_objective_id: Option<Uuid>,
+    pub academic_year: Option<String>,
+    pub semester: Option<String>,
+    pub grade_level: Option<String>,
+    pub subject_name: Option<String>,
+    pub subject_code: Option<String>,
+    pub phase: Option<String>,
+    pub allocated_hours: Option<i32>,
+    pub total_meetings: Option<i32>,
+    pub hours_per_meeting: Option<i32>,
+    pub user_instructions: Option<String>,
+    pub target_meetings: Option<i32>,
+    pub pedagogical_approach: Option<String>,
+    pub local_wisdom_context: Option<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct DiagnosticClusteringQuery {
+    pub class_id: Uuid,
+    pub academic_year: Option<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct RaporPreviewQuery {
+    pub class_id: Uuid,
+    pub subject_code: Option<String>,
+    pub academic_year: Option<String>,
+    pub semester: Option<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct ApproveRaporPayload {
+    pub class_id: Uuid,
+    pub academic_year: Option<String>,
+    pub semester: Option<String>,
+    pub subject_code: Option<String>,
+    pub approved_by_role: Option<String>,
+    pub approved_by_name: Option<String>,
+    pub ratification_notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct SemesterNarrativeQuery {
+    pub class_id: Option<Uuid>,
+    pub academic_year: Option<String>,
+    pub semester: Option<String>,
+    pub student_id: Option<Uuid>,
+    pub save_to_snapshot: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SendHabitReminderPayload {
+    pub class_id: Option<Uuid>,
+    pub student_id: Option<Uuid>,
+    pub days_lookback: Option<i32>,
+}
