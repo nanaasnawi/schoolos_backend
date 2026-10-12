@@ -95,11 +95,12 @@ pub struct SynthesizeCpResponse {
     pub message: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct KaldikBudgetQuery {
-    pub subject_code: Option<String>,
     pub academic_year: Option<String>,
     pub semester: Option<String>,
+    pub subject_code: Option<String>,
+    pub subject_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema, Clone)]
@@ -150,16 +151,21 @@ pub struct ModulAjarDto {
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SynthesizeModulAjarPayload {
-    pub learning_objective_id: Uuid,
+    pub tp_id: Option<Uuid>,
+    pub learning_objective_id: Option<Uuid>,
     pub academic_year: Option<String>,
-    pub semester: String,
-    pub grade_level: String,
-    pub subject_name: String,
-    pub subject_code: String,
-    pub allocated_hours: i32,
-    pub total_meetings: i32,
-    pub hours_per_meeting: i32,
+    pub semester: Option<String>,
+    pub grade_level: Option<String>,
+    pub subject_name: Option<String>,
+    pub subject_code: Option<String>,
+    pub phase: Option<String>,
+    pub allocated_hours: Option<i32>,
+    pub total_meetings: Option<i32>,
+    pub hours_per_meeting: Option<i32>,
     pub user_instructions: Option<String>,
+    pub target_meetings: Option<i32>,
+    pub pedagogical_approach: Option<String>,
+    pub local_wisdom_context: Option<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -475,14 +481,6 @@ pub struct SuperviseModulAjarRequest {
     pub supervisor_name: Option<String>,
 }
 
-#[derive(Debug, Deserialize, utoipa::IntoParams)]
-pub struct KaldikBudgetQuery {
-    pub academic_year: Option<String>,
-    pub semester: Option<String>,
-    pub subject_code: Option<String>,
-    pub subject_name: Option<String>,
-}
-
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct KaldikBudgetDetails {
     pub academic_year: String,
@@ -494,25 +492,6 @@ pub struct KaldikBudgetDetails {
     pub allocated_jp: i32,
     pub remaining_available_jp: i32,
     pub allocation_percentage: i32,
-}
-
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-pub struct SynthesizeModulAjarPayload {
-    pub tp_id: Option<Uuid>,
-    pub learning_objective_id: Option<Uuid>,
-    pub academic_year: Option<String>,
-    pub semester: Option<String>,
-    pub grade_level: Option<String>,
-    pub subject_name: Option<String>,
-    pub subject_code: Option<String>,
-    pub phase: Option<String>,
-    pub allocated_hours: Option<i32>,
-    pub total_meetings: Option<i32>,
-    pub hours_per_meeting: Option<i32>,
-    pub user_instructions: Option<String>,
-    pub target_meetings: Option<i32>,
-    pub pedagogical_approach: Option<String>,
-    pub local_wisdom_context: Option<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
