@@ -38,11 +38,11 @@ pub fn pedagogy_routes() -> Router<ApplicationContext> {
         .route("/publish", post(publish_pedagogy))
         // Modul Ajar
         .route("/modul-ajar", get(list_modul_ajar).post(create_modul_ajar))
-        .route("/modul-ajar/:id/activate", put(activate_modul_ajar))
+        .route("/modul-ajar/{id}/activate", put(activate_modul_ajar))
         // Assessments
         .route("/assessments", get(list_assessments).post(create_assessment))
-        .route("/assessments/:id", get(get_assessment_detail))
-        .route("/assessments/:id/grades", post(record_assessment_grades))
+        .route("/assessments/{id}", get(get_assessment_detail))
+        .route("/assessments/{id}/grades", post(record_assessment_grades))
         // Habits G7KAIH
         .route("/habits/calendar", get(get_habits_calendar))
         .route("/habits/entry", post(record_habit_entry))
