@@ -107,6 +107,10 @@ impl SubmitAttemptUseCase {
             .auto_grade(&quiz, &*self.clock)
             .map_err(ApplicationError::Domain)?;
 
+        for graded_ans in &attempt.answers {
+            self.repo.save_answer(graded_ans).await?;
+        }
+
         self.repo.update_attempt(&attempt).await?;
 
         for event in attempt.take_events() {

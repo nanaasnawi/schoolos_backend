@@ -439,8 +439,8 @@ impl QuizRepository for PgQuizRepository {
             ON CONFLICT (attempt_id, question_id) DO UPDATE
             SET chosen_choice_id = COALESCE($4, attempt_answers.chosen_choice_id),
                 text_answer = COALESCE($5, attempt_answers.text_answer),
-                is_correct = COALESCE($6, attempt_answers.is_correct),
-                points_earned = COALESCE($7, attempt_answers.points_earned)
+                is_correct = EXCLUDED.is_correct,
+                points_earned = EXCLUDED.points_earned
             "#
         )
         .bind(answer.id)

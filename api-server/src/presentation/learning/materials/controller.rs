@@ -883,6 +883,16 @@ async fn get_by_id(
     })?;
 
     let is_completed = if is_student {
+        if let Some(uid) = actor_id {
+            let _ = crate::presentation::learning::attendance_automation::record_online_material_presence(
+                &ctx.pool,
+                req_ctx.tenant_id,
+                uid,
+                id,
+            )
+            .await;
+        }
+
         sqlx::query_scalar::<_, bool>(
             r#"SELECT EXISTS(
                 SELECT 1 FROM student_material_completions 
@@ -1027,6 +1037,14 @@ async fn toggle_complete(
         .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
             school_core::common::error::InfrastructureError::Database(e)
         ), &req_ctx.request_id))?;
+        let _ = crate::presentation::learning::attendance_automation::record_online_material_presence(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default(),
+            id,
+        )
+        .await;
+
         true
     };
 
