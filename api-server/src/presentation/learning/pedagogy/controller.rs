@@ -13,7 +13,8 @@ use crate::{
     extractors::RequestContext,
     response::ApiResponse,
 };
-use school_core::common::error::{ApplicationError, DomainError};
+use school_core::common::error::ApplicationError;
+use school_core::common::error_code::ErrorCode;
 
 use super::dto::{
     AssessmentQuery, AtpItemDto, AtpMatrixQuery, AtpMatrixResponse, AtpSemesterSummaryDto,
@@ -21,7 +22,7 @@ use super::dto::{
     HabitEntryDto, HabitsCalendarQuery, KospCommitteeDto, KospDocumentResponse, KospSignatoryDto,
     LearningOutcomeElementDto, ModulAjarDto, ModulAjarQuery, OverrideHabitTeacherPayload,
     PedagogicalAssessmentItemDto, ProposedTpDto, PublishPedagogyPayload, PublishPedagogyResponse,
-    RecordHabitEntryPayload, RegisterSchoolCpPayload, StudentGradeSubmission, SubmitGradesPayload,
+    RecordHabitEntryPayload, RegisterSchoolCpPayload, SubmitGradesPayload,
     SynthesizeCpRequest, SynthesizeCpResponse, UpdateTpPayload, VerifyHabitParentPayload,
 };
 
@@ -943,9 +944,10 @@ pub async fn get_active_kosp(
         Some(row) => row,
         None => {
             return Err(ApiError::new(
-                ApplicationError::Domain(DomainError::NotFound(
+                ApplicationError::NotFound(
+                    ErrorCode::ResourceNotFound,
                     format!("Dokumen KOSP untuk tahun ajaran {academic_year} belum terdaftar."),
-                )),
+                ),
                 &req_ctx.request_id,
             ));
         }
@@ -1194,9 +1196,10 @@ pub async fn update_tp(
         Some(r) => r,
         None => {
             return Err(ApiError::new(
-                ApplicationError::Domain(DomainError::NotFound(
+                ApplicationError::NotFound(
+                    ErrorCode::ResourceNotFound,
                     "Tujuan Pembelajaran tidak ditemukan".to_string(),
-                )),
+                ),
                 &req_ctx.request_id,
             ));
         }
@@ -1324,9 +1327,10 @@ pub async fn publish_pedagogy(
 
     if tp_rows.is_empty() {
         return Err(ApiError::new(
-            ApplicationError::Domain(DomainError::NotFound(
+            ApplicationError::NotFound(
+                ErrorCode::ResourceNotFound,
                 "Tidak ada Tujuan Pembelajaran yang cocok untuk diterbitkan pada sekolah ini.".to_string(),
-            )),
+            ),
             &req_ctx.request_id,
         ));
     }
@@ -1865,9 +1869,10 @@ pub async fn get_assessment_detail(
         Some(r) => r,
         None => {
             return Err(ApiError::new(
-                ApplicationError::Domain(DomainError::NotFound(
+                ApplicationError::NotFound(
+                    ErrorCode::ResourceNotFound,
                     "Asesmen tidak ditemukan".to_string(),
-                )),
+                ),
                 &req_ctx.request_id,
             ));
         }
@@ -2111,9 +2116,7 @@ pub async fn record_habit_entry(
     let semester = payload.semester.unwrap_or_else(|| "GANJIL".to_string()).to_uppercase();
     let habits_notes = payload.habits_notes.unwrap_or_else(|| serde_json::json!({}));
 
-    let tenant_id = req_ctx.tenant_id.unwrap_or_else(|| {
-        Uuid::parse_str("e3c4d8da-ff44-4d87-bb13-759a54f49bd0").unwrap()
-    });
+    let tenant_id = req_ctx.tenant_id;
 
     let row = sqlx::query(
         r#"
