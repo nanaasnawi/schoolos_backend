@@ -178,6 +178,39 @@ impl QuizAttempt {
         self.answers.push(answer);
     }
 
+    /// Submit Domain Method
+    /// Menandai lembar ujian/kuis siswa telah selesai dikumpulkan dan tersimpan aman.
+    /// Nilai dan kelulusan TIDAK dihitung otomatis oleh sistem, melainkan diserahkan
+    /// sepenuhnya kepada Guru pengampu untuk dikoreksi dan diverifikasi.
+    pub fn submit(&mut self, clock: &dyn Clock) -> Result<(), DomainError> {
+        let now = clock.now();
+        self.status = "submitted".to_string();
+        self.completed_at = Some(now);
+        self.updated_at = now;
+        self.score = None;
+        self.passed = false;
+
+        self.raise_event(QuizAttemptSubmittedEvent {
+            metadata: EventMetadata::new(
+                "QuizAttemptSubmitted".to_string(),
+                self.tenant_id,
+                self.id.to_string(),
+                None,
+                None,
+                None,
+                (self.version + 1) as u32,
+                clock,
+            ),
+            attempt_id: self.id,
+            quiz_id: self.quiz_id,
+            student_id: self.student_id,
+            score: 0,
+            passed: false,
+        });
+
+        Ok(())
+    }
+
     /// Auto Grade Domain Method
     /// Automatically calculates earned points, score percentage, and pass/fail state
     pub fn auto_grade(

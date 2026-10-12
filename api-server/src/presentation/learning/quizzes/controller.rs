@@ -1571,14 +1571,33 @@ async fn grade_attempt(
             .unwrap_or(0)
         };
 
+        let pass_info = sqlx::query(
+            "SELECT q.passing_score, q.max_score FROM quizzes q JOIN quiz_attempts a ON a.quiz_id = q.id WHERE a.id = $1"
+        )
+        .bind(attempt_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten();
+
+        let is_passed = if let Some(prow) = pass_info {
+            let pass_score: i32 = prow.get("passing_score");
+            let max_score: i32 = prow.get("max_score");
+            let eff_max = if max_score > 0 { max_score } else { 100 };
+            ((new_score * 100) / eff_max) >= pass_score
+        } else {
+            new_score >= 75
+        };
+
         let _ = sqlx::query(
             r#"
             UPDATE quiz_attempts 
-            SET score = $1, status = 'graded', completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
-            WHERE id = $2
+            SET score = $1, passed = $2, status = 'graded', completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
+            WHERE id = $3
             "#
         )
         .bind(new_score)
+        .bind(is_passed)
         .bind(attempt_id)
         .execute(&ctx.pool)
         .await;

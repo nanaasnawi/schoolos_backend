@@ -220,158 +220,99 @@ pub fn build_subject_pedagogical_instructions(subject: &str, grade: &str) -> Str
     }
 }
 
-// ── Real Educational Image Search Engine (Wikipedia, Wikimedia Commons, Curated Educational CDN) ──
-async fn search_wikipedia_pageimage(
-    client: &reqwest::Client,
-    lang: &str,
-    query: &str,
-) -> Option<String> {
-    let url = format!("https://{lang}.wikipedia.org/w/api.php");
-    let resp = client
-        .get(&url)
-        .query(&[
-            ("action", "query"),
-            ("generator", "search"),
-            ("gsrsearch", query),
-            ("gsrlimit", "1"),
-            ("prop", "pageimages"),
-            ("piprop", "original|thumbnail"),
-            ("pithumbsize", "900"),
-            ("format", "json"),
-        ])
-        .send()
-        .await
-        .ok()?;
+// ── 100% Safe Educational Curated Visual Engine (Child & School Safe) ──
+// Wikimedia Commons & open web crawlers are completely disabled to prevent uncurated or adult imagery.
+// Only verified, high-quality, family-safe educational visuals curated per subject are returned.
 
-    if !resp.status().is_success() {
-        return None;
-    }
-
-    let json: serde_json::Value = resp.json().await.ok()?;
-    let pages = json.get("query")?.get("pages")?.as_object()?;
-
-    for (_page_id, page_val) in pages {
-        if let Some(orig) = page_val.get("original").and_then(|o| o.get("source")).and_then(|s| s.as_str()) {
-            if !orig.is_empty() {
-                return Some(orig.to_string());
-            }
-        }
-        if let Some(thumb) = page_val.get("thumbnail").and_then(|t| t.get("source")).and_then(|s| s.as_str()) {
-            if !thumb.is_empty() {
-                return Some(thumb.to_string());
-            }
-        }
-    }
-    None
-}
-
-async fn search_wikimedia_commons(
-    client: &reqwest::Client,
-    query: &str,
-) -> Option<String> {
-    let url = "https://commons.wikimedia.org/w/api.php";
-    let resp = client
-        .get(url)
-        .query(&[
-            ("action", "query"),
-            ("generator", "search"),
-            ("gsrnamespace", "6"),
-            ("gsrsearch", query),
-            ("gsrlimit", "1"),
-            ("prop", "imageinfo"),
-            ("iiprop", "url"),
-            ("format", "json"),
-        ])
-        .send()
-        .await
-        .ok()?;
-
-    if !resp.status().is_success() {
-        return None;
-    }
-
-    let json: serde_json::Value = resp.json().await.ok()?;
-    let pages = json.get("query")?.get("pages")?.as_object()?;
-
-    for (_page_id, page_val) in pages {
-        if let Some(infos) = page_val.get("imageinfo").and_then(|i| i.as_array()) {
-            for info in infos {
-                if let Some(img_url) = info.get("url").and_then(|u| u.as_str()) {
-                    let lower = img_url.to_lowercase();
-                    if lower.ends_with(".jpg")
-                        || lower.ends_with(".jpeg")
-                        || lower.ends_with(".png")
-                        || lower.ends_with(".webp")
-                        || lower.ends_with(".svg")
-                    {
-                        return Some(img_url.to_string());
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-fn get_educational_fallback_image(subject: &str, query: &str) -> String {
+pub fn get_safe_curated_educational_image(subject: &str, query: &str) -> String {
     let s = subject.to_lowercase();
     let q = query.to_lowercase();
 
-    if q.contains("planet") || q.contains("surya") || q.contains("solar") || q.contains("bintang") || q.contains("antariksa") || q.contains("space") {
-        "https://images.unsplash.com/photo-1614728894747-a83421e2b9c9?auto=format&fit=crop&w=1200&q=80".to_string()
-    } else if s.contains("matematika") || s.contains("math") || q.contains("hitung") || q.contains("rumus") || q.contains("aljabar") || q.contains("geometri") {
-        "https://images.unsplash.com/photo-1635070041078-e363dbe005cb?auto=format&fit=crop&w=1200&q=80".to_string()
-    } else if s.contains("inggris") || s.contains("english") || q.contains("grammar") || q.contains("vocabulary") {
-        "https://images.unsplash.com/photo-1456513080510-7bf3a84b82f8?auto=format&fit=crop&w=1200&q=80".to_string()
-    } else if s.contains("kimia") || q.contains("molekul") || q.contains("larutan") || q.contains("reaksi") {
-        "https://images.unsplash.com/photo-1603126857599-f6e157fa2fe6?auto=format&fit=crop&w=1200&q=80".to_string()
-    } else if s.contains("fisika") || q.contains("gaya") || q.contains("newton") || q.contains("energi") || q.contains("listrik") {
-        "https://images.unsplash.com/photo-1507668077129-56e32842fceb?auto=format&fit=crop&w=1200&q=80".to_string()
-    } else if s.contains("biologi") || s.contains("ipa") || s.contains("sains") || q.contains("sel") || q.contains("hewan") || q.contains("tumbuhan") || q.contains("organ") {
-        "https://images.unsplash.com/photo-1532094349884-543bc11b234d?auto=format&fit=crop&w=1200&q=80".to_string()
-    } else if s.contains("cirebon") || s.contains("jawa") || s.contains("sunda") || s.contains("daerah") || q.contains("budaya") || q.contains("candi") || q.contains("tradisi") {
-        "https://images.unsplash.com/photo-1596402184320-417e7178b2cd?auto=format&fit=crop&w=1200&q=80".to_string()
-    } else if s.contains("sejarah") || s.contains("ips") || s.contains("geografi") || q.contains("peta") {
-        "https://images.unsplash.com/photo-1461360370896-922624d12aa1?auto=format&fit=crop&w=1200&q=80".to_string()
-    } else if s.contains("agama") || s.contains("pai") {
-        "https://images.unsplash.com/photo-1584551246679-0daf3d275d0f?auto=format&fit=crop&w=1200&q=80".to_string()
-    } else {
-        "https://images.unsplash.com/photo-1503676260728-1c00da094a0b?auto=format&fit=crop&w=1200&q=80".to_string()
+    // 1. Astronomy / Space / Antariksa
+    if q.contains("planet") || q.contains("surya") || q.contains("solar") || q.contains("bintang") || q.contains("antariksa") || q.contains("space") || q.contains("galaxy") || q.contains("orbit") || q.contains("tata surya") {
+        return "https://images.unsplash.com/photo-1614728894747-a83421e2b9c9?auto=format&fit=crop&w=1200&q=80".to_string();
     }
+
+    // 2. Bahasa Inggris (English Language & Grammar)
+    if s.contains("inggris") || s.contains("english") || q.contains("grammar") || q.contains("vocabulary") || q.contains("verb") || q.contains("tense") || q.contains("has") || q.contains("have") || q.contains("question") || q.contains("sentence") {
+        if q.contains("question") || q.contains("tanya") || q.contains("ask") {
+            return "https://images.unsplash.com/photo-1434030216411-0b793f4b4173?auto=format&fit=crop&w=1200&q=80".to_string(); // Student writing notes & thinking
+        }
+        if q.contains("vocab") || q.contains("word") || q.contains("kata") || q.contains("dictionary") {
+            return "https://images.unsplash.com/photo-1456513080510-7bf3a84b82f8?auto=format&fit=crop&w=1200&q=80".to_string(); // Library books and study
+        }
+        if q.contains("speak") || q.contains("dialog") || q.contains("conversation") || q.contains("bicara") {
+            return "https://images.unsplash.com/photo-1522202176988-66273c2fd55f?auto=format&fit=crop&w=1200&q=80".to_string(); // Students collaborating politely
+        }
+        // Clean English language textbook & classroom
+        return "https://images.unsplash.com/photo-1503676260728-1c00da094a0b?auto=format&fit=crop&w=1200&q=80".to_string();
+    }
+
+    // 3. Matematika (Mathematics)
+    if s.contains("matematika") || s.contains("math") || q.contains("hitung") || q.contains("rumus") || q.contains("aljabar") || q.contains("geometri") || q.contains("kalkulus") || q.contains("pecahan") || q.contains("bilangan") {
+        if q.contains("geometri") || q.contains("bangun") || q.contains("sudut") || q.contains("ruang") {
+            return "https://images.unsplash.com/photo-1509228468518-180dd4864904?auto=format&fit=crop&w=1200&q=80".to_string(); // Geometry tools & ruler
+        }
+        if q.contains("grafik") || q.contains("statistik") || q.contains("diagram") || q.contains("data") {
+            return "https://images.unsplash.com/photo-1551288049-bebda4e38f71?auto=format&fit=crop&w=1200&q=80".to_string(); // Analytics & charts
+        }
+        return "https://images.unsplash.com/photo-1635070041078-e363dbe005cb?auto=format&fit=crop&w=1200&q=80".to_string(); // Math blackboard
+    }
+
+    // 4. Sains / IPA / Fisika / Kimia / Biologi
+    if s.contains("kimia") || q.contains("molekul") || q.contains("larutan") || q.contains("reaksi") || q.contains("unsur") || q.contains("senyawa") {
+        return "https://images.unsplash.com/photo-1603126857599-f6e157fa2fe6?auto=format&fit=crop&w=1200&q=80".to_string(); // Chemistry lab glassware
+    }
+    if s.contains("fisika") || q.contains("gaya") || q.contains("newton") || q.contains("energi") || q.contains("listrik") || q.contains("magnet") || q.contains("gelombang") || q.contains("optik") {
+        return "https://images.unsplash.com/photo-1507668077129-56e32842fceb?auto=format&fit=crop&w=1200&q=80".to_string(); // Physics concept & light
+    }
+    if s.contains("biologi") || s.contains("ipa") || s.contains("sains") || q.contains("sel") || q.contains("hewan") || q.contains("tumbuhan") || q.contains("organ") || q.contains("fotosintesis") || q.contains("ekosistem") {
+        if q.contains("sel") || q.contains("mikroskop") || q.contains("bakteri") || q.contains("dna") {
+            return "https://images.unsplash.com/photo-1532094349884-543bc11b234d?auto=format&fit=crop&w=1200&q=80".to_string(); // Microscope lab
+        }
+        return "https://images.unsplash.com/photo-1518531933037-91b2f5f229cc?auto=format&fit=crop&w=1200&q=80".to_string(); // Botany & green plants
+    }
+
+    // 5. Bahasa Indonesia & Sastra
+    if s.contains("bahasa indonesia") || s.contains("literasi") || q.contains("puisi") || q.contains("cerpen") || q.contains("paragraf") || q.contains("teks") || q.contains("eyd") || q.contains("puebi") {
+        return "https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?auto=format&fit=crop&w=1200&q=80".to_string(); // Reading book & literature
+    }
+
+    // 6. IPS / Sejarah / Geografi / Ekonomi
+    if s.contains("sejarah") || s.contains("ips") || s.contains("geografi") || s.contains("ekonomi") || s.contains("sosiologi") || q.contains("peta") || q.contains("bumi") || q.contains("benua") || q.contains("perang") || q.contains("kemerdekaan") {
+        if q.contains("peta") || q.contains("globe") || q.contains("atlas") || q.contains("geografi") {
+            return "https://images.unsplash.com/photo-1524661135-423995f22d0b?auto=format&fit=crop&w=1200&q=80".to_string(); // World map & globe
+        }
+        return "https://images.unsplash.com/photo-1461360370896-922624d12aa1?auto=format&fit=crop&w=1200&q=80".to_string(); // History artifacts
+    }
+
+    // 7. Budaya & Muatan Lokal Nusantara
+    if s.contains("cirebon") || s.contains("jawa") || s.contains("sunda") || s.contains("daerah") || q.contains("budaya") || q.contains("candi") || q.contains("tradisi") || q.contains("batik") {
+        return "https://images.unsplash.com/photo-1596402184320-417e7178b2cd?auto=format&fit=crop&w=1200&q=80".to_string(); // Indonesian heritage
+    }
+
+    // 8. Pendidikan Agama & Budi Pekerti
+    if s.contains("agama") || s.contains("pai") || s.contains("akhlak") || s.contains("fiqih") || s.contains("moral") {
+        return "https://images.unsplash.com/photo-1584551246679-0daf3d275d0f?auto=format&fit=crop&w=1200&q=80".to_string(); // Islamic calligraphy & architecture
+    }
+
+    // 9. Seni Budaya & Keterampilan
+    if s.contains("seni") || s.contains("prakarya") || q.contains("lukis") || q.contains("gambar") || q.contains("musik") {
+        return "https://images.unsplash.com/photo-1513364776144-60967b0f800f?auto=format&fit=crop&w=1200&q=80".to_string(); // Art supplies & painting
+    }
+
+    // 10. Olahraga & Jasmani (PJOK)
+    if s.contains("pjok") || s.contains("olahraga") || s.contains("penjas") || q.contains("sehat") || q.contains("kebugaran") {
+        return "https://images.unsplash.com/photo-1461896836934-ffe607ba8211?auto=format&fit=crop&w=1200&q=80".to_string(); // Sports field
+    }
+
+    // Universal Classroom & Learning Default
+    "https://images.unsplash.com/photo-1497633762265-9d179a990aa6?auto=format&fit=crop&w=1200&q=80".to_string()
 }
 
 pub async fn search_real_educational_image(query: &str, subject_name: &str) -> String {
-    let clean_query = query.trim();
-    if clean_query.is_empty() {
-        return get_educational_fallback_image(subject_name, query);
-    }
-
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(4))
-        .user_agent("AkselerasiEdu/1.0 (contact@akselerasiedu.id; Indonesian Educational Platform)")
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return get_educational_fallback_image(subject_name, clean_query),
-    };
-
-    // 1. Coba cari di Wikipedia Bahasa Indonesia (ensiklopedia edukatif resmi)
-    if let Some(url) = search_wikipedia_pageimage(&client, "id", clean_query).await {
-        return url;
-    }
-
-    // 2. Coba cari di Wikipedia Bahasa Inggris (untuk sains, matematika, bahasa inggris)
-    if let Some(url) = search_wikipedia_pageimage(&client, "en", clean_query).await {
-        return url;
-    }
-
-    // 3. Coba cari di Wikimedia Commons Image Repository
-    if let Some(url) = search_wikimedia_commons(&client, clean_query).await {
-        return url;
-    }
-
-    // 4. Fallback ke gambar edukasi berkualitas tinggi yang terverifikasi sesuai subjek
-    get_educational_fallback_image(subject_name, clean_query)
+    // Strictly curated child-safe engine to ensure zero inappropriate/adult material can enter
+    get_safe_curated_educational_image(subject_name, query)
 }
 
 #[derive(Deserialize)]
