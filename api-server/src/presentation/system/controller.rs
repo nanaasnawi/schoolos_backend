@@ -42,6 +42,10 @@ pub fn system_routes(context: ApplicationContext) -> Router<ApplicationContext> 
                 .route("/tenants/{id}/reset-credentials", post(reset_credentials))
                 .route("/tenants/{id}/toggle-status", post(toggle_tenant_status))
                 .route("/tenants/{id}/impersonate", post(impersonate_tenant))
+                .route(
+                    "/broadcast",
+                    post(send_system_broadcast).get(list_system_broadcasts),
+                )
                 .layer(middleware::from_fn_with_state(context, auth_middleware)),
         )
 }
@@ -1084,3 +1088,409 @@ async fn update_system_settings(
         req_ctx.request_id,
     )))
 }
+
+#[derive(Debug, serde::Deserialize)]
+pub struct SendSystemBroadcastRequest {
+    pub title: String,
+    pub content: String,
+    #[serde(default = "default_broadcast_cat")]
+    pub category: String, // "MAINTENANCE" | "SERVER_INCIDENT" | "SERVER_LATENCY" | "SYSTEM_UPDATE" | "GENERAL"
+    #[serde(default)]
+    pub target_roles: Vec<String>, // ["kepala_sekolah", "guru", "siswa", "wali_siswa"] or ["all"]
+    pub urgency: Option<String>, // "CRITICAL" | "HIGH" | "NORMAL"
+    pub scheduled_start: Option<chrono::DateTime<chrono::Utc>>,
+    pub scheduled_end: Option<chrono::DateTime<chrono::Utc>>,
+    pub send_push: Option<bool>,
+    pub activate_maintenance_mode: Option<bool>,
+}
+
+fn default_broadcast_cat() -> String {
+    "MAINTENANCE".to_string()
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SystemBroadcastItem {
+    pub id: Uuid,
+    pub title: String,
+    pub content: String,
+    pub category: String,
+    pub target: String,
+    pub target_roles: Vec<String>,
+    pub urgency: String,
+    pub author: String,
+    pub push_status: bool,
+    pub recipients_count: i64,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub date_formatted: String,
+}
+
+/// Send System Broadcast Push Notification to Principals, Teachers, Students
+async fn send_system_broadcast(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Json(payload): Json<SendSystemBroadcastRequest>,
+) -> Result<Json<ApiResponse<SystemBroadcastItem>>, ApiError> {
+    if !req_ctx.actor.is_some_and(|a| a.id.is_nil()) {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Access denied. System Admin only.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
+    let title_trimmed = payload.title.trim().to_string();
+    let content_trimmed = payload.content.trim().to_string();
+
+    if title_trimmed.is_empty() || content_trimmed.is_empty() {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Domain(
+                school_core::common::error::DomainError::Validation(
+                    "Judul dan isi pesan broadcast tidak boleh kosong".to_string(),
+                ),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
+    let raw_cat = payload.category.trim().to_uppercase();
+    let category = match raw_cat.as_str() {
+        "SERVER_INCIDENT" | "INCIDENT" | "KENDALA" => "SERVER_INCIDENT".to_string(),
+        "SERVER_LATENCY" | "LATENCY" => "SERVER_LATENCY".to_string(),
+        "SYSTEM_UPDATE" | "UPDATE" => "SYSTEM_UPDATE".to_string(),
+        "GENERAL" | "PENGUMUMAN" => "GENERAL".to_string(),
+        _ => "MAINTENANCE".to_string(),
+    };
+
+    let urgency = payload.urgency.unwrap_or_else(|| match category.as_str() {
+        "SERVER_INCIDENT" => "CRITICAL".to_string(),
+        "MAINTENANCE" => "HIGH".to_string(),
+        _ => "NORMAL".to_string(),
+    });
+
+    let target_roles = if payload.target_roles.is_empty()
+        || payload.target_roles.iter().any(|r| r.eq_ignore_ascii_case("all") || r.eq_ignore_ascii_case("semua"))
+    {
+        vec![
+            "kepala_sekolah".to_string(),
+            "guru".to_string(),
+            "siswa".to_string(),
+            "wali_siswa".to_string(),
+        ]
+    } else {
+        payload.target_roles.clone()
+    };
+
+    let target_all = target_roles.len() >= 4
+        || target_roles.iter().any(|r| r.eq_ignore_ascii_case("all"));
+    let target_principal = target_all
+        || target_roles.iter().any(|r| r.contains("kepala") || r.contains("principal"));
+    let target_teachers = target_all
+        || target_roles.iter().any(|r| r.contains("guru") || r.contains("teacher"));
+    let target_students = target_all
+        || target_roles.iter().any(|r| r.contains("siswa") || r.contains("student"));
+    let target_guardians = target_all
+        || target_roles.iter().any(|r| r.contains("wali") || r.contains("parent") || r.contains("ortu"));
+
+    let prefix_icon = match category.as_str() {
+        "MAINTENANCE" => "🛠️ [Pemeliharaan Server]",
+        "SERVER_INCIDENT" => "⚠️ [Kendala Layanan]",
+        "SERVER_LATENCY" => "⚡ [Optimasi Server]",
+        "SYSTEM_UPDATE" => "🚀 [Pembaruan Sistem]",
+        _ => "📢 [Pemberitahuan Sistem]",
+    };
+
+    let broadcast_title = format!("{} {}", prefix_icon, title_trimmed);
+
+    let mut broadcast_body = content_trimmed.clone();
+    if let (Some(st), Some(et)) = (payload.scheduled_start, payload.scheduled_end) {
+        broadcast_body.push_str(&format!(
+            "\n\n⏰ Jadwal Waktu: {} s/d {} WIB",
+            st.format("%d %b %Y, %H:%M"),
+            et.format("%H:%M")
+        ));
+    } else if let Some(st) = payload.scheduled_start {
+        broadcast_body.push_str(&format!(
+            "\n\n⏰ Waktu Pelaksanaan: {} WIB",
+            st.format("%d %b %Y, %H:%M")
+        ));
+    }
+
+    let broadcast_id = Uuid::new_v4();
+    let now = chrono::Utc::now();
+    let send_push = payload.send_push.unwrap_or(true);
+
+    // 1. Bulk Insert ke tabel notifications untuk seluruh user aktif yang sesuai target roles
+    let notif_insert_query = r#"
+        INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, reference_type, reference_id, is_read, created_at)
+        SELECT 
+            gen_random_uuid(),
+            u.tenant_id,
+            u.id,
+            $1 as title,
+            $2 as body,
+            'SYSTEM_BROADCAST',
+            'in_app',
+            'system_broadcast',
+            $3 as reference_id,
+            FALSE,
+            NOW()
+        FROM users u
+        WHERE u.is_active = TRUE
+          AND (
+            $4 = TRUE
+            OR ($5 = TRUE AND EXISTS (
+                SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id 
+                WHERE ur.user_id = u.id AND (LOWER(r.name) LIKE '%kepala%' OR LOWER(r.name) LIKE '%principal%')
+            ))
+            OR ($6 = TRUE AND EXISTS (
+                SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id 
+                WHERE ur.user_id = u.id AND (LOWER(r.name) LIKE '%guru%' OR LOWER(r.name) LIKE '%teacher%')
+            ))
+            OR ($7 = TRUE AND EXISTS (
+                SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id 
+                WHERE ur.user_id = u.id AND (LOWER(r.name) LIKE '%siswa%' OR LOWER(r.name) LIKE '%student%')
+            ))
+            OR ($8 = TRUE AND EXISTS (
+                SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id 
+                WHERE ur.user_id = u.id AND (LOWER(r.name) LIKE '%wali%' OR LOWER(r.name) LIKE '%parent%' OR LOWER(r.name) LIKE '%ortu%')
+            ))
+          )
+    "#;
+
+    let recipients_count: i64 = sqlx::query(notif_insert_query)
+        .bind(&broadcast_title)
+        .bind(&broadcast_body)
+        .bind(broadcast_id)
+        .bind(target_all)
+        .bind(target_principal)
+        .bind(target_teachers)
+        .bind(target_students)
+        .bind(target_guardians)
+        .execute(&ctx.pool)
+        .await
+        .map(|res| res.rows_affected() as i64)
+        .unwrap_or(0);
+
+    // 2. Simpan pengumuman resmi ke tabel announcements untuk semua tenant aktif
+    let target_str = if target_all {
+        "ALL".to_string()
+    } else {
+        let mut parts = Vec::new();
+        if target_principal {
+            parts.push("PRINCIPAL");
+        }
+        if target_teachers {
+            parts.push("TEACHER");
+        }
+        if target_students {
+            parts.push("STUDENT");
+        }
+        if target_guardians {
+            parts.push("GUARDIAN");
+        }
+        parts.join(",")
+    };
+
+    let _ = sqlx::query(
+        r#"
+        INSERT INTO announcements (id, tenant_id, title, content, category, target, author, is_pinned, push_status, created_at, updated_at)
+        SELECT 
+            gen_random_uuid(),
+            t.id,
+            $1,
+            $2,
+            $3,
+            $4,
+            'Super Admin Pusat',
+            TRUE,
+            $5,
+            NOW(),
+            NOW()
+        FROM tenants t
+        WHERE t.is_active = TRUE
+        "#
+    )
+    .bind(&broadcast_title)
+    .bind(&broadcast_body)
+    .bind(&category)
+    .bind(&target_str)
+    .bind(send_push)
+    .execute(&ctx.pool)
+    .await;
+
+    // 3. FCM Push Notification ke Android mobile devices
+    if send_push {
+        let fcm_target = if target_all {
+            crate::infrastructure::fcm::FcmTarget::All
+        } else {
+            let mut fcm_roles = Vec::new();
+            if target_principal {
+                fcm_roles.push("principal".to_string());
+            }
+            if target_teachers {
+                fcm_roles.push("teacher".to_string());
+            }
+            if target_students {
+                fcm_roles.push("student".to_string());
+            }
+            if target_guardians {
+                fcm_roles.push("parent".to_string());
+            }
+            crate::infrastructure::fcm::FcmTarget::Roles(fcm_roles)
+        };
+
+        crate::infrastructure::fcm::trigger_fcm_push_targeted(
+            broadcast_title.clone(),
+            broadcast_body.clone(),
+            crate::infrastructure::fcm::FcmCategory::Announcement,
+            broadcast_id,
+            fcm_target,
+        );
+    }
+
+    // 4. Jika Super Admin memilih mengaktifkan status maintenance mode
+    if payload.activate_maintenance_mode.unwrap_or(false) {
+        let maint_json = serde_json::json!({
+            "maintenance_mode": true,
+            "maintenance_message": broadcast_body.clone()
+        });
+
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO system_settings (key, value, updated_at)
+            VALUES ('maintenance', $1, NOW())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+            "#
+        )
+        .bind(maint_json)
+        .execute(&ctx.pool)
+        .await;
+
+        ctx.auth_cache.set_maintenance_mode(true).await;
+        tracing::info!("System maintenance mode activated along with broadcast notification");
+    }
+
+    // 5. Catat audit log
+    let _ = sqlx::query!(
+        r#"
+        INSERT INTO audit_logs (id, tenant_id, actor_id, action, resource, decision, reason, timestamp)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+        "#,
+        Uuid::new_v4(),
+        Uuid::nil(),
+        Uuid::nil(),
+        "SYSTEM_BROADCAST_SENT",
+        "push_notifications",
+        "ALLOWED",
+        format!(
+            "System broadcast '{}' sent to {} recipients (targets: {})",
+            broadcast_title, recipients_count, target_str
+        )
+    )
+    .execute(&ctx.pool)
+    .await;
+
+    let item = SystemBroadcastItem {
+        id: broadcast_id,
+        title: broadcast_title,
+        content: broadcast_body,
+        category,
+        target: target_str,
+        target_roles,
+        urgency,
+        author: "Super Admin Pusat".to_string(),
+        push_status: send_push,
+        recipients_count,
+        created_at: now,
+        date_formatted: now.format("%d %b %Y · %H:%M WIB").to_string(),
+    };
+
+    Ok(Json(ApiResponse::success(item, req_ctx.request_id)))
+}
+
+/// List System Broadcasts history for Super Admin
+async fn list_system_broadcasts(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+) -> Result<Json<ApiResponse<Vec<SystemBroadcastItem>>>, ApiError> {
+    use sqlx::Row;
+
+    if !req_ctx.actor.is_some_and(|a| a.id.is_nil()) {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Access denied. System Admin only.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT DISTINCT ON (title, created_at::date, content)
+            id, title, content, category, target, author, push_status, created_at
+        FROM announcements
+        WHERE author = 'Super Admin Pusat'
+           OR category IN ('MAINTENANCE', 'SERVER_INCIDENT', 'SERVER_LATENCY', 'SYSTEM_UPDATE', 'SERVER_ALERT', 'GENERAL')
+        ORDER BY title, created_at::date, content, created_at DESC
+        LIMIT 50
+        "#
+    )
+    .fetch_all(&ctx.pool)
+    .await
+    .unwrap_or_default();
+
+    let mut items = Vec::new();
+    for r in rows {
+        let id: Uuid = r.get("id");
+        let title: String = r.get("title");
+        let content: String = r.get("content");
+        let category: String = r.get("category");
+        let target: String = r.get("target");
+        let author: String = r.get("author");
+        let push_status: bool = r.get("push_status");
+        let created_at: chrono::DateTime<chrono::Utc> = r.get("created_at");
+
+        let count: i64 = sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM notifications WHERE (reference_id = $1 OR title = $2)",
+            id,
+            title
+        )
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap_or(Some(0))
+        .unwrap_or(0);
+
+        let target_roles = target
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        items.push(SystemBroadcastItem {
+            id,
+            title,
+            content,
+            category: category.clone(),
+            target,
+            target_roles,
+            urgency: if category == "SERVER_INCIDENT" {
+                "CRITICAL".to_string()
+            } else {
+                "NORMAL".to_string()
+            },
+            author,
+            push_status,
+            recipients_count: count,
+            created_at,
+            date_formatted: created_at.format("%d %b %Y · %H:%M WIB").to_string(),
+        });
+    }
+
+    items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    Ok(Json(ApiResponse::success(items, req_ctx.request_id)))
+}
+
