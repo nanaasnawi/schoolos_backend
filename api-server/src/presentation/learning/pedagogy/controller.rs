@@ -2468,6 +2468,8 @@ pub async fn synthesize_modul_ajar(
     let tp_profiles: Option<Vec<String>> = tp_row.get("pancasila_profiles");
     let profiles_vec = tp_profiles.unwrap_or_else(|| vec!["Bernalar Kritis".to_string(), "Mandiri".to_string()]);
 
+    let subject_guideline = crate::infrastructure::nvidia_ai::build_subject_pedagogical_instructions(&subject_name, &grade_level);
+
     let prompt = format!(
         r#"Anda adalah Ahli Spesialis Kurikulum Merdeka Kemendikdasmen RI & Perancang Modul Ajar Berdiferensiasi.
 Rancang Modul Ajar operasional resmi berdasarkan Tujuan Pembelajaran yang telah disahkan berikut:
@@ -2481,6 +2483,8 @@ Target & Konteks:
 - Rumusan Tujuan Pembelajaran: "{tp_statement}"
 - Lingkup Materi Esensial: "{tp_content_scope}"
 - Profil Pelajar Pancasila: {profiles:?}
+
+{subject_guideline}
 
 Format Respon: Wajib JSON murni tanpa markdown/backticks, dengan struktur:
 {{
