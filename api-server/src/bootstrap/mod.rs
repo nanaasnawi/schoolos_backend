@@ -184,6 +184,8 @@ use crate::presentation::{
     people::staff::controller::staff_routes, people::students::controller::student_routes,
     people::teacher::controller::teacher_routes, school::controller::get_school_public_info,
     school::controller::school_routes, tenant::controller::tenant_routes,
+    gamification::controller::gamification_routes,
+    teacher::controller::teacher_workspace_routes,
 };
 use crate::ApiDoc;
 
@@ -1217,6 +1219,22 @@ impl Bootstrap {
                         context.clone(),
                         idempotency::idempotency_middleware,
                     ))
+                    .layer(axum::middleware::from_fn_with_state(
+                        context.clone(),
+                        auth_middleware,
+                    )),
+            )
+            .nest(
+                "/api/v1/gamification",
+                gamification_routes()
+                    .layer(axum::middleware::from_fn_with_state(
+                        context.clone(),
+                        auth_middleware,
+                    )),
+            )
+            .nest(
+                "/api/v1/teacher",
+                teacher_workspace_routes()
                     .layer(axum::middleware::from_fn_with_state(
                         context.clone(),
                         auth_middleware,
