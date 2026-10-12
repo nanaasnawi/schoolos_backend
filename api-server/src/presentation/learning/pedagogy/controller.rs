@@ -13,7 +13,7 @@ use crate::{
     extractors::RequestContext,
     response::ApiResponse,
 };
-use school_core::common::error::ApplicationError;
+use school_core::common::error::{ApplicationError, DomainError};
 use school_core::common::error_code::ErrorCode;
 
 use super::dto::{
