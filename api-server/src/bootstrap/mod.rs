@@ -185,7 +185,6 @@ use crate::presentation::{
     people::teacher::controller::teacher_routes, school::controller::get_school_public_info,
     school::controller::school_routes, tenant::controller::tenant_routes,
     gamification::controller::gamification_routes,
-    teacher::controller::teacher_workspace_routes,
 };
 use crate::ApiDoc;
 
@@ -879,11 +878,16 @@ impl Bootstrap {
             )
             .nest(
                 "/api/v1/teacher",
-                Router::new().route(
-                    "/remind",
-                    axum::routing::post(crate::presentation::people::teacher::remind::remind_students)
-                        .get(crate::presentation::people::teacher::remind::get_reminders),
-                ),
+                Router::new()
+                    .route(
+                        "/remind",
+                        axum::routing::post(crate::presentation::people::teacher::remind::remind_students)
+                            .get(crate::presentation::people::teacher::remind::get_reminders),
+                    )
+                    .layer(axum::middleware::from_fn_with_state(
+                        context.clone(),
+                        auth_middleware,
+                    )),
             )
             .nest(
                 "/api/v1/teachers",
@@ -1227,14 +1231,6 @@ impl Bootstrap {
             .nest(
                 "/api/v1/gamification",
                 gamification_routes()
-                    .layer(axum::middleware::from_fn_with_state(
-                        context.clone(),
-                        auth_middleware,
-                    )),
-            )
-            .nest(
-                "/api/v1/teacher",
-                teacher_workspace_routes()
                     .layer(axum::middleware::from_fn_with_state(
                         context.clone(),
                         auth_middleware,
