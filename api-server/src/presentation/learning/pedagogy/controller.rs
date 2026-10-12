@@ -1,10 +1,11 @@
 use axum::{
-    extract::{Query, State},
-    routing::{get, post},
+    extract::{Path, Query, State},
+    routing::{get, post, put},
     Json, Router,
 };
 use uuid::Uuid;
 use sqlx::Row;
+use chrono::{DateTime, Utc};
 
 use crate::{
     bootstrap::ApplicationContext,
@@ -15,8 +16,13 @@ use crate::{
 use school_core::common::error::{ApplicationError, DomainError};
 
 use super::dto::{
-    CpRegistryLookupResponse, CpSearchQuery, LearningOutcomeElementDto,
-    ProposedTpDto, RegisterSchoolCpPayload, SynthesizeCpRequest, SynthesizeCpResponse,
+    AssessmentQuery, AtpItemDto, AtpMatrixQuery, AtpMatrixResponse, AtpSemesterSummaryDto,
+    CpRegistryLookupResponse, CpSearchQuery, CreateAssessmentPayload, CreateModulAjarPayload,
+    HabitEntryDto, HabitsCalendarQuery, KospCommitteeDto, KospDocumentResponse, KospSignatoryDto,
+    LearningOutcomeElementDto, ModulAjarDto, ModulAjarQuery, OverrideHabitTeacherPayload,
+    PedagogicalAssessmentItemDto, ProposedTpDto, PublishPedagogyPayload, PublishPedagogyResponse,
+    RecordHabitEntryPayload, RegisterSchoolCpPayload, StudentGradeSubmission, SubmitGradesPayload,
+    SynthesizeCpRequest, SynthesizeCpResponse, UpdateTpPayload, VerifyHabitParentPayload,
 };
 
 pub fn pedagogy_routes() -> Router<ApplicationContext> {
@@ -24,6 +30,23 @@ pub fn pedagogy_routes() -> Router<ApplicationContext> {
         .route("/cp", get(lookup_cp))
         .route("/cp/school", post(register_school_cp))
         .route("/cp/synthesize", post(synthesize_cp))
+        .route("/kosp", get(get_active_kosp))
+        // ATP, TP & Publish
+        .route("/atp", get(get_atp_matrix))
+        .route("/tp", put(update_tp))
+        .route("/publish", post(publish_pedagogy))
+        // Modul Ajar
+        .route("/modul-ajar", get(list_modul_ajar).post(create_modul_ajar))
+        .route("/modul-ajar/:id/activate", put(activate_modul_ajar))
+        // Assessments
+        .route("/assessments", get(list_assessments).post(create_assessment))
+        .route("/assessments/:id", get(get_assessment_detail))
+        .route("/assessments/:id/grades", post(record_assessment_grades))
+        // Habits G7KAIH
+        .route("/habits/calendar", get(get_habits_calendar))
+        .route("/habits/entry", post(record_habit_entry))
+        .route("/habits/verify-parent", post(verify_habit_parent))
+        .route("/habits/override-teacher", post(override_habit_teacher))
 }
 
 #[utoipa::path(
@@ -867,3 +890,1369 @@ OUTPUT HANYA JSON MURNI TANPA PEMBUKA/PENUTUP MARKDOWN."#,
         req_ctx.request_id,
     )))
 }
+
+#[utoipa::path(
+    get,
+    operation_id = "getActiveKospDocument",
+    path = "/api/v1/learning/pedagogy/kosp",
+    responses(
+        (status = 200, description = "Active KOSP Document & Committees", body = ApiResponse<KospDocumentResponse>),
+        (status = 404, description = "KOSP not found")
+    ),
+    security(("Bearer" = []))
+)]
+pub async fn get_active_kosp(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<ApiResponse<KospDocumentResponse>>, ApiError> {
+    let academic_year = query
+        .get("academic_year")
+        .cloned()
+        .unwrap_or_else(|| "2026/2027".to_string());
+
+    // 1. Fetch KOSP Document for tenant (or default to PKBM As-Salafiyah)
+    let doc_row = sqlx::query(
+        r#"
+        SELECT 
+            id, tenant_id, academic_year, title, legal_basis_statement,
+            establishment_place, establishment_date, effective_weeks_odd, effective_weeks_even,
+            status, created_at, updated_at
+        FROM kosp_documents
+        WHERE (tenant_id = $1 OR tenant_id = 'e3c4d8da-ff44-4d87-bb13-759a54f49bd0')
+          AND academic_year = $2
+          AND deleted_at IS NULL
+        ORDER BY (tenant_id = $1) DESC, created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(req_ctx.tenant_id)
+    .bind(&academic_year)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let doc = match doc_row {
+        Some(row) => row,
+        None => {
+            return Err(ApiError::new(
+                ApplicationError::Domain(DomainError::NotFound(
+                    format!("Dokumen KOSP untuk tahun ajaran {academic_year} belum terdaftar."),
+                )),
+                &req_ctx.request_id,
+            ));
+        }
+    };
+
+    let kosp_id: Uuid = doc.get("id");
+
+    // 2. Fetch Committees (TPK)
+    let comm_rows = sqlx::query(
+        r#"
+        SELECT id, teacher_id, name, role_in_committee, order_index, notes
+        FROM kosp_committees
+        WHERE kosp_document_id = $1
+        ORDER BY order_index ASC
+        "#,
+    )
+    .bind(kosp_id)
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let mut committees = Vec::new();
+    for r in comm_rows {
+        committees.push(KospCommitteeDto {
+            id: r.get("id"),
+            teacher_id: r.get("teacher_id"),
+            name: r.get("name"),
+            role_in_committee: r.get("role_in_committee"),
+            order_index: r.get("order_index"),
+            notes: r.get("notes"),
+        });
+    }
+
+    // 3. Fetch Signatories
+    let sign_rows = sqlx::query(
+        r#"
+        SELECT id, signatory_role, position_title, name, nip, has_signature, has_official_seal, order_index
+        FROM kosp_signatories
+        WHERE kosp_document_id = $1
+        ORDER BY order_index ASC
+        "#,
+    )
+    .bind(kosp_id)
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let mut signatories = Vec::new();
+    for r in sign_rows {
+        signatories.push(KospSignatoryDto {
+            id: r.get("id"),
+            signatory_role: r.get("signatory_role"),
+            position_title: r.get("position_title"),
+            name: r.get("name"),
+            nip: r.get("nip"),
+            has_signature: r.get("has_signature"),
+            has_official_seal: r.get("has_official_seal"),
+            order_index: r.get("order_index"),
+        });
+    }
+
+    let est_date: chrono::NaiveDate = doc.get("establishment_date");
+
+    let response = KospDocumentResponse {
+        id: kosp_id,
+        tenant_id: doc.get("tenant_id"),
+        academic_year: doc.get("academic_year"),
+        title: doc.get("title"),
+        legal_basis_statement: doc.get("legal_basis_statement"),
+        establishment_place: doc.get("establishment_place"),
+        establishment_date: est_date.to_string(),
+        effective_weeks_odd: doc.get("effective_weeks_odd"),
+        effective_weeks_even: doc.get("effective_weeks_even"),
+        status: doc.get("status"),
+        committees,
+        signatories,
+        created_at: doc.get("created_at"),
+        updated_at: doc.get("updated_at"),
+    };
+
+    Ok(Json(ApiResponse::success(
+        response,
+        req_ctx.request_id,
+    )))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ATP & TP & Publish Endpoints
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub async fn get_atp_matrix(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Query(query): Query<AtpMatrixQuery>,
+) -> Result<Json<ApiResponse<AtpMatrixResponse>>, ApiError> {
+    let academic_year = query.academic_year.unwrap_or_else(|| "2026/2027".to_string());
+    let source_cp_id = query.source_cp_id;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT 
+            tp.id as tp_id,
+            tp.code,
+            tp.competency,
+            tp.bloom_level,
+            tp.content_scope,
+            tp.statement,
+            tp.pancasila_profiles,
+            tp.evidence_indicators,
+            tp.estimated_hours,
+            tp.publication_status,
+            tp.version,
+            atp.id as atp_id,
+            atp.semester,
+            atp.sequence_order,
+            atp.allocated_hours,
+            atp.pedagogical_approach,
+            lo.subject_name,
+            lo.phase,
+            lo.element_name
+        FROM learning_objectives tp
+        JOIN learning_outcomes lo ON lo.id = tp.learning_outcome_id
+        LEFT JOIN learning_objective_flows atp ON atp.learning_objective_id = tp.id
+        WHERE tp.learning_outcome_id = $1
+          AND tp.is_superseded = false
+          AND ($2 IS NULL OR tp.tenant_id = $2 OR tp.tenant_id IS NULL)
+          AND tp.deleted_at IS NULL
+        ORDER BY atp.semester ASC NULLS LAST, atp.sequence_order ASC NULLS LAST, tp.order_index ASC
+        "#,
+    )
+    .bind(source_cp_id)
+    .bind(req_ctx.tenant_id)
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let mut odd_items = Vec::new();
+    let mut even_items = Vec::new();
+    let mut odd_hours = 0;
+    let mut even_hours = 0;
+
+    for r in rows {
+        let sem: Option<String> = r.get("semester");
+        let est_hours: i32 = r.get("estimated_hours");
+        let alloc_hours: Option<i32> = r.get("allocated_hours");
+        let item_hours = alloc_hours.unwrap_or(est_hours);
+
+        let item = AtpItemDto {
+            tp_id: r.get("tp_id"),
+            code: r.get("code"),
+            competency: r.get("competency"),
+            bloom_level: r.get("bloom_level"),
+            content_scope: r.get("content_scope"),
+            statement: r.get("statement"),
+            pancasila_profiles: r.get("pancasila_profiles"),
+            evidence_indicators: r.get("evidence_indicators"),
+            estimated_hours: est_hours,
+            publication_status: r.get("publication_status"),
+            version: r.get("version"),
+            atp_id: r.get("atp_id"),
+            semester: sem.clone(),
+            sequence_order: r.get("sequence_order"),
+            allocated_hours: alloc_hours,
+            pedagogical_approach: r.get("pedagogical_approach"),
+            subject_name: r.get("subject_name"),
+            phase: r.get("phase"),
+            element_name: r.get("element_name"),
+        };
+
+        if sem.as_deref() == Some("EVEN") {
+            even_hours += item_hours;
+            even_items.push(item);
+        } else {
+            odd_hours += item_hours;
+            odd_items.push(item);
+        }
+    }
+
+    let total_items = odd_items.len() + even_items.len();
+    let total_hours = odd_hours + even_hours;
+
+    let response = AtpMatrixResponse {
+        academic_year,
+        total_items,
+        total_hours,
+        odd_semester: AtpSemesterSummaryDto {
+            items_count: odd_items.len(),
+            total_hours: odd_hours,
+            items: odd_items,
+        },
+        even_semester: AtpSemesterSummaryDto {
+            items_count: even_items.len(),
+            total_hours: even_hours,
+            items: even_items,
+        },
+    };
+
+    Ok(Json(ApiResponse::success(response, req_ctx.request_id)))
+}
+
+pub async fn update_tp(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Json(payload): Json<UpdateTpPayload>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let tp_id = payload.id;
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
+
+    let existing = sqlx::query(
+        "SELECT id, publication_status FROM learning_objectives WHERE id = $1 AND deleted_at IS NULL"
+    )
+    .bind(tp_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let existing_row = match existing {
+        Some(r) => r,
+        None => {
+            return Err(ApiError::new(
+                ApplicationError::Domain(DomainError::NotFound(
+                    "Tujuan Pembelajaran tidak ditemukan".to_string(),
+                )),
+                &req_ctx.request_id,
+            ));
+        }
+    };
+
+    let current_status: String = existing_row.get("publication_status");
+    let mark_as_reviewed = payload.mark_as_reviewed.unwrap_or(true);
+    let new_status = if current_status == "PUBLISHED" {
+        "PUBLISHED".to_string()
+    } else if mark_as_reviewed {
+        "REVIEWED".to_string()
+    } else {
+        current_status
+    };
+
+    let updated = sqlx::query(
+        r#"
+        UPDATE learning_objectives
+        SET 
+            statement = COALESCE($2, statement),
+            competency = COALESCE($3, competency),
+            bloom_level = COALESCE($4, bloom_level),
+            content_scope = COALESCE($5, content_scope),
+            estimated_hours = COALESCE($6, estimated_hours),
+            pancasila_profiles = COALESCE($7, pancasila_profiles),
+            evidence_indicators = COALESCE($8, evidence_indicators),
+            publication_status = $9,
+            reviewed_by = CASE WHEN $9 = 'REVIEWED' THEN $10 ELSE reviewed_by END,
+            reviewed_at = CASE WHEN $9 = 'REVIEWED' THEN NOW() ELSE reviewed_at END,
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING id, code, competency, bloom_level, content_scope, statement,
+                  pancasila_profiles, evidence_indicators, estimated_hours, publication_status, version
+        "#
+    )
+    .bind(tp_id)
+    .bind(payload.statement)
+    .bind(payload.competency)
+    .bind(payload.bloom_level)
+    .bind(payload.content_scope)
+    .bind(payload.estimated_hours)
+    .bind(payload.pancasila_profiles)
+    .bind(payload.evidence_indicators)
+    .bind(&new_status)
+    .bind(actor_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let result = serde_json::json!({
+        "id": updated.get::<Uuid, _>("id"),
+        "code": updated.get::<String, _>("code"),
+        "competency": updated.get::<Option<String>, _>("competency"),
+        "bloom_level": updated.get::<Option<String>, _>("bloom_level"),
+        "content_scope": updated.get::<String, _>("content_scope"),
+        "statement": updated.get::<String, _>("statement"),
+        "pancasila_profiles": updated.get::<Option<Vec<String>>, _>("pancasila_profiles"),
+        "evidence_indicators": updated.get::<Option<Vec<String>>, _>("evidence_indicators"),
+        "estimated_hours": updated.get::<i32, _>("estimated_hours"),
+        "publication_status": updated.get::<String, _>("publication_status"),
+        "version": updated.get::<i32, _>("version")
+    });
+
+    Ok(Json(ApiResponse::success(result, req_ctx.request_id)))
+}
+
+pub async fn publish_pedagogy(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Json(payload): Json<PublishPedagogyPayload>,
+) -> Result<Json<ApiResponse<PublishPedagogyResponse>>, ApiError> {
+    if payload.tp_ids.is_empty() {
+        return Err(ApiError::new(
+            ApplicationError::Domain(DomainError::Validation(
+                "Daftar ID TP (tp_ids) wajib disertakan".to_string(),
+            )),
+            &req_ctx.request_id,
+        ));
+    }
+
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
+    let mut tx = ctx.pool.begin().await.map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let tp_rows = sqlx::query(
+        r#"
+        UPDATE learning_objectives
+        SET 
+            publication_status = 'PUBLISHED',
+            published_by = $2,
+            published_at = NOW(),
+            updated_at = NOW()
+        WHERE id = ANY($1)
+          AND ($3 IS NULL OR tenant_id = $3 OR tenant_id IS NULL)
+          AND deleted_at IS NULL
+        RETURNING id, estimated_hours
+        "#
+    )
+    .bind(&payload.tp_ids)
+    .bind(actor_id)
+    .bind(req_ctx.tenant_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    if tp_rows.is_empty() {
+        return Err(ApiError::new(
+            ApplicationError::Domain(DomainError::NotFound(
+                "Tidak ada Tujuan Pembelajaran yang cocok untuk diterbitkan pada sekolah ini.".to_string(),
+            )),
+            &req_ctx.request_id,
+        ));
+    }
+
+    let atp_rows = sqlx::query(
+        r#"
+        UPDATE learning_objective_flows
+        SET 
+            publication_status = 'PUBLISHED',
+            published_by = $2,
+            published_at = NOW(),
+            updated_at = NOW()
+        WHERE learning_objective_id = ANY($1)
+          AND ($3 IS NULL OR tenant_id = $3 OR tenant_id IS NULL)
+          AND deleted_at IS NULL
+        RETURNING id
+        "#
+    )
+    .bind(&payload.tp_ids)
+    .bind(actor_id)
+    .bind(req_ctx.tenant_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    tx.commit().await.map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let total_hours: i32 = tp_rows.iter().map(|r| r.get::<i32, _>("estimated_hours")).sum();
+
+    let response = PublishPedagogyResponse {
+        published_tps_count: tp_rows.len(),
+        published_atps_count: atp_rows.len(),
+        total_hours,
+        message: format!(
+            "Berhasil menerbitkan {} TP dan {} alur ATP dengan total {} JP ke kurikulum aktif.",
+            tp_rows.len(), atp_rows.len(), total_hours
+        ),
+    };
+
+    Ok(Json(ApiResponse::success(response, req_ctx.request_id)))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Modul Ajar Endpoints
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub async fn list_modul_ajar(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Query(query): Query<ModulAjarQuery>,
+) -> Result<Json<ApiResponse<Vec<ModulAjarDto>>>, ApiError> {
+    let academic_year = query.academic_year.unwrap_or_else(|| "2026/2027".to_string());
+    let semester = query.semester.unwrap_or_else(|| "ALL".to_string()).to_uppercase();
+    let subject_code = query.subject_code.unwrap_or_else(|| "ALL".to_string());
+    let status = query.status.unwrap_or_else(|| "ALL".to_string()).to_uppercase();
+
+    let rows = sqlx::query(
+        r#"
+        SELECT 
+            m.id,
+            m.tenant_id,
+            m.learning_objective_id,
+            m.academic_year,
+            m.semester,
+            m.title,
+            m.grade_level,
+            m.subject_code,
+            m.subject_name,
+            m.phase,
+            m.allocated_hours,
+            m.total_meetings,
+            m.hours_per_meeting,
+            m.pancasila_profiles,
+            m.meaningful_understanding,
+            m.trigger_questions,
+            m.differentiation_strategies,
+            m.learning_activities,
+            m.assessment_plan,
+            m.lkpd_attachments,
+            m.status,
+            m.suspension_reason,
+            m.version,
+            m.is_ai_generated,
+            m.created_at,
+            m.updated_at,
+            tp.code as tp_code,
+            tp.statement as tp_statement,
+            tp.publication_status as tp_publication_status
+        FROM modul_ajar m
+        JOIN learning_objectives tp ON m.learning_objective_id = tp.id
+        WHERE ($1 IS NULL OR m.tenant_id = $1 OR m.tenant_id IS NULL)
+          AND m.academic_year = $2
+          AND ($3 = 'ALL' OR m.semester = $3)
+          AND ($4 = 'ALL' OR m.subject_code = $4)
+          AND ($5 = 'ALL' OR m.status = $5)
+          AND m.deleted_at IS NULL
+        ORDER BY m.created_at DESC
+        "#
+    )
+    .bind(req_ctx.tenant_id)
+    .bind(&academic_year)
+    .bind(&semester)
+    .bind(&subject_code)
+    .bind(&status)
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let mut result = Vec::new();
+    for r in rows {
+        result.push(ModulAjarDto {
+            id: r.get("id"),
+            tenant_id: r.get("tenant_id"),
+            learning_objective_id: r.get("learning_objective_id"),
+            tp_code: r.get("tp_code"),
+            tp_statement: r.get("tp_statement"),
+            tp_publication_status: r.get("tp_publication_status"),
+            academic_year: r.get("academic_year"),
+            semester: r.get("semester"),
+            title: r.get("title"),
+            grade_level: r.get("grade_level"),
+            subject_code: r.get("subject_code"),
+            subject_name: r.get("subject_name"),
+            phase: r.get("phase"),
+            allocated_hours: r.get("allocated_hours"),
+            total_meetings: r.get("total_meetings"),
+            hours_per_meeting: r.get("hours_per_meeting"),
+            pancasila_profiles: r.get("pancasila_profiles"),
+            meaningful_understanding: r.get("meaningful_understanding"),
+            trigger_questions: r.get("trigger_questions"),
+            differentiation_strategies: r.get("differentiation_strategies"),
+            learning_activities: r.get("learning_activities"),
+            assessment_plan: r.get("assessment_plan"),
+            lkpd_attachments: r.get("lkpd_attachments"),
+            status: r.get("status"),
+            suspension_reason: r.get("suspension_reason"),
+            version: r.get("version"),
+            is_ai_generated: r.get("is_ai_generated"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
+        });
+    }
+
+    Ok(Json(ApiResponse::success(result, req_ctx.request_id)))
+}
+
+pub async fn create_modul_ajar(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Json(payload): Json<CreateModulAjarPayload>,
+) -> Result<Json<ApiResponse<ModulAjarDto>>, ApiError> {
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
+    let academic_year = payload.academic_year.unwrap_or_else(|| "2026/2027".to_string());
+    let semester = payload.semester.unwrap_or_else(|| "ODD".to_string()).to_uppercase();
+    let grade_level = payload.grade_level.unwrap_or_else(|| "Kelas 5 SD".to_string());
+    let subject_code = payload.subject_code.unwrap_or_else(|| "401900000".to_string());
+    let subject_name = payload.subject_name.unwrap_or_else(|| "IPAS".to_string());
+    let phase = payload.phase.unwrap_or_else(|| "FASE_C".to_string());
+    let allocated_hours = payload.allocated_hours.unwrap_or(4);
+    let total_meetings = payload.total_meetings.unwrap_or(1);
+    let hours_per_meeting = payload.hours_per_meeting.unwrap_or(4);
+    let pancasila_profiles = payload.pancasila_profiles.unwrap_or_else(|| vec!["Bernalar Kritis".to_string(), "Mandiri".to_string()]);
+    let meaningful_understanding = payload.meaningful_understanding.unwrap_or_default();
+    let trigger_questions = payload.trigger_questions.unwrap_or_else(|| serde_json::json!([]));
+    let differentiation_strategies = payload.differentiation_strategies.unwrap_or_else(|| serde_json::json!({}));
+    let learning_activities = payload.learning_activities.unwrap_or_else(|| serde_json::json!({}));
+    let assessment_plan = payload.assessment_plan.unwrap_or_else(|| serde_json::json!({}));
+    let lkpd_attachments = payload.lkpd_attachments.unwrap_or_else(|| serde_json::json!([]));
+
+    let row = sqlx::query(
+        r#"
+        INSERT INTO modul_ajar (
+            tenant_id, learning_objective_id, academic_year, semester,
+            title, grade_level, subject_code, subject_name, phase,
+            allocated_hours, total_meetings, hours_per_meeting,
+            pancasila_profiles, meaningful_understanding, trigger_questions,
+            differentiation_strategies, learning_activities, assessment_plan,
+            lkpd_attachments, status, created_by
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, 'DRAFT', $20
+        )
+        RETURNING *
+        "#
+    )
+    .bind(req_ctx.tenant_id)
+    .bind(payload.learning_objective_id)
+    .bind(&academic_year)
+    .bind(&semester)
+    .bind(&payload.title)
+    .bind(&grade_level)
+    .bind(&subject_code)
+    .bind(&subject_name)
+    .bind(&phase)
+    .bind(allocated_hours)
+    .bind(total_meetings)
+    .bind(hours_per_meeting)
+    .bind(&pancasila_profiles)
+    .bind(&meaningful_understanding)
+    .bind(&trigger_questions)
+    .bind(&differentiation_strategies)
+    .bind(&learning_activities)
+    .bind(&assessment_plan)
+    .bind(&lkpd_attachments)
+    .bind(actor_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let dto = ModulAjarDto {
+        id: row.get("id"),
+        tenant_id: row.get("tenant_id"),
+        learning_objective_id: row.get("learning_objective_id"),
+        tp_code: None,
+        tp_statement: None,
+        tp_publication_status: None,
+        academic_year: row.get("academic_year"),
+        semester: row.get("semester"),
+        title: row.get("title"),
+        grade_level: row.get("grade_level"),
+        subject_code: row.get("subject_code"),
+        subject_name: row.get("subject_name"),
+        phase: row.get("phase"),
+        allocated_hours: row.get("allocated_hours"),
+        total_meetings: row.get("total_meetings"),
+        hours_per_meeting: row.get("hours_per_meeting"),
+        pancasila_profiles: row.get("pancasila_profiles"),
+        meaningful_understanding: row.get("meaningful_understanding"),
+        trigger_questions: row.get("trigger_questions"),
+        differentiation_strategies: row.get("differentiation_strategies"),
+        learning_activities: row.get("learning_activities"),
+        assessment_plan: row.get("assessment_plan"),
+        lkpd_attachments: row.get("lkpd_attachments"),
+        status: row.get("status"),
+        suspension_reason: row.get("suspension_reason"),
+        version: row.get("version"),
+        is_ai_generated: row.get("is_ai_generated"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    };
+
+    Ok(Json(ApiResponse::success(dto, req_ctx.request_id)))
+}
+
+pub async fn activate_modul_ajar(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let row = sqlx::query(
+        r#"
+        UPDATE modul_ajar
+        SET status = 'ACTIVE', suspension_reason = NULL, updated_at = NOW()
+        WHERE id = $1 AND ($2 IS NULL OR tenant_id = $2 OR tenant_id IS NULL)
+        RETURNING id, title, status
+        "#
+    )
+    .bind(id)
+    .bind(req_ctx.tenant_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let res = serde_json::json!({
+        "id": row.get::<Uuid, _>("id"),
+        "title": row.get::<String, _>("title"),
+        "status": row.get::<String, _>("status")
+    });
+
+    Ok(Json(ApiResponse::success(res, req_ctx.request_id)))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pedagogical Assessments Endpoints
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub async fn list_assessments(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Query(query): Query<AssessmentQuery>,
+) -> Result<Json<ApiResponse<Vec<PedagogicalAssessmentItemDto>>>, ApiError> {
+    let academic_year = query.academic_year.unwrap_or_else(|| "2026/2027".to_string());
+    let semester = query.semester.unwrap_or_else(|| "ALL".to_string()).to_uppercase();
+    let subject_code = query.subject_code.unwrap_or_else(|| "ALL".to_string());
+    let taxonomy_type = query.taxonomy_type.unwrap_or_else(|| "ALL".to_string()).to_uppercase();
+    let class_id = query.class_id;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT 
+            pa.id,
+            pa.class_id,
+            c.name AS class_name,
+            pa.learning_objective_id,
+            tp.code AS tp_code,
+            tp.statement AS tp_statement,
+            tp.competency AS tp_competency,
+            tp.content_scope AS tp_content_scope,
+            tp.publication_status AS tp_publication_status,
+            pa.modul_ajar_id,
+            m.title AS modul_ajar_title,
+            pa.academic_year,
+            pa.semester,
+            pa.subject_code,
+            pa.subject_name,
+            pa.title,
+            pa.taxonomy_type,
+            pa.assessment_method,
+            pa.passing_threshold::float8 AS passing_threshold,
+            pa.kktp_criteria,
+            pa.rubric_descriptors,
+            pa.date_conducted::text AS date_conducted,
+            pa.calendar_event_id,
+            kaldik.title AS kaldik_event_title,
+            pa.status,
+            COUNT(asr.id)::int AS graded_students_count,
+            pa.created_at
+        FROM pedagogical_assessments pa
+        JOIN classes c ON pa.class_id = c.id
+        LEFT JOIN learning_objectives tp ON pa.learning_objective_id = tp.id
+        LEFT JOIN modul_ajar m ON pa.modul_ajar_id = m.id
+        LEFT JOIN academic_calendar_events kaldik ON pa.calendar_event_id = kaldik.id
+        LEFT JOIN assessment_student_results asr ON pa.id = asr.assessment_id
+        WHERE ($1 IS NULL OR pa.tenant_id = $1 OR pa.tenant_id IS NULL)
+          AND pa.academic_year = $2
+          AND ($3 = 'ALL' OR pa.semester = $3)
+          AND ($4 IS NULL OR pa.class_id = $4)
+          AND ($5 = 'ALL' OR pa.subject_code = $5)
+          AND ($6 = 'ALL' OR pa.taxonomy_type = $6)
+          AND pa.deleted_at IS NULL
+        GROUP BY pa.id, c.name, tp.code, tp.statement, tp.competency, tp.content_scope, tp.publication_status, m.title, kaldik.title
+        ORDER BY pa.date_conducted DESC, pa.created_at DESC
+        "#
+    )
+    .bind(req_ctx.tenant_id)
+    .bind(&academic_year)
+    .bind(&semester)
+    .bind(class_id)
+    .bind(&subject_code)
+    .bind(&taxonomy_type)
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let mut result = Vec::new();
+    for r in rows {
+        result.push(PedagogicalAssessmentItemDto {
+            id: r.get("id"),
+            class_id: r.get("class_id"),
+            class_name: r.get("class_name"),
+            learning_objective_id: r.get("learning_objective_id"),
+            tp_code: r.get("tp_code"),
+            tp_statement: r.get("tp_statement"),
+            tp_competency: r.get("tp_competency"),
+            tp_content_scope: r.get("tp_content_scope"),
+            tp_publication_status: r.get("tp_publication_status"),
+            modul_ajar_id: r.get("modul_ajar_id"),
+            modul_ajar_title: r.get("modul_ajar_title"),
+            academic_year: r.get("academic_year"),
+            semester: r.get("semester"),
+            subject_code: r.get("subject_code"),
+            subject_name: r.get("subject_name"),
+            title: r.get("title"),
+            taxonomy_type: r.get("taxonomy_type"),
+            assessment_method: r.get("assessment_method"),
+            passing_threshold: r.get("passing_threshold"),
+            kktp_criteria: r.get("kktp_criteria"),
+            rubric_descriptors: r.get("rubric_descriptors"),
+            date_conducted: r.get("date_conducted"),
+            calendar_event_id: r.get("calendar_event_id"),
+            kaldik_event_title: r.get("kaldik_event_title"),
+            status: r.get("status"),
+            graded_students_count: r.get("graded_students_count"),
+            created_at: r.get("created_at"),
+        });
+    }
+
+    Ok(Json(ApiResponse::success(result, req_ctx.request_id)))
+}
+
+pub async fn create_assessment(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Json(payload): Json<CreateAssessmentPayload>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
+    let academic_year = payload.academic_year.unwrap_or_else(|| "2026/2027".to_string());
+    let semester = payload.semester.unwrap_or_else(|| "ODD".to_string()).to_uppercase();
+    let subject_code = payload.subject_code.unwrap_or_else(|| "401900000".to_string());
+    let subject_name = payload.subject_name.unwrap_or_else(|| "IPAS".to_string());
+    let assessment_method = payload.assessment_method.unwrap_or_else(|| "WRITTEN_TEST".to_string());
+    let passing_threshold = payload.passing_threshold.unwrap_or(75.0);
+    let kktp_criteria = payload.kktp_criteria.unwrap_or_else(|| serde_json::json!({}));
+    let rubric_descriptors = payload.rubric_descriptors.unwrap_or_else(|| serde_json::json!([]));
+    let status = payload.status.unwrap_or_else(|| "DRAFT".to_string());
+
+    let row = sqlx::query(
+        r#"
+        INSERT INTO pedagogical_assessments (
+            tenant_id, learning_objective_id, modul_ajar_id, academic_year, semester,
+            class_id, subject_code, subject_name, title, taxonomy_type,
+            assessment_method, passing_threshold, kktp_criteria, rubric_descriptors,
+            date_conducted, calendar_event_id, status, created_by
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+            COALESCE($15::date, CURRENT_DATE), $16, $17, $18
+        )
+        RETURNING id, title, taxonomy_type, status, created_at
+        "#
+    )
+    .bind(req_ctx.tenant_id)
+    .bind(payload.learning_objective_id)
+    .bind(payload.modul_ajar_id)
+    .bind(&academic_year)
+    .bind(&semester)
+    .bind(payload.class_id)
+    .bind(&subject_code)
+    .bind(&subject_name)
+    .bind(&payload.title)
+    .bind(&payload.taxonomy_type)
+    .bind(&assessment_method)
+    .bind(passing_threshold)
+    .bind(&kktp_criteria)
+    .bind(&rubric_descriptors)
+    .bind(payload.date_conducted)
+    .bind(payload.calendar_event_id)
+    .bind(&status)
+    .bind(actor_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let res = serde_json::json!({
+        "id": row.get::<Uuid, _>("id"),
+        "title": row.get::<String, _>("title"),
+        "taxonomy_type": row.get::<String, _>("taxonomy_type"),
+        "status": row.get::<String, _>("status"),
+        "created_at": row.get::<DateTime<Utc>, _>("created_at")
+    });
+
+    Ok(Json(ApiResponse::success(res, req_ctx.request_id)))
+}
+
+pub async fn get_assessment_detail(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let row = sqlx::query(
+        r#"
+        SELECT 
+            pa.id,
+            pa.class_id,
+            c.name AS class_name,
+            pa.learning_objective_id,
+            tp.code AS tp_code,
+            tp.statement AS tp_statement,
+            m.title AS modul_ajar_title,
+            pa.title,
+            pa.taxonomy_type,
+            pa.assessment_method,
+            pa.passing_threshold::float8 AS passing_threshold,
+            pa.kktp_criteria,
+            pa.rubric_descriptors,
+            pa.status
+        FROM pedagogical_assessments pa
+        JOIN classes c ON pa.class_id = c.id
+        LEFT JOIN learning_objectives tp ON pa.learning_objective_id = tp.id
+        LEFT JOIN modul_ajar m ON pa.modul_ajar_id = m.id
+        WHERE pa.id = $1 AND ($2 IS NULL OR pa.tenant_id = $2 OR pa.tenant_id IS NULL)
+          AND pa.deleted_at IS NULL
+        "#
+    )
+    .bind(id)
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let assess = match row {
+        Some(r) => r,
+        None => {
+            return Err(ApiError::new(
+                ApplicationError::Domain(DomainError::NotFound(
+                    "Asesmen tidak ditemukan".to_string(),
+                )),
+                &req_ctx.request_id,
+            ));
+        }
+    };
+
+    let class_id: Uuid = assess.get("class_id");
+
+    let student_rows = sqlx::query(
+        r#"
+        SELECT 
+            s.id AS student_id,
+            s.nis,
+            s.nisn,
+            u.full_name AS student_name,
+            asr.id AS result_id,
+            asr.raw_score::float8 AS raw_score,
+            asr.qualitative_level,
+            asr.feedback_notes,
+            asr.strengths,
+            asr.areas_for_improvement
+        FROM enrollments e
+        JOIN students s ON e.student_id = s.id
+        JOIN users u ON s.user_id = u.id
+        LEFT JOIN assessment_student_results asr ON asr.assessment_id = $1 AND asr.student_id = s.id
+        WHERE e.class_id = $2 AND e.status = 'ACTIVE'
+        ORDER BY u.full_name ASC
+        "#
+    )
+    .bind(id)
+    .bind(class_id)
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let mut students = Vec::new();
+    for sr in student_rows {
+        students.push(serde_json::json!({
+            "student_id": sr.get::<Uuid, _>("student_id"),
+            "nis": sr.get::<Option<String>, _>("nis"),
+            "nisn": sr.get::<Option<String>, _>("nisn"),
+            "student_name": sr.get::<String, _>("student_name"),
+            "result_id": sr.get::<Option<Uuid>, _>("result_id"),
+            "raw_score": sr.get::<Option<f64>, _>("raw_score"),
+            "qualitative_level": sr.get::<Option<String>, _>("qualitative_level"),
+            "feedback_notes": sr.get::<Option<String>, _>("feedback_notes"),
+            "strengths": sr.get::<Option<String>, _>("strengths"),
+            "areas_for_improvement": sr.get::<Option<String>, _>("areas_for_improvement"),
+        }));
+    }
+
+    let detail = serde_json::json!({
+        "id": assess.get::<Uuid, _>("id"),
+        "class_id": class_id,
+        "class_name": assess.get::<String, _>("class_name"),
+        "learning_objective_id": assess.get::<Option<Uuid>, _>("learning_objective_id"),
+        "tp_code": assess.get::<Option<String>, _>("tp_code"),
+        "tp_statement": assess.get::<Option<String>, _>("tp_statement"),
+        "modul_ajar_title": assess.get::<Option<String>, _>("modul_ajar_title"),
+        "title": assess.get::<String, _>("title"),
+        "taxonomy_type": assess.get::<String, _>("taxonomy_type"),
+        "assessment_method": assess.get::<String, _>("assessment_method"),
+        "passing_threshold": assess.get::<f64, _>("passing_threshold"),
+        "kktp_criteria": assess.get::<serde_json::Value, _>("kktp_criteria"),
+        "rubric_descriptors": assess.get::<serde_json::Value, _>("rubric_descriptors"),
+        "status": assess.get::<String, _>("status"),
+        "students": students,
+    });
+
+    Ok(Json(ApiResponse::success(detail, req_ctx.request_id)))
+}
+
+pub async fn record_assessment_grades(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Path(assessment_id): Path<Uuid>,
+    Json(payload): Json<SubmitGradesPayload>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let mut tx = ctx.pool.begin().await.map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    for g in payload.grades {
+        sqlx::query(
+            r#"
+            INSERT INTO assessment_student_results (
+                tenant_id, assessment_id, student_id, raw_score,
+                qualitative_level, feedback_notes, strengths, areas_for_improvement
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8
+            )
+            ON CONFLICT (assessment_id, student_id) DO UPDATE
+            SET raw_score = EXCLUDED.raw_score,
+                qualitative_level = EXCLUDED.qualitative_level,
+                feedback_notes = EXCLUDED.feedback_notes,
+                strengths = EXCLUDED.strengths,
+                areas_for_improvement = EXCLUDED.areas_for_improvement,
+                updated_at = NOW()
+            "#
+        )
+        .bind(req_ctx.tenant_id)
+        .bind(assessment_id)
+        .bind(g.student_id)
+        .bind(g.raw_score)
+        .bind(g.qualitative_level)
+        .bind(g.feedback_notes)
+        .bind(g.strengths)
+        .bind(g.areas_for_improvement)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+    }
+
+    tx.commit().await.map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let res = serde_json::json!({
+        "assessment_id": assessment_id,
+        "message": "Nilai asesmen siswa berhasil disimpan secara transaksional."
+    });
+
+    Ok(Json(ApiResponse::success(res, req_ctx.request_id)))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Habit Tracker G7KAIH Endpoints
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub async fn get_habits_calendar(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Query(query): Query<HabitsCalendarQuery>,
+) -> Result<Json<ApiResponse<Vec<HabitEntryDto>>>, ApiError> {
+    let student_id = query.student_id;
+    let class_id = query.class_id;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT 
+            h.id,
+            h.student_id,
+            u.full_name AS student_name,
+            c.name AS class_name,
+            h.entry_date::text AS entry_date,
+            h.academic_year,
+            h.semester,
+            h.habits,
+            h.habits_notes,
+            h.completed_count,
+            h.compliance_rate::float8 AS compliance_rate,
+            h.verification_status,
+            h.verified_by_user_id,
+            h.verified_by_role,
+            h.verified_at,
+            h.parent_feedback,
+            h.teacher_notes,
+            h.override_reason
+        FROM habit_tracker_entries h
+        JOIN students s ON h.student_id = s.id
+        JOIN users u ON s.user_id = u.id
+        LEFT JOIN enrollments e ON e.student_id = s.id AND e.status = 'ACTIVE'
+        LEFT JOIN classes c ON e.class_id = c.id
+        WHERE ($1 IS NULL OR h.tenant_id = $1)
+          AND ($2 IS NULL OR h.student_id = $2)
+          AND ($3 IS NULL OR e.class_id = $3)
+        ORDER BY h.entry_date DESC, u.full_name ASC
+        LIMIT 200
+        "#
+    )
+    .bind(req_ctx.tenant_id)
+    .bind(student_id)
+    .bind(class_id)
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let mut result = Vec::new();
+    for r in rows {
+        result.push(HabitEntryDto {
+            id: r.get("id"),
+            student_id: r.get("student_id"),
+            student_name: r.get("student_name"),
+            class_name: r.get("class_name"),
+            entry_date: r.get("entry_date"),
+            academic_year: r.get("academic_year"),
+            semester: r.get("semester"),
+            habits: r.get("habits"),
+            habits_notes: r.get("habits_notes"),
+            completed_count: r.get("completed_count"),
+            compliance_rate: r.get("compliance_rate"),
+            verification_status: r.get("verification_status"),
+            verified_by_user_id: r.get("verified_by_user_id"),
+            verified_by_role: r.get("verified_by_role"),
+            verified_at: r.get("verified_at"),
+            parent_feedback: r.get("parent_feedback"),
+            teacher_notes: r.get("teacher_notes"),
+            override_reason: r.get("override_reason"),
+        });
+    }
+
+    Ok(Json(ApiResponse::success(result, req_ctx.request_id)))
+}
+
+pub async fn record_habit_entry(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Json(payload): Json<RecordHabitEntryPayload>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let academic_year = payload.academic_year.unwrap_or_else(|| "2026/2027".to_string());
+    let semester = payload.semester.unwrap_or_else(|| "GANJIL".to_string()).to_uppercase();
+    let habits_notes = payload.habits_notes.unwrap_or_else(|| serde_json::json!({}));
+
+    let tenant_id = req_ctx.tenant_id.unwrap_or_else(|| {
+        Uuid::parse_str("e3c4d8da-ff44-4d87-bb13-759a54f49bd0").unwrap()
+    });
+
+    let row = sqlx::query(
+        r#"
+        INSERT INTO habit_tracker_entries (
+            tenant_id, student_id, entry_date, academic_year, semester,
+            habits, habits_notes, verification_status
+        ) VALUES (
+            $1, $2, $3::date, $4, $5, $6, $7, 'PENDING'
+        )
+        ON CONFLICT (tenant_id, student_id, entry_date) DO UPDATE
+        SET habits = EXCLUDED.habits,
+            habits_notes = EXCLUDED.habits_notes,
+            academic_year = EXCLUDED.academic_year,
+            semester = EXCLUDED.semester,
+            updated_at = NOW()
+        RETURNING id, student_id, entry_date::text, completed_count, compliance_rate::float8 AS compliance_rate, verification_status
+        "#
+    )
+    .bind(tenant_id)
+    .bind(payload.student_id)
+    .bind(&payload.entry_date)
+    .bind(&academic_year)
+    .bind(&semester)
+    .bind(&payload.habits)
+    .bind(&habits_notes)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let res = serde_json::json!({
+        "id": row.get::<Uuid, _>("id"),
+        "student_id": row.get::<Uuid, _>("student_id"),
+        "entry_date": row.get::<String, _>("entry_date"),
+        "completed_count": row.get::<i16, _>("completed_count"),
+        "compliance_rate": row.get::<f64, _>("compliance_rate"),
+        "verification_status": row.get::<String, _>("verification_status"),
+        "message": "Jurnal 7 Kebiasaan Anak Indonesia Hebat berhasil dicatat."
+    });
+
+    Ok(Json(ApiResponse::success(res, req_ctx.request_id)))
+}
+
+pub async fn verify_habit_parent(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Json(payload): Json<VerifyHabitParentPayload>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
+
+    let row = sqlx::query(
+        r#"
+        UPDATE habit_tracker_entries
+        SET 
+            verification_status = 'PARENT_VERIFIED',
+            verified_by_user_id = $2,
+            verified_by_role = 'PARENT',
+            verified_at = NOW(),
+            parent_feedback = COALESCE($3, parent_feedback),
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING id, student_id, verification_status, verified_at
+        "#
+    )
+    .bind(payload.entry_id)
+    .bind(actor_id)
+    .bind(payload.parent_feedback)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let res = serde_json::json!({
+        "id": row.get::<Uuid, _>("id"),
+        "student_id": row.get::<Uuid, _>("student_id"),
+        "verification_status": row.get::<String, _>("verification_status"),
+        "message": "Verifikasi Orang Tua / Wali berhasil disimpan."
+    });
+
+    Ok(Json(ApiResponse::success(res, req_ctx.request_id)))
+}
+
+pub async fn override_habit_teacher(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Json(payload): Json<OverrideHabitTeacherPayload>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
+
+    let row = sqlx::query(
+        r#"
+        UPDATE habit_tracker_entries
+        SET 
+            verification_status = 'TEACHER_OVERRIDE',
+            verified_by_user_id = $2,
+            verified_by_role = 'HOMEROOM_TEACHER',
+            verified_at = NOW(),
+            teacher_notes = COALESCE($3, teacher_notes),
+            override_reason = COALESCE($4, override_reason),
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING id, student_id, verification_status, verified_at
+        "#
+    )
+    .bind(payload.entry_id)
+    .bind(actor_id)
+    .bind(payload.teacher_notes)
+    .bind(payload.override_reason)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let res = serde_json::json!({
+        "id": row.get::<Uuid, _>("id"),
+        "student_id": row.get::<Uuid, _>("student_id"),
+        "verification_status": row.get::<String, _>("verification_status"),
+        "message": "Verifikasi Override Wali Kelas berhasil disimpan."
+    });
+
+    Ok(Json(ApiResponse::success(res, req_ctx.request_id)))
+}
+
+

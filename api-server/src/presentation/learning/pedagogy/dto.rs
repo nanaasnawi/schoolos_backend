@@ -176,3 +176,296 @@ pub struct UpdateModulAjarPayload {
     pub hours_per_meeting: Option<i32>,
 }
 
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema, Clone)]
+pub struct KospCommitteeDto {
+    pub id: Uuid,
+    pub teacher_id: Option<Uuid>,
+    pub name: String,
+    pub role_in_committee: String,
+    pub order_index: i32,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema, Clone)]
+pub struct KospSignatoryDto {
+    pub id: Uuid,
+    pub signatory_role: String,
+    pub position_title: String,
+    pub name: String,
+    pub nip: Option<String>,
+    pub has_signature: bool,
+    pub has_official_seal: bool,
+    pub order_index: i32,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema, Clone)]
+pub struct KospDocumentResponse {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub academic_year: String,
+    pub title: String,
+    pub legal_basis_statement: String,
+    pub establishment_place: String,
+    pub establishment_date: String,
+    pub effective_weeks_odd: i32,
+    pub effective_weeks_even: i32,
+    pub status: String,
+    pub committees: Vec<KospCommitteeDto>,
+    pub signatories: Vec<KospSignatoryDto>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ATP (Alur Tujuan Pembelajaran) DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+#[derive(Debug, Deserialize)]
+pub struct AtpMatrixQuery {
+    pub source_cp_id: Uuid,
+    pub academic_year: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema, Clone)]
+pub struct AtpItemDto {
+    pub tp_id: Uuid,
+    pub code: String,
+    pub competency: Option<String>,
+    pub bloom_level: Option<String>,
+    pub content_scope: String,
+    pub statement: String,
+    pub pancasila_profiles: Vec<String>,
+    pub evidence_indicators: Vec<String>,
+    pub estimated_hours: i32,
+    pub publication_status: String,
+    pub version: i32,
+    pub atp_id: Option<Uuid>,
+    pub semester: Option<String>,
+    pub sequence_order: Option<i32>,
+    pub allocated_hours: Option<i32>,
+    pub pedagogical_approach: Option<String>,
+    pub subject_name: String,
+    pub phase: String,
+    pub element_name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema, Clone)]
+pub struct AtpSemesterSummaryDto {
+    pub items_count: usize,
+    pub total_hours: i32,
+    pub items: Vec<AtpItemDto>,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema, Clone)]
+pub struct AtpMatrixResponse {
+    pub academic_year: String,
+    pub total_items: usize,
+    pub total_hours: i32,
+    pub odd_semester: AtpSemesterSummaryDto,
+    pub even_semester: AtpSemesterSummaryDto,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TP (Tujuan Pembelajaran) Update DTO
+// ─────────────────────────────────────────────────────────────────────────────
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateTpPayload {
+    pub id: Uuid,
+    pub statement: Option<String>,
+    pub competency: Option<String>,
+    pub bloom_level: Option<String>,
+    pub content_scope: Option<String>,
+    pub estimated_hours: Option<i32>,
+    pub pancasila_profiles: Option<Vec<String>>,
+    pub evidence_indicators: Option<Vec<String>>,
+    pub mark_as_reviewed: Option<bool>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Publish Pedagogy Transaction DTO
+// ─────────────────────────────────────────────────────────────────────────────
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct PublishPedagogyPayload {
+    pub tp_ids: Vec<Uuid>,
+    pub academic_year: Option<String>,
+    pub grade_level: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema, Clone)]
+pub struct PublishPedagogyResponse {
+    pub published_tps_count: usize,
+    pub published_atps_count: usize,
+    pub total_hours: i32,
+    pub message: String,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Modul Ajar Query & Creation DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+#[derive(Debug, Deserialize)]
+pub struct ModulAjarQuery {
+    pub academic_year: Option<String>,
+    pub semester: Option<String>,
+    pub subject_code: Option<String>,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateModulAjarPayload {
+    pub learning_objective_id: Uuid,
+    pub academic_year: Option<String>,
+    pub semester: Option<String>,
+    pub title: String,
+    pub grade_level: Option<String>,
+    pub subject_code: Option<String>,
+    pub subject_name: Option<String>,
+    pub phase: Option<String>,
+    pub allocated_hours: Option<i32>,
+    pub total_meetings: Option<i32>,
+    pub hours_per_meeting: Option<i32>,
+    pub pancasila_profiles: Option<Vec<String>>,
+    pub meaningful_understanding: Option<String>,
+    pub trigger_questions: Option<serde_json::Value>,
+    pub differentiation_strategies: Option<serde_json::Value>,
+    pub learning_activities: Option<serde_json::Value>,
+    pub assessment_plan: Option<serde_json::Value>,
+    pub lkpd_attachments: Option<serde_json::Value>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pedagogical Assessments DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+#[derive(Debug, Deserialize)]
+pub struct AssessmentQuery {
+    pub academic_year: Option<String>,
+    pub semester: Option<String>,
+    pub class_id: Option<Uuid>,
+    pub subject_code: Option<String>,
+    pub taxonomy_type: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema, Clone)]
+pub struct PedagogicalAssessmentItemDto {
+    pub id: Uuid,
+    pub class_id: Uuid,
+    pub class_name: Option<String>,
+    pub learning_objective_id: Option<Uuid>,
+    pub tp_code: Option<String>,
+    pub tp_statement: Option<String>,
+    pub tp_competency: Option<String>,
+    pub tp_content_scope: Option<String>,
+    pub tp_publication_status: Option<String>,
+    pub modul_ajar_id: Option<Uuid>,
+    pub modul_ajar_title: Option<String>,
+    pub academic_year: String,
+    pub semester: String,
+    pub subject_code: String,
+    pub subject_name: String,
+    pub title: String,
+    pub taxonomy_type: String,
+    pub assessment_method: String,
+    pub passing_threshold: f64,
+    pub kktp_criteria: serde_json::Value,
+    pub rubric_descriptors: serde_json::Value,
+    pub date_conducted: String,
+    pub calendar_event_id: Option<Uuid>,
+    pub kaldik_event_title: Option<String>,
+    pub status: String,
+    pub graded_students_count: i32,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateAssessmentPayload {
+    pub learning_objective_id: Option<Uuid>,
+    pub modul_ajar_id: Option<Uuid>,
+    pub academic_year: Option<String>,
+    pub semester: Option<String>,
+    pub class_id: Uuid,
+    pub subject_code: Option<String>,
+    pub subject_name: Option<String>,
+    pub title: String,
+    pub taxonomy_type: String,
+    pub assessment_method: Option<String>,
+    pub passing_threshold: Option<f64>,
+    pub kktp_criteria: Option<serde_json::Value>,
+    pub rubric_descriptors: Option<serde_json::Value>,
+    pub date_conducted: Option<String>,
+    pub calendar_event_id: Option<Uuid>,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct StudentGradeSubmission {
+    pub student_id: Uuid,
+    pub raw_score: Option<f64>,
+    pub qualitative_level: Option<String>,
+    pub feedback_notes: Option<String>,
+    pub strengths: Option<String>,
+    pub areas_for_improvement: Option<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SubmitGradesPayload {
+    pub grades: Vec<StudentGradeSubmission>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Habit Tracker G7KAIH DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+#[derive(Debug, Deserialize)]
+pub struct HabitsCalendarQuery {
+    pub student_id: Option<Uuid>,
+    pub class_id: Option<Uuid>,
+    pub entry_date: Option<String>,
+    pub academic_year: Option<String>,
+    pub semester: Option<String>,
+    pub school_overview: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema, Clone)]
+pub struct HabitEntryDto {
+    pub id: Uuid,
+    pub student_id: Uuid,
+    pub student_name: Option<String>,
+    pub class_name: Option<String>,
+    pub entry_date: String,
+    pub academic_year: String,
+    pub semester: String,
+    pub habits: serde_json::Value,
+    pub habits_notes: serde_json::Value,
+    pub completed_count: i16,
+    pub compliance_rate: f64,
+    pub verification_status: String,
+    pub verified_by_user_id: Option<Uuid>,
+    pub verified_by_role: Option<String>,
+    pub verified_at: Option<DateTime<Utc>>,
+    pub parent_feedback: Option<String>,
+    pub teacher_notes: Option<String>,
+    pub override_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct RecordHabitEntryPayload {
+    pub student_id: Uuid,
+    pub entry_date: String,
+    pub academic_year: Option<String>,
+    pub semester: Option<String>,
+    pub habits: serde_json::Value,
+    pub habits_notes: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct VerifyHabitParentPayload {
+    pub entry_id: Uuid,
+    pub parent_feedback: Option<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct OverrideHabitTeacherPayload {
+    pub entry_id: Uuid,
+    pub teacher_notes: Option<String>,
+    pub override_reason: Option<String>,
+}
+
+
+
