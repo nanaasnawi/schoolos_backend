@@ -42,6 +42,7 @@ pub fn material_routes() -> Router<ApplicationContext> {
         .route("/{id}", get(get_by_id).patch(update).delete(delete))
         .route("/{id}/toggle-complete", post(toggle_complete))
         .route("/{id}/completions", get(get_material_completions))
+        .route("/{id}/progress", post(update_material_reading_progress))
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
 }
 
@@ -1023,6 +1024,19 @@ async fn toggle_complete(
         .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
             school_core::common::error::InfrastructureError::Database(e)
         ), &req_ctx.request_id))?;
+
+        let _ = sqlx::query!(
+            r#"
+            UPDATE reading_progress 
+            SET is_completed = false, updated_at = NOW()
+            WHERE student_id = $1 AND material_id = $2
+            "#,
+            student_id,
+            id
+        )
+        .execute(&ctx.pool)
+        .await;
+
         false
     } else {
         // Toggle ON (mark completed)
@@ -1037,6 +1051,35 @@ async fn toggle_complete(
         .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
             school_core::common::error::InfrastructureError::Database(e)
         ), &req_ctx.request_id))?;
+
+        let total_pages: i32 = sqlx::query_scalar!(
+            r#"SELECT (COALESCE(end_page, 15) - COALESCE(start_page, 1) + 1)::integer as "tp!" FROM learning_materials WHERE id = $1"#,
+            id
+        )
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(15);
+
+        let _ = sqlx::query!(
+            r#"
+            INSERT INTO reading_progress (id, tenant_id, student_id, material_id, current_page, is_completed, last_read_at, created_at, updated_at)
+            VALUES (gen_random_uuid(), $1, $2, $3, $4, true, NOW(), NOW(), NOW())
+            ON CONFLICT (student_id, material_id) DO UPDATE
+            SET current_page = EXCLUDED.current_page,
+                is_completed = true,
+                last_read_at = NOW(),
+                updated_at = NOW()
+            "#,
+            req_ctx.tenant_id,
+            student_id,
+            id,
+            total_pages
+        )
+        .execute(&ctx.pool)
+        .await;
+
         let _ = crate::presentation::learning::attendance_automation::record_online_material_presence(
             &ctx.pool,
             req_ctx.tenant_id,
@@ -1225,17 +1268,22 @@ async fn get_material_completions(
                     c.name as class_name,
                     (smc.id IS NOT NULL OR COALESCE(rp.is_completed, false) = true) as is_completed,
                     COALESCE(smc.completed_at, rp.updated_at) as completed_at,
-                    rp.current_page,
-                    rp.last_read_at
+                    CASE 
+                        WHEN (smc.id IS NOT NULL OR COALESCE(rp.is_completed, false) = true) 
+                            THEN COALESCE(rp.current_page, (COALESCE(m.end_page, 15) - COALESCE(m.start_page, 1) + 1)::integer)
+                        ELSE rp.current_page
+                    END as current_page,
+                    COALESCE(rp.last_read_at, smc.completed_at) as last_read_at
                 FROM students s
                 JOIN enrollments en ON en.student_id = s.id AND en.class_id = ANY($2) AND (en.status = 'Active' OR en.status = 'active')
                 JOIN classes c ON c.id = en.class_id
+                CROSS JOIN (SELECT start_page, end_page FROM learning_materials WHERE id = $1) m
                 LEFT JOIN student_material_completions smc ON smc.student_id = s.id AND smc.material_id = $1
                 LEFT JOIN reading_progress rp ON rp.student_id = s.id AND rp.material_id = $1
                 WHERE s.tenant_id = $3 AND s.deleted_at IS NULL AND (s.status = 'active' OR s.status = 'Active' OR s.is_active = true)
                 ORDER BY s.id, (smc.id IS NOT NULL OR COALESCE(rp.is_completed, false) = true) DESC
             ) sub
-            ORDER BY is_completed DESC, student_name ASC
+            ORDER BY is_completed DESC, current_page DESC NULLS LAST, student_name ASC
             "#
         )
         .bind(id)
@@ -1265,18 +1313,23 @@ async fn get_material_completions(
                     c.name as class_name,
                     (smc.id IS NOT NULL OR COALESCE(rp.is_completed, false) = true) as is_completed,
                     COALESCE(smc.completed_at, rp.updated_at) as completed_at,
-                    rp.current_page,
-                    rp.last_read_at
+                    CASE 
+                        WHEN (smc.id IS NOT NULL OR COALESCE(rp.is_completed, false) = true) 
+                            THEN COALESCE(rp.current_page, (COALESCE(m.end_page, 15) - COALESCE(m.start_page, 1) + 1)::integer)
+                        ELSE rp.current_page
+                    END as current_page,
+                    COALESCE(rp.last_read_at, smc.completed_at) as last_read_at
                 FROM students s
                 JOIN enrollments en ON en.student_id = s.id AND (en.status = 'Active' OR en.status = 'active')
                 JOIN classes c ON c.id = en.class_id
+                CROSS JOIN (SELECT start_page, end_page FROM learning_materials WHERE id = $1) m
                 LEFT JOIN student_material_completions smc ON smc.student_id = s.id AND smc.material_id = $1
                 LEFT JOIN reading_progress rp ON rp.student_id = s.id AND rp.material_id = $1
                 WHERE s.tenant_id = $2 AND s.deleted_at IS NULL AND (s.status = 'active' OR s.status = 'Active' OR s.is_active = true)
                   AND (smc.id IS NOT NULL OR COALESCE(rp.is_completed, false) = true OR COALESCE(rp.current_page, 0) > 0)
                 ORDER BY s.id, (smc.id IS NOT NULL OR COALESCE(rp.is_completed, false) = true) DESC
             ) sub
-            ORDER BY is_completed DESC, student_name ASC
+            ORDER BY is_completed DESC, current_page DESC NULLS LAST, student_name ASC
             "#
         )
         .bind(id)
@@ -1304,6 +1357,142 @@ async fn get_material_completions(
         .collect();
 
     Ok(Json(ApiResponse::success(dtos, req_ctx.request_id)))
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct UpdateMaterialProgressRequest {
+    pub current_page: i32,
+    pub is_completed: Option<bool>,
+}
+
+async fn update_material_reading_progress(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateMaterialProgressRequest>,
+) -> Result<Json<ApiResponse<MaterialStudentCompletionDto>>, ApiError> {
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id).ok_or_else(|| {
+        ApiError::new(
+            ApplicationError::Unauthorized(
+                ErrorCode::AuthPermissionDenied,
+                "Autentikasi diperlukan".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let student_id = crate::authorization_helpers::AuthorizationScope::resolve_student_id(
+        &ctx.pool,
+        req_ctx.tenant_id,
+        actor_id,
+    )
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?
+    .ok_or_else(|| {
+        ApiError::new(
+            ApplicationError::Unauthorized(
+                ErrorCode::AuthPermissionDenied,
+                "Hanya siswa yang dapat memperbarui progres membaca".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let is_completed = payload.is_completed.unwrap_or(false);
+
+    let row = sqlx::query(
+        r#"
+        INSERT INTO reading_progress (id, tenant_id, student_id, material_id, current_page, is_completed, last_read_at, created_at, updated_at)
+        VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, NOW(), NOW(), NOW())
+        ON CONFLICT (student_id, material_id) DO UPDATE
+        SET current_page = EXCLUDED.current_page,
+            is_completed = EXCLUDED.is_completed,
+            last_read_at = NOW(),
+            updated_at = NOW()
+        RETURNING current_page, is_completed, last_read_at
+        "#
+    )
+    .bind(req_ctx.tenant_id)
+    .bind(student_id)
+    .bind(id)
+    .bind(payload.current_page)
+    .bind(is_completed)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    if is_completed {
+        let _ = sqlx::query(
+            r#"INSERT INTO student_material_completions (id, tenant_id, student_id, material_id, completed_at, created_at, updated_at) 
+               VALUES (gen_random_uuid(), $1, $2, $3, NOW(), NOW(), NOW())
+               ON CONFLICT (student_id, material_id) DO NOTHING"#
+        )
+        .bind(req_ctx.tenant_id)
+        .bind(student_id)
+        .bind(id)
+        .execute(&ctx.pool)
+        .await;
+    }
+
+    let _ = crate::presentation::learning::attendance_automation::record_online_material_presence(
+        &ctx.pool,
+        req_ctx.tenant_id,
+        actor_id,
+        id,
+    )
+    .await;
+
+    let st = sqlx::query(
+        r#"
+        SELECT s.full_name, s.nisn, s.gender, c.name as class_name
+        FROM students s
+        LEFT JOIN enrollments en ON en.student_id = s.id AND (en.status = 'Active' OR en.status = 'active')
+        LEFT JOIN classes c ON c.id = en.class_id
+        WHERE s.id = $1
+        LIMIT 1
+        "#
+    )
+    .bind(student_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .unwrap_or(None);
+
+    let (st_name, st_nisn, st_gender, st_class) = match st {
+        Some(s) => (s.get("full_name"), s.get("nisn"), s.get("gender"), s.get("class_name")),
+        None => ("Siswa".to_string(), None, None, None),
+    };
+
+    let row_is_completed: bool = row.get("is_completed");
+    let row_current_page: i32 = row.get("current_page");
+    let row_last_read_at: chrono::DateTime<chrono::Utc> = row.get("last_read_at");
+
+    let dto = MaterialStudentCompletionDto {
+        student_id,
+        student_name: st_name,
+        nisn: st_nisn,
+        gender: st_gender,
+        class_name: st_class,
+        is_completed: row_is_completed,
+        completed_at: if row_is_completed { Some(row_last_read_at) } else { None },
+        current_page: Some(row_current_page),
+        last_read_at: Some(row_last_read_at),
+    };
+
+    Ok(Json(ApiResponse::success(dto, req_ctx.request_id)))
 }
 
 async fn update(
