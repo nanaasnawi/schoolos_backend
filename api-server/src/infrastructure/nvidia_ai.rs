@@ -653,6 +653,36 @@ pub struct GeneratedAssignmentDto {
     pub questions: Vec<AssignmentQuestionDto>,
 }
 
+fn json_value_to_string(val: &serde_json::Value) -> String {
+    match val {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Object(map) => {
+            map.iter()
+                .map(|(k, v)| {
+                    let v_str = match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        _ => v.to_string(),
+                    };
+                    format!("{k}: {v_str}")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        serde_json::Value::Array(arr) => {
+            arr.iter()
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    _ => v.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => String::new(),
+    }
+}
+
 pub async fn generate_assignment(
     topic: &str,
     grade_level: &str,
@@ -665,18 +695,22 @@ pub async fn generate_assignment(
 ) -> Result<GeneratedAssignmentDto, ApplicationError> {
     let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
     let is_homework = assignment_format.map(|f| f.to_uppercase() == "HOMEWORK_PR").unwrap_or(false);
+    let now_ts = chrono::Utc::now().timestamp_millis();
 
+    let total_questions = if is_homework { num_essay.max(1) } else { num_mcq + num_essay };
     let format_instruction = if is_homework {
-        "Format Penugasan: TUGAS MANDIRI / LEMBAR KERJA SISWA (PR).\nSediakan petunjuk pengerjaan langkah-demi-langkah, tugas mandiri pemecahan masalah / observasi, dan rubrik penilaian komprehensif.".to_string()
+        format!(
+            "Format Penugasan: TUGAS MANDIRI / LEMBAR KERJA SISWA (PR).\nSediakan tepat {num_essay} butir tugas mandiri analitis/observasi (tipe: ESSAY), petunjuk pengerjaan langkah demi langkah, dan rubrik penilaian komprehensif."
+        )
     } else {
         format!(
-            "Format Penugasan: SOAL TERSTRUKTUR (Kombinasi Pilihan Ganda dan Uraian/Essay).\n- Jumlah Soal Pilihan Ganda (PG): {num_mcq} butir\n- Jumlah Soal Uraian / Essay: {num_essay} butir\nTiap butir PG harus memiliki tepat 4 opsi dengan kunci is_correct tepat 1 true."
+            "Format Penugasan: SOAL TERSTRUKTUR (Kombinasi Pilihan Ganda dan Uraian/Essay).\n- Jumlah Soal Pilihan Ganda (PG): {num_mcq} butir (tipe: MULTIPLE_CHOICE dengan tepat 4 opsi A, B, C, D dan kunci is_correct tepat 1 true)\n- Jumlah Soal Uraian / Essay: {num_essay} butir (tipe: ESSAY dengan rubrik penilaian)\nTotal harus TEPAT {total_questions} butir soal di array 'questions'."
         )
     };
 
     let prompt = format!(
         r#"Anda adalah guru pengembang asesmen Kurikulum Merdeka Indonesia.
-Buatkan paket penugasan siswa terstruktur untuk mata pelajaran: "{subject_name}", topik: "{topic}", jenjang: "{grade_level}", tingkat kesulitan: "{difficulty}".
+Buatkan paket penugasan siswa terstruktur untuk mata pelajaran: "{subject_name}", topik: "{topic}", jenjang: "{grade_level}", tingkat kesulitan: "{difficulty}" (ID Batch: {now_ts}).
 
 {subject_guideline}
 
@@ -695,9 +729,9 @@ Format output HARUS berupa JSON murni dengan skema:
   "questions": [
     {{
       "id": "q1",
-      "question_text": "Teks soal pilihan ganda...",
+      "question_text": "Teks soal pilihan ganda nomor 1...",
       "question_type": "MULTIPLE_CHOICE",
-      "points": 20,
+      "points": 10,
       "choices": [
         {{ "choice_text": "A. Pilihan A", "is_correct": true }},
         {{ "choice_text": "B. Pilihan B", "is_correct": false }},
@@ -705,12 +739,22 @@ Format output HARUS berupa JSON murni dengan skema:
         {{ "choice_text": "D. Pilihan D", "is_correct": false }}
       ],
       "explanation": "Pembahasan kunci jawaban..."
+    }},
+    {{
+      "id": "q2",
+      "question_text": "Teks soal uraian / essay analitis...",
+      "question_type": "ESSAY",
+      "points": 20,
+      "choices": [],
+      "explanation": "Rubrik pedoman penskoran essay..."
     }}
   ]
 }}
 
 PENTING:
 - Pastikan teks soal dan pilihan jawaban SESUAI ATURAN MAPEL ({subject_name}).
+- Hasilkan TEPAT {total_questions} butir soal pada array 'questions' ({num_mcq} PG dan {num_essay} Essay).
+- Nilai 'rubric' dan 'instructions' HARUS berupa STRING TEKS tunggal (BUKAN JSON object/map).
 - Output HANYA JSON tanpa teks lain.
 - Pastikan seluruh string multi-baris menggunakan escape sequence \n dan BUKAN karakter raw newline."#,
         assignment_type_val = if is_homework { "HOMEWORK_PR" } else { "STRUCTURED_QUESTIONS" }
@@ -727,33 +771,21 @@ PENTING:
         },
     ];
 
-    let raw = call_nvidia_nim(messages, 0.3, 3500).await?;
+    let raw = call_nvidia_nim(messages, 0.65, 3800).await?;
     let cleaned = extract_clean_json(&raw);
     let sanitized = sanitize_json_control_chars(cleaned);
 
     #[derive(Deserialize)]
-    struct RawAssignmentQuestion {
-        id: Option<String>,
-        question_text: String,
-        #[serde(default)]
-        question_type: Option<String>,
-        points: Option<i32>,
-        #[serde(default)]
-        choices: Vec<CbtQuestionChoiceDto>,
-        explanation: Option<String>,
-    }
-
-    #[derive(Deserialize)]
     struct RawAssignmentResponse {
-        title: String,
-        instructions: String,
+        title: Option<serde_json::Value>,
+        instructions: Option<serde_json::Value>,
         #[serde(default)]
         assignment_type: Option<String>,
-        rubric: String,
+        rubric: Option<serde_json::Value>,
         #[serde(default)]
-        tasks: Vec<String>,
+        tasks: Option<serde_json::Value>,
         #[serde(default)]
-        questions: Vec<RawAssignmentQuestion>,
+        questions: Vec<serde_json::Value>,
     }
 
     let parsed: RawAssignmentResponse = serde_json::from_str(&sanitized)
@@ -765,34 +797,106 @@ PENTING:
         None
     };
 
-    let questions: Vec<AssignmentQuestionDto> = parsed
-        .questions
-        .into_iter()
-        .enumerate()
-        .map(|(idx, q)| {
-            let img = if include_images && idx < 2 { safe_visual_url.clone() } else { None };
-            AssignmentQuestionDto {
-                id: q.id.unwrap_or_else(|| format!("asg-q-{}", idx + 1)),
-                question_text: q.question_text,
-                question_type: q.question_type.unwrap_or_else(|| {
-                    if q.choices.is_empty() { "ESSAY".to_string() } else { "MULTIPLE_CHOICE".to_string() }
-                }),
-                points: q.points.unwrap_or(20),
-                image_url: img,
-                choices: q.choices,
-                explanation: q.explanation.unwrap_or_default(),
+    let title_str = parsed.title.map(|v| json_value_to_string(&v)).filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("Tugas Siswa: {topic}"));
+    let instructions_str = parsed.instructions.map(|v| json_value_to_string(&v)).filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Kerjakan penugasan berikut dengan seksama dan teliti.".to_string());
+    let rubric_str = parsed.rubric.map(|v| json_value_to_string(&v)).filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Rubrik Penilaian: Skala Skor 0 - 100 berdasarkan ketepatan konsep dan kelengkapan analisis.".to_string());
+
+    let tasks_vec: Vec<String> = match parsed.tasks {
+        Some(serde_json::Value::Array(arr)) => arr.into_iter().map(|v| json_value_to_string(&v)).collect(),
+        Some(serde_json::Value::String(s)) => vec![s],
+        _ => Vec::new(),
+    };
+
+    let mut questions: Vec<AssignmentQuestionDto> = Vec::new();
+
+    for (idx, q_val) in parsed.questions.into_iter().enumerate() {
+        let q_id = q_val.get("id").and_then(|v| v.as_str()).map(|s| s.to_string())
+            .unwrap_or_else(|| format!("asg-q-{}", idx + 1));
+        let q_text = q_val.get("question_text").or_else(|| q_val.get("text"))
+            .map(json_value_to_string).unwrap_or_default();
+        if q_text.trim().is_empty() {
+            continue;
+        }
+
+        let mut choices: Vec<CbtQuestionChoiceDto> = Vec::new();
+        if let Some(choices_val) = q_val.get("choices") {
+            if let Some(c_arr) = choices_val.as_array() {
+                for (c_idx, c_item) in c_arr.iter().enumerate() {
+                    let c_text = c_item.get("choice_text").or_else(|| c_item.get("text"))
+                        .map(json_value_to_string)
+                        .unwrap_or_else(|| json_value_to_string(c_item));
+                    let is_correct = c_item.get("is_correct")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(c_idx == 0);
+                    choices.push(CbtQuestionChoiceDto {
+                        choice_text: c_text,
+                        is_correct,
+                    });
+                }
             }
-        })
-        .collect();
+        } else if let Some(options_val) = q_val.get("options") {
+            if let Some(map) = options_val.as_object() {
+                let correct_key = q_val.get("correct_key").and_then(|k| k.as_str()).unwrap_or("A");
+                for (k, v) in map {
+                    let c_text = format!("{k}. {}", json_value_to_string(v));
+                    let is_correct = k.trim().eq_ignore_ascii_case(correct_key.trim());
+                    choices.push(CbtQuestionChoiceDto {
+                        choice_text: c_text,
+                        is_correct,
+                    });
+                }
+            }
+        }
+
+        let explicit_type = q_val.get("question_type").and_then(|v| v.as_str());
+        let question_type = explicit_type.map(|t| t.to_uppercase()).unwrap_or_else(|| {
+            if choices.is_empty() { "ESSAY".to_string() } else { "MULTIPLE_CHOICE".to_string() }
+        });
+
+        let default_points = if question_type == "MULTIPLE_CHOICE" { 10 } else { 20 };
+        let points = q_val.get("points").and_then(|p| p.as_i64()).map(|p| p as i32).unwrap_or(default_points);
+
+        let explanation = q_val.get("explanation").map(json_value_to_string).unwrap_or_default();
+        let img = if include_images && idx < 2 { safe_visual_url.clone() } else { None };
+
+        questions.push(AssignmentQuestionDto {
+            id: q_id,
+            question_text: q_text,
+            question_type,
+            points,
+            image_url: img,
+            choices,
+            explanation,
+        });
+    }
+
+    // Fallback if questions array was empty but tasks existed
+    if questions.is_empty() && !tasks_vec.is_empty() {
+        for (idx, task_str) in tasks_vec.iter().enumerate() {
+            let img = if include_images && idx < 2 { safe_visual_url.clone() } else { None };
+            questions.push(AssignmentQuestionDto {
+                id: format!("asg-task-{}", idx + 1),
+                question_text: task_str.clone(),
+                question_type: "ESSAY".to_string(),
+                points: 20,
+                image_url: img,
+                choices: Vec::new(),
+                explanation: rubric_str.clone(),
+            });
+        }
+    }
 
     Ok(GeneratedAssignmentDto {
-        title: parsed.title,
-        instructions: parsed.instructions,
+        title: title_str,
+        instructions: instructions_str,
         assignment_type: parsed.assignment_type.unwrap_or_else(|| {
             if is_homework { "HOMEWORK_PR".to_string() } else { "STRUCTURED_QUESTIONS".to_string() }
         }),
-        rubric: parsed.rubric,
-        tasks: parsed.tasks,
+        rubric: rubric_str,
+        tasks: tasks_vec,
         questions,
     })
 }
@@ -820,23 +924,6 @@ pub struct GeneratedCbtQuizDto {
     pub questions: Vec<CbtQuestionDto>,
 }
 
-#[derive(Deserialize)]
-struct RawQuizQuestion {
-    question_text: String,
-    options: std::collections::BTreeMap<String, String>,
-    correct_key: String,
-    explanation: Option<String>,
-    bloom_level: Option<String>,
-    points: Option<i32>,
-}
-
-#[derive(Deserialize)]
-struct RawQuizResponse {
-    title: String,
-    description: String,
-    questions: Vec<RawQuizQuestion>,
-}
-
 pub async fn generate_cbt_quiz(
     topic: &str,
     grade_level: &str,
@@ -845,11 +932,19 @@ pub async fn generate_cbt_quiz(
     difficulty: &str,
 ) -> Result<GeneratedCbtQuizDto, ApplicationError> {
     let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
+    let now_ts = chrono::Utc::now().timestamp_millis();
+
     let prompt = format!(
-        r#"Anda adalah tim pembuat soal ujian CBT resmi sekolah (Kurikulum Merdeka).
-Buatkan {num_questions} butir soal pilihan ganda (opsi A-D) untuk jenjang {grade_level} mata pelajaran {subject_name} dengan topik: "{topic}" tingkat kesulitan: {difficulty}.
+        r#"Anda adalah tim pembuat bank soal ujian CBT resmi sekolah (Kurikulum Merdeka).
+Buatkan TEPAT {num_questions} butir soal pilihan ganda (opsi A-D) yang BERBEDA, DINAMIS, dan BERVARIASI untuk jenjang {grade_level} mata pelajaran {subject_name} dengan topik: "{topic}" tingkat kesulitan: {difficulty} (ID Batch: {now_ts}).
 
 {subject_guideline}
+
+PENTING & WAJIB:
+- Array 'questions' HARUS BERISI TEPAT {num_questions} BUTIR SOAL LENGKAP (DILARANG KERAS HANYA MEMBUAT 1 SOAL!).
+- Setiap soal harus unik, variatif, dan menguji aspek pemahaman yang berbeda dari materi {topic}.
+- Kunci jawaban benar (correct_key) harus didistribusikan secara acak dan seimbang antara 'A', 'B', 'C', dan 'D' (jangan condong ke satu huruf saja).
+- Pilihan A, B, C, D harus masuk akal, memiliki distraktor ilmiah yang baik, dan tidak ada pilihan konyol.
 
 Format output HARUS berupa JSON murni dengan skema:
 {{
@@ -857,7 +952,7 @@ Format output HARUS berupa JSON murni dengan skema:
   "description": "Ujian pilihan ganda {num_questions} butir soal materi {topic} ({subject_name}).",
   "questions": [
     {{
-      "question_text": "Teks soal yang jelas, spesifik, dan tidak ambigu (bahasa sesuai mapel)...",
+      "question_text": "Teks butir soal nomor 1 yang jelas dan kontekstual...",
       "options": {{
         "A": "Pilihan A",
         "B": "Pilihan B",
@@ -865,20 +960,33 @@ Format output HARUS berupa JSON murni dengan skema:
         "D": "Pilihan D"
       }},
       "correct_key": "B",
-      "explanation": "Pembahasan lengkap kenapa jawaban B benar, termasuk cara hitung / analisis grammar.",
+      "explanation": "Pembahasan lengkap kenapa B benar...",
       "bloom_level": "C3",
+      "points": 20
+    }},
+    {{
+      "question_text": "Teks butir soal nomor 2 yang unik dan berbeda konteks...",
+      "options": {{
+        "A": "Pilihan A",
+        "B": "Pilihan B",
+        "C": "Pilihan C",
+        "D": "Pilihan D"
+      }},
+      "correct_key": "C",
+      "explanation": "Pembahasan lengkap kenapa C benar...",
+      "bloom_level": "C4",
       "points": 20
     }}
   ]
 }}
 
-Output HANYA JSON tanpa teks lain."#
+Output HANYA JSON tanpa teks pembuka atau penutup."#
     );
 
     let messages = vec![
         ChatMessage {
             role: "system",
-            content: "You are a professional CBT exam author producing valid JSON question banks strictly respecting the subject matter rules.",
+            content: "You are a professional CBT exam author producing valid JSON question banks strictly respecting the subject matter rules and producing the exact requested count of distinct questions.",
         },
         ChatMessage {
             role: "user",
@@ -886,53 +994,91 @@ Output HANYA JSON tanpa teks lain."#
         },
     ];
 
-    let raw = call_nvidia_nim(messages, 0.3, 2500).await?;
+    let raw = call_nvidia_nim(messages, 0.65, 3800).await?;
     let cleaned = extract_clean_json(&raw);
     let sanitized = sanitize_json_control_chars(cleaned);
+
+    #[derive(Deserialize)]
+    struct RawQuizResponse {
+        title: Option<serde_json::Value>,
+        description: Option<serde_json::Value>,
+        #[serde(default)]
+        questions: Vec<serde_json::Value>,
+    }
 
     let parsed: RawQuizResponse = serde_json::from_str(&sanitized)
         .map_err(|e| ApplicationError::Domain(DomainError::Validation(format!("Invalid AI CBT Quiz JSON: {e}"))))?;
 
-    let now_ts = chrono::Utc::now().timestamp_millis();
     let total_q = parsed.questions.len().max(1) as i32;
     let default_pts = (100 / total_q).max(1);
 
-    let questions = parsed
-        .questions
-        .into_iter()
-        .enumerate()
-        .map(|(idx, q)| {
-            let correct_upper = q.correct_key.trim().to_uppercase();
-            let choices = q
-                .options
-                .into_iter()
-                .map(|(key, text)| {
-                    let is_correct = key.trim().to_uppercase() == correct_upper;
-                    CbtQuestionChoiceDto {
-                        choice_text: format!("{key}. {text}"),
-                        is_correct,
-                    }
-                })
-                .collect();
+    let mut questions: Vec<CbtQuestionDto> = Vec::new();
 
-            CbtQuestionDto {
-                id: format!("gen-q-{}-{}", idx + 1, now_ts),
-                question_text: q.question_text,
-                choices,
-                correct_key: correct_upper,
-                explanation: q.explanation.unwrap_or_default(),
-                bloom_level: q.bloom_level.unwrap_or_else(|| "C3".to_string()),
-                points: q.points.unwrap_or(default_pts),
+    for (idx, q_val) in parsed.questions.into_iter().enumerate() {
+        let q_text = q_val.get("question_text").or_else(|| q_val.get("text"))
+            .map(json_value_to_string).unwrap_or_default();
+        if q_text.trim().is_empty() {
+            continue;
+        }
+
+        let correct_key = q_val.get("correct_key").and_then(|k| k.as_str()).unwrap_or("A").trim().to_uppercase();
+        let mut choices: Vec<CbtQuestionChoiceDto> = Vec::new();
+
+        if let Some(options_val) = q_val.get("options") {
+            if let Some(map) = options_val.as_object() {
+                for (key, val) in map {
+                    let k_upper = key.trim().to_uppercase();
+                    let is_correct = k_upper == correct_key;
+                    choices.push(CbtQuestionChoiceDto {
+                        choice_text: format!("{key}. {}", json_value_to_string(val)),
+                        is_correct,
+                    });
+                }
             }
-        })
-        .collect();
+        } else if let Some(choices_val) = q_val.get("choices") {
+            if let Some(arr) = choices_val.as_array() {
+                for (c_idx, c_item) in arr.iter().enumerate() {
+                    let c_text = c_item.get("choice_text").or_else(|| c_item.get("text"))
+                        .map(json_value_to_string)
+                        .unwrap_or_else(|| json_value_to_string(c_item));
+                    let is_correct = c_item.get("is_correct")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(c_idx == 0);
+                    choices.push(CbtQuestionChoiceDto {
+                        choice_text: c_text,
+                        is_correct,
+                    });
+                }
+            }
+        }
+
+        let explanation = q_val.get("explanation").map(json_value_to_string).unwrap_or_default();
+        let bloom_level = q_val.get("bloom_level").and_then(|b| b.as_str()).unwrap_or("C3").to_string();
+        let points = q_val.get("points").and_then(|p| p.as_i64()).map(|p| p as i32).unwrap_or(default_pts);
+
+        questions.push(CbtQuestionDto {
+            id: format!("gen-q-{}-{}", idx + 1, now_ts),
+            question_text: q_text,
+            choices,
+            correct_key,
+            explanation,
+            bloom_level,
+            points,
+        });
+    }
+
+    let title_str = parsed.title.map(|v| json_value_to_string(&v)).filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("Paket Soal CBT: {topic}"));
+    let desc_str = parsed.description.map(|v| json_value_to_string(&v)).filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("Ujian CBT {num_questions} butir soal materi {topic} ({subject_name})."));
 
     Ok(GeneratedCbtQuizDto {
-        title: parsed.title,
-        description: parsed.description,
+        title: title_str,
+        description: desc_str,
         questions,
     })
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 5. STUDENT & AT-RISK ANALYTICS DTOs & FUNCTION
