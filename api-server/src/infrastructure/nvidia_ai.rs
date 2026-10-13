@@ -1,7 +1,7 @@
-use std::time::Duration;
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 use school_core::common::error::{ApplicationError, DomainError};
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
+use uuid::Uuid;
 
 const DEFAULT_NVIDIA_MODEL: &str = "meta/llama-3.2-11b-vision-instruct";
 const DEFAULT_NVIDIA_URL: &str = "https://integrate.api.nvidia.com/v1/chat/completions";
@@ -38,12 +38,10 @@ struct ChatCompletionResponse {
 fn get_config() -> Result<(String, String, String), ApplicationError> {
     // 1. Prioritaskan pembacaan aman dari environment variable server
     let env_key = std::env::var("NVIDIA_API_KEY").ok();
-    let key = env_key
-        .filter(|k| !k.trim().is_empty())
-        .unwrap_or_else(|| {
-            // Fallback aman jika environment variable belum dikonfigurasi di cloud dashboard
-            "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".to_string()
-        });
+    let key = env_key.filter(|k| !k.trim().is_empty()).unwrap_or_else(|| {
+        // Fallback aman jika environment variable belum dikonfigurasi di cloud dashboard
+        "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".to_string()
+    });
 
     let model = std::env::var("NVIDIA_MODEL").unwrap_or_else(|_| DEFAULT_NVIDIA_MODEL.to_string());
     let url = std::env::var("NVIDIA_API_URL").unwrap_or_else(|_| DEFAULT_NVIDIA_URL.to_string());
@@ -111,7 +109,12 @@ pub async fn call_nvidia_nim(
             }
         };
 
-        if let Some(content) = parsed.choices.into_iter().next().and_then(|c| c.message.content) {
+        if let Some(content) = parsed
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|c| c.message.content)
+        {
             if !content.trim().is_empty() {
                 return Ok(content);
             }
@@ -136,7 +139,10 @@ pub fn extract_clean_json(text: &str) -> &str {
         trimmed = trimmed.trim_end_matches("```").trim();
     }
 
-    if let (Some(first), Some(last)) = (trimmed.find(|c| c == '{' || c == '['), trimmed.rfind(|c| c == '}' || c == ']')) {
+    if let (Some(first), Some(last)) = (
+        trimmed.find(|c| c == '{' || c == '['),
+        trimmed.rfind(|c| c == '}' || c == ']'),
+    ) {
         if last >= first {
             return &trimmed[first..=last];
         }
@@ -215,7 +221,12 @@ pub fn build_subject_pedagogical_instructions(subject: &str, grade: &str) -> Str
 - Sesuaikan tingkat kosakata (vocabulary) dan tata bahasa (grammar) dengan tingkat siswa {grade}.
 - Cantumkan aspek komunikatif autentik (misal: Reading Comprehension, Grammar in Context, Vocabulary Building, Text Types seperti Narrative, Descriptive, Recount, Report, Procedure)."#
         )
-    } else if lower_subject.contains("matematika") || lower_subject.contains("math") || lower_subject.contains("aljabar") || lower_subject.contains("geometri") || lower_subject.contains("kalkulus") {
+    } else if lower_subject.contains("matematika")
+        || lower_subject.contains("math")
+        || lower_subject.contains("aljabar")
+        || lower_subject.contains("geometri")
+        || lower_subject.contains("kalkulus")
+    {
         format!(
             r#"### ATURAN WAJIB MAPEL (MATEMATIKA / MATHEMATICS):
 - Matematika adalah ilmu eksak terapan, BUKAN esai naratif umum.
@@ -223,13 +234,23 @@ pub fn build_subject_pedagogical_instructions(subject: &str, grade: &str) -> Str
 - Soal kuis & tugas HARUS berupa soal perhitungan matematis nyata, pemecahan masalah (problem-solving), atau soal cerita kontekstual (word problems) sesuai level {grade}.
 - Opsi jawaban A, B, C, D kuis CBT harus berupa nilai kuantitatif/angka/persamaan yang presisi. Bagian pembahasan (explanation) wajib menyertakan langkah hitung yang runtut."#
         )
-    } else if lower_subject.contains("cirebon") || lower_subject.contains("daerah") || lower_subject.contains("jawa") || lower_subject.contains("sunda") {
+    } else if lower_subject.contains("cirebon")
+        || lower_subject.contains("daerah")
+        || lower_subject.contains("jawa")
+        || lower_subject.contains("sunda")
+    {
         format!(
             r#"### ATURAN WAJIB MAPEL (BAHASA DAERAH / MUATAN LOKAL):
 - Gunakan kosakata dan ragam bahasa daerah yang tepat ({subject}) serta nilai kearifan lokal (tradisi, seni, tatakrama/unggah-ungguh basa).
 - Lengkapi dengan arti kata/glosarium kosakata daerah agar siswa {grade} dapat memahami dengan optimal."#
         )
-    } else if lower_subject.contains("fisika") || lower_subject.contains("kimia") || lower_subject.contains("biologi") || lower_subject.contains("ipa") || lower_subject.contains("sains") || lower_subject.contains("science") {
+    } else if lower_subject.contains("fisika")
+        || lower_subject.contains("kimia")
+        || lower_subject.contains("biologi")
+        || lower_subject.contains("ipa")
+        || lower_subject.contains("sains")
+        || lower_subject.contains("science")
+    {
         format!(
             r#"### ATURAN WAJIB MAPEL (IPA / SAINS / FISIKA / BIOLOGI / KIMIA):
 - Gunakan prinsip ilmiah yang akurat: fenomena alam nyata, hukum fisika/reaksi kimia/proses biologis empiris, serta metode ilmiah.
@@ -242,12 +263,20 @@ pub fn build_subject_pedagogical_instructions(subject: &str, grade: &str) -> Str
 - Fokus pada keterampilan literasi berbahasa: pemahaman teks, kaidah kebahasaan (PUEBI/EYD), struktur jenis teks, majas, dan kosakata baku sesuai jenjang {grade}.
 - Soal kuis & tugas harus menguji kemampuan analisis teks, ide pokok, kalimat efektif, dan penalaran kritis."#
         )
-    } else if lower_subject.contains("agama") || lower_subject.contains("pai") || lower_subject.contains("akhlak") {
+    } else if lower_subject.contains("agama")
+        || lower_subject.contains("pai")
+        || lower_subject.contains("akhlak")
+    {
         format!(
             r#"### ATURAN WAJIB MAPEL (PENDIDIKAN AGAMA & BUDI PEKERTI):
 - Tekankan nilai-nilai moral, akhlak mulia, dalil dan keteladanan yang relevan, serta pengamalan ibadah praktis dalam kehidupan sehari-hari siswa {grade}."#
         )
-    } else if lower_subject.contains("sejarah") || lower_subject.contains("ips") || lower_subject.contains("geografi") || lower_subject.contains("ekonomi") || lower_subject.contains("sosiologi") {
+    } else if lower_subject.contains("sejarah")
+        || lower_subject.contains("ips")
+        || lower_subject.contains("geografi")
+        || lower_subject.contains("ekonomi")
+        || lower_subject.contains("sosiologi")
+    {
         format!(
             r#"### ATURAN WAJIB MAPEL (IPS / SEJARAH / SOSIAL):
 - Sertakan kronologi waktu peristiwa, tokoh penting, lokasi geografis, dan analisis dampak sosial-ekonomi nyata yang relevan bagi siswa {grade}."#
@@ -269,85 +298,219 @@ pub fn get_safe_curated_educational_image(subject: &str, query: &str) -> String 
     let q = query.to_lowercase();
 
     // 1. Astronomy / Space / Antariksa
-    if q.contains("planet") || q.contains("surya") || q.contains("solar") || q.contains("bintang") || q.contains("antariksa") || q.contains("space") || q.contains("galaxy") || q.contains("orbit") || q.contains("tata surya") {
+    if q.contains("planet")
+        || q.contains("surya")
+        || q.contains("solar")
+        || q.contains("bintang")
+        || q.contains("antariksa")
+        || q.contains("space")
+        || q.contains("galaxy")
+        || q.contains("orbit")
+        || q.contains("tata surya")
+    {
         return "https://images.unsplash.com/photo-1614728894747-a83421e2b9c9?auto=format&fit=crop&w=1200&q=80".to_string();
     }
 
     // 2. Bahasa Inggris (English Language & Grammar)
-    if s.contains("inggris") || s.contains("english") || q.contains("grammar") || q.contains("vocabulary") || q.contains("verb") || q.contains("tense") || q.contains("has") || q.contains("have") || q.contains("question") || q.contains("sentence") {
+    if s.contains("inggris")
+        || s.contains("english")
+        || q.contains("grammar")
+        || q.contains("vocabulary")
+        || q.contains("verb")
+        || q.contains("tense")
+        || q.contains("has")
+        || q.contains("have")
+        || q.contains("question")
+        || q.contains("sentence")
+    {
         if q.contains("question") || q.contains("tanya") || q.contains("ask") {
-            return "https://images.unsplash.com/photo-1434030216411-0b793f4b4173?auto=format&fit=crop&w=1200&q=80".to_string(); // Student writing notes & thinking
+            return "https://images.unsplash.com/photo-1434030216411-0b793f4b4173?auto=format&fit=crop&w=1200&q=80".to_string();
+            // Student writing notes & thinking
         }
-        if q.contains("vocab") || q.contains("word") || q.contains("kata") || q.contains("dictionary") {
-            return "https://images.unsplash.com/photo-1456513080510-7bf3a84b82f8?auto=format&fit=crop&w=1200&q=80".to_string(); // Library books and study
+        if q.contains("vocab")
+            || q.contains("word")
+            || q.contains("kata")
+            || q.contains("dictionary")
+        {
+            return "https://images.unsplash.com/photo-1456513080510-7bf3a84b82f8?auto=format&fit=crop&w=1200&q=80".to_string();
+            // Library books and study
         }
-        if q.contains("speak") || q.contains("dialog") || q.contains("conversation") || q.contains("bicara") {
-            return "https://images.unsplash.com/photo-1522202176988-66273c2fd55f?auto=format&fit=crop&w=1200&q=80".to_string(); // Students collaborating politely
+        if q.contains("speak")
+            || q.contains("dialog")
+            || q.contains("conversation")
+            || q.contains("bicara")
+        {
+            return "https://images.unsplash.com/photo-1522202176988-66273c2fd55f?auto=format&fit=crop&w=1200&q=80".to_string();
+            // Students collaborating politely
         }
         // Clean English language textbook & classroom
         return "https://images.unsplash.com/photo-1503676260728-1c00da094a0b?auto=format&fit=crop&w=1200&q=80".to_string();
     }
 
     // 3. Matematika (Mathematics)
-    if s.contains("matematika") || s.contains("math") || q.contains("hitung") || q.contains("rumus") || q.contains("aljabar") || q.contains("geometri") || q.contains("kalkulus") || q.contains("pecahan") || q.contains("bilangan") {
-        if q.contains("geometri") || q.contains("bangun") || q.contains("sudut") || q.contains("ruang") {
-            return "https://images.unsplash.com/photo-1509228468518-180dd4864904?auto=format&fit=crop&w=1200&q=80".to_string(); // Geometry tools & ruler
+    if s.contains("matematika")
+        || s.contains("math")
+        || q.contains("hitung")
+        || q.contains("rumus")
+        || q.contains("aljabar")
+        || q.contains("geometri")
+        || q.contains("kalkulus")
+        || q.contains("pecahan")
+        || q.contains("bilangan")
+    {
+        if q.contains("geometri")
+            || q.contains("bangun")
+            || q.contains("sudut")
+            || q.contains("ruang")
+        {
+            return "https://images.unsplash.com/photo-1509228468518-180dd4864904?auto=format&fit=crop&w=1200&q=80".to_string();
+            // Geometry tools & ruler
         }
-        if q.contains("grafik") || q.contains("statistik") || q.contains("diagram") || q.contains("data") {
-            return "https://images.unsplash.com/photo-1551288049-bebda4e38f71?auto=format&fit=crop&w=1200&q=80".to_string(); // Analytics & charts
+        if q.contains("grafik")
+            || q.contains("statistik")
+            || q.contains("diagram")
+            || q.contains("data")
+        {
+            return "https://images.unsplash.com/photo-1551288049-bebda4e38f71?auto=format&fit=crop&w=1200&q=80".to_string();
+            // Analytics & charts
         }
-        return "https://images.unsplash.com/photo-1635070041078-e363dbe005cb?auto=format&fit=crop&w=1200&q=80".to_string(); // Math blackboard
+        return "https://images.unsplash.com/photo-1635070041078-e363dbe005cb?auto=format&fit=crop&w=1200&q=80".to_string();
+        // Math blackboard
     }
 
     // 4. Sains / IPA / Fisika / Kimia / Biologi
-    if s.contains("kimia") || q.contains("molekul") || q.contains("larutan") || q.contains("reaksi") || q.contains("unsur") || q.contains("senyawa") {
-        return "https://images.unsplash.com/photo-1603126857599-f6e157fa2fe6?auto=format&fit=crop&w=1200&q=80".to_string(); // Chemistry lab glassware
+    if s.contains("kimia")
+        || q.contains("molekul")
+        || q.contains("larutan")
+        || q.contains("reaksi")
+        || q.contains("unsur")
+        || q.contains("senyawa")
+    {
+        return "https://images.unsplash.com/photo-1603126857599-f6e157fa2fe6?auto=format&fit=crop&w=1200&q=80".to_string();
+        // Chemistry lab glassware
     }
-    if s.contains("fisika") || q.contains("gaya") || q.contains("newton") || q.contains("energi") || q.contains("listrik") || q.contains("magnet") || q.contains("gelombang") || q.contains("optik") {
-        return "https://images.unsplash.com/photo-1507668077129-56e32842fceb?auto=format&fit=crop&w=1200&q=80".to_string(); // Physics concept & light
+    if s.contains("fisika")
+        || q.contains("gaya")
+        || q.contains("newton")
+        || q.contains("energi")
+        || q.contains("listrik")
+        || q.contains("magnet")
+        || q.contains("gelombang")
+        || q.contains("optik")
+    {
+        return "https://images.unsplash.com/photo-1507668077129-56e32842fceb?auto=format&fit=crop&w=1200&q=80".to_string();
+        // Physics concept & light
     }
-    if s.contains("biologi") || s.contains("ipa") || s.contains("sains") || q.contains("sel") || q.contains("hewan") || q.contains("tumbuhan") || q.contains("organ") || q.contains("fotosintesis") || q.contains("ekosistem") {
-        if q.contains("sel") || q.contains("mikroskop") || q.contains("bakteri") || q.contains("dna") {
-            return "https://images.unsplash.com/photo-1532094349884-543bc11b234d?auto=format&fit=crop&w=1200&q=80".to_string(); // Microscope lab
+    if s.contains("biologi")
+        || s.contains("ipa")
+        || s.contains("sains")
+        || q.contains("sel")
+        || q.contains("hewan")
+        || q.contains("tumbuhan")
+        || q.contains("organ")
+        || q.contains("fotosintesis")
+        || q.contains("ekosistem")
+    {
+        if q.contains("sel")
+            || q.contains("mikroskop")
+            || q.contains("bakteri")
+            || q.contains("dna")
+        {
+            return "https://images.unsplash.com/photo-1532094349884-543bc11b234d?auto=format&fit=crop&w=1200&q=80".to_string();
+            // Microscope lab
         }
-        return "https://images.unsplash.com/photo-1518531933037-91b2f5f229cc?auto=format&fit=crop&w=1200&q=80".to_string(); // Botany & green plants
+        return "https://images.unsplash.com/photo-1518531933037-91b2f5f229cc?auto=format&fit=crop&w=1200&q=80".to_string();
+        // Botany & green plants
     }
 
     // 5. Bahasa Indonesia & Sastra
-    if s.contains("bahasa indonesia") || s.contains("literasi") || q.contains("puisi") || q.contains("cerpen") || q.contains("paragraf") || q.contains("teks") || q.contains("eyd") || q.contains("puebi") {
-        return "https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?auto=format&fit=crop&w=1200&q=80".to_string(); // Reading book & literature
+    if s.contains("bahasa indonesia")
+        || s.contains("literasi")
+        || q.contains("puisi")
+        || q.contains("cerpen")
+        || q.contains("paragraf")
+        || q.contains("teks")
+        || q.contains("eyd")
+        || q.contains("puebi")
+    {
+        return "https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?auto=format&fit=crop&w=1200&q=80".to_string();
+        // Reading book & literature
     }
 
     // 6. IPS / Sejarah / Geografi / Ekonomi
-    if s.contains("sejarah") || s.contains("ips") || s.contains("geografi") || s.contains("ekonomi") || s.contains("sosiologi") || q.contains("peta") || q.contains("bumi") || q.contains("benua") || q.contains("perang") || q.contains("kemerdekaan") {
-        if q.contains("peta") || q.contains("globe") || q.contains("atlas") || q.contains("geografi") {
-            return "https://images.unsplash.com/photo-1524661135-423995f22d0b?auto=format&fit=crop&w=1200&q=80".to_string(); // World map & globe
+    if s.contains("sejarah")
+        || s.contains("ips")
+        || s.contains("geografi")
+        || s.contains("ekonomi")
+        || s.contains("sosiologi")
+        || q.contains("peta")
+        || q.contains("bumi")
+        || q.contains("benua")
+        || q.contains("perang")
+        || q.contains("kemerdekaan")
+    {
+        if q.contains("peta")
+            || q.contains("globe")
+            || q.contains("atlas")
+            || q.contains("geografi")
+        {
+            return "https://images.unsplash.com/photo-1524661135-423995f22d0b?auto=format&fit=crop&w=1200&q=80".to_string();
+            // World map & globe
         }
-        return "https://images.unsplash.com/photo-1461360370896-922624d12aa1?auto=format&fit=crop&w=1200&q=80".to_string(); // History artifacts
+        return "https://images.unsplash.com/photo-1461360370896-922624d12aa1?auto=format&fit=crop&w=1200&q=80".to_string();
+        // History artifacts
     }
 
     // 7. Budaya & Muatan Lokal Nusantara
-    if s.contains("cirebon") || s.contains("jawa") || s.contains("sunda") || s.contains("daerah") || q.contains("budaya") || q.contains("candi") || q.contains("tradisi") || q.contains("batik") {
-        return "https://images.unsplash.com/photo-1596402184320-417e7178b2cd?auto=format&fit=crop&w=1200&q=80".to_string(); // Indonesian heritage
+    if s.contains("cirebon")
+        || s.contains("jawa")
+        || s.contains("sunda")
+        || s.contains("daerah")
+        || q.contains("budaya")
+        || q.contains("candi")
+        || q.contains("tradisi")
+        || q.contains("batik")
+    {
+        return "https://images.unsplash.com/photo-1596402184320-417e7178b2cd?auto=format&fit=crop&w=1200&q=80".to_string();
+        // Indonesian heritage
     }
 
     // 8. Pendidikan Agama & Budi Pekerti
-    if s.contains("agama") || s.contains("pai") || s.contains("akhlak") || s.contains("fiqih") || s.contains("moral") {
-        return "https://images.unsplash.com/photo-1584551246679-0daf3d275d0f?auto=format&fit=crop&w=1200&q=80".to_string(); // Islamic calligraphy & architecture
+    if s.contains("agama")
+        || s.contains("pai")
+        || s.contains("akhlak")
+        || s.contains("fiqih")
+        || s.contains("moral")
+    {
+        return "https://images.unsplash.com/photo-1584551246679-0daf3d275d0f?auto=format&fit=crop&w=1200&q=80".to_string();
+        // Islamic calligraphy & architecture
     }
 
     // 9. Seni Budaya & Keterampilan
-    if s.contains("seni") || s.contains("prakarya") || q.contains("lukis") || q.contains("gambar") || q.contains("musik") {
-        return "https://images.unsplash.com/photo-1513364776144-60967b0f800f?auto=format&fit=crop&w=1200&q=80".to_string(); // Art supplies & painting
+    if s.contains("seni")
+        || s.contains("prakarya")
+        || q.contains("lukis")
+        || q.contains("gambar")
+        || q.contains("musik")
+    {
+        return "https://images.unsplash.com/photo-1513364776144-60967b0f800f?auto=format&fit=crop&w=1200&q=80".to_string();
+        // Art supplies & painting
     }
 
     // 10. Olahraga & Jasmani (PJOK)
-    if s.contains("pjok") || s.contains("olahraga") || s.contains("penjas") || q.contains("sehat") || q.contains("kebugaran") {
-        return "https://images.unsplash.com/photo-1461896836934-ffe607ba8211?auto=format&fit=crop&w=1200&q=80".to_string(); // Sports field
+    if s.contains("pjok")
+        || s.contains("olahraga")
+        || s.contains("penjas")
+        || q.contains("sehat")
+        || q.contains("kebugaran")
+    {
+        return "https://images.unsplash.com/photo-1461896836934-ffe607ba8211?auto=format&fit=crop&w=1200&q=80".to_string();
+        // Sports field
     }
 
     // Universal Classroom & Learning Default
-    "https://images.unsplash.com/photo-1497633762265-9d179a990aa6?auto=format&fit=crop&w=1200&q=80".to_string()
+    "https://images.unsplash.com/photo-1497633762265-9d179a990aa6?auto=format&fit=crop&w=1200&q=80"
+        .to_string()
 }
 
 pub async fn search_real_educational_image(query: &str, subject_name: &str) -> String {
@@ -432,8 +595,11 @@ Output HANYA JSON tanpa teks pembuka/penutup."#
     let raw = call_nvidia_nim(messages, 0.3, 1800).await?;
     let cleaned = extract_clean_json(&raw);
 
-    let parsed: RawInfographicResponse = serde_json::from_str(cleaned)
-        .map_err(|e| ApplicationError::Domain(DomainError::Validation(format!("Invalid AI Infographic JSON: {e}"))))?;
+    let parsed: RawInfographicResponse = serde_json::from_str(cleaned).map_err(|e| {
+        ApplicationError::Domain(DomainError::Validation(format!(
+            "Invalid AI Infographic JSON: {e}"
+        )))
+    })?;
 
     let now_ts = chrono::Utc::now().timestamp_millis();
     let mut blocks = Vec::new();
@@ -447,7 +613,9 @@ Output HANYA JSON tanpa teks pembuka/penutup."#
     });
 
     for (idx, card) in parsed.cards.into_iter().enumerate() {
-        let card_query = card.image_search_keyword.as_deref()
+        let card_query = card
+            .image_search_keyword
+            .as_deref()
             .or(card.image_suggestion.as_deref())
             .filter(|s| !s.trim().is_empty())
             .unwrap_or(topic);
@@ -462,7 +630,10 @@ Output HANYA JSON tanpa teks pembuka/penutup."#
         blocks.push(InfographicBlockDto {
             id: format!("ai-block-text-{}-{}", idx + 1, now_ts),
             block_type: "TEXT".to_string(),
-            content: format!("### 📌 {}. {}\n\n{}", card.step_number, card.headline, card.summary),
+            content: format!(
+                "### 📌 {}. {}\n\n{}",
+                card.step_number, card.headline, card.summary
+            ),
         });
     }
 
@@ -491,7 +662,11 @@ struct RawArticleResponse {
     markdown_article: String,
 }
 
-fn parse_or_extract_article(raw: &str, default_topic: &str, default_subject: &str) -> GeneratedArticleDto {
+fn parse_or_extract_article(
+    raw: &str,
+    default_topic: &str,
+    default_subject: &str,
+) -> GeneratedArticleDto {
     let cleaned = extract_clean_json(raw);
     if let Ok(parsed) = serde_json::from_str::<RawArticleResponse>(cleaned) {
         return GeneratedArticleDto {
@@ -553,11 +728,18 @@ fn parse_or_extract_article(raw: &str, default_topic: &str, default_subject: &st
         if let Some(start) = rest.find('"') {
             let after_quote = &rest[start + 1..];
             let content_str = if let Some(end) = after_quote.rfind('"') {
-                if end > 0 { &after_quote[..end] } else { after_quote }
+                if end > 0 {
+                    &after_quote[..end]
+                } else {
+                    after_quote
+                }
             } else {
                 after_quote
             };
-            content_str.replace("\\n", "\n").replace("\\\"", "\"").replace("\\\\", "\\")
+            content_str
+                .replace("\\n", "\n")
+                .replace("\\\"", "\"")
+                .replace("\\\\", "\\")
         } else {
             raw.to_string()
         }
@@ -656,27 +838,25 @@ pub struct GeneratedAssignmentDto {
 fn json_value_to_string(val: &serde_json::Value) -> String {
     match val {
         serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Object(map) => {
-            map.iter()
-                .map(|(k, v)| {
-                    let v_str = match v {
-                        serde_json::Value::String(s) => s.clone(),
-                        _ => v.to_string(),
-                    };
-                    format!("{k}: {v_str}")
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
-        serde_json::Value::Array(arr) => {
-            arr.iter()
-                .map(|v| match v {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| {
+                let v_str = match v {
                     serde_json::Value::String(s) => s.clone(),
                     _ => v.to_string(),
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
+                };
+                format!("{k}: {v_str}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .map(|v| match v {
+                serde_json::Value::String(s) => s.clone(),
+                _ => v.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
         serde_json::Value::Number(n) => n.to_string(),
         serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Null => String::new(),
@@ -694,10 +874,16 @@ pub async fn generate_assignment(
     include_images: bool,
 ) -> Result<GeneratedAssignmentDto, ApplicationError> {
     let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
-    let is_homework = assignment_format.map(|f| f.to_uppercase() == "HOMEWORK_PR").unwrap_or(false);
+    let is_homework = assignment_format
+        .map(|f| f.to_uppercase() == "HOMEWORK_PR")
+        .unwrap_or(false);
     let now_ts = chrono::Utc::now().timestamp_millis();
 
-    let total_questions = if is_homework { num_essay.max(1) } else { num_mcq + num_essay };
+    let total_questions = if is_homework {
+        num_essay.max(1)
+    } else {
+        num_mcq + num_essay
+    };
     let format_instruction = if is_homework {
         format!(
             "Format Penugasan: TUGAS MANDIRI / LEMBAR KERJA SISWA (PR).\nSediakan tepat {num_essay} butir tugas mandiri analitis/observasi (tipe: ESSAY), petunjuk pengerjaan langkah demi langkah, dan rubrik penilaian komprehensif."
@@ -733,10 +919,10 @@ Format output HARUS berupa JSON murni dengan skema:
       "question_type": "MULTIPLE_CHOICE",
       "points": 10,
       "choices": [
-        {{ "choice_text": "A. Pilihan A", "is_correct": true }},
-        {{ "choice_text": "B. Pilihan B", "is_correct": false }},
-        {{ "choice_text": "C. Pilihan C", "is_correct": false }},
-        {{ "choice_text": "D. Pilihan D", "is_correct": false }}
+        {{ "choice_text": "Pilihan A", "is_correct": true }},
+        {{ "choice_text": "Pilihan B", "is_correct": false }},
+        {{ "choice_text": "Pilihan C", "is_correct": false }},
+        {{ "choice_text": "Pilihan D", "is_correct": false }}
       ],
       "explanation": "Pembahasan kunci jawaban..."
     }},
@@ -757,7 +943,11 @@ PENTING:
 - Nilai 'rubric' dan 'instructions' HARUS berupa STRING TEKS tunggal (BUKAN JSON object/map).
 - Output HANYA JSON tanpa teks lain.
 - Pastikan seluruh string multi-baris menggunakan escape sequence \n dan BUKAN karakter raw newline."#,
-        assignment_type_val = if is_homework { "HOMEWORK_PR" } else { "STRUCTURED_QUESTIONS" }
+        assignment_type_val = if is_homework {
+            "HOMEWORK_PR"
+        } else {
+            "STRUCTURED_QUESTIONS"
+        }
     );
 
     let messages = vec![
@@ -788,8 +978,11 @@ PENTING:
         questions: Vec<serde_json::Value>,
     }
 
-    let parsed: RawAssignmentResponse = serde_json::from_str(&sanitized)
-        .map_err(|e| ApplicationError::Domain(DomainError::Validation(format!("Invalid AI Assignment JSON: {e}"))))?;
+    let parsed: RawAssignmentResponse = serde_json::from_str(&sanitized).map_err(|e| {
+        ApplicationError::Domain(DomainError::Validation(format!(
+            "Invalid AI Assignment JSON: {e}"
+        )))
+    })?;
 
     let safe_visual_url = if include_images {
         Some(get_safe_curated_educational_image(subject_name, topic))
@@ -797,15 +990,23 @@ PENTING:
         None
     };
 
-    let title_str = parsed.title.map(|v| json_value_to_string(&v)).filter(|s| !s.is_empty())
+    let title_str = parsed
+        .title
+        .map(|v| json_value_to_string(&v))
+        .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("Tugas Siswa: {topic}"));
-    let instructions_str = parsed.instructions.map(|v| json_value_to_string(&v)).filter(|s| !s.is_empty())
+    let instructions_str = parsed
+        .instructions
+        .map(|v| json_value_to_string(&v))
+        .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "Kerjakan penugasan berikut dengan seksama dan teliti.".to_string());
     let rubric_str = parsed.rubric.map(|v| json_value_to_string(&v)).filter(|s| !s.is_empty())
         .unwrap_or_else(|| "Rubrik Penilaian: Skala Skor 0 - 100 berdasarkan ketepatan konsep dan kelengkapan analisis.".to_string());
 
     let tasks_vec: Vec<String> = match parsed.tasks {
-        Some(serde_json::Value::Array(arr)) => arr.into_iter().map(|v| json_value_to_string(&v)).collect(),
+        Some(serde_json::Value::Array(arr)) => {
+            arr.into_iter().map(|v| json_value_to_string(&v)).collect()
+        }
         Some(serde_json::Value::String(s)) => vec![s],
         _ => Vec::new(),
     };
@@ -813,10 +1014,16 @@ PENTING:
     let mut questions: Vec<AssignmentQuestionDto> = Vec::new();
 
     for (idx, q_val) in parsed.questions.into_iter().enumerate() {
-        let q_id = q_val.get("id").and_then(|v| v.as_str()).map(|s| s.to_string())
+        let q_id = q_val
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
             .unwrap_or_else(|| format!("asg-q-{}", idx + 1));
-        let q_text = q_val.get("question_text").or_else(|| q_val.get("text"))
-            .map(json_value_to_string).unwrap_or_default();
+        let q_text = q_val
+            .get("question_text")
+            .or_else(|| q_val.get("text"))
+            .map(json_value_to_string)
+            .unwrap_or_default();
         if q_text.trim().is_empty() {
             continue;
         }
@@ -825,10 +1032,13 @@ PENTING:
         if let Some(choices_val) = q_val.get("choices") {
             if let Some(c_arr) = choices_val.as_array() {
                 for (c_idx, c_item) in c_arr.iter().enumerate() {
-                    let c_text = c_item.get("choice_text").or_else(|| c_item.get("text"))
+                    let c_text = c_item
+                        .get("choice_text")
+                        .or_else(|| c_item.get("text"))
                         .map(json_value_to_string)
                         .unwrap_or_else(|| json_value_to_string(c_item));
-                    let is_correct = c_item.get("is_correct")
+                    let is_correct = c_item
+                        .get("is_correct")
                         .and_then(|b| b.as_bool())
                         .unwrap_or(c_idx == 0);
                     choices.push(CbtQuestionChoiceDto {
@@ -839,7 +1049,10 @@ PENTING:
             }
         } else if let Some(options_val) = q_val.get("options") {
             if let Some(map) = options_val.as_object() {
-                let correct_key = q_val.get("correct_key").and_then(|k| k.as_str()).unwrap_or("A");
+                let correct_key = q_val
+                    .get("correct_key")
+                    .and_then(|k| k.as_str())
+                    .unwrap_or("A");
                 for (k, v) in map {
                     let c_text = format!("{k}. {}", json_value_to_string(v));
                     let is_correct = k.trim().eq_ignore_ascii_case(correct_key.trim());
@@ -853,14 +1066,33 @@ PENTING:
 
         let explicit_type = q_val.get("question_type").and_then(|v| v.as_str());
         let question_type = explicit_type.map(|t| t.to_uppercase()).unwrap_or_else(|| {
-            if choices.is_empty() { "ESSAY".to_string() } else { "MULTIPLE_CHOICE".to_string() }
+            if choices.is_empty() {
+                "ESSAY".to_string()
+            } else {
+                "MULTIPLE_CHOICE".to_string()
+            }
         });
 
-        let default_points = if question_type == "MULTIPLE_CHOICE" { 10 } else { 20 };
-        let points = q_val.get("points").and_then(|p| p.as_i64()).map(|p| p as i32).unwrap_or(default_points);
+        let default_points = if question_type == "MULTIPLE_CHOICE" {
+            10
+        } else {
+            20
+        };
+        let points = q_val
+            .get("points")
+            .and_then(|p| p.as_i64())
+            .map(|p| p as i32)
+            .unwrap_or(default_points);
 
-        let explanation = q_val.get("explanation").map(json_value_to_string).unwrap_or_default();
-        let img = if include_images && idx < 2 { safe_visual_url.clone() } else { None };
+        let explanation = q_val
+            .get("explanation")
+            .map(json_value_to_string)
+            .unwrap_or_default();
+        let img = if include_images && idx < 2 {
+            safe_visual_url.clone()
+        } else {
+            None
+        };
 
         questions.push(AssignmentQuestionDto {
             id: q_id,
@@ -876,7 +1108,11 @@ PENTING:
     // Fallback if questions array was empty but tasks existed
     if questions.is_empty() && !tasks_vec.is_empty() {
         for (idx, task_str) in tasks_vec.iter().enumerate() {
-            let img = if include_images && idx < 2 { safe_visual_url.clone() } else { None };
+            let img = if include_images && idx < 2 {
+                safe_visual_url.clone()
+            } else {
+                None
+            };
             questions.push(AssignmentQuestionDto {
                 id: format!("asg-task-{}", idx + 1),
                 question_text: task_str.clone(),
@@ -893,7 +1129,11 @@ PENTING:
         title: title_str,
         instructions: instructions_str,
         assignment_type: parsed.assignment_type.unwrap_or_else(|| {
-            if is_homework { "HOMEWORK_PR".to_string() } else { "STRUCTURED_QUESTIONS".to_string() }
+            if is_homework {
+                "HOMEWORK_PR".to_string()
+            } else {
+                "STRUCTURED_QUESTIONS".to_string()
+            }
         }),
         rubric: rubric_str,
         tasks: tasks_vec,
@@ -904,7 +1144,6 @@ PENTING:
 // ─────────────────────────────────────────────────────────────────────────────
 // 4. CBT QUIZ / EXAM GENERATION DTOs & FUNCTION
 // ─────────────────────────────────────────────────────────────────────────────
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CbtQuestionDto {
@@ -1006,8 +1245,11 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
         questions: Vec<serde_json::Value>,
     }
 
-    let parsed: RawQuizResponse = serde_json::from_str(&sanitized)
-        .map_err(|e| ApplicationError::Domain(DomainError::Validation(format!("Invalid AI CBT Quiz JSON: {e}"))))?;
+    let parsed: RawQuizResponse = serde_json::from_str(&sanitized).map_err(|e| {
+        ApplicationError::Domain(DomainError::Validation(format!(
+            "Invalid AI CBT Quiz JSON: {e}"
+        )))
+    })?;
 
     let total_q = parsed.questions.len().max(1) as i32;
     let default_pts = (100 / total_q).max(1);
@@ -1015,13 +1257,21 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
     let mut questions: Vec<CbtQuestionDto> = Vec::new();
 
     for (idx, q_val) in parsed.questions.into_iter().enumerate() {
-        let q_text = q_val.get("question_text").or_else(|| q_val.get("text"))
-            .map(json_value_to_string).unwrap_or_default();
+        let q_text = q_val
+            .get("question_text")
+            .or_else(|| q_val.get("text"))
+            .map(json_value_to_string)
+            .unwrap_or_default();
         if q_text.trim().is_empty() {
             continue;
         }
 
-        let correct_key = q_val.get("correct_key").and_then(|k| k.as_str()).unwrap_or("A").trim().to_uppercase();
+        let correct_key = q_val
+            .get("correct_key")
+            .and_then(|k| k.as_str())
+            .unwrap_or("A")
+            .trim()
+            .to_uppercase();
         let mut choices: Vec<CbtQuestionChoiceDto> = Vec::new();
 
         if let Some(options_val) = q_val.get("options") {
@@ -1038,10 +1288,13 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
         } else if let Some(choices_val) = q_val.get("choices") {
             if let Some(arr) = choices_val.as_array() {
                 for (c_idx, c_item) in arr.iter().enumerate() {
-                    let c_text = c_item.get("choice_text").or_else(|| c_item.get("text"))
+                    let c_text = c_item
+                        .get("choice_text")
+                        .or_else(|| c_item.get("text"))
                         .map(json_value_to_string)
                         .unwrap_or_else(|| json_value_to_string(c_item));
-                    let is_correct = c_item.get("is_correct")
+                    let is_correct = c_item
+                        .get("is_correct")
                         .and_then(|b| b.as_bool())
                         .unwrap_or(c_idx == 0);
                     choices.push(CbtQuestionChoiceDto {
@@ -1052,9 +1305,20 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
             }
         }
 
-        let explanation = q_val.get("explanation").map(json_value_to_string).unwrap_or_default();
-        let bloom_level = q_val.get("bloom_level").and_then(|b| b.as_str()).unwrap_or("C3").to_string();
-        let points = q_val.get("points").and_then(|p| p.as_i64()).map(|p| p as i32).unwrap_or(default_pts);
+        let explanation = q_val
+            .get("explanation")
+            .map(json_value_to_string)
+            .unwrap_or_default();
+        let bloom_level = q_val
+            .get("bloom_level")
+            .and_then(|b| b.as_str())
+            .unwrap_or("C3")
+            .to_string();
+        let points = q_val
+            .get("points")
+            .and_then(|p| p.as_i64())
+            .map(|p| p as i32)
+            .unwrap_or(default_pts);
 
         questions.push(CbtQuestionDto {
             id: format!("gen-q-{}-{}", idx + 1, now_ts),
@@ -1067,10 +1331,18 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
         });
     }
 
-    let title_str = parsed.title.map(|v| json_value_to_string(&v)).filter(|s| !s.is_empty())
+    let title_str = parsed
+        .title
+        .map(|v| json_value_to_string(&v))
+        .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("Paket Soal CBT: {topic}"));
-    let desc_str = parsed.description.map(|v| json_value_to_string(&v)).filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("Ujian CBT {num_questions} butir soal materi {topic} ({subject_name})."));
+    let desc_str = parsed
+        .description
+        .map(|v| json_value_to_string(&v))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            format!("Ujian CBT {num_questions} butir soal materi {topic} ({subject_name}).")
+        });
 
     Ok(GeneratedCbtQuizDto {
         title: title_str,
@@ -1078,7 +1350,6 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
         questions,
     })
 }
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 5. STUDENT & AT-RISK ANALYTICS DTOs & FUNCTION
@@ -1148,8 +1419,11 @@ Output HANYA JSON tanpa teks lain."#
         risk_level: String,
     }
 
-    let parsed: RawAnalytics = serde_json::from_str(cleaned)
-        .map_err(|e| ApplicationError::Domain(DomainError::Validation(format!("Invalid AI Analytics JSON: {e}"))))?;
+    let parsed: RawAnalytics = serde_json::from_str(cleaned).map_err(|e| {
+        ApplicationError::Domain(DomainError::Validation(format!(
+            "Invalid AI Analytics JSON: {e}"
+        )))
+    })?;
 
     Ok(StudentAnalyticsInsightDto {
         student_id,
