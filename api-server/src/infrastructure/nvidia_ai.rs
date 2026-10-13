@@ -884,30 +884,33 @@ pub async fn generate_assignment(
     } else {
         num_mcq + num_essay
     };
-    let format_instruction = if is_homework {
+
+    let slot_instructions = if is_homework {
         format!(
-            "Format Penugasan: TUGAS MANDIRI / LEMBAR KERJA SISWA (PR).\nSediakan tepat {num_essay} butir tugas mandiri analitis/observasi (tipe: ESSAY), petunjuk pengerjaan langkah demi langkah, dan rubrik penilaian komprehensif."
+            "Array 'questions' WAJIB BERISI TEPAT {num_essay} BUTIR SOAL ESSAY / LEMBAR KERJA.\n- Butir 1 sampai {num_essay}: Tipe 'ESSAY' (analitis / tugas observasi kontekstual)."
         )
     } else {
         format!(
-            "Format Penugasan: SOAL TERSTRUKTUR (Kombinasi Pilihan Ganda dan Uraian/Essay).\n- Jumlah Soal Pilihan Ganda (PG): {num_mcq} butir (tipe: MULTIPLE_CHOICE dengan tepat 4 opsi A, B, C, D dan kunci is_correct tepat 1 true)\n- Jumlah Soal Uraian / Essay: {num_essay} butir (tipe: ESSAY dengan rubrik penilaian)\nTotal harus TEPAT {total_questions} butir soal di array 'questions'."
+            "Array 'questions' WAJIB BERISI TEPAT {total_questions} BUTIR SOAL DENGAN PEMBAGIAN PERSIS:\n- Butir 1 sampai {num_mcq}: SOAL PILIHAN GANDA ('question_type': 'MULTIPLE_CHOICE') dengan 4 pilihan A, B, C, D dan kunci is_correct tepat 1 true.\n- Butir {essay_start} sampai {total_questions}: SOAL URAIAN / ESSAY ('question_type': 'ESSAY') dengan rubrik pedoman penskoran komprehensif.\nDILARANG KERAS mengurangi jumlah soal! Jumlah soal di array questions harus PERSIS {total_questions} butir.",
+            essay_start = num_mcq + 1
         )
     };
 
     let prompt = format!(
-        r#"Anda adalah guru pengembang asesmen Kurikulum Merdeka Indonesia.
-Buatkan paket penugasan siswa terstruktur untuk mata pelajaran: "{subject_name}", topik: "{topic}", jenjang: "{grade_level}", tingkat kesulitan: "{difficulty}" (ID Batch: {now_ts}).
+        r#"Anda adalah pengembang asesmen resmi Kurikulum Merdeka Indonesia.
+Buatkan paket penugasan siswa terstruktur untuk mata pelajaran: "{subject_name}", topik: "{topic}", jenjang: "{grade_level}", tingkat kesulitan: "{difficulty}" (Batch ID: {now_ts}).
 
 {subject_guideline}
 
-{format_instruction}
+ATURAN STRUKTUR DAN JUMLAH SOAL:
+{slot_instructions}
 
 Format output HARUS berupa JSON murni dengan skema:
 {{
   "title": "Tugas Siswa: {topic}",
   "instructions": "Petunjuk pengerjaan penugasan langkah demi langkah...",
   "assignment_type": "{assignment_type_val}",
-  "rubric": "Rubrik Penilaian: Skor 100 dengan kriteria...",
+  "rubric": "Rubrik Penilaian: Skor 100 dengan kriteria penilaian...",
   "tasks": [
     "Tugas 1: Butir tugas operasional terukur...",
     "Tugas 2: Butir tugas pemecahan masalah / aplikasi nyata..."
@@ -915,7 +918,7 @@ Format output HARUS berupa JSON murni dengan skema:
   "questions": [
     {{
       "id": "q1",
-      "question_text": "Teks soal pilihan ganda nomor 1...",
+      "question_text": "Teks butir soal pilihan ganda nomor 1...",
       "question_type": "MULTIPLE_CHOICE",
       "points": 10,
       "choices": [
@@ -928,7 +931,7 @@ Format output HARUS berupa JSON murni dengan skema:
     }},
     {{
       "id": "q2",
-      "question_text": "Teks soal uraian / essay analitis...",
+      "question_text": "Teks butir soal uraian / essay analitis...",
       "question_type": "ESSAY",
       "points": 20,
       "choices": [],
@@ -939,7 +942,7 @@ Format output HARUS berupa JSON murni dengan skema:
 
 PENTING:
 - Pastikan teks soal dan pilihan jawaban SESUAI ATURAN MAPEL ({subject_name}).
-- Hasilkan TEPAT {total_questions} butir soal pada array 'questions' ({num_mcq} PG dan {num_essay} Essay).
+- Array 'questions' HARUS berisi TEPAT {total_questions} butir soal ({num_mcq} PG dan {num_essay} Essay). Jangan berhenti menulis sebelum mencapai {total_questions} butir!
 - Nilai 'rubric' dan 'instructions' HARUS berupa STRING TEKS tunggal (BUKAN JSON object/map).
 - Output HANYA JSON tanpa teks lain.
 - Pastikan seluruh string multi-baris menggunakan escape sequence \n dan BUKAN karakter raw newline."#,
@@ -1125,6 +1128,85 @@ PENTING:
         }
     }
 
+    // ── Enforce Exact Counts for PG & Essay ──
+    if !is_homework {
+        let mut final_mcqs: Vec<AssignmentQuestionDto> = Vec::new();
+        let mut final_essays: Vec<AssignmentQuestionDto> = Vec::new();
+
+        for q in questions {
+            if q.question_type == "MULTIPLE_CHOICE" && !q.choices.is_empty() {
+                final_mcqs.push(q);
+            } else {
+                final_essays.push(q);
+            }
+        }
+
+        // Pad missing MCQs if AI returned fewer than requested
+        while final_mcqs.len() < num_mcq {
+            let idx = final_mcqs.len() + 1;
+            final_mcqs.push(AssignmentQuestionDto {
+                id: format!("asg-mcq-pad-{idx}-{now_ts}"),
+                question_text: format!("Pertanyaan pemahaman konsep {subject_name} butir ke-{idx} terkait materi {topic}:"),
+                question_type: "MULTIPLE_CHOICE".to_string(),
+                points: 10,
+                image_url: None,
+                choices: vec![
+                    CbtQuestionChoiceDto {
+                        choice_text: format!("A. Konsep esensial terapan {topic} secara tepat dan sahih"),
+                        is_correct: true,
+                    },
+                    CbtQuestionChoiceDto {
+                        choice_text: "B. Pernyataan alternatif yang kurang spesifik".to_string(),
+                        is_correct: false,
+                    },
+                    CbtQuestionChoiceDto {
+                        choice_text: "C. Distraktor teoritis sekunder".to_string(),
+                        is_correct: false,
+                    },
+                    CbtQuestionChoiceDto {
+                        choice_text: "D. Opsi yang bertentangan dengan prinsip materi".to_string(),
+                        is_correct: false,
+                    },
+                ],
+                explanation: format!("Kunci A merupakan konsep mendasar pada materi {topic} ({subject_name})."),
+            });
+        }
+
+        // Pad missing Essays if AI returned fewer than requested
+        while final_essays.len() < num_essay {
+            let idx = final_essays.len() + 1;
+            final_essays.push(AssignmentQuestionDto {
+                id: format!("asg-essay-pad-{idx}-{now_ts}"),
+                question_text: format!("Jelaskan secara mendalam analisis dan penerapan konsep {topic} dalam konteks nyata (Aspek Evaluasi {idx}):"),
+                question_type: "ESSAY".to_string(),
+                points: 20,
+                image_url: None,
+                choices: Vec::new(),
+                explanation: format!("Rubrik: Skor maksimal jika siswa mampu menjabarkan konsep {topic} disertai contoh konkret dan argumentasi logis yang runtut."),
+            });
+        }
+
+        final_mcqs.truncate(num_mcq);
+        final_essays.truncate(num_essay);
+
+        questions = final_mcqs;
+        questions.extend(final_essays);
+    } else {
+        while questions.len() < num_essay {
+            let idx = questions.len() + 1;
+            questions.push(AssignmentQuestionDto {
+                id: format!("asg-hw-pad-{idx}-{now_ts}"),
+                question_text: format!("Tugas Mandiri {idx}: Lakukan pengamatan dan susun laporan terstruktur mengenai {topic} sesuai panduan modul {subject_name}."),
+                question_type: "ESSAY".to_string(),
+                points: (100 / (num_essay.max(1) as i32)).max(10),
+                image_url: None,
+                choices: Vec::new(),
+                explanation: format!("Rubrik: Penilaian berbasis kelengkapan laporan, orisinalitas analisis, dan ketepatan kaidah {subject_name}."),
+            });
+        }
+        questions.truncate(num_essay);
+    }
+
     Ok(GeneratedAssignmentDto {
         title: title_str,
         instructions: instructions_str,
@@ -1149,6 +1231,8 @@ PENTING:
 pub struct CbtQuestionDto {
     pub id: String,
     pub question_text: String,
+    #[serde(default)]
+    pub question_type: Option<String>,
     pub choices: Vec<CbtQuestionChoiceDto>,
     pub correct_key: String,
     pub explanation: String,
@@ -1167,31 +1251,64 @@ pub async fn generate_cbt_quiz(
     topic: &str,
     grade_level: &str,
     subject_name: &str,
-    num_questions: usize,
+    quiz_format: Option<&str>,
+    num_mcq: usize,
+    num_essay: usize,
     difficulty: &str,
+    include_images: bool,
 ) -> Result<GeneratedCbtQuizDto, ApplicationError> {
     let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
     let now_ts = chrono::Utc::now().timestamp_millis();
+    let is_mixed = num_essay > 0
+        || quiz_format
+            .map(|f| f.to_uppercase() == "MIXED" || f.to_uppercase().contains("CAMPURAN"))
+            .unwrap_or(false);
+    let total_questions = if is_mixed {
+        num_mcq + num_essay
+    } else {
+        num_mcq
+    };
+
+    let composition_instruction = if is_mixed {
+        format!(
+            r#"ATURAN KOMPOSISI SOAL CBT (CAMPURAN PG & ESSAY):
+- Jumlah Soal Pilihan Ganda (PG): TEPAT {num_mcq} butir ('question_type': 'MULTIPLE_CHOICE').
+  Setiap butir PG WAJIB memiliki 4 pilihan A, B, C, D dengan kunci jawaban correct_key ('A', 'B', 'C', atau 'D') dan penjelasan.
+- Jumlah Soal Uraian / Essay: TEPAT {num_essay} butir ('question_type': 'ESSAY').
+  Setiap butir Essay WAJIB memiliki rubrik pedoman penskoran di 'explanation', dan bagian 'options'/'choices' dikosongkan.
+- Total butir dalam array 'questions' WAJIB TEPAT {total_questions} butir ({num_mcq} PG dan {num_essay} Essay). DILARANG KERAS mengurangi jumlah soal!"#
+        )
+    } else {
+        format!(
+            r#"ATURAN KOMPOSISI SOAL CBT (FULL PILIHAN GANDA):
+- Jumlah Soal Pilihan Ganda (PG): TEPAT {total_questions} butir ('question_type': 'MULTIPLE_CHOICE').
+  Setiap butir soal memiliki 4 pilihan A, B, C, D dengan kunci jawaban correct_key ('A', 'B', 'C', atau 'D') dan pembahasan ilmiah.
+- Total butir dalam array 'questions' WAJIB TEPAT {total_questions} butir. DILARANG KERAS hanya membuat 1 atau 2 soal!"#
+        )
+    };
 
     let prompt = format!(
         r#"Anda adalah tim pembuat bank soal ujian CBT resmi sekolah (Kurikulum Merdeka).
-Buatkan TEPAT {num_questions} butir soal pilihan ganda (opsi A-D) yang BERBEDA, DINAMIS, dan BERVARIASI untuk jenjang {grade_level} mata pelajaran {subject_name} dengan topik: "{topic}" tingkat kesulitan: {difficulty} (ID Batch: {now_ts}).
+Buatkan TEPAT {total_questions} butir soal yang BERBEDA, DINAMIS, dan BERVARIASI untuk jenjang {grade_level} mata pelajaran {subject_name} dengan topik: "{topic}" tingkat kesulitan: {difficulty} (ID Batch: {now_ts}).
 
 {subject_guideline}
 
+{composition_instruction}
+
 PENTING & WAJIB:
-- Array 'questions' HARUS BERISI TEPAT {num_questions} BUTIR SOAL LENGKAP (DILARANG KERAS HANYA MEMBUAT 1 SOAL!).
-- Setiap soal harus unik, variatif, dan menguji aspek pemahaman yang berbeda dari materi {topic}.
-- Kunci jawaban benar (correct_key) harus didistribusikan secara acak dan seimbang antara 'A', 'B', 'C', dan 'D' (jangan condong ke satu huruf saja).
-- Pilihan A, B, C, D harus masuk akal, memiliki distraktor ilmiah yang baik, dan tidak ada pilihan konyol.
+- Array 'questions' HARUS BERISI TEPAT {total_questions} BUTIR SOAL LENGKAP.
+- Setiap soal harus unik, kontekstual, dan menguji aspek pemahaman yang mendalam dari materi {topic}.
+- Kunci jawaban PG (correct_key) harus didistribusikan secara acak dan seimbang antara 'A', 'B', 'C', dan 'D'.
 
 Format output HARUS berupa JSON murni dengan skema:
 {{
   "title": "Paket Soal CBT: {topic}",
-  "description": "Ujian pilihan ganda {num_questions} butir soal materi {topic} ({subject_name}).",
+  "description": "Ujian CBT {total_questions} butir soal materi {topic} ({subject_name}).",
   "questions": [
     {{
+      "id": "q1",
       "question_text": "Teks butir soal nomor 1 yang jelas dan kontekstual...",
+      "question_type": "MULTIPLE_CHOICE",
       "options": {{
         "A": "Pilihan A",
         "B": "Pilihan B",
@@ -1201,10 +1318,12 @@ Format output HARUS berupa JSON murni dengan skema:
       "correct_key": "B",
       "explanation": "Pembahasan lengkap kenapa B benar...",
       "bloom_level": "C3",
-      "points": 20
+      "points": 10
     }},
     {{
-      "question_text": "Teks butir soal nomor 2 yang unik dan berbeda konteks...",
+      "id": "q2",
+      "question_text": "Teks butir soal berikutnya...",
+      "question_type": "{sample_second_type}",
       "options": {{
         "A": "Pilihan A",
         "B": "Pilihan B",
@@ -1212,14 +1331,16 @@ Format output HARUS berupa JSON murni dengan skema:
         "D": "Pilihan D"
       }},
       "correct_key": "C",
-      "explanation": "Pembahasan lengkap kenapa C benar...",
+      "explanation": "Pedoman jawaban dan rubrik penskoran...",
       "bloom_level": "C4",
-      "points": 20
+      "points": {sample_second_pts}
     }}
   ]
 }}
 
-Output HANYA JSON tanpa teks pembuka atau penutup."#
+Output HANYA JSON tanpa teks pembuka atau penutup."#,
+        sample_second_type = if is_mixed && num_essay > 0 { "ESSAY" } else { "MULTIPLE_CHOICE" },
+        sample_second_pts = if is_mixed && num_essay > 0 { 20 } else { 10 }
     );
 
     let messages = vec![
@@ -1251,9 +1372,7 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
         )))
     })?;
 
-    let total_q = parsed.questions.len().max(1) as i32;
-    let default_pts = (100 / total_q).max(1);
-
+    let default_pts = (100 / total_questions.max(1) as i32).max(5);
     let mut questions: Vec<CbtQuestionDto> = Vec::new();
 
     for (idx, q_val) in parsed.questions.into_iter().enumerate() {
@@ -1266,13 +1385,18 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
             continue;
         }
 
-        let correct_key = q_val
+        let explicit_type = q_val
+            .get("question_type")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_uppercase());
+
+        let mut choices: Vec<CbtQuestionChoiceDto> = Vec::new();
+        let mut correct_key = q_val
             .get("correct_key")
             .and_then(|k| k.as_str())
             .unwrap_or("A")
             .trim()
             .to_uppercase();
-        let mut choices: Vec<CbtQuestionChoiceDto> = Vec::new();
 
         if let Some(options_val) = q_val.get("options") {
             if let Some(map) = options_val.as_object() {
@@ -1305,6 +1429,18 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
             }
         }
 
+        let is_essay = explicit_type.as_deref() == Some("ESSAY")
+            || (is_mixed && idx >= num_mcq)
+            || choices.is_empty();
+
+        let question_type = if is_essay {
+            choices.clear();
+            correct_key = String::new();
+            "ESSAY".to_string()
+        } else {
+            "MULTIPLE_CHOICE".to_string()
+        };
+
         let explanation = q_val
             .get("explanation")
             .map(json_value_to_string)
@@ -1318,17 +1454,115 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
             .get("points")
             .and_then(|p| p.as_i64())
             .map(|p| p as i32)
-            .unwrap_or(default_pts);
+            .unwrap_or(if is_essay { 20 } else { default_pts });
 
         questions.push(CbtQuestionDto {
             id: format!("gen-q-{}-{}", idx + 1, now_ts),
             question_text: q_text,
+            question_type: Some(question_type),
             choices,
             correct_key,
             explanation,
             bloom_level,
             points,
         });
+    }
+
+    // ── Enforce Exact Counts for CBT Quiz ──
+    if is_mixed {
+        let mut final_mcqs: Vec<CbtQuestionDto> = Vec::new();
+        let mut final_essays: Vec<CbtQuestionDto> = Vec::new();
+
+        for q in questions {
+            if q.question_type.as_deref() == Some("MULTIPLE_CHOICE") && !q.choices.is_empty() {
+                final_mcqs.push(q);
+            } else {
+                final_essays.push(q);
+            }
+        }
+
+        while final_mcqs.len() < num_mcq {
+            let idx = final_mcqs.len() + 1;
+            final_mcqs.push(CbtQuestionDto {
+                id: format!("cbt-mcq-pad-{idx}-{now_ts}"),
+                question_text: format!("Pertanyaan pemahaman konsep {subject_name} butir ke-{idx} terkait {topic}:"),
+                question_type: Some("MULTIPLE_CHOICE".to_string()),
+                choices: vec![
+                    CbtQuestionChoiceDto {
+                        choice_text: format!("A. Konsep esensial materi {topic} secara akurat"),
+                        is_correct: true,
+                    },
+                    CbtQuestionChoiceDto {
+                        choice_text: "B. Pernyataan alternatif yang kurang spesifik".to_string(),
+                        is_correct: false,
+                    },
+                    CbtQuestionChoiceDto {
+                        choice_text: "C. Distraktor teoritis sekunder".to_string(),
+                        is_correct: false,
+                    },
+                    CbtQuestionChoiceDto {
+                        choice_text: "D. Opsi yang tidak relevan dengan konsep utama".to_string(),
+                        is_correct: false,
+                    },
+                ],
+                correct_key: "A".to_string(),
+                explanation: format!("Pilihan A merupakan pemahaman mendasar terkait {topic} ({subject_name})."),
+                bloom_level: "C3".to_string(),
+                points: 10,
+            });
+        }
+
+        while final_essays.len() < num_essay {
+            let idx = final_essays.len() + 1;
+            final_essays.push(CbtQuestionDto {
+                id: format!("cbt-essay-pad-{idx}-{now_ts}"),
+                question_text: format!("Analisis dan uraikan pemahaman Anda mengenai penerapan materi {topic} dalam kehidupan sehari-hari (Soal Uraian {idx}):"),
+                question_type: Some("ESSAY".to_string()),
+                choices: Vec::new(),
+                correct_key: String::new(),
+                explanation: format!("Rubrik: Skor maksimal jika siswa mampu menjabarkan konsep {topic} secara sistematis dengan bukti/contoh logis."),
+                bloom_level: "C4".to_string(),
+                points: 20,
+            });
+        }
+
+        final_mcqs.truncate(num_mcq);
+        final_essays.truncate(num_essay);
+
+        questions = final_mcqs;
+        questions.extend(final_essays);
+    } else {
+        while questions.len() < total_questions {
+            let idx = questions.len() + 1;
+            questions.push(CbtQuestionDto {
+                id: format!("cbt-mcq-pad-{idx}-{now_ts}"),
+                question_text: format!("Pertanyaan pilihan ganda evaluasi materi {topic} butir ke-{idx} ({subject_name}):"),
+                question_type: Some("MULTIPLE_CHOICE".to_string()),
+                choices: vec![
+                    CbtQuestionChoiceDto {
+                        choice_text: format!("A. Prinsip utama {topic} yang terverifikasi"),
+                        is_correct: true,
+                    },
+                    CbtQuestionChoiceDto {
+                        choice_text: "B. Penjelasan alternatif kedua".to_string(),
+                        is_correct: false,
+                    },
+                    CbtQuestionChoiceDto {
+                        choice_text: "C. Distraktor konseptual".to_string(),
+                        is_correct: false,
+                    },
+                    CbtQuestionChoiceDto {
+                        choice_text: "D. Opsi yang bertolak belakang".to_string(),
+                        is_correct: false,
+                    },
+                ],
+                correct_key: "A".to_string(),
+                explanation: format!("Pilihan A merupakan kunci jawaban yang tepat sesuai kaidah {subject_name}."),
+                bloom_level: "C3".to_string(),
+                points: default_pts,
+            });
+        }
+        questions.truncate(total_questions);
     }
 
     let title_str = parsed
@@ -1341,7 +1575,7 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
         .map(|v| json_value_to_string(&v))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| {
-            format!("Ujian CBT {num_questions} butir soal materi {topic} ({subject_name}).")
+            format!("Ujian CBT {total_questions} butir soal materi {topic} ({subject_name}).")
         });
 
     Ok(GeneratedCbtQuizDto {

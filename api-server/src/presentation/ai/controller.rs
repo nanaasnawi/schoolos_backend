@@ -33,6 +33,7 @@ pub struct GenerateAiContentRequest {
     pub num_essay: Option<usize>,
     pub difficulty: Option<String>,
     pub assignment_format: Option<String>,
+    pub quiz_format: Option<String>,
     pub include_images: Option<bool>,
 }
 
@@ -153,10 +154,30 @@ async fn generate_content(
             )))
         }
         "QUIZ" => {
-            let total_q = payload.num_mcq.or(payload.num_questions).unwrap_or(num_q).clamp(1, 20);
-            let quiz = nvidia_ai::generate_cbt_quiz(topic, grade, subject, total_q, diff)
-                .await
-                .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
+            let quiz_format = payload.quiz_format.as_deref();
+            let is_mixed = quiz_format
+                .map(|f| f.to_uppercase() == "MIXED" || f.to_uppercase().contains("CAMPURAN"))
+                .unwrap_or_else(|| payload.num_essay.map(|e| e > 0).unwrap_or(false));
+            let num_mcq = payload.num_mcq.or(payload.num_questions).unwrap_or(if is_mixed { 10 } else { num_q }).clamp(0, 20);
+            let num_essay = if is_mixed {
+                payload.num_essay.unwrap_or(5).clamp(0, 10)
+            } else {
+                0
+            };
+            let include_images = payload.include_images.unwrap_or(false);
+
+            let quiz = nvidia_ai::generate_cbt_quiz(
+                topic,
+                grade,
+                subject,
+                quiz_format,
+                num_mcq,
+                num_essay,
+                diff,
+                include_images,
+            )
+            .await
+            .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
             Ok(Json(ApiResponse::success(
                 GenerateAiContentResponse {
