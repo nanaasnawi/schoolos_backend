@@ -1096,7 +1096,7 @@ pub async fn get_atp_matrix(
         FROM learning_objectives tp
         JOIN learning_outcomes lo ON lo.id = tp.learning_outcome_id
         LEFT JOIN learning_objective_flows atp ON atp.learning_objective_id = tp.id
-        WHERE tp.learning_outcome_id = $1
+        WHERE ($1 IS NULL OR tp.learning_outcome_id = $1)
           AND tp.is_superseded = false
           AND ($2 IS NULL OR tp.tenant_id = $2 OR tp.tenant_id IS NULL)
           AND tp.deleted_at IS NULL

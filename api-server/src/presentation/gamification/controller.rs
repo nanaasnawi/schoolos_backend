@@ -45,7 +45,7 @@ pub struct GamificationStatusResponse {
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct AwardXpPayload {
-    pub student_id: Uuid,
+    pub student_id: Option<Uuid>,
     pub action_type: String,
     pub reference_id: Option<Uuid>,
     pub description: Option<String>,
@@ -181,17 +181,37 @@ pub async fn award_student_xp(
     Json(payload): Json<AwardXpPayload>,
 ) -> Result<Json<ApiResponse<AwardXpResponse>>, ApiError> {
     // Resolve target student id & tenant id
-    let resolved_student = sqlx::query(
-        "SELECT id, tenant_id FROM students WHERE (id = $1 OR user_id = $1) LIMIT 1"
-    )
-    .bind(payload.student_id)
-    .fetch_optional(&ctx.pool)
-    .await
-    .map_err(|e| ApiError::new(ApplicationError::Infrastructure(InfrastructureError::Database(e)), &req_ctx.request_id))?;
+    let (effective_student_id, effective_tenant_id) = match payload.student_id {
+        Some(sid) => {
+            let resolved = sqlx::query(
+                "SELECT id, tenant_id FROM students WHERE (id = $1 OR user_id = $1) LIMIT 1"
+            )
+            .bind(sid)
+            .fetch_optional(&ctx.pool)
+            .await
+            .map_err(|e| ApiError::new(ApplicationError::Infrastructure(InfrastructureError::Database(e)), &req_ctx.request_id))?;
 
-    let (effective_student_id, effective_tenant_id) = match resolved_student {
-        Some(r) => (r.get::<Uuid, _>("id"), r.get::<Uuid, _>("tenant_id")),
-        None => (payload.student_id, req_ctx.tenant_id),
+            match resolved {
+                Some(r) => (r.get::<Uuid, _>("id"), r.get::<Uuid, _>("tenant_id")),
+                None => (sid, req_ctx.tenant_id),
+            }
+        }
+        None => {
+            let actor_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
+            let resolved = sqlx::query(
+                "SELECT id, tenant_id FROM students WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 LIMIT 1"
+            )
+            .bind(actor_id)
+            .bind(req_ctx.tenant_id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .map_err(|e| ApiError::new(ApplicationError::Infrastructure(InfrastructureError::Database(e)), &req_ctx.request_id))?;
+
+            match resolved {
+                Some(r) => (r.get::<Uuid, _>("id"), r.get::<Uuid, _>("tenant_id")),
+                None => (actor_id, req_ctx.tenant_id),
+            }
+        }
     };
 
     let action_clean = payload.action_type.to_uppercase();
