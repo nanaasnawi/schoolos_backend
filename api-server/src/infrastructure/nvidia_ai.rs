@@ -144,6 +144,46 @@ pub fn extract_clean_json(text: &str) -> &str {
     trimmed
 }
 
+/// Sanitasi string JSON terhadap karakter kontrol unescaped (RFC 8259: newline, carriage return, tab, ASCII < 0x20)
+/// yang sering dihasilkan oleh LLM dalam teks multi-baris sehingga menyebabkan serde_json error.
+pub fn sanitize_json_control_chars(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() + 64);
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for c in input.chars() {
+        if !in_string {
+            if c == '"' {
+                in_string = true;
+            }
+            out.push(c);
+        } else {
+            if escaped {
+                out.push(c);
+                escaped = false;
+            } else if c == '\\' {
+                out.push(c);
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+                out.push(c);
+            } else if c == '\n' {
+                out.push_str("\\n");
+            } else if c == '\r' {
+                out.push_str("\\r");
+            } else if c == '\t' {
+                out.push_str("\\t");
+            } else if (c as u32) < 0x20 {
+                out.push(' ');
+            } else {
+                out.push(c);
+            }
+        }
+    }
+
+    out
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. INFOGRAPHIC GENERATION DTOs & FUNCTION
 // ─────────────────────────────────────────────────────────────────────────────
@@ -671,7 +711,8 @@ Format output HARUS berupa JSON murni dengan skema:
 
 PENTING:
 - Pastikan teks soal dan pilihan jawaban SESUAI ATURAN MAPEL ({subject_name}).
-- Output HANYA JSON tanpa teks lain."#,
+- Output HANYA JSON tanpa teks lain.
+- Pastikan seluruh string multi-baris menggunakan escape sequence \n dan BUKAN karakter raw newline."#,
         assignment_type_val = if is_homework { "HOMEWORK_PR" } else { "STRUCTURED_QUESTIONS" }
     );
 
@@ -688,6 +729,7 @@ PENTING:
 
     let raw = call_nvidia_nim(messages, 0.3, 3500).await?;
     let cleaned = extract_clean_json(&raw);
+    let sanitized = sanitize_json_control_chars(cleaned);
 
     #[derive(Deserialize)]
     struct RawAssignmentQuestion {
@@ -714,7 +756,7 @@ PENTING:
         questions: Vec<RawAssignmentQuestion>,
     }
 
-    let parsed: RawAssignmentResponse = serde_json::from_str(cleaned)
+    let parsed: RawAssignmentResponse = serde_json::from_str(&sanitized)
         .map_err(|e| ApplicationError::Domain(DomainError::Validation(format!("Invalid AI Assignment JSON: {e}"))))?;
 
     let safe_visual_url = if include_images {
@@ -846,8 +888,9 @@ Output HANYA JSON tanpa teks lain."#
 
     let raw = call_nvidia_nim(messages, 0.3, 2500).await?;
     let cleaned = extract_clean_json(&raw);
+    let sanitized = sanitize_json_control_chars(cleaned);
 
-    let parsed: RawQuizResponse = serde_json::from_str(cleaned)
+    let parsed: RawQuizResponse = serde_json::from_str(&sanitized)
         .map_err(|e| ApplicationError::Domain(DomainError::Validation(format!("Invalid AI CBT Quiz JSON: {e}"))))?;
 
     let now_ts = chrono::Utc::now().timestamp_millis();
