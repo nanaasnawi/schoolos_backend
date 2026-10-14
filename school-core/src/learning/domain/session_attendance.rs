@@ -38,10 +38,9 @@ impl Clone for SessionAttendance {
 impl SessionAttendance {
     pub fn normalize_status(raw: &str) -> String {
         match raw.trim().to_lowercase().as_str() {
-            "present" | "hadir" | "h" => "present".to_string(),
+            "present" | "hadir" | "h" | "late" | "terlambat" | "t" => "present".to_string(),
             "sick" | "sakit" | "s" => "sick".to_string(),
             "excused" | "izin" | "i" => "excused".to_string(),
-            "late" | "terlambat" | "t" => "late".to_string(),
             _ => "absent".to_string(),
         }
     }
@@ -55,7 +54,7 @@ impl SessionAttendance {
         notes: Option<String>,
     ) -> Self {
         let now = Utc::now();
-        let valid_checked_in = if status.to_lowercase() == "present" || status.to_lowercase() == "late" {
+        let valid_checked_in = if status.to_lowercase() == "present" {
             checked_in_at.or(Some(now))
         } else {
             checked_in_at
@@ -86,7 +85,7 @@ impl SessionAttendance {
         recorded_by: Option<Uuid>,
     ) -> Self {
         let now = Utc::now();
-        let valid_checked_in = if status.to_lowercase() == "present" || status.to_lowercase() == "late" {
+        let valid_checked_in = if status.to_lowercase() == "present" {
             checked_in_at.or(Some(now))
         } else {
             checked_in_at
