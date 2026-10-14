@@ -827,7 +827,7 @@ pub struct AssignmentQuestionDto {
 pub struct GeneratedAssignmentDto {
     pub title: String,
     pub instructions: String,
-    pub assignment_type: String, // "STRUCTURED_QUESTIONS" | "HOMEWORK_PR"
+    pub assignment_type: String,
     pub rubric: String,
     #[serde(default)]
     pub tasks: Vec<String>,
@@ -860,6 +860,65 @@ fn json_value_to_string(val: &serde_json::Value) -> String {
         serde_json::Value::Number(n) => n.to_string(),
         serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Null => String::new(),
+    }
+}
+
+pub fn clean_choice_text(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.len() >= 2 {
+        let first = trimmed.chars().next().unwrap();
+        if first.is_ascii_alphabetic() {
+            let rest = &trimmed[first.len_utf8()..];
+            let mut chars = rest.chars();
+            if let Some(punct) = chars.next() {
+                if punct == '.' || punct == ')' || punct == ':' || punct == '-' {
+                    return chars.as_str().trim_start().to_string();
+                }
+            }
+        }
+    }
+    trimmed.to_string()
+}
+
+pub fn clean_question_stem(raw: &str) -> String {
+    let lines: Vec<&str> = raw.lines().collect();
+    if lines.len() <= 1 {
+        return raw.trim().to_string();
+    }
+
+    let mut cut_idx = lines.len();
+    for i in (0..lines.len()).rev() {
+        let line = lines[i].trim();
+        if line.is_empty() {
+            continue;
+        }
+        let is_choice_line = if line.len() >= 2 {
+            let first = line.chars().next().unwrap();
+            if first.is_ascii_alphabetic() {
+                let rest = &line[first.len_utf8()..];
+                if let Some(punct) = rest.chars().next() {
+                    punct == '.' || punct == ')' || punct == ':' || punct == '-'
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if is_choice_line {
+            cut_idx = i;
+        } else {
+            break;
+        }
+    }
+
+    if cut_idx > 0 && cut_idx < lines.len() {
+        lines[..cut_idx].join("\n").trim().to_string()
+    } else {
+        raw.trim().to_string()
     }
 }
 
@@ -940,8 +999,10 @@ Format output HARUS berupa JSON murni dengan skema:
   ]
 }}
 
-PENTING:
+PENTING & WAJIB:
 - Pastikan teks soal dan pilihan jawaban SESUAI ATURAN MAPEL ({subject_name}).
+- 'question_text' HANYA BERISI TEKS PERTANYAAN UTAMA / STIMULUS SOAL. DILARANG KERAS MENYISIPKAN OPSI PILIHAN JAWABAN (A, B, C, D) KE DALAM 'question_text'. Seluruh opsi pilihan HANYA boleh ada di dalam array 'choices'!
+- Nilai 'choice_text' di dalam 'choices' HANYA berisi kalimat jawaban tanpa menyertakan label prefix 'A.', 'B.', 'C.', atau 'D.'.
 - Array 'questions' HARUS berisi TEPAT {total_questions} butir soal ({num_mcq} PG dan {num_essay} Essay). Jangan berhenti menulis sebelum mencapai {total_questions} butir!
 - Nilai 'rubric' dan 'instructions' HARUS berupa STRING TEKS tunggal (BUKAN JSON object/map).
 - Output HANYA JSON tanpa teks lain.
@@ -1022,11 +1083,12 @@ PENTING:
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("asg-q-{}", idx + 1));
-        let q_text = q_val
+        let q_text_raw = q_val
             .get("question_text")
             .or_else(|| q_val.get("text"))
             .map(json_value_to_string)
             .unwrap_or_default();
+        let q_text = clean_question_stem(&q_text_raw);
         if q_text.trim().is_empty() {
             continue;
         }
@@ -1035,11 +1097,12 @@ PENTING:
         if let Some(choices_val) = q_val.get("choices") {
             if let Some(c_arr) = choices_val.as_array() {
                 for (c_idx, c_item) in c_arr.iter().enumerate() {
-                    let c_text = c_item
+                    let c_text_raw = c_item
                         .get("choice_text")
                         .or_else(|| c_item.get("text"))
                         .map(json_value_to_string)
                         .unwrap_or_else(|| json_value_to_string(c_item));
+                    let c_text = clean_choice_text(&c_text_raw);
                     let is_correct = c_item
                         .get("is_correct")
                         .and_then(|b| b.as_bool())
@@ -1057,7 +1120,8 @@ PENTING:
                     .and_then(|k| k.as_str())
                     .unwrap_or("A");
                 for (k, v) in map {
-                    let c_text = format!("{k}. {}", json_value_to_string(v));
+                    let raw_v = json_value_to_string(v);
+                    let c_text = clean_choice_text(&raw_v);
                     let is_correct = k.trim().eq_ignore_ascii_case(correct_key.trim());
                     choices.push(CbtQuestionChoiceDto {
                         choice_text: c_text,
@@ -1339,7 +1403,11 @@ Format output HARUS berupa JSON murni dengan skema:
 }}
 
 Output HANYA JSON tanpa teks pembuka atau penutup."#,
-        sample_second_type = if is_mixed && num_essay > 0 { "ESSAY" } else { "MULTIPLE_CHOICE" },
+        sample_second_type = if is_mixed && num_essay > 0 {
+            "ESSAY"
+        } else {
+            "MULTIPLE_CHOICE"
+        },
         sample_second_pts = if is_mixed && num_essay > 0 { 20 } else { 10 }
     );
 
@@ -1376,11 +1444,12 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#,
     let mut questions: Vec<CbtQuestionDto> = Vec::new();
 
     for (idx, q_val) in parsed.questions.into_iter().enumerate() {
-        let q_text = q_val
+        let q_text_raw = q_val
             .get("question_text")
             .or_else(|| q_val.get("text"))
             .map(json_value_to_string)
             .unwrap_or_default();
+        let q_text = clean_question_stem(&q_text_raw);
         if q_text.trim().is_empty() {
             continue;
         }
@@ -1403,8 +1472,9 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#,
                 for (key, val) in map {
                     let k_upper = key.trim().to_uppercase();
                     let is_correct = k_upper == correct_key;
+                    let clean_val = clean_choice_text(&json_value_to_string(val));
                     choices.push(CbtQuestionChoiceDto {
-                        choice_text: format!("{key}. {}", json_value_to_string(val)),
+                        choice_text: clean_val,
                         is_correct,
                     });
                 }
@@ -1412,11 +1482,12 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#,
         } else if let Some(choices_val) = q_val.get("choices") {
             if let Some(arr) = choices_val.as_array() {
                 for (c_idx, c_item) in arr.iter().enumerate() {
-                    let c_text = c_item
+                    let c_text_raw = c_item
                         .get("choice_text")
                         .or_else(|| c_item.get("text"))
                         .map(json_value_to_string)
                         .unwrap_or_else(|| json_value_to_string(c_item));
+                    let c_text = clean_choice_text(&c_text_raw);
                     let is_correct = c_item
                         .get("is_correct")
                         .and_then(|b| b.as_bool())
@@ -1485,7 +1556,9 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#,
             let idx = final_mcqs.len() + 1;
             final_mcqs.push(CbtQuestionDto {
                 id: format!("cbt-mcq-pad-{idx}-{now_ts}"),
-                question_text: format!("Pertanyaan pemahaman konsep {subject_name} butir ke-{idx} terkait {topic}:"),
+                question_text: format!(
+                    "Pertanyaan pemahaman konsep {subject_name} butir ke-{idx} terkait {topic}:"
+                ),
                 question_type: Some("MULTIPLE_CHOICE".to_string()),
                 choices: vec![
                     CbtQuestionChoiceDto {
@@ -1506,7 +1579,9 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#,
                     },
                 ],
                 correct_key: "A".to_string(),
-                explanation: format!("Pilihan A merupakan pemahaman mendasar terkait {topic} ({subject_name})."),
+                explanation: format!(
+                    "Pilihan A merupakan pemahaman mendasar terkait {topic} ({subject_name})."
+                ),
                 bloom_level: "C3".to_string(),
                 points: 10,
             });

@@ -333,6 +333,8 @@ pub enum FcmTarget {
     Roles(Vec<String>),
     /// Spesifik untuk 1 rombel / kelas: "class_{class_id}"
     Class(Uuid),
+    /// Spesifik untuk beberapa rombel / kelas paralel: "class_{class_id}"
+    Classes(Vec<Uuid>),
     /// Spesifik untuk 1 pengguna (private 1-to-1 chat, tanya-jawab murid/guru): "user_{user_id}"
     User(Uuid),
     /// Custom topic
@@ -510,6 +512,24 @@ pub fn trigger_fcm_push_targeted(
                     message_obj["condition"] = serde_json::Value::String(cond);
                 } else {
                     message_obj["topic"] = serde_json::Value::String(format!("class_{}", clean));
+                }
+            }
+            FcmTarget::Classes(cids) => {
+                if cids.is_empty() {
+                    return;
+                } else if cids.len() == 1 {
+                    let clean = cids[0].to_string().replace('-', "");
+                    message_obj["topic"] = serde_json::Value::String(format!("class_{}", clean));
+                } else {
+                    let cond = cids
+                        .iter()
+                        .map(|c| {
+                            let clean = c.to_string().replace('-', "");
+                            format!("'class_{}' in topics", clean)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" || ");
+                    message_obj["condition"] = serde_json::Value::String(cond);
                 }
             }
             FcmTarget::User(uid) => {

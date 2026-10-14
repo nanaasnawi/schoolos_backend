@@ -385,8 +385,10 @@ async fn create(
                 'ASSIGNMENT', 'in_app', 'assignment', $4, FALSE, NOW()
             FROM students s
             JOIN enrollments en ON en.student_id = s.id
+            JOIN classes en_c ON en_c.id = en.class_id
+            LEFT JOIN classes target_c ON target_c.id = $5
             WHERE s.tenant_id = $3
-              AND ($5::uuid IS NULL OR en.class_id = $5)
+              AND ($5::uuid IS NULL OR en_c.id = $5 OR (en_c.tingkat IS NOT NULL AND en_c.tingkat != '' AND target_c.tingkat IS NOT NULL AND en_c.tingkat = target_c.tingkat))
               AND (en.status = 'Active' OR en.status = 'ACTIVE')
             "#,
         )
@@ -399,7 +401,20 @@ async fn create(
         .await;
 
         let fcm_target = if let Some(class_uuid) = cid {
-            crate::infrastructure::fcm::FcmTarget::Class(class_uuid)
+            let sibling_cids = sqlx::query_scalar::<_, Uuid>(
+                r#"
+                SELECT sib.id FROM classes c
+                JOIN classes sib ON sib.tenant_id = c.tenant_id
+                     AND (sib.id = c.id OR (sib.tingkat IS NOT NULL AND sib.tingkat != '' AND sib.tingkat = c.tingkat))
+                WHERE c.id = $1
+                "#
+            )
+            .bind(class_uuid)
+            .fetch_all(&ctx.pool)
+            .await
+            .unwrap_or_else(|_| vec![class_uuid]);
+
+            crate::infrastructure::fcm::FcmTarget::Classes(sibling_cids)
         } else {
             crate::infrastructure::fcm::FcmTarget::Roles(vec!["student".to_string()])
         };
@@ -615,15 +630,21 @@ async fn list(
               AND (
                   a.class_id IS NULL
                   OR a.class_id IN (
-                      SELECT en.class_id 
+                      SELECT sibling_c.id 
                       FROM students s
                       JOIN enrollments en ON en.student_id = s.id
+                      JOIN classes en_c ON en_c.id = en.class_id
+                      JOIN classes sibling_c ON sibling_c.tenant_id = en_c.tenant_id
+                           AND (sibling_c.id = en_c.id OR (sibling_c.tingkat IS NOT NULL AND sibling_c.tingkat != '' AND sibling_c.tingkat = en_c.tingkat))
                       WHERE s.user_id = $2 AND (en.status = 'Active' OR en.status = 'ACTIVE')
                       UNION
-                      SELECT en.class_id 
+                      SELECT sibling_c.id 
                       FROM guardians g
                       JOIN students s ON s.guardian_id = g.id
                       JOIN enrollments en ON en.student_id = s.id
+                      JOIN classes en_c ON en_c.id = en.class_id
+                      JOIN classes sibling_c ON sibling_c.tenant_id = en_c.tenant_id
+                           AND (sibling_c.id = en_c.id OR (sibling_c.tingkat IS NOT NULL AND sibling_c.tingkat != '' AND sibling_c.tingkat = en_c.tingkat))
                       WHERE g.user_id = $2 AND (en.status = 'Active' OR en.status = 'ACTIVE')
                   )
               )
@@ -1493,7 +1514,9 @@ async fn get_submissions(
                     JOIN students s ON s.id = en.student_id
                     LEFT JOIN users u ON u.id = s.user_id
                     LEFT JOIN assignment_submissions sub ON sub.assignment_id = $1 AND (sub.student_id = s.id OR (s.user_id IS NOT NULL AND sub.student_id = s.user_id))
-                    WHERE en.class_id = $2
+                    JOIN classes en_c ON en_c.id = en.class_id
+                    LEFT JOIN classes target_c ON target_c.id = $2
+                    WHERE ($2::uuid IS NULL OR en_c.id = $2 OR (en_c.tingkat IS NOT NULL AND en_c.tingkat != '' AND target_c.tingkat IS NOT NULL AND en_c.tingkat = target_c.tingkat))
                       AND (en.status = 'Active' OR en.status = 'ACTIVE' OR en.status IS NULL)
                     ORDER BY s.id, (sub.status IS NOT NULL AND sub.status != 'unsubmitted') DESC
                 ) subquery
