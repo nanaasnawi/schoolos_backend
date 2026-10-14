@@ -1422,7 +1422,7 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#,
         },
     ];
 
-    let raw = call_nvidia_nim(messages, 0.65, 3800).await?;
+    let raw = call_nvidia_nim(messages, 0.65, 4500).await?;
     let cleaned = extract_clean_json(&raw);
     let sanitized = sanitize_json_control_chars(cleaned);
 
@@ -1467,8 +1467,14 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#,
             .trim()
             .to_uppercase();
 
-        if let Some(options_val) = q_val.get("options") {
-            if let Some(map) = options_val.as_object() {
+        let raw_choices_val = q_val
+            .get("options")
+            .or_else(|| q_val.get("choices"))
+            .or_else(|| q_val.get("pilihan"))
+            .or_else(|| q_val.get("opsi"));
+
+        if let Some(opts) = raw_choices_val {
+            if let Some(map) = opts.as_object() {
                 for (key, val) in map {
                     let k_upper = key.trim().to_uppercase();
                     let is_correct = k_upper == correct_key;
@@ -1478,25 +1484,42 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#,
                         is_correct,
                     });
                 }
-            }
-        } else if let Some(choices_val) = q_val.get("choices") {
-            if let Some(arr) = choices_val.as_array() {
+            } else if let Some(arr) = opts.as_array() {
                 for (c_idx, c_item) in arr.iter().enumerate() {
-                    let c_text_raw = c_item
-                        .get("choice_text")
-                        .or_else(|| c_item.get("text"))
-                        .map(json_value_to_string)
-                        .unwrap_or_else(|| json_value_to_string(c_item));
-                    let c_text = clean_choice_text(&c_text_raw);
-                    let is_correct = c_item
-                        .get("is_correct")
-                        .and_then(|b| b.as_bool())
-                        .unwrap_or(c_idx == 0);
+                    let letter = ((b'A' + (c_idx as u8).min(25)) as char).to_string();
+                    let c_text_raw = if let Some(obj) = c_item.as_object() {
+                        obj.get("choice_text")
+                            .or_else(|| obj.get("text"))
+                            .map(json_value_to_string)
+                            .unwrap_or_else(|| json_value_to_string(c_item))
+                    } else {
+                        json_value_to_string(c_item)
+                    };
+                    let is_correct = if let Some(obj) = c_item.as_object() {
+                        obj.get("is_correct")
+                            .and_then(|b| b.as_bool())
+                            .unwrap_or(letter == correct_key)
+                    } else {
+                        letter == correct_key
+                    };
                     choices.push(CbtQuestionChoiceDto {
-                        choice_text: c_text,
+                        choice_text: clean_choice_text(&c_text_raw),
                         is_correct,
                     });
                 }
+            }
+        }
+
+        // Ensure at least one choice is marked correct if multiple choice
+        if !choices.is_empty() && !choices.iter().any(|c| c.is_correct) {
+            let target_idx = match correct_key.as_str() {
+                "B" if choices.len() > 1 => 1,
+                "C" if choices.len() > 2 => 2,
+                "D" if choices.len() > 3 => 3,
+                _ => 0,
+            };
+            if let Some(c) = choices.get_mut(target_idx) {
+                c.is_correct = true;
             }
         }
 
@@ -1557,33 +1580,35 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#,
             final_mcqs.push(CbtQuestionDto {
                 id: format!("cbt-mcq-pad-{idx}-{now_ts}"),
                 question_text: format!(
-                    "Pertanyaan pemahaman konsep {subject_name} butir ke-{idx} terkait {topic}:"
+                    "Dalam konteks pembelajaran {}, manakah penjelasan yang paling tepat mengenai implikasi materi {}?",
+                    subject_name, topic
                 ),
                 question_type: Some("MULTIPLE_CHOICE".to_string()),
                 choices: vec![
                     CbtQuestionChoiceDto {
-                        choice_text: format!("A. Konsep esensial materi {topic} secara akurat"),
+                        choice_text: format!("Menganalisis prinsip dan keterkaitan esensial materi {} secara sistematis", topic),
                         is_correct: true,
                     },
                     CbtQuestionChoiceDto {
-                        choice_text: "B. Pernyataan alternatif yang kurang spesifik".to_string(),
+                        choice_text: format!("Memusatkan kajian hanya pada aspek teoritis tanpa implementasi"),
                         is_correct: false,
                     },
                     CbtQuestionChoiceDto {
-                        choice_text: "C. Distraktor teoritis sekunder".to_string(),
+                        choice_text: format!("Mengabaikan variabel kontekstual dalam evaluasi materi"),
                         is_correct: false,
                     },
                     CbtQuestionChoiceDto {
-                        choice_text: "D. Opsi yang tidak relevan dengan konsep utama".to_string(),
+                        choice_text: format!("Menyamaratakan seluruh kondisi tanpa membedakan indikator utama"),
                         is_correct: false,
                     },
                 ],
                 correct_key: "A".to_string(),
                 explanation: format!(
-                    "Pilihan A merupakan pemahaman mendasar terkait {topic} ({subject_name})."
+                    "Pemahaman mendalam tentang {} pada mata pelajaran {} memerlukan analisis sistematis terhadap seluruh prinsip dasarnya.",
+                    topic, subject_name
                 ),
                 bloom_level: "C3".to_string(),
-                points: 10,
+                points: default_pts,
             });
         }
 
@@ -1615,19 +1640,19 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#,
                 question_type: Some("MULTIPLE_CHOICE".to_string()),
                 choices: vec![
                     CbtQuestionChoiceDto {
-                        choice_text: format!("A. Prinsip utama {topic} yang terverifikasi"),
+                        choice_text: format!("Prinsip dan pemahaman utama {} yang terverifikasi secara sahih", topic),
                         is_correct: true,
                     },
                     CbtQuestionChoiceDto {
-                        choice_text: "B. Penjelasan alternatif kedua".to_string(),
+                        choice_text: format!("Kajian sekunder yang kurang relevan dengan pokok bahasan"),
                         is_correct: false,
                     },
                     CbtQuestionChoiceDto {
-                        choice_text: "C. Distraktor konseptual".to_string(),
+                        choice_text: format!("Asumsi umum yang belum teruji keabsahannya"),
                         is_correct: false,
                     },
                     CbtQuestionChoiceDto {
-                        choice_text: "D. Opsi yang bertolak belakang".to_string(),
+                        choice_text: format!("Pernyataan yang berlawanan dengan kaidah {}", subject_name),
                         is_correct: false,
                     },
                 ],
