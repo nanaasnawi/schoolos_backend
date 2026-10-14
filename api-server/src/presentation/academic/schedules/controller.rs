@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
-    routing::{post, put},
+    routing::{get, post, put},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -54,6 +54,27 @@ pub struct ScheduleResponse {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Serialize, Deserialize, sqlx::FromRow, utoipa::ToSchema)]
+pub struct TodayScheduleResponse {
+    pub id: Uuid,
+    pub schedule_id: Uuid,
+    pub session_id: Option<Uuid>,
+    pub class_id: Uuid,
+    pub class_name: String,
+    pub subject_id: Uuid,
+    pub subject_name: String,
+    pub teacher_id: Uuid,
+    pub teacher_name: String,
+    pub teacher_user_id: Option<Uuid>,
+    pub day_of_week: String,
+    pub start_time: String,
+    pub end_time: String,
+    pub room: String,
+    pub status: String,
+    pub is_current: bool,
+    pub is_upcoming: bool,
+}
+
 #[derive(Deserialize)]
 pub struct ScheduleFilterQuery {
     pub class_id: Option<Uuid>,
@@ -64,6 +85,7 @@ pub struct ScheduleFilterQuery {
 pub fn schedule_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/", post(create).get(list))
+        .route("/today", get(today_schedules))
         .route("/{id}", put(update_schedule).delete(delete_schedule))
 }
 
@@ -309,6 +331,145 @@ async fn list(
     .bind(filter_class_id)
     .bind(filter_teacher_id)
     .bind(query.day)
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    Ok(Json(ApiResponse::success(rows, req_ctx.request_id)))
+}
+
+#[utoipa::path(
+    get,
+    operation_id = "todaySchedules",
+    path = "/api/v1/academic/schedules/today",
+    responses(
+        (status = 200, description = "Today schedules with real-time status", body = ApiResponse<Vec<TodayScheduleResponse>>)
+    ),
+    security(("Bearer" = []))
+)]
+async fn today_schedules(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Query(query): Query<ScheduleFilterQuery>,
+) -> Result<Json<ApiResponse<Vec<TodayScheduleResponse>>>, ApiError> {
+    let is_admin_or_staff = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("admin")
+                    || n.contains("kepala")
+                    || n.contains("operator")
+                    || n.contains("tu")
+                    || n.contains("staff")
+                    || n.contains("staf")
+            })
+        })
+        .unwrap_or(false);
+
+    let is_teacher = !is_admin_or_staff
+        && req_ctx
+            .actor
+            .as_ref()
+            .map(|a| {
+                a.roles.iter().any(|r| {
+                    let n = r.name.to_lowercase();
+                    n.contains("guru") || n.contains("teacher") || n.contains("pengajar")
+                })
+            })
+            .unwrap_or(false);
+
+    let mut filter_teacher_id = query.teacher_id;
+    if is_teacher && filter_teacher_id.is_none() {
+        let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
+        let t_id = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT id FROM teachers 
+            WHERE (
+                user_id = $1 
+                OR lower(trim(full_name)) = (SELECT lower(trim(full_name)) FROM users WHERE id = $1)
+                OR (email IS NOT NULL AND lower(trim(email)) = (SELECT lower(trim(email)) FROM users WHERE id = $1))
+            )
+            AND tenant_id = $2 AND deleted_at IS NULL
+            LIMIT 1
+            "#,
+        )
+        .bind(user_id)
+        .bind(req_ctx.tenant_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten();
+
+        filter_teacher_id = t_id;
+    }
+
+    let rows = sqlx::query_as::<_, TodayScheduleResponse>(
+        r#"
+        WITH context_time AS (
+            SELECT 
+                (NOW() AT TIME ZONE 'Asia/Jakarta')::date AS today_date,
+                (NOW() AT TIME ZONE 'Asia/Jakarta')::time AS current_time,
+                CASE EXTRACT(DOW FROM (NOW() AT TIME ZONE 'Asia/Jakarta'))::integer
+                    WHEN 0 THEN 'Minggu'
+                    WHEN 1 THEN 'Senin'
+                    WHEN 2 THEN 'Selasa'
+                    WHEN 3 THEN 'Rabu'
+                    WHEN 4 THEN 'Kamis'
+                    WHEN 5 THEN 'Jumat'
+                    WHEN 6 THEN 'Sabtu'
+                END AS today_day
+        )
+        SELECT 
+            cs.id,
+            cs.id AS schedule_id,
+            ls.id AS session_id,
+            cs.class_id,
+            c.name AS class_name,
+            cs.subject_id,
+            s.name AS subject_name,
+            cs.teacher_id,
+            t.full_name AS teacher_name,
+            t.user_id AS teacher_user_id,
+            cs.day_of_week,
+            cs.start_time,
+            cs.end_time,
+            COALESCE(cs.room, 'Ruang Kelas') AS room,
+            CASE 
+                WHEN ls.status IS NOT NULL THEN ls.status
+                WHEN ct.current_time > cs.end_time::time THEN 'completed'
+                WHEN ct.current_time >= cs.start_time::time THEN 'active'
+                ELSE 'scheduled'
+            END AS status,
+            (ct.current_time >= cs.start_time::time AND ct.current_time <= cs.end_time::time) AS is_current,
+            (ct.current_time < cs.start_time::time) AS is_upcoming
+        FROM context_time ct
+        CROSS JOIN class_schedules cs
+        JOIN classes c ON c.id = cs.class_id
+        JOIN subjects s ON s.id = cs.subject_id
+        JOIN teachers t ON t.id = cs.teacher_id
+        LEFT JOIN learning_sessions ls ON ls.schedule_id = cs.id 
+            AND ls.session_date = ct.today_date 
+            AND ls.deleted_at IS NULL
+        WHERE cs.tenant_id = $1
+          AND cs.deleted_at IS NULL
+          AND cs.day_of_week = ct.today_day
+          AND ($2::uuid IS NULL OR cs.class_id = $2)
+          AND ($3::uuid IS NULL OR cs.teacher_id = $3 OR t.user_id = $3)
+        ORDER BY cs.start_time ASC
+        "#,
+    )
+    .bind(req_ctx.tenant_id)
+    .bind(query.class_id)
+    .bind(filter_teacher_id)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| {
