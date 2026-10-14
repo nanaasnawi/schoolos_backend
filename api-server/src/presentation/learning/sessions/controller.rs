@@ -555,13 +555,6 @@ async fn list(
         .execute(&ctx.pool)
         .await;
 
-    // Evaluasi aturan auto-alpa (24 jam) untuk sesi-sesi yang telah lewat
-    let _ = crate::presentation::learning::attendance_automation::process_auto_alpa_for_expired_sessions(
-        &ctx.pool,
-        req_ctx.tenant_id,
-    )
-    .await;
-
     let rows = sqlx::query(
         r#"
         SELECT 
@@ -973,12 +966,6 @@ async fn get_attendance(
 
     let target_session_id = resolve_effective_session_id(&ctx.pool, req_ctx.tenant_id, id).await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
-
-    let _ = crate::presentation::learning::attendance_automation::process_auto_alpa_for_expired_sessions(
-        &ctx.pool,
-        req_ctx.tenant_id,
-    )
-    .await;
 
     let query = GetAttendanceQuery {
         tenant_id: req_ctx.tenant_id,

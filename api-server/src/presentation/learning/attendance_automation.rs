@@ -232,6 +232,7 @@ pub async fn process_auto_alpa_for_expired_sessions(
         LEFT JOIN session_attendances sa ON sa.session_id = ls.id AND sa.student_id = en.student_id
         WHERE ls.tenant_id = $1
           AND ls.deleted_at IS NULL
+          AND ls.status NOT IN ('cancelled', 'draft')
           AND (
               -- Sesi telah lewat lebih dari 24 jam dari jadwal tanggal/jam pelaksanaan
               ls.session_date < (NOW() AT TIME ZONE 'Asia/Jakarta')::date - INTERVAL '1 day'
