@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, State},
-    routing::{get, post},
+    routing::{delete as axum_delete, get, post},
     Json, Router,
 };
 use sqlx::Row;
@@ -31,7 +31,7 @@ use school_core::learning::application::quiz::{
 pub fn quiz_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/", post(create).get(list))
-        .route("/{id}", get(get_by_id).patch(update).put(update))
+        .route("/{id}", get(get_by_id).patch(update).put(update).delete(delete_quiz))
         .route("/{id}/publish", post(publish))
         .route("/{id}/verify-token", post(verify_token))
         .route("/{id}/questions", post(add_question).get(get_questions))
@@ -997,6 +997,84 @@ async fn update(
     }
 
     get_by_id(State(ctx), req_ctx, Path(id)).await
+}
+
+async fn delete_quiz(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ApiResponse<()>>, ApiError> {
+    use crate::middleware::require_permission;
+    use school_core::permission::domain::permission_registry::Permission;
+    require_permission(&req_ctx.actor, Permission::LearningQuizDelete).map_err(|_| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Insufficient permissions".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let meta = sqlx::query(
+        "SELECT tenant_id, class_id, teacher_id, created_by FROM quizzes WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?
+    .ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::NotFound(
+                school_core::common::error_code::ErrorCode::QuizNotFound,
+                format!("Quiz {} not found", id),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let meta_tenant_id: Uuid = meta.get("tenant_id");
+    let meta_class_id: Option<Uuid> = meta.get("class_id");
+    let meta_teacher_id: Option<Uuid> = meta.get("teacher_id");
+    let meta_created_by: Option<Uuid> = meta.get("created_by");
+
+    crate::authorization_helpers::AuthorizationScope::verify_learning_resource_access(
+        &ctx.pool,
+        &req_ctx,
+        meta_tenant_id,
+        meta_class_id,
+        meta_teacher_id,
+        meta_created_by,
+    )
+    .await?;
+
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
+    sqlx::query(
+        "UPDATE quizzes SET deleted_at = NOW(), deleted_by = $1, is_active = false, updated_at = NOW() WHERE id = $2 AND tenant_id = $3",
+    )
+    .bind(actor_id)
+    .bind(id)
+    .bind(req_ctx.tenant_id)
+    .execute(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    Ok(Json(ApiResponse::success((), req_ctx.request_id)))
 }
 
 async fn publish(
