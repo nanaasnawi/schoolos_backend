@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, State},
-    routing::{delete as axum_delete, get, post},
+    routing::{get, post},
     Json, Router,
 };
 use sqlx::Row;

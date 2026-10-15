@@ -1319,7 +1319,7 @@ pub async fn generate_cbt_quiz(
     num_mcq: usize,
     num_essay: usize,
     difficulty: &str,
-    include_images: bool,
+    _include_images: bool,
 ) -> Result<GeneratedCbtQuizDto, ApplicationError> {
     let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
     let now_ts = chrono::Utc::now().timestamp_millis();
