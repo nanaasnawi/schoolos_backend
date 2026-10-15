@@ -219,7 +219,13 @@ async fn login(
                    WHERE s.user_id = u.id
                    LIMIT 1
                  )
-               ) as child_id
+               ) as child_id,
+               COALESCE(
+                 (SELECT t.subject FROM teachers t WHERE t.user_id = u.id ORDER BY t.updated_at DESC LIMIT 1),
+                 (SELECT t.subject FROM teachers t WHERE LOWER(t.full_name) = LOWER(u.full_name) ORDER BY t.updated_at DESC LIMIT 1),
+                 (SELECT t.subject FROM teachers t WHERE LOWER(t.email) = LOWER(u.email) ORDER BY t.updated_at DESC LIMIT 1),
+                 ''
+               ) as subject
         FROM users u
         WHERE u.id = $1
         LIMIT 1
@@ -323,6 +329,10 @@ async fn login(
         child_name,
         child_id,
         avatar_url: user_row.as_ref().and_then(|u| u.try_get("avatar_url").ok().flatten()),
+        subject: user_row.as_ref().and_then(|u| {
+            let s: String = u.try_get("subject").unwrap_or_default();
+            if s.is_empty() { None } else { Some(s) }
+        }),
     };
 
     Ok(Json(ApiResponse::success(
@@ -442,6 +452,8 @@ pub struct AuthUserDto {
     pub phone: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub about: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
 }
 
 #[derive(serde::Deserialize, utoipa::ToSchema)]
@@ -520,6 +532,7 @@ async fn list_users(
             avatar_url: r.try_get("avatar_url").ok().flatten(),
             phone: None,
             about: None,
+            subject: None,
         })
         .collect();
 
@@ -724,6 +737,7 @@ async fn get_me(
                 avatar_url: None,
                 phone: None,
                 about: None,
+                subject: None,
             },
             req_ctx.request_id,
         )));
@@ -755,6 +769,12 @@ async fn get_me(
                  (SELECT g.address FROM guardians g WHERE g.user_id = u.id ORDER BY g.updated_at DESC LIMIT 1),
                  ''
                ) as about,
+               COALESCE(
+                 (SELECT t.subject FROM teachers t WHERE t.user_id = u.id ORDER BY t.updated_at DESC LIMIT 1),
+                 (SELECT t.subject FROM teachers t WHERE LOWER(t.full_name) = LOWER(u.full_name) ORDER BY t.updated_at DESC LIMIT 1),
+                 (SELECT t.subject FROM teachers t WHERE LOWER(t.email) = LOWER(u.email) ORDER BY t.updated_at DESC LIMIT 1),
+                 ''
+               ) as subject,
                COALESCE(
                  (
                    SELECT c.name 
@@ -854,6 +874,7 @@ async fn get_me(
             let ident: String = r.get("identifier");
             let phone_str: String = r.try_get("phone").unwrap_or_default();
             let about_str: String = r.try_get("about").unwrap_or_default();
+            let subject_str: String = r.try_get("subject").unwrap_or_default();
             AuthUserDto {
                 id: r.get("id"),
                 email: r.get("email"),
@@ -874,6 +895,7 @@ async fn get_me(
                 avatar_url: r.try_get("avatar_url").ok().flatten(),
                 phone: if phone_str.is_empty() { None } else { Some(phone_str) },
                 about: if about_str.is_empty() { None } else { Some(about_str) },
+                subject: if subject_str.is_empty() { None } else { Some(subject_str) },
             }
         }
         None => AuthUserDto {
@@ -894,6 +916,7 @@ async fn get_me(
             avatar_url: None,
             phone: None,
             about: None,
+            subject: None,
         },
     };
 
@@ -1509,6 +1532,7 @@ async fn qr_login(
         child_name,
         child_id,
         avatar_url: qr_avatar_url,
+        subject: None,
     };
 
     Ok(Json(ApiResponse::success(
