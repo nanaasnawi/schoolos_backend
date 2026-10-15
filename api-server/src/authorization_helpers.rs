@@ -32,7 +32,16 @@ impl AuthorizationScope {
         user_id: Uuid,
     ) -> Result<Option<Uuid>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT id FROM teachers WHERE user_id = $1 AND tenant_id = $2 AND deleted_at IS NULL LIMIT 1",
+            r#"
+            SELECT id FROM teachers 
+            WHERE (
+                user_id = $1 
+                OR lower(trim(full_name)) = (SELECT lower(trim(full_name)) FROM users WHERE id = $1)
+                OR (email IS NOT NULL AND lower(trim(email)) = (SELECT lower(trim(email)) FROM users WHERE id = $1))
+            )
+            AND tenant_id = $2 AND deleted_at IS NULL
+            LIMIT 1
+            "#,
         )
         .bind(user_id)
         .bind(tenant_id)
