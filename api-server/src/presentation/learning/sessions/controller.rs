@@ -1279,7 +1279,7 @@ async fn resolve_effective_session_id(
         if let Some(ref sched) = default_sched {
             let sched_id: Option<Uuid> = sched.try_get("id").ok();
             let target_subject_id: Option<Uuid> = sched.try_get("subject_id").ok();
-            let target_teacher_id: Option<Uuid> = homeroom_teacher_id.or_else(|| sched.try_get("teacher_id").ok());
+            let target_teacher_id: Option<Uuid> = sched.try_get("teacher_id").ok().or(homeroom_teacher_id);
             let st_str: Option<String> = sched.try_get("start_time").ok();
             let et_str: Option<String> = sched.try_get("end_time").ok();
 
