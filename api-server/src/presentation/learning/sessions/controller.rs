@@ -1254,73 +1254,69 @@ async fn resolve_effective_session_id(
             return Ok(sid);
         }
 
-        // Cari subject_id dan teacher_id default dari jadwal rombel ini
+        // Cari subject_id dan teacher_id dari jadwal rombel ini KHUSUS HARI INI
+        let dow_str = match today.weekday() {
+            chrono::Weekday::Mon => "Senin",
+            chrono::Weekday::Tue => "Selasa",
+            chrono::Weekday::Wed => "Rabu",
+            chrono::Weekday::Thu => "Kamis",
+            chrono::Weekday::Fri => "Jumat",
+            chrono::Weekday::Sat => "Sabtu",
+            chrono::Weekday::Sun => "Minggu",
+        };
+
         let default_sched = sqlx::query(
-            "SELECT subject_id, teacher_id FROM class_schedules WHERE class_id = $1 AND tenant_id = $2 AND deleted_at IS NULL LIMIT 1"
+            "SELECT id, subject_id, teacher_id, start_time, end_time FROM class_schedules WHERE class_id = $1 AND tenant_id = $2 AND day_of_week = $3 AND deleted_at IS NULL LIMIT 1"
         )
         .bind(class_id)
         .bind(tenant_id)
+        .bind(dow_str)
         .fetch_optional(pool)
         .await
         .ok()
         .flatten();
 
-        let target_subject_id: Option<Uuid> = if let Some(ref sched) = default_sched {
-            sched.try_get("subject_id").ok()
-        } else {
-            sqlx::query_scalar::<_, Uuid>("SELECT id FROM subjects WHERE tenant_id = $1 LIMIT 1")
-                .bind(tenant_id)
-                .fetch_optional(pool)
-                .await
-                .ok()
-                .flatten()
-        };
+        if let Some(ref sched) = default_sched {
+            let sched_id: Option<Uuid> = sched.try_get("id").ok();
+            let target_subject_id: Option<Uuid> = sched.try_get("subject_id").ok();
+            let target_teacher_id: Option<Uuid> = homeroom_teacher_id.or_else(|| sched.try_get("teacher_id").ok());
+            let st_str: Option<String> = sched.try_get("start_time").ok();
+            let et_str: Option<String> = sched.try_get("end_time").ok();
 
-        let target_teacher_id: Option<Uuid> = if let Some(htid) = homeroom_teacher_id {
-            Some(htid)
-        } else if let Some(ref sched) = default_sched {
-            sched.try_get("teacher_id").ok()
-        } else {
-            sqlx::query_scalar::<_, Uuid>("SELECT id FROM teachers WHERE tenant_id = $1 LIMIT 1")
-                .bind(tenant_id)
-                .fetch_optional(pool)
-                .await
-                .ok()
-                .flatten()
-        };
+            if let (Some(sub_id), Some(t_id)) = (target_subject_id, target_teacher_id) {
+                let new_id = Uuid::new_v4();
+                let st = st_str.as_deref().and_then(parse_naive_time).or_else(|| parse_naive_time("07:30"));
+                let et = et_str.as_deref().and_then(parse_naive_time).or_else(|| parse_naive_time("09:00"));
+                let scheduled_at = st.and_then(|t| today.and_time(t).and_local_timezone(Utc).single());
 
-        if let (Some(sub_id), Some(t_id)) = (target_subject_id, target_teacher_id) {
-            let new_id = Uuid::new_v4();
-            let st = parse_naive_time("07:30");
-            let et = parse_naive_time("15:00");
-            let scheduled_at = st.and_then(|t| today.and_time(t).and_local_timezone(Utc).single());
-
-            let created_id = sqlx::query_scalar::<_, Uuid>(
-                r#"
-                INSERT INTO learning_sessions (
-                    id, tenant_id, session_type, schedule_id, lesson_id, class_id, subject_id, teacher_id,
-                    session_date, session_number, start_time, end_time, scheduled_at, started_at, status, created_at, updated_at
+                let created_id = sqlx::query_scalar::<_, Uuid>(
+                    r#"
+                    INSERT INTO learning_sessions (
+                        id, tenant_id, session_type, schedule_id, lesson_id, class_id, subject_id, teacher_id,
+                        session_date, session_number, start_time, end_time, scheduled_at, started_at, status, created_at, updated_at
+                    )
+                    VALUES ($1, $2, 'scheduled', $3, NULL, $4, $5, $6, $7, 1, $8, $9, $10, NOW(), 'active', NOW(), NOW())
+                    RETURNING id
+                    "#
                 )
-                VALUES ($1, $2, 'adhoc', NULL, NULL, $3, $4, $5, $6, 1, $7, $8, $9, NOW(), 'active', NOW(), NOW())
-                RETURNING id
-                "#
-            )
-            .bind(new_id)
-            .bind(tenant_id)
-            .bind(class_id)
-            .bind(sub_id)
-            .bind(t_id)
-            .bind(today)
-            .bind(st)
-            .bind(et)
-            .bind(scheduled_at)
-            .fetch_one(pool)
-            .await
-            .map_err(|e| school_core::common::error::ApplicationError::Infrastructure(
-                school_core::common::error::InfrastructureError::Database(e),
-            ))?;
+                .bind(new_id)
+                .bind(tenant_id)
+                .bind(sched_id)
+                .bind(class_id)
+                .bind(sub_id)
+                .bind(t_id)
+                .bind(today)
+                .bind(st)
+                .bind(et)
+                .bind(scheduled_at)
+                .fetch_one(pool)
+                .await
+                .map_err(|e| school_core::common::error::ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ))?;
 
-            return Ok(created_id);
+                return Ok(created_id);
+            }
         }
     }
 
