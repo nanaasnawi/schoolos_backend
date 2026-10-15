@@ -1,9 +1,4 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use chrono::Utc;
 use hex::ToHex;
 use school_core::common::error::{ApplicationError, DomainError};
@@ -437,7 +432,13 @@ pub fn clean_name_for_base_username(full_name: &str) -> String {
     let main_name = without_titles.split(',').next().unwrap_or("user").trim();
     let cleaned: String = main_name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c.is_whitespace() { c } else { ' ' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c.is_whitespace() {
+                c
+            } else {
+                ' '
+            }
+        })
         .collect();
     let words: Vec<&str> = cleaned.split_whitespace().collect();
     if words.is_empty() {
@@ -1160,14 +1161,12 @@ pub async fn agent_sync_async_handler(
                 let count = res.0.data.as_ref().map(|v| v.len()).unwrap_or(0);
                 tracing::info!(
                     "[Dapodik Background] Successfully finished sync job {}: {} records processed.",
-                    job_id, count
+                    job_id,
+                    count
                 );
             }
             Err(err) => {
-                tracing::error!(
-                    "[Dapodik Background] Sync job {} failed: {}",
-                    job_id, err
-                );
+                tracing::error!("[Dapodik Background] Sync job {} failed: {}", job_id, err);
             }
         }
     });
@@ -1422,7 +1421,10 @@ pub async fn pull_dapodik_records(
     .await
     .map_err(|e| {
         ApiError::new(
-            ApplicationError::Internal(format!("Database error reading Kepala Sekolah role: {}", e)),
+            ApplicationError::Internal(format!(
+                "Database error reading Kepala Sekolah role: {}",
+                e
+            )),
             &ctx.request_id,
         )
     })? {
@@ -1579,7 +1581,7 @@ pub async fn pull_dapodik_records(
         username: Option<String>,
     }
     let user_rows = sqlx::query_as::<_, UserCacheRow>(
-        "SELECT id, email, username FROM users WHERE tenant_id = $1"
+        "SELECT id, email, username FROM users WHERE tenant_id = $1",
     )
     .bind(ctx.tenant_id)
     .fetch_all(&mut *tx)
@@ -1599,7 +1601,7 @@ pub async fn pull_dapodik_records(
     }
 
     let qr_rows = sqlx::query_scalar::<_, Uuid>(
-        "SELECT user_id FROM user_qr_tokens WHERE tenant_id = $1 AND is_active = true"
+        "SELECT user_id FROM user_qr_tokens WHERE tenant_id = $1 AND is_active = true",
     )
     .bind(ctx.tenant_id)
     .fetch_all(&mut *tx)
@@ -1846,10 +1848,8 @@ pub async fn pull_dapodik_records(
                 .or(gtk.mapel.clone())
                 .filter(|s| !s.trim().is_empty())
                 .map(|s| truncate_str(&s, 100));
-            let ptk_kind = classify_dapodik_ptk(
-                jenis_ptk_raw.as_deref(),
-                gtk.jabatan_ptk_id_str.as_deref(),
-            );
+            let ptk_kind =
+                classify_dapodik_ptk(jenis_ptk_raw.as_deref(), gtk.jabatan_ptk_id_str.as_deref());
 
             let email = format!("{}@guru.schoolos.id", ptk_prefix);
             let username = fast_generate_unique_username(&mut existing_usernames, &nama);
@@ -1992,7 +1992,11 @@ pub async fn pull_dapodik_records(
                 let _ = sqlx::query(&format!("RELEASE SAVEPOINT {}", sp_gtk))
                     .execute(&mut *tx)
                     .await;
-                let tag = if ptk_kind == PtkKind::KepalaSekolah { "KEPSEK" } else { "TENDIK" };
+                let tag = if ptk_kind == PtkKind::KepalaSekolah {
+                    "KEPSEK"
+                } else {
+                    "TENDIK"
+                };
                 imported_records.push(DapodikSyncRecordDto {
                     id: new_id.to_string(),
                     nisn: nip_str.clone(),
@@ -2214,7 +2218,8 @@ pub async fn pull_dapodik_records(
                 .as_ref()
                 .and_then(|pid| {
                     let prefix = pid.chars().take(8).collect::<String>();
-                    let expected_email = format!("{}@guru.schoolos.id", prefix).to_lowercase();
+                    let expected_email =
+                        format!("{}@guru.pkbmassalafiyah.id", prefix).to_lowercase();
                     teacher_by_email.get(&expected_email).copied()
                 })
                 .or_else(|| {
@@ -2586,7 +2591,8 @@ pub async fn pull_dapodik_records(
                     Some(gid)
                 } else {
                     let g_id = Uuid::now_v7();
-                    let g_username = fast_generate_unique_username(&mut existing_usernames, &g_upper);
+                    let g_username =
+                        fast_generate_unique_username(&mut existing_usernames, &g_upper);
                     let g_email = format!("{}@wali.schoolos.id", g_username);
 
                     let actual_g_user_id = match fast_safe_upsert_user(
@@ -2861,7 +2867,10 @@ pub async fn pull_dapodik_records(
 
             if !removed_students.is_empty() {
                 let removed_ids: Vec<Uuid> = removed_students.iter().map(|s| s.id).collect();
-                let removed_names: Vec<String> = removed_students.iter().map(|s| s.full_name.clone()).collect();
+                let removed_names: Vec<String> = removed_students
+                    .iter()
+                    .map(|s| s.full_name.clone())
+                    .collect();
 
                 let update_std_res =
                     sqlx::query("UPDATE students SET status = 'inactive', updated_at = NOW() WHERE tenant_id = $1 AND id = ANY($2)")
