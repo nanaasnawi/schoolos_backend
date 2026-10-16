@@ -88,6 +88,7 @@ pub struct CreateInquiryRequest {
     pub reference_title: String,
     pub reference_id: Option<String>,
     pub initial_message: String,
+    pub client_message_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -557,6 +558,19 @@ async fn get_inquiry_detail(
         .execute(&ctx.pool)
         .await;
         teacher_read_at = Some(now);
+
+        let rtdb_th_id = id.to_string();
+        let rtdb_now_ms = now.timestamp_millis();
+        tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            let base_url = "https://akselerasi-edu-default-rtdb.asia-southeast1.firebasedatabase.app";
+            let summary_url = format!("{}/inquiries/{}/summary.json", base_url, rtdb_th_id);
+            let summary_payload = serde_json::json!({
+                "teacherLastReadAt": rtdb_now_ms,
+                "readStatusLabel": "✓ Dibaca Guru",
+            });
+            let _ = client.patch(&summary_url).json(&summary_payload).send().await;
+        });
     } else if caller_is_student {
         let _ = sqlx::query(
             "UPDATE inquiry_threads SET student_last_read_at = NOW() WHERE id = $1 AND tenant_id = $2"
@@ -1075,7 +1089,7 @@ async fn create_inquiry(
             UPDATE inquiry_threads SET
                 inquiry_type = $2, reference_title = $3, reference_id = $4,
                 subject_name = $5, status = 'WAITING_REPLY',
-                last_message_content = $6, last_message_at = NOW(), updated_at = NOW()
+                last_message_content = $6, last_message_at = NOW(), teacher_last_read_at = NULL, updated_at = NOW()
             WHERE id = $1
             RETURNING id, student_id, student_name, student_class, teacher_id, teacher_name,
                       subject_name, inquiry_type, reference_title, reference_id, status,
@@ -1136,12 +1150,20 @@ async fn create_inquiry(
         )
     })?
     };
+    let msg_id = payload
+        .client_message_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let msg_uuid = Uuid::parse_str(&msg_id).unwrap_or_else(|_| Uuid::new_v4());
+
     let _ = sqlx::query(
         r#"
-        INSERT INTO inquiry_messages (id, tenant_id, thread_id, sender_id, sender_name, sender_role, content, is_from_teacher, created_at)
-        VALUES (gen_random_uuid(), $1, $2, $3, $4, 'STUDENT', $5, false, NOW())
+        INSERT INTO inquiry_messages (id, tenant_id, thread_id, sender_id, sender_name, sender_role, content, is_from_teacher, client_message_id, created_at)
+        VALUES ($1, $2, $3, $4, $5, 'STUDENT', $6, false, $1, NOW())
+        ON CONFLICT (id) DO NOTHING
         "#,
     )
+    .bind(msg_uuid)
     .bind(tenant_id)
     .bind(thread_id)
     .bind(student_id.to_string())
@@ -1209,6 +1231,7 @@ async fn create_inquiry(
     let rtdb_ref_id = payload.reference_id.clone().unwrap_or_default();
     let rtdb_init_msg = initial_msg.clone();
     let rtdb_now_ms = chrono::Utc::now().timestamp_millis();
+    let rtdb_msg_id = msg_id.clone();
 
     tokio::spawn(async move {
         let client = reqwest::Client::new();
@@ -1231,10 +1254,9 @@ async fn create_inquiry(
         });
         let _ = client.put(&meta_url).json(&meta_payload).send().await;
 
-        let msg_id = uuid::Uuid::new_v4().to_string();
-        let msg_url = format!("{}/inquiries/{}/messages/{}.json", base_url, rtdb_th_id, msg_id);
+        let msg_url = format!("{}/inquiries/{}/messages/{}.json", base_url, rtdb_th_id, rtdb_msg_id);
         let msg_payload = serde_json::json!({
-            "id": msg_id,
+            "id": rtdb_msg_id,
             "threadId": rtdb_th_id,
             "senderId": rtdb_std_id,
             "senderName": rtdb_std_name,
@@ -1242,6 +1264,7 @@ async fn create_inquiry(
             "content": rtdb_init_msg,
             "timestamp": rtdb_now_ms,
             "isFromTeacher": false,
+            "isRead": false,
         });
         let _ = client.put(&msg_url).json(&msg_payload).send().await;
 
@@ -1251,6 +1274,8 @@ async fn create_inquiry(
             "lastMessageAt": rtdb_now_ms,
             "status": "WAITING_REPLY",
             "lastSenderName": rtdb_std_name,
+            "readStatusLabel": "Menunggu Dibaca Guru",
+            "teacherLastReadAt": 0,
         });
         let _ = client.patch(&summary_url).json(&summary_payload).send().await;
     });
@@ -1451,7 +1476,7 @@ async fn send_message(
             .unwrap_or_else(|| "Siswa".to_string())
     };
 
-    let message_id = Uuid::new_v4();
+    let message_id = client_uuid.unwrap_or_else(Uuid::new_v4);
     let content = payload.content.trim().to_string();
 
     let msg_row = sqlx::query(
@@ -1512,7 +1537,7 @@ async fn send_message(
         let _ = sqlx::query(
             r#"
             UPDATE inquiry_threads
-            SET status = 'WAITING_REPLY', last_message_content = $1, last_message_at = NOW(), student_last_read_at = NOW(), updated_at = NOW()
+            SET status = 'WAITING_REPLY', last_message_content = $1, last_message_at = NOW(), student_last_read_at = NOW(), teacher_last_read_at = NULL, updated_at = NOW()
             WHERE id = $2
             "#,
         )
@@ -1677,6 +1702,8 @@ async fn send_message(
             "lastMessageAt": rtdb_now_ms,
             "status": rtdb_status,
             "lastSenderName": rtdb_sender_name,
+            "readStatusLabel": if rtdb_is_teacher { "✓ Dijawab Guru" } else { "Menunggu Dibaca Guru" },
+            "teacherLastReadAt": if rtdb_is_teacher { rtdb_now_ms } else { 0 },
         });
         let _ = client.patch(&summary_url).json(&summary_payload).send().await;
     });
@@ -1764,6 +1791,19 @@ async fn mark_inquiry_read(
         .bind(req_ctx.tenant_id)
         .execute(&ctx.pool)
         .await;
+
+        let rtdb_th_id = id.to_string();
+        let rtdb_now_ms = chrono::Utc::now().timestamp_millis();
+        tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            let base_url = "https://akselerasi-edu-default-rtdb.asia-southeast1.firebasedatabase.app";
+            let summary_url = format!("{}/inquiries/{}/summary.json", base_url, rtdb_th_id);
+            let summary_payload = serde_json::json!({
+                "teacherLastReadAt": rtdb_now_ms,
+                "readStatusLabel": "✓ Dibaca Guru",
+            });
+            let _ = client.patch(&summary_url).json(&summary_payload).send().await;
+        });
     } else {
         let student_id = crate::authorization_helpers::AuthorizationScope::resolve_student_id(
             &ctx.pool,
