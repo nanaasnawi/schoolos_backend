@@ -1465,9 +1465,38 @@ async fn send_message(
     };
     let sender_id = actor.id.to_string();
     let sender_name = if is_from_teacher {
+        let teacher_db_name: Option<String> = sqlx::query_scalar(
+            "SELECT full_name FROM teachers WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 LIMIT 1",
+        )
+        .bind(actor.id)
+        .bind(effective_tenant_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten();
+
+        let user_full_name: Option<String> = if teacher_db_name.is_none() {
+            sqlx::query_scalar("SELECT full_name FROM users WHERE id = $1 LIMIT 1")
+                .bind(actor.id)
+                .fetch_optional(&ctx.pool)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+
         payload
             .sender_name
-            .filter(|s| !s.trim().is_empty() && !s.eq_ignore_ascii_case("Guru Pengampu"))
+            .filter(|s| {
+                let trimmed = s.trim();
+                !trimmed.is_empty()
+                    && !trimmed.eq_ignore_ascii_case("Guru Pengampu")
+                    && !trimmed.eq_ignore_ascii_case("Bapak/Ibu Guru")
+                    && !trimmed.eq_ignore_ascii_case("Guru")
+            })
+            .or(teacher_db_name)
+            .or(user_full_name)
             .unwrap_or(thread_teacher_name)
     } else {
         payload
@@ -1548,7 +1577,7 @@ async fn send_message(
     }
 
     // If teacher replies and thread currently has generic teacher name, update to actual teacher name
-    if is_teacher && !sender_name.is_empty() && !sender_name.eq_ignore_ascii_case("Guru Pengampu") {
+    if is_teacher && !sender_name.is_empty() && !sender_name.eq_ignore_ascii_case("Guru Pengampu") && !sender_name.eq_ignore_ascii_case("Bapak/Ibu Guru") {
         let sender_uuid = Uuid::parse_str(&sender_id).ok();
         let _ = sqlx::query(
             r#"
@@ -1561,6 +1590,7 @@ async fn send_message(
             WHERE id = $3 AND (
                 teacher_name = 'Guru Pengampu' OR
                 teacher_name = 'Guru Mata Pelajaran' OR
+                teacher_name = 'Bapak/Ibu Guru' OR
                 teacher_name IS NULL OR
                 teacher_name = ''
             )
@@ -1693,19 +1723,55 @@ async fn send_message(
             "content": rtdb_content,
             "timestamp": rtdb_now_ms,
             "isFromTeacher": rtdb_is_teacher,
+            "isRead": false,
         });
         let _ = client.put(&msg_url).json(&msg_payload).send().await;
 
         let summary_url = format!("{}/inquiries/{}/summary.json", base_url, rtdb_thread_id);
-        let summary_payload = serde_json::json!({
+        let mut summary_payload = serde_json::json!({
             "lastMessageContent": rtdb_content,
             "lastMessageAt": rtdb_now_ms,
             "status": rtdb_status,
             "lastSenderName": rtdb_sender_name,
+            "lastSenderId": rtdb_sender_id,
+            "lastSenderRole": rtdb_sender_role,
             "readStatusLabel": if rtdb_is_teacher { "✓ Dijawab Guru" } else { "Menunggu Dibaca Guru" },
             "teacherLastReadAt": if rtdb_is_teacher { rtdb_now_ms } else { 0 },
         });
+        if rtdb_is_teacher {
+            summary_payload["teacherName"] = serde_json::json!(rtdb_sender_name);
+            summary_payload["teacherId"] = serde_json::json!(rtdb_sender_id);
+        }
         let _ = client.patch(&summary_url).json(&summary_payload).send().await;
+
+        if rtdb_is_teacher {
+            let meta_url = format!("{}/inquiries/{}/metadata.json", base_url, rtdb_thread_id);
+            let meta_patch = serde_json::json!({
+                "teacherName": rtdb_sender_name,
+                "teacherId": rtdb_sender_id,
+                "lastUpdated": rtdb_now_ms,
+            });
+            let _ = client.patch(&meta_url).json(&meta_patch).send().await;
+
+            let presence_thread_url = format!("{}/inquiries/{}/presence/teacher.json", base_url, rtdb_thread_id);
+            let presence_payload = serde_json::json!({
+                "userId": rtdb_sender_id,
+                "name": rtdb_sender_name,
+                "status": "online",
+                "lastSeen": rtdb_now_ms,
+            });
+            let _ = client.put(&presence_thread_url).json(&presence_payload).send().await;
+
+            let presence_global_url = format!("{}/inquiries/presence/{}.json", base_url, rtdb_sender_id);
+            let global_payload = serde_json::json!({
+                "userId": rtdb_sender_id,
+                "name": rtdb_sender_name,
+                "role": "TEACHER",
+                "status": "online",
+                "lastSeen": rtdb_now_ms,
+            });
+            let _ = client.put(&presence_global_url).json(&global_payload).send().await;
+        }
     });
 
     let dto = InquiryMessageDto {
