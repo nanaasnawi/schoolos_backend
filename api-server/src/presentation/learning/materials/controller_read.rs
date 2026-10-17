@@ -512,18 +512,8 @@ async fn toggle_complete(
     ), &req_ctx.request_id))?;
 
     let is_completed = if existing.is_some() {
-        // Toggle OFF (unmark completed)
-        sqlx::query!(
-            r#"DELETE FROM student_material_completions WHERE student_id = $1 AND material_id = $2"#,
-            student_id,
-            id
-        )
-        .execute(&ctx.pool)
-        .await
-        .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
-            school_core::common::error::InfrastructureError::Database(e)
-        ), &req_ctx.request_id))?;
-        false
+        // Status is PERMANENTLY LOCKED once completed (anti-cheating: tidak boleh batal)
+        true
     } else {
         // Toggle ON (mark completed)
         sqlx::query!(

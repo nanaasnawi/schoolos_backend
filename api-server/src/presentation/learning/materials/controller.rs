@@ -1037,31 +1037,8 @@ async fn toggle_complete(
     })?;
 
     let is_completed = if existing.is_some() {
-        // Toggle OFF (unmark completed)
-        sqlx::query(
-            r#"DELETE FROM student_material_completions WHERE student_id = $1 AND material_id = $2"#
-        )
-        .bind(student_id)
-        .bind(id)
-        .execute(&ctx.pool)
-        .await
-        .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
-            school_core::common::error::InfrastructureError::Database(e)
-        ), &req_ctx.request_id))?;
-
-        let _ = sqlx::query(
-            r#"
-            UPDATE reading_progress 
-            SET is_completed = false, updated_at = NOW()
-            WHERE student_id = $1 AND material_id = $2
-            "#
-        )
-        .bind(student_id)
-        .bind(id)
-        .execute(&ctx.pool)
-        .await;
-
-        false
+        // Status is PERMANENTLY LOCKED once completed (anti-cheating: tidak boleh batal)
+        true
     } else {
         // Toggle ON (mark completed)
         sqlx::query(
