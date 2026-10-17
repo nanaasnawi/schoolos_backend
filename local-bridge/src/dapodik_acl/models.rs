@@ -37,6 +37,60 @@ pub struct DapodikRawStudent {
     pub status: Option<String>,
     pub status_di_sekolah: Option<String>,
     pub aktif: Option<serde_json::Value>,
+
+    #[serde(alias = "rt", alias = "RT", alias = "r_t")]
+    pub rt: Option<serde_json::Value>,
+    #[serde(alias = "rw", alias = "RW", alias = "r_w")]
+    pub rw: Option<serde_json::Value>,
+    #[serde(alias = "dusun", alias = "nama_dusun", alias = "Dusun")]
+    pub dusun: Option<String>,
+    #[serde(alias = "kelurahan", alias = "desa_kelurahan", alias = "Kelurahan")]
+    pub kelurahan: Option<String>,
+    #[serde(alias = "kecamatan", alias = "nama_kecamatan", alias = "Kecamatan")]
+    pub kecamatan: Option<String>,
+    #[serde(alias = "kode_pos", alias = "kodepos", alias = "Kode Pos")]
+    pub kode_pos: Option<String>,
+
+    #[serde(alias = "pekerjaan_ayah", alias = "Pekerjaan Ayah")]
+    pub pekerjaan_ayah: Option<String>,
+    #[serde(alias = "penghasilan_ayah", alias = "penghasilan_ayah_id_str", alias = "Penghasilan Ayah")]
+    pub penghasilan_ayah: Option<String>,
+
+    #[serde(alias = "pekerjaan_ibu", alias = "Pekerjaan Ibu")]
+    pub pekerjaan_ibu: Option<String>,
+    #[serde(alias = "penghasilan_ibu", alias = "penghasilan_ibu_id_str", alias = "Penghasilan Ibu")]
+    pub penghasilan_ibu: Option<String>,
+
+    #[serde(alias = "pekerjaan_wali", alias = "Pekerjaan Wali")]
+    pub pekerjaan_wali: Option<String>,
+    #[serde(alias = "penghasilan_wali", alias = "penghasilan_wali_id_str", alias = "Penghasilan Wali")]
+    pub penghasilan_wali: Option<String>,
+
+    #[serde(alias = "penerima_kps", alias = "Penerima KPS", alias = "kps")]
+    pub penerima_kps: Option<serde_json::Value>,
+    #[serde(alias = "no_kps", alias = "nomor_kps", alias = "No. KPS")]
+    pub no_kps: Option<String>,
+
+    #[serde(alias = "penerima_kip", alias = "Penerima KIP", alias = "kip")]
+    pub penerima_kip: Option<serde_json::Value>,
+    #[serde(alias = "nomor_kip", alias = "no_kip", alias = "Nomor KIP")]
+    pub nomor_kip: Option<String>,
+    #[serde(alias = "nama_di_kip", alias = "nama_kip", alias = "Nama di KIP")]
+    pub nama_di_kip: Option<String>,
+    #[serde(alias = "nomor_kks", alias = "no_kks", alias = "Nomor KKS")]
+    pub nomor_kks: Option<String>,
+
+    #[serde(alias = "layak_pip", alias = "Layak PIP (usulan dari sekolah)", alias = "usulan_pip")]
+    pub layak_pip: Option<serde_json::Value>,
+    #[serde(alias = "alasan_layak_pip", alias = "Alasan Layak PIP", alias = "alasan_pip")]
+    pub alasan_layak_pip: Option<String>,
+
+    #[serde(alias = "bank", alias = "nama_bank", alias = "Bank")]
+    pub bank: Option<String>,
+    #[serde(alias = "nomor_rekening_bank", alias = "no_rekening", alias = "no_rekening_bank", alias = "Nomor Rekening Bank")]
+    pub nomor_rekening_bank: Option<String>,
+    #[serde(alias = "rekening_atas_nama", alias = "nama_rekening", alias = "Rekening Atas Nama")]
+    pub rekening_atas_nama: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

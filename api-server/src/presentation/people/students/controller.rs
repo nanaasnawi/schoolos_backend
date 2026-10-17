@@ -22,6 +22,7 @@ use school_core::people::application::{
     list_students::query::ListStudentsQuery, update_student::command::UpdateStudentCommand,
 };
 use school_core::people::domain::student::Student;
+use sqlx::Row;
 
 #[derive(Deserialize)]
 pub struct StudentFilter {
@@ -35,9 +36,20 @@ pub struct StudentFilter {
     pub created_at_to: Option<DateTime<Utc>>,
 }
 
+#[derive(Deserialize)]
+pub struct PipFilterQuery {
+    pub search: Option<String>,
+    pub category: Option<String>,
+    pub class_name: Option<String>,
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+}
+
 pub fn student_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/", post(create).get(list))
+        .route("/pip", get(get_pip_students))
+        .route("/me/official-profile", get(get_my_official_profile))
         .route("/{id}", get(get_by_id).patch(update))
 }
 
@@ -336,6 +348,22 @@ async fn get_by_id(
         None
     };
 
+    let ext_row = sqlx::query(
+        r#"
+        SELECT rt, rw, dusun, kelurahan, kecamatan, kode_pos,
+               pekerjaan_ayah, penghasilan_ayah, pekerjaan_ibu, penghasilan_ibu,
+               nama_wali, pekerjaan_wali, penghasilan_wali,
+               penerima_kps, no_kps, penerima_kip, nomor_kip, nama_di_kip, nomor_kks,
+               layak_pip, alasan_layak_pip, bank, nomor_rekening_bank, rekening_atas_nama, foto_profile
+        FROM students WHERE id = $1
+        "#
+    )
+    .bind(id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .ok()
+    .flatten();
+
     let response_data = super::dto::student_responses::StudentProfileResponse {
         id: profile.student.id,
         tenant_id: profile.student.tenant_id,
@@ -380,6 +408,31 @@ async fn get_by_id(
             .map(|a| serde_json::to_value(a).unwrap_or_default()),
         created_at: profile.student.created_at,
         updated_at: profile.student.updated_at,
+        rt: ext_row.as_ref().and_then(|r| r.try_get("rt").ok()),
+        rw: ext_row.as_ref().and_then(|r| r.try_get("rw").ok()),
+        dusun: ext_row.as_ref().and_then(|r| r.try_get("dusun").ok()),
+        kelurahan: ext_row.as_ref().and_then(|r| r.try_get("kelurahan").ok()),
+        kecamatan: ext_row.as_ref().and_then(|r| r.try_get("kecamatan").ok()),
+        kode_pos: ext_row.as_ref().and_then(|r| r.try_get("kode_pos").ok()),
+        pekerjaan_ayah: ext_row.as_ref().and_then(|r| r.try_get("pekerjaan_ayah").ok()),
+        penghasilan_ayah: ext_row.as_ref().and_then(|r| r.try_get("penghasilan_ayah").ok()),
+        pekerjaan_ibu: ext_row.as_ref().and_then(|r| r.try_get("pekerjaan_ibu").ok()),
+        penghasilan_ibu: ext_row.as_ref().and_then(|r| r.try_get("penghasilan_ibu").ok()),
+        nama_wali: ext_row.as_ref().and_then(|r| r.try_get("nama_wali").ok()),
+        pekerjaan_wali: ext_row.as_ref().and_then(|r| r.try_get("pekerjaan_wali").ok()),
+        penghasilan_wali: ext_row.as_ref().and_then(|r| r.try_get("penghasilan_wali").ok()),
+        penerima_kps: ext_row.as_ref().and_then(|r| r.try_get("penerima_kps").ok()),
+        no_kps: ext_row.as_ref().and_then(|r| r.try_get("no_kps").ok()),
+        penerima_kip: ext_row.as_ref().and_then(|r| r.try_get("penerima_kip").ok()),
+        nomor_kip: ext_row.as_ref().and_then(|r| r.try_get("nomor_kip").ok()),
+        nama_di_kip: ext_row.as_ref().and_then(|r| r.try_get("nama_di_kip").ok()),
+        nomor_kks: ext_row.as_ref().and_then(|r| r.try_get("nomor_kks").ok()),
+        layak_pip: ext_row.as_ref().and_then(|r| r.try_get("layak_pip").ok()),
+        alasan_layak_pip: ext_row.as_ref().and_then(|r| r.try_get("alasan_layak_pip").ok()),
+        bank: ext_row.as_ref().and_then(|r| r.try_get("bank").ok()),
+        nomor_rekening_bank: ext_row.as_ref().and_then(|r| r.try_get("nomor_rekening_bank").ok()),
+        rekening_atas_nama: ext_row.as_ref().and_then(|r| r.try_get("rekening_atas_nama").ok()),
+        foto_profile: ext_row.as_ref().and_then(|r| r.try_get("foto_profile").ok()),
     };
 
     Ok(Json(ApiResponse::success(
@@ -504,4 +557,344 @@ async fn update(
         response_dto,
         req_ctx.correlation_id,
     )))
+}
+
+/// Retrieve students receiving or eligible for PIP (Program Indonesia Pintar) with summary KPI statistics.
+/// Dedicated for Kepala Sekolah and Management oversight.
+#[utoipa::path(
+    get,
+    operation_id = "getPipStudents",
+    path = "/api/v1/students/pip",
+    params(
+        ("search" = Option<String>, Query, description = "Search query by name, NISN, NIK, or bank account"),
+        ("category" = Option<String>, Query, description = "Filter category: ALL, KIP, LAYAK_PIP, KPS, HAS_REKENING, NO_REKENING"),
+        ("class_name" = Option<String>, Query, description = "Filter by class/rombel name"),
+        ("page" = Option<u32>, Query, description = "Page number (1-indexed)"),
+        ("page_size" = Option<u32>, Query, description = "Number of items per page (up to 5000 for export)")
+    ),
+    responses(
+        (status = 200, description = "PIP students and statistical summary retrieved successfully", body = inline(ApiResponse<super::dto::student_responses::PipOverviewResponse>)),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden: khusus Kepala Sekolah dan Manajemen")
+    ),
+    security(
+        ("Bearer" = [])
+    ),
+    tag = "Student"
+)]
+async fn get_pip_students(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Query(query): Query<PipFilterQuery>,
+) -> Result<Json<ApiResponse<super::dto::student_responses::PipOverviewResponse>>, ApiError> {
+    let is_authorized = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                r.name == "Kepala Sekolah"
+                    || r.name == "Admin"
+                    || r.name == "SuperAdmin"
+                    || r.name == "Operator/Staff"
+                    || r.name == "Bendahara"
+            })
+        })
+        .unwrap_or(false);
+
+    if !is_authorized {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Akses menu pemantauan PIP khusus untuk Kepala Sekolah dan Manajemen".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
+    // 1. Calculate Summary Counters for the tenant
+    let summary_row = sqlx::query(
+        r#"
+        SELECT 
+            COUNT(*)::bigint as total_students,
+            COUNT(*) FILTER (WHERE penerima_kip = true)::bigint as penerima_kip,
+            COUNT(*) FILTER (WHERE layak_pip = true)::bigint as layak_pip,
+            COUNT(*) FILTER (WHERE penerima_kps = true)::bigint as penerima_kps,
+            COUNT(*) FILTER (WHERE bank IS NOT NULL AND bank != '' AND nomor_rekening_bank IS NOT NULL AND nomor_rekening_bank != '')::bigint as memiliki_rekening,
+            COUNT(*) FILTER (WHERE bank IS NULL OR bank = '' OR nomor_rekening_bank IS NULL OR nomor_rekening_bank = '')::bigint as belum_memiliki_rekening
+        FROM students
+        WHERE tenant_id = $1 AND status = 'active'
+        "#
+    )
+    .bind(req_ctx.tenant_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let summary = super::dto::student_responses::PipSummaryStats {
+        total_students: summary_row.try_get("total_students").unwrap_or(0),
+        penerima_kip: summary_row.try_get("penerima_kip").unwrap_or(0),
+        layak_pip: summary_row.try_get("layak_pip").unwrap_or(0),
+        penerima_kps: summary_row.try_get("penerima_kps").unwrap_or(0),
+        memiliki_rekening: summary_row.try_get("memiliki_rekening").unwrap_or(0),
+        belum_memiliki_rekening: summary_row.try_get("belum_memiliki_rekening").unwrap_or(0),
+    };
+
+    let category = query.category.unwrap_or_else(|| "ALL".to_string()).to_uppercase();
+    let class_filter = query.class_name.and_then(|c| {
+        let t = c.trim().to_string();
+        if t.is_empty() || t == "ALL" { None } else { Some(t) }
+    });
+    let search_term = query.search.and_then(|s| {
+        let t = s.trim().to_string();
+        if t.is_empty() { None } else { Some(t) }
+    });
+
+    let page = query.page.unwrap_or(1).max(1);
+    let page_size = query.page_size.unwrap_or(50).max(1).min(5000);
+    let offset = ((page - 1) * page_size) as i64;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT 
+            s.id, s.nisn, s.full_name, s.nik, s.gender, s.place_of_birth, s.date_of_birth, s.religion,
+            c.name as class_name,
+            s.alamat_jalan, s.rt, s.rw, s.dusun, s.kelurahan, s.kecamatan, s.kode_pos,
+            s.no_hp, s.email,
+            s.nama_ayah, s.pekerjaan_ayah, s.penghasilan_ayah,
+            s.nama_ibu, s.pekerjaan_ibu, s.penghasilan_ibu,
+            s.nama_wali, s.pekerjaan_wali, s.penghasilan_wali,
+            COALESCE(s.penerima_kps, false) as penerima_kps, s.no_kps,
+            COALESCE(s.penerima_kip, false) as penerima_kip, s.nomor_kip, s.nama_di_kip, s.nomor_kks,
+            COALESCE(s.layak_pip, false) as layak_pip, s.alasan_layak_pip,
+            s.bank, s.nomor_rekening_bank, s.rekening_atas_nama, s.foto_profile
+        FROM students s
+        LEFT JOIN LATERAL (
+            SELECT c.name FROM enrollments e
+            JOIN classes c ON c.id = e.class_id
+            WHERE e.student_id = s.id AND e.status = 'Active'
+            LIMIT 1
+        ) c ON true
+        WHERE s.tenant_id = $1 AND s.status = 'active'
+          AND (
+            $2 = 'ALL' 
+            OR ($2 = 'KIP' AND s.penerima_kip = true)
+            OR ($2 = 'LAYAK_PIP' AND s.layak_pip = true)
+            OR ($2 = 'KPS' AND s.penerima_kps = true)
+            OR ($2 = 'HAS_REKENING' AND s.bank IS NOT NULL AND s.bank != '' AND s.nomor_rekening_bank IS NOT NULL AND s.nomor_rekening_bank != '')
+            OR ($2 = 'NO_REKENING' AND (s.bank IS NULL OR s.bank = '' OR s.nomor_rekening_bank IS NULL OR s.nomor_rekening_bank = ''))
+          )
+          AND ($3::text IS NULL OR c.name = $3)
+          AND (
+            $4::text IS NULL
+            OR s.full_name ILIKE ('%' || $4 || '%')
+            OR s.nisn ILIKE ('%' || $4 || '%')
+            OR s.nik ILIKE ('%' || $4 || '%')
+            OR s.nomor_kip ILIKE ('%' || $4 || '%')
+            OR s.bank ILIKE ('%' || $4 || '%')
+            OR s.nomor_rekening_bank ILIKE ('%' || $4 || '%')
+          )
+        ORDER BY s.full_name ASC
+        LIMIT $5 OFFSET $6
+        "#
+    )
+    .bind(req_ctx.tenant_id)
+    .bind(&category)
+    .bind(class_filter)
+    .bind(search_term)
+    .bind(page_size as i64)
+    .bind(offset)
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let students: Vec<super::dto::student_responses::PipStudentItem> = rows
+        .into_iter()
+        .map(|r| super::dto::student_responses::PipStudentItem {
+            id: r.get("id"),
+            nisn: r.get("nisn"),
+            full_name: r.get("full_name"),
+            nik: r.try_get("nik").ok(),
+            gender: r.try_get("gender").ok(),
+            place_of_birth: r.try_get("place_of_birth").ok(),
+            date_of_birth: r.try_get("date_of_birth").ok(),
+            religion: r.try_get("religion").ok(),
+            class_name: r.try_get("class_name").ok(),
+            alamat_jalan: r.try_get("alamat_jalan").ok(),
+            rt: r.try_get("rt").ok(),
+            rw: r.try_get("rw").ok(),
+            dusun: r.try_get("dusun").ok(),
+            kelurahan: r.try_get("kelurahan").ok(),
+            kecamatan: r.try_get("kecamatan").ok(),
+            kode_pos: r.try_get("kode_pos").ok(),
+            no_hp: r.try_get("no_hp").ok(),
+            email: r.try_get("email").ok(),
+            nama_ayah: r.try_get("nama_ayah").ok(),
+            pekerjaan_ayah: r.try_get("pekerjaan_ayah").ok(),
+            penghasilan_ayah: r.try_get("penghasilan_ayah").ok(),
+            nama_ibu: r.try_get("nama_ibu").ok(),
+            pekerjaan_ibu: r.try_get("pekerjaan_ibu").ok(),
+            penghasilan_ibu: r.try_get("penghasilan_ibu").ok(),
+            nama_wali: r.try_get("nama_wali").ok(),
+            pekerjaan_wali: r.try_get("pekerjaan_wali").ok(),
+            penghasilan_wali: r.try_get("penghasilan_wali").ok(),
+            penerima_kps: r.try_get("penerima_kps").unwrap_or(false),
+            no_kps: r.try_get("no_kps").ok(),
+            penerima_kip: r.try_get("penerima_kip").unwrap_or(false),
+            nomor_kip: r.try_get("nomor_kip").ok(),
+            nama_di_kip: r.try_get("nama_di_kip").ok(),
+            nomor_kks: r.try_get("nomor_kks").ok(),
+            layak_pip: r.try_get("layak_pip").unwrap_or(false),
+            alasan_layak_pip: r.try_get("alasan_layak_pip").ok(),
+            bank: r.try_get("bank").ok(),
+            nomor_rekening_bank: r.try_get("nomor_rekening_bank").ok(),
+            rekening_atas_nama: r.try_get("rekening_atas_nama").ok(),
+            foto_profile: r.try_get("foto_profile").ok(),
+        })
+        .collect();
+
+    Ok(Json(ApiResponse::success(
+        super::dto::student_responses::PipOverviewResponse {
+            summary,
+            students,
+        },
+        req_ctx.request_id,
+    )))
+}
+
+/// Retrieve the official verified Dapodik biodata for current authenticated student or their guardian.
+#[utoipa::path(
+    get,
+    operation_id = "getMyOfficialProfile",
+    path = "/api/v1/students/me/official-profile",
+    responses(
+        (status = 200, description = "Official Dapodik biodata retrieved successfully", body = inline(ApiResponse<super::dto::student_responses::StudentOfficialProfileResponse>)),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Data profil resmi tidak ditemukan")
+    ),
+    security(
+        ("Bearer" = [])
+    ),
+    tag = "Student"
+)]
+async fn get_my_official_profile(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+) -> Result<Json<ApiResponse<super::dto::student_responses::StudentOfficialProfileResponse>>, ApiError> {
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id).ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthInvalidToken,
+                "Authentication required".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let row = sqlx::query(
+        r#"
+        SELECT 
+            s.id, s.nisn, s.full_name, s.nik, s.nipd, s.gender, s.place_of_birth, s.date_of_birth, s.religion,
+            c.name as class_name,
+            s.alamat_jalan, s.rt, s.rw, s.dusun, s.kelurahan, s.kecamatan, s.kode_pos,
+            s.no_hp, s.email,
+            s.nama_ayah, s.pekerjaan_ayah, s.penghasilan_ayah,
+            s.nama_ibu, s.pekerjaan_ibu, s.penghasilan_ibu,
+            s.nama_wali, s.pekerjaan_wali, s.penghasilan_wali,
+            COALESCE(s.penerima_kps, false) as penerima_kps, s.no_kps,
+            COALESCE(s.penerima_kip, false) as penerima_kip, s.nomor_kip, s.nama_di_kip, s.nomor_kks,
+            COALESCE(s.layak_pip, false) as layak_pip, s.alasan_layak_pip,
+            s.bank, s.nomor_rekening_bank, s.rekening_atas_nama, s.foto_profile
+        FROM students s
+        LEFT JOIN LATERAL (
+            SELECT c.name FROM enrollments e
+            JOIN classes c ON c.id = e.class_id
+            WHERE e.student_id = s.id AND e.status = 'Active'
+            LIMIT 1
+        ) c ON true
+        WHERE (s.user_id = $1 OR s.guardian_id IN (SELECT id FROM guardians WHERE user_id = $1))
+          AND s.tenant_id = $2
+        LIMIT 1
+        "#
+    )
+    .bind(actor_id)
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?
+    .ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Domain(
+                school_core::common::error::DomainError::NotFound(
+                    "Biodata resmi peserta didik tidak ditemukan".to_string(),
+                ),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let dto = super::dto::student_responses::StudentOfficialProfileResponse {
+        id: row.get("id"),
+        nisn: row.get("nisn"),
+        full_name: row.get("full_name"),
+        nik: row.try_get("nik").ok(),
+        nipd: row.try_get("nipd").ok(),
+        gender: row.try_get("gender").ok(),
+        place_of_birth: row.try_get("place_of_birth").ok(),
+        date_of_birth: row.try_get("date_of_birth").ok(),
+        religion: row.try_get("religion").ok(),
+        class_name: row.try_get("class_name").ok(),
+        alamat_jalan: row.try_get("alamat_jalan").ok(),
+        rt: row.try_get("rt").ok(),
+        rw: row.try_get("rw").ok(),
+        dusun: row.try_get("dusun").ok(),
+        kelurahan: row.try_get("kelurahan").ok(),
+        kecamatan: row.try_get("kecamatan").ok(),
+        kode_pos: row.try_get("kode_pos").ok(),
+        no_hp: row.try_get("no_hp").ok(),
+        email: row.try_get("email").ok(),
+        nama_ayah: row.try_get("nama_ayah").ok(),
+        pekerjaan_ayah: row.try_get("pekerjaan_ayah").ok(),
+        penghasilan_ayah: row.try_get("penghasilan_ayah").ok(),
+        nama_ibu: row.try_get("nama_ibu").ok(),
+        pekerjaan_ibu: row.try_get("pekerjaan_ibu").ok(),
+        penghasilan_ibu: row.try_get("penghasilan_ibu").ok(),
+        nama_wali: row.try_get("nama_wali").ok(),
+        pekerjaan_wali: row.try_get("pekerjaan_wali").ok(),
+        penghasilan_wali: row.try_get("penghasilan_wali").ok(),
+        penerima_kps: row.try_get("penerima_kps").unwrap_or(false),
+        no_kps: row.try_get("no_kps").ok(),
+        penerima_kip: row.try_get("penerima_kip").unwrap_or(false),
+        nomor_kip: row.try_get("nomor_kip").ok(),
+        nama_di_kip: row.try_get("nama_di_kip").ok(),
+        nomor_kks: row.try_get("nomor_kks").ok(),
+        layak_pip: row.try_get("layak_pip").unwrap_or(false),
+        alasan_layak_pip: row.try_get("alasan_layak_pip").ok(),
+        bank: row.try_get("bank").ok(),
+        nomor_rekening_bank: row.try_get("nomor_rekening_bank").ok(),
+        rekening_atas_nama: row.try_get("rekening_atas_nama").ok(),
+        foto_profile: row.try_get("foto_profile").ok(),
+    };
+
+    Ok(Json(ApiResponse::success(dto, req_ctx.request_id)))
 }
