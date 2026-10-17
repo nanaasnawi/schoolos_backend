@@ -611,16 +611,16 @@ async fn get_pip_students(
         ));
     }
 
-    // 1. Calculate Summary Counters for the tenant
+    // 1. Calculate Summary Counters for the tenant (Filtered strictly to students with PIP / Bansos records)
     let summary_row = sqlx::query(
         r#"
         SELECT 
-            COUNT(*)::bigint as total_students,
+            COUNT(*) FILTER (WHERE penerima_kip = true OR layak_pip = true OR penerima_kps = true OR (nomor_kks IS NOT NULL AND nomor_kks != '') OR (bank IS NOT NULL AND bank != ''))::bigint as total_students,
             COUNT(*) FILTER (WHERE penerima_kip = true)::bigint as penerima_kip,
             COUNT(*) FILTER (WHERE layak_pip = true)::bigint as layak_pip,
-            COUNT(*) FILTER (WHERE penerima_kps = true)::bigint as penerima_kps,
-            COUNT(*) FILTER (WHERE bank IS NOT NULL AND bank != '' AND nomor_rekening_bank IS NOT NULL AND nomor_rekening_bank != '')::bigint as memiliki_rekening,
-            COUNT(*) FILTER (WHERE bank IS NULL OR bank = '' OR nomor_rekening_bank IS NULL OR nomor_rekening_bank = '')::bigint as belum_memiliki_rekening
+            COUNT(*) FILTER (WHERE penerima_kps = true OR (nomor_kks IS NOT NULL AND nomor_kks != ''))::bigint as penerima_kps,
+            COUNT(*) FILTER (WHERE (penerima_kip = true OR layak_pip = true OR penerima_kps = true OR (nomor_kks IS NOT NULL AND nomor_kks != '') OR (bank IS NOT NULL AND bank != '')) AND bank IS NOT NULL AND bank != '' AND nomor_rekening_bank IS NOT NULL AND nomor_rekening_bank != '')::bigint as memiliki_rekening,
+            COUNT(*) FILTER (WHERE (penerima_kip = true OR layak_pip = true OR penerima_kps = true OR (nomor_kks IS NOT NULL AND nomor_kks != '') OR (bank IS NOT NULL AND bank != '')) AND (bank IS NULL OR bank = '' OR nomor_rekening_bank IS NULL OR nomor_rekening_bank = ''))::bigint as belum_memiliki_rekening
         FROM students
         WHERE tenant_id = $1 AND (status = 'active' OR status = 'Active')
         "#
@@ -682,11 +682,12 @@ async fn get_pip_students(
             LIMIT 1
         ) c ON true
         WHERE s.tenant_id = $1 AND (s.status = 'active' OR s.status = 'Active')
+          AND (s.penerima_kip = true OR s.layak_pip = true OR s.penerima_kps = true OR (s.nomor_kks IS NOT NULL AND s.nomor_kks != '') OR (s.bank IS NOT NULL AND s.bank != ''))
           AND (
             $2 = 'ALL' 
             OR ($2 = 'KIP' AND s.penerima_kip = true)
             OR ($2 = 'LAYAK_PIP' AND s.layak_pip = true)
-            OR ($2 = 'KPS' AND s.penerima_kps = true)
+            OR ($2 = 'KPS' AND (s.penerima_kps = true OR (s.nomor_kks IS NOT NULL AND s.nomor_kks != '')))
             OR ($2 = 'HAS_REKENING' AND s.bank IS NOT NULL AND s.bank != '' AND s.nomor_rekening_bank IS NOT NULL AND s.nomor_rekening_bank != '')
             OR ($2 = 'NO_REKENING' AND (s.bank IS NULL OR s.bank = '' OR s.nomor_rekening_bank IS NULL OR s.nomor_rekening_bank = ''))
           )
@@ -697,6 +698,7 @@ async fn get_pip_students(
             OR s.nisn ILIKE ('%' || $4 || '%')
             OR s.nik ILIKE ('%' || $4 || '%')
             OR s.nomor_kip ILIKE ('%' || $4 || '%')
+            OR s.nomor_kks ILIKE ('%' || $4 || '%')
             OR s.bank ILIKE ('%' || $4 || '%')
             OR s.nomor_rekening_bank ILIKE ('%' || $4 || '%')
           )
