@@ -2365,7 +2365,7 @@ pub async fn get_kaldik_budget(
         FROM modul_ajar
         WHERE academic_year = $1
           AND semester = $2
-          AND (subject_code = $3 OR subject_name ILIKE $4 OR $3 = '')
+          AND (subject_code = $3 OR subject_name ILIKE $4 OR $3 = '' OR $3 = 'ALL')
           AND status IN ('ACTIVE', 'DRAFT')
           AND deleted_at IS NULL
         "#,
