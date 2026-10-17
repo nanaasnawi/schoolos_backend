@@ -622,7 +622,7 @@ async fn get_pip_students(
             COUNT(*) FILTER (WHERE bank IS NOT NULL AND bank != '' AND nomor_rekening_bank IS NOT NULL AND nomor_rekening_bank != '')::bigint as memiliki_rekening,
             COUNT(*) FILTER (WHERE bank IS NULL OR bank = '' OR nomor_rekening_bank IS NULL OR nomor_rekening_bank = '')::bigint as belum_memiliki_rekening
         FROM students
-        WHERE tenant_id = $1 AND status = 'active'
+        WHERE tenant_id = $1 AND (status = 'active' OR status = 'Active')
         "#
     )
     .bind(req_ctx.tenant_id)
@@ -678,10 +678,10 @@ async fn get_pip_students(
         LEFT JOIN LATERAL (
             SELECT c.name FROM enrollments e
             JOIN classes c ON c.id = e.class_id
-            WHERE e.student_id = s.id AND e.status = 'Active'
+            WHERE e.student_id = s.id AND (e.status = 'active' OR e.status = 'Active')
             LIMIT 1
         ) c ON true
-        WHERE s.tenant_id = $1 AND s.status = 'active'
+        WHERE s.tenant_id = $1 AND (s.status = 'active' OR s.status = 'Active')
           AND (
             $2 = 'ALL' 
             OR ($2 = 'KIP' AND s.penerima_kip = true)
@@ -822,7 +822,7 @@ async fn get_my_official_profile(
         LEFT JOIN LATERAL (
             SELECT c.name FROM enrollments e
             JOIN classes c ON c.id = e.class_id
-            WHERE e.student_id = s.id AND e.status = 'Active'
+            WHERE e.student_id = s.id AND (e.status = 'active' OR e.status = 'Active')
             LIMIT 1
         ) c ON true
         WHERE (s.user_id = $1 OR s.guardian_id IN (SELECT id FROM guardians WHERE user_id = $1))
