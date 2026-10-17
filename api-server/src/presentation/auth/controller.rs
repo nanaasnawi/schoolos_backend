@@ -1046,6 +1046,23 @@ async fn upload_avatar(
         )
     })?;
 
+    // Synchronize foto_profile to students, teachers, staff
+    let _ = sqlx::query("UPDATE students SET foto_profile = $1, updated_at = NOW() WHERE user_id = $2")
+        .bind(&url)
+        .bind(actor_id)
+        .execute(&ctx.pool)
+        .await;
+    let _ = sqlx::query("UPDATE teachers SET foto_profile = $1, updated_at = NOW() WHERE user_id = $2")
+        .bind(&url)
+        .bind(actor_id)
+        .execute(&ctx.pool)
+        .await;
+    let _ = sqlx::query("UPDATE staff SET foto_profile = $1, updated_at = NOW() WHERE user_id = $2")
+        .bind(&url)
+        .bind(actor_id)
+        .execute(&ctx.pool)
+        .await;
+
     Ok(Json(ApiResponse::success(
         serde_json::json!({
             "avatar_url": url,
@@ -1166,6 +1183,20 @@ async fn delete_avatar(
         )
     })?;
 
+    // Synchronize foto_profile to students, teachers, staff
+    let _ = sqlx::query("UPDATE students SET foto_profile = NULL, updated_at = NOW() WHERE user_id = $1")
+        .bind(actor_id)
+        .execute(&ctx.pool)
+        .await;
+    let _ = sqlx::query("UPDATE teachers SET foto_profile = NULL, updated_at = NOW() WHERE user_id = $1")
+        .bind(actor_id)
+        .execute(&ctx.pool)
+        .await;
+    let _ = sqlx::query("UPDATE staff SET foto_profile = NULL, updated_at = NOW() WHERE user_id = $1")
+        .bind(actor_id)
+        .execute(&ctx.pool)
+        .await;
+
     Ok(Json(ApiResponse::success(
         serde_json::json!({
             "message": "Foto profil berhasil dihapus dari database",
@@ -1205,6 +1236,12 @@ async fn update_profile(
         ));
     }
 
+    let is_student: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM students WHERE user_id = $1)")
+        .bind(actor_id)
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap_or(false);
+
     if let Some(ref av) = payload.avatar_url {
         if av.trim().is_empty() {
             let _ = sqlx::query(
@@ -1213,6 +1250,12 @@ async fn update_profile(
             .bind(actor_id)
             .execute(&ctx.pool)
             .await;
+            let _ = sqlx::query("UPDATE students SET foto_profile = NULL, updated_at = NOW() WHERE user_id = $1")
+                .bind(actor_id).execute(&ctx.pool).await;
+            let _ = sqlx::query("UPDATE teachers SET foto_profile = NULL, updated_at = NOW() WHERE user_id = $1")
+                .bind(actor_id).execute(&ctx.pool).await;
+            let _ = sqlx::query("UPDATE staff SET foto_profile = NULL, updated_at = NOW() WHERE user_id = $1")
+                .bind(actor_id).execute(&ctx.pool).await;
         } else {
             let _ = sqlx::query(
                 "UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE id = $2",
@@ -1221,6 +1264,12 @@ async fn update_profile(
             .bind(actor_id)
             .execute(&ctx.pool)
             .await;
+            let _ = sqlx::query("UPDATE students SET foto_profile = $1, updated_at = NOW() WHERE user_id = $2")
+                .bind(av).bind(actor_id).execute(&ctx.pool).await;
+            let _ = sqlx::query("UPDATE teachers SET foto_profile = $1, updated_at = NOW() WHERE user_id = $2")
+                .bind(av).bind(actor_id).execute(&ctx.pool).await;
+            let _ = sqlx::query("UPDATE staff SET foto_profile = $1, updated_at = NOW() WHERE user_id = $2")
+                .bind(av).bind(actor_id).execute(&ctx.pool).await;
         }
     }
 
@@ -1234,15 +1283,6 @@ async fn update_profile(
             let _ = sqlx::query("UPDATE teachers SET email = $1, updated_at = NOW() WHERE user_id = $2")
                 .bind(clean).bind(actor_id).execute(&ctx.pool).await;
             let _ = sqlx::query("UPDATE staff SET email = $1, updated_at = NOW() WHERE user_id = $2")
-                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
-        }
-    }
-
-    let target_username = payload.username.as_ref().or(payload.identifier.as_ref());
-    if let Some(un) = target_username {
-        if !un.trim().is_empty() {
-            let clean = un.trim();
-            let _ = sqlx::query("UPDATE users SET username = $1, updated_at = NOW() WHERE id = $2")
                 .bind(clean).bind(actor_id).execute(&ctx.pool).await;
         }
     }
@@ -1261,33 +1301,42 @@ async fn update_profile(
         }
     }
 
-    if let Some(ref ab) = payload.about {
-        if !ab.trim().is_empty() {
-            let clean = ab.trim();
-            let _ = sqlx::query("UPDATE students SET alamat_jalan = $1, updated_at = NOW() WHERE user_id = $2")
-                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
-            let _ = sqlx::query("UPDATE teachers SET alamat_jalan = $1, updated_at = NOW() WHERE user_id = $2")
-                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
-            let _ = sqlx::query("UPDATE staff SET alamat_jalan = $1, updated_at = NOW() WHERE user_id = $2")
-                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
-            let _ = sqlx::query("UPDATE guardians SET address = $1, updated_at = NOW() WHERE user_id = $2")
-                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+    // Peraturan Tegas: Bagi akun Siswa, hanya Email dan Nomor Telepon serta Foto Profil yang dapat diubah mandiri.
+    // Username, alamat domisili, dan Nama Lengkap terkunci dan harus sinkron dengan data resmi Dapodik!
+    if !is_student {
+        let target_username = payload.username.as_ref().or(payload.identifier.as_ref());
+        if let Some(un) = target_username {
+            if !un.trim().is_empty() {
+                let clean = un.trim();
+                let _ = sqlx::query("UPDATE users SET username = $1, updated_at = NOW() WHERE id = $2")
+                    .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+            }
         }
-    }
 
-    if let Some(ref name) = payload.full_name {
-        if !name.trim().is_empty() {
-            let clean = name.trim();
-            let _ = sqlx::query("UPDATE users SET full_name = $1, updated_at = NOW() WHERE id = $2")
-                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
-            let _ = sqlx::query("UPDATE students SET full_name = $1, updated_at = NOW() WHERE user_id = $2")
-                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
-            let _ = sqlx::query("UPDATE teachers SET full_name = $1, updated_at = NOW() WHERE user_id = $2")
-                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
-            let _ = sqlx::query("UPDATE staff SET full_name = $1, updated_at = NOW() WHERE user_id = $2")
-                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
-            let _ = sqlx::query("UPDATE guardians SET full_name = $1, updated_at = NOW() WHERE user_id = $2")
-                .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+        if let Some(ref ab) = payload.about {
+            if !ab.trim().is_empty() {
+                let clean = ab.trim();
+                let _ = sqlx::query("UPDATE teachers SET alamat_jalan = $1, updated_at = NOW() WHERE user_id = $2")
+                    .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+                let _ = sqlx::query("UPDATE staff SET alamat_jalan = $1, updated_at = NOW() WHERE user_id = $2")
+                    .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+                let _ = sqlx::query("UPDATE guardians SET address = $1, updated_at = NOW() WHERE user_id = $2")
+                    .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+            }
+        }
+
+        if let Some(ref name) = payload.full_name {
+            if !name.trim().is_empty() {
+                let clean = name.trim();
+                let _ = sqlx::query("UPDATE users SET full_name = $1, updated_at = NOW() WHERE id = $2")
+                    .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+                let _ = sqlx::query("UPDATE teachers SET full_name = $1, updated_at = NOW() WHERE user_id = $2")
+                    .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+                let _ = sqlx::query("UPDATE staff SET full_name = $1, updated_at = NOW() WHERE user_id = $2")
+                    .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+                let _ = sqlx::query("UPDATE guardians SET full_name = $1, updated_at = NOW() WHERE user_id = $2")
+                    .bind(clean).bind(actor_id).execute(&ctx.pool).await;
+            }
         }
     }
 

@@ -333,6 +333,39 @@ fn truncate_str(val: &str, max_len: usize) -> String {
     val.trim().chars().take(max_len).collect()
 }
 
+fn parse_dapodik_bool(val: Option<&serde_json::Value>) -> Option<bool> {
+    match val {
+        Some(serde_json::Value::Bool(b)) => Some(*b),
+        Some(serde_json::Value::Number(n)) => Some(n.as_i64().unwrap_or(0) == 1),
+        Some(serde_json::Value::String(s)) => {
+            let s_lower = s.trim().to_lowercase();
+            if s_lower == "ya" || s_lower == "1" || s_lower == "true" || s_lower == "y" {
+                Some(true)
+            } else if s_lower == "tidak" || s_lower == "0" || s_lower == "false" || s_lower == "t" {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn parse_dapodik_string_val(val: Option<&serde_json::Value>, max_len: usize) -> Option<String> {
+    match val {
+        Some(serde_json::Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() || trimmed == "-" {
+                None
+            } else {
+                Some(truncate_str(trimmed, max_len))
+            }
+        }
+        Some(serde_json::Value::Number(n)) => Some(truncate_str(&n.to_string(), max_len)),
+        _ => None,
+    }
+}
+
 /// Kategori PTK hasil klasifikasi dari data mentah Dapodik (`jenis_ptk_id_str` / `jabatan_ptk_id_str`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PtkKind {
@@ -939,6 +972,60 @@ pub struct DapodikRawStudent {
     pub status: Option<String>,
     pub status_di_sekolah: Option<String>,
     pub aktif: Option<serde_json::Value>,
+
+    #[serde(alias = "rt", alias = "RT", alias = "r_t")]
+    pub rt: Option<serde_json::Value>,
+    #[serde(alias = "rw", alias = "RW", alias = "r_w")]
+    pub rw: Option<serde_json::Value>,
+    #[serde(alias = "dusun", alias = "nama_dusun", alias = "Dusun")]
+    pub dusun: Option<String>,
+    #[serde(alias = "kelurahan", alias = "desa_kelurahan", alias = "Kelurahan")]
+    pub kelurahan: Option<String>,
+    #[serde(alias = "kecamatan", alias = "nama_kecamatan", alias = "Kecamatan")]
+    pub kecamatan: Option<String>,
+    #[serde(alias = "kode_pos", alias = "kodepos", alias = "Kode Pos")]
+    pub kode_pos: Option<String>,
+
+    #[serde(alias = "pekerjaan_ayah", alias = "Pekerjaan Ayah")]
+    pub pekerjaan_ayah: Option<String>,
+    #[serde(alias = "penghasilan_ayah", alias = "penghasilan_ayah_id_str", alias = "Penghasilan Ayah")]
+    pub penghasilan_ayah: Option<String>,
+
+    #[serde(alias = "pekerjaan_ibu", alias = "Pekerjaan Ibu")]
+    pub pekerjaan_ibu: Option<String>,
+    #[serde(alias = "penghasilan_ibu", alias = "penghasilan_ibu_id_str", alias = "Penghasilan Ibu")]
+    pub penghasilan_ibu: Option<String>,
+
+    #[serde(alias = "pekerjaan_wali", alias = "Pekerjaan Wali")]
+    pub pekerjaan_wali: Option<String>,
+    #[serde(alias = "penghasilan_wali", alias = "penghasilan_wali_id_str", alias = "Penghasilan Wali")]
+    pub penghasilan_wali: Option<String>,
+
+    #[serde(alias = "penerima_kps", alias = "Penerima KPS", alias = "kps")]
+    pub penerima_kps: Option<serde_json::Value>,
+    #[serde(alias = "no_kps", alias = "nomor_kps", alias = "No. KPS")]
+    pub no_kps: Option<String>,
+
+    #[serde(alias = "penerima_kip", alias = "Penerima KIP", alias = "kip")]
+    pub penerima_kip: Option<serde_json::Value>,
+    #[serde(alias = "nomor_kip", alias = "no_kip", alias = "Nomor KIP")]
+    pub nomor_kip: Option<String>,
+    #[serde(alias = "nama_di_kip", alias = "nama_kip", alias = "Nama di KIP")]
+    pub nama_di_kip: Option<String>,
+    #[serde(alias = "nomor_kks", alias = "no_kks", alias = "Nomor KKS")]
+    pub nomor_kks: Option<String>,
+
+    #[serde(alias = "layak_pip", alias = "Layak PIP (usulan dari sekolah)", alias = "usulan_pip")]
+    pub layak_pip: Option<serde_json::Value>,
+    #[serde(alias = "alasan_layak_pip", alias = "Alasan Layak PIP", alias = "alasan_pip")]
+    pub alasan_layak_pip: Option<String>,
+
+    #[serde(alias = "bank", alias = "nama_bank", alias = "Bank")]
+    pub bank: Option<String>,
+    #[serde(alias = "nomor_rekening_bank", alias = "no_rekening", alias = "no_rekening_bank", alias = "Nomor Rekening Bank")]
+    pub nomor_rekening_bank: Option<String>,
+    #[serde(alias = "rekening_atas_nama", alias = "nama_rekening", alias = "Rekening Atas Nama")]
+    pub rekening_atas_nama: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
@@ -2654,6 +2741,38 @@ pub async fn pull_dapodik_records(
                 None
             };
 
+            let rt_val = parse_dapodik_string_val(std.rt.as_ref(), 10);
+            let rw_val = parse_dapodik_string_val(std.rw.as_ref(), 10);
+            let dusun_val = std.dusun.as_deref().map(|s| truncate_str(s, 100));
+            let kelurahan_val = std.kelurahan.as_deref().map(|s| truncate_str(s, 100));
+            let kecamatan_val = std.kecamatan.as_deref().map(|s| truncate_str(s, 100));
+            let kode_pos_val = std.kode_pos.as_deref().map(|s| truncate_str(s, 20));
+
+            let pekerjaan_ayah_val = std.pekerjaan_ayah.as_deref().or(std.pekerjaan_ayah_id_str.as_deref()).map(|s| truncate_str(s, 100));
+            let penghasilan_ayah_val = std.penghasilan_ayah.as_deref().map(|s| truncate_str(s, 100));
+
+            let pekerjaan_ibu_val = std.pekerjaan_ibu.as_deref().or(std.pekerjaan_ibu_id_str.as_deref()).map(|s| truncate_str(s, 100));
+            let penghasilan_ibu_val = std.penghasilan_ibu.as_deref().map(|s| truncate_str(s, 100));
+
+            let nama_wali_val = nama_wali.clone();
+            let pekerjaan_wali_val = std.pekerjaan_wali.as_deref().or(std.pekerjaan_wali_id_str.as_deref()).map(|s| truncate_str(s, 100));
+            let penghasilan_wali_val = std.penghasilan_wali.as_deref().map(|s| truncate_str(s, 100));
+
+            let penerima_kps_val = parse_dapodik_bool(std.penerima_kps.as_ref());
+            let no_kps_val = std.no_kps.as_deref().map(|s| truncate_str(s, 100));
+
+            let penerima_kip_val = parse_dapodik_bool(std.penerima_kip.as_ref());
+            let nomor_kip_val = std.nomor_kip.as_deref().map(|s| truncate_str(s, 100));
+            let nama_di_kip_val = std.nama_di_kip.as_deref().map(|s| truncate_str(s, 255));
+            let nomor_kks_val = std.nomor_kks.as_deref().map(|s| truncate_str(s, 100));
+
+            let layak_pip_val = parse_dapodik_bool(std.layak_pip.as_ref());
+            let alasan_layak_pip_val = std.alasan_layak_pip.as_deref().map(|s| truncate_str(s, 500));
+
+            let bank_val = std.bank.as_deref().map(|s| truncate_str(s, 100));
+            let nomor_rekening_bank_val = std.nomor_rekening_bank.as_deref().map(|s| truncate_str(s, 100));
+            let rekening_atas_nama_val = std.rekening_atas_nama.as_deref().map(|s| truncate_str(s, 255));
+
             // Resolution student ID MUTLAK berdasarkan NISN -> NIK valid.
             // DILARANG KERAS menggunakan string nama untuk deduplikasi atau pencarian siswa!
             let existing_student_id = student_by_nisn.get(&final_nisn).copied().or_else(|| {
@@ -2676,7 +2795,19 @@ pub async fn pull_dapodik_records(
                         guardian_id = COALESCE($8, students.guardian_id), nipd = COALESCE($9, students.nipd),
                         alamat_jalan = COALESCE($10, students.alamat_jalan), no_hp = COALESCE($11, students.no_hp),
                         email = COALESCE($12, students.email), nama_ayah = COALESCE($13, students.nama_ayah), nama_ibu = COALESCE($14, students.nama_ibu),
-                        status = 'active', updated_at = $15, nisn = $16
+                        status = 'active', updated_at = $15, nisn = $16,
+                        rt = COALESCE($18, students.rt), rw = COALESCE($19, students.rw),
+                        dusun = COALESCE($20, students.dusun), kelurahan = COALESCE($21, students.kelurahan),
+                        kecamatan = COALESCE($22, students.kecamatan), kode_pos = COALESCE($23, students.kode_pos),
+                        pekerjaan_ayah = COALESCE($24, students.pekerjaan_ayah), penghasilan_ayah = COALESCE($25, students.penghasilan_ayah),
+                        pekerjaan_ibu = COALESCE($26, students.pekerjaan_ibu), penghasilan_ibu = COALESCE($27, students.penghasilan_ibu),
+                        nama_wali = COALESCE($28, students.nama_wali), pekerjaan_wali = COALESCE($29, students.pekerjaan_wali), penghasilan_wali = COALESCE($30, students.penghasilan_wali),
+                        penerima_kps = COALESCE($31, students.penerima_kps), no_kps = COALESCE($32, students.no_kps),
+                        penerima_kip = COALESCE($33, students.penerima_kip), nomor_kip = COALESCE($34, students.nomor_kip),
+                        nama_di_kip = COALESCE($35, students.nama_di_kip), nomor_kks = COALESCE($36, students.nomor_kks),
+                        layak_pip = COALESCE($37, students.layak_pip), alasan_layak_pip = COALESCE($38, students.alasan_layak_pip),
+                        bank = COALESCE($39, students.bank), nomor_rekening_bank = COALESCE($40, students.nomor_rekening_bank),
+                        rekening_atas_nama = COALESCE($41, students.rekening_atas_nama)
                     WHERE id = $17
                     "#
                 )
@@ -2688,6 +2819,18 @@ pub async fn pull_dapodik_records(
                 .bind(final_guardian_id).bind(nipd_val.clone()).bind(&student_address).bind(&guardian_phone)
                 .bind(std.email.as_deref().map(|s| truncate_str(s, 255)))
                 .bind(&nama_ayah).bind(&nama_ibu).bind(now).bind(&final_nisn).bind(sid)
+                .bind(&rt_val).bind(&rw_val)
+                .bind(&dusun_val).bind(&kelurahan_val)
+                .bind(&kecamatan_val).bind(&kode_pos_val)
+                .bind(&pekerjaan_ayah_val).bind(&penghasilan_ayah_val)
+                .bind(&pekerjaan_ibu_val).bind(&penghasilan_ibu_val)
+                .bind(&nama_wali_val).bind(&pekerjaan_wali_val).bind(&penghasilan_wali_val)
+                .bind(penerima_kps_val).bind(&no_kps_val)
+                .bind(penerima_kip_val).bind(&nomor_kip_val)
+                .bind(&nama_di_kip_val).bind(&nomor_kks_val)
+                .bind(layak_pip_val).bind(&alasan_layak_pip_val)
+                .bind(&bank_val).bind(&nomor_rekening_bank_val)
+                .bind(&rekening_atas_nama_val)
                 .execute(&mut *tx).await;
 
                 if let Err(e) = update_res {
@@ -2714,8 +2857,20 @@ pub async fn pull_dapodik_records(
             } else {
                 let insert_res = sqlx::query_scalar::<_, Uuid>(
                     r#"
-                    INSERT INTO students (id, tenant_id, user_id, guardian_id, nisn, full_name, nik, gender, place_of_birth, date_of_birth, religion, nipd, alamat_jalan, no_hp, email, nama_ayah, nama_ibu, status, created_at, updated_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, 'active', $18, $18)
+                    INSERT INTO students (
+                        id, tenant_id, user_id, guardian_id, nisn, full_name, nik, gender, place_of_birth, date_of_birth, religion, nipd, alamat_jalan, no_hp, email, nama_ayah, nama_ibu, status, created_at, updated_at,
+                        rt, rw, dusun, kelurahan, kecamatan, kode_pos,
+                        pekerjaan_ayah, penghasilan_ayah, pekerjaan_ibu, penghasilan_ibu, nama_wali, pekerjaan_wali, penghasilan_wali,
+                        penerima_kps, no_kps, penerima_kip, nomor_kip, nama_di_kip, nomor_kks, layak_pip, alasan_layak_pip,
+                        bank, nomor_rekening_bank, rekening_atas_nama
+                    )
+                    VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, 'active', $18, $18,
+                        $19, $20, $21, $22, $23, $24,
+                        $25, $26, $27, $28, $29, $30, $31,
+                        COALESCE($32, false), $33, COALESCE($34, false), $35, $36, $37, COALESCE($38, false), $39,
+                        $40, $41, $42
+                    )
                     ON CONFLICT (tenant_id, nisn) DO UPDATE
                     SET full_name = EXCLUDED.full_name,
                         user_id = COALESCE(EXCLUDED.user_id, students.user_id),
@@ -2732,7 +2887,31 @@ pub async fn pull_dapodik_records(
                         nama_ayah = COALESCE(EXCLUDED.nama_ayah, students.nama_ayah),
                         nama_ibu = COALESCE(EXCLUDED.nama_ibu, students.nama_ibu),
                         status = 'active',
-                        updated_at = EXCLUDED.updated_at
+                        updated_at = EXCLUDED.updated_at,
+                        rt = COALESCE(EXCLUDED.rt, students.rt),
+                        rw = COALESCE(EXCLUDED.rw, students.rw),
+                        dusun = COALESCE(EXCLUDED.dusun, students.dusun),
+                        kelurahan = COALESCE(EXCLUDED.kelurahan, students.kelurahan),
+                        kecamatan = COALESCE(EXCLUDED.kecamatan, students.kecamatan),
+                        kode_pos = COALESCE(EXCLUDED.kode_pos, students.kode_pos),
+                        pekerjaan_ayah = COALESCE(EXCLUDED.pekerjaan_ayah, students.pekerjaan_ayah),
+                        penghasilan_ayah = COALESCE(EXCLUDED.penghasilan_ayah, students.penghasilan_ayah),
+                        pekerjaan_ibu = COALESCE(EXCLUDED.pekerjaan_ibu, students.pekerjaan_ibu),
+                        penghasilan_ibu = COALESCE(EXCLUDED.penghasilan_ibu, students.penghasilan_ibu),
+                        nama_wali = COALESCE(EXCLUDED.nama_wali, students.nama_wali),
+                        pekerjaan_wali = COALESCE(EXCLUDED.pekerjaan_wali, students.pekerjaan_wali),
+                        penghasilan_wali = COALESCE(EXCLUDED.penghasilan_wali, students.penghasilan_wali),
+                        penerima_kps = COALESCE(EXCLUDED.penerima_kps, students.penerima_kps),
+                        no_kps = COALESCE(EXCLUDED.no_kps, students.no_kps),
+                        penerima_kip = COALESCE(EXCLUDED.penerima_kip, students.penerima_kip),
+                        nomor_kip = COALESCE(EXCLUDED.nomor_kip, students.nomor_kip),
+                        nama_di_kip = COALESCE(EXCLUDED.nama_di_kip, students.nama_di_kip),
+                        nomor_kks = COALESCE(EXCLUDED.nomor_kks, students.nomor_kks),
+                        layak_pip = COALESCE(EXCLUDED.layak_pip, students.layak_pip),
+                        alasan_layak_pip = COALESCE(EXCLUDED.alasan_layak_pip, students.alasan_layak_pip),
+                        bank = COALESCE(EXCLUDED.bank, students.bank),
+                        nomor_rekening_bank = COALESCE(EXCLUDED.nomor_rekening_bank, students.nomor_rekening_bank),
+                        rekening_atas_nama = COALESCE(EXCLUDED.rekening_atas_nama, students.rekening_atas_nama)
                     RETURNING id
                     "#
                 )
@@ -2744,7 +2923,20 @@ pub async fn pull_dapodik_records(
                 .bind(std.agama_id_str.as_deref().map(|s| truncate_str(s, 50)))
                 .bind(nipd_val).bind(&student_address).bind(&guardian_phone)
                 .bind(std.email.as_deref().map(|s| truncate_str(s, 255)))
-                .bind(&nama_ayah).bind(&nama_ibu).bind(now).fetch_one(&mut *tx).await;
+                .bind(&nama_ayah).bind(&nama_ibu).bind(now)
+                .bind(&rt_val).bind(&rw_val)
+                .bind(&dusun_val).bind(&kelurahan_val)
+                .bind(&kecamatan_val).bind(&kode_pos_val)
+                .bind(&pekerjaan_ayah_val).bind(&penghasilan_ayah_val)
+                .bind(&pekerjaan_ibu_val).bind(&penghasilan_ibu_val)
+                .bind(&nama_wali_val).bind(&pekerjaan_wali_val).bind(&penghasilan_wali_val)
+                .bind(penerima_kps_val).bind(&no_kps_val)
+                .bind(penerima_kip_val).bind(&nomor_kip_val)
+                .bind(&nama_di_kip_val).bind(&nomor_kks_val)
+                .bind(layak_pip_val).bind(&alasan_layak_pip_val)
+                .bind(&bank_val).bind(&nomor_rekening_bank_val)
+                .bind(&rekening_atas_nama_val)
+                .fetch_one(&mut *tx).await;
 
                 let inserted_id = match insert_res {
                     Ok(id) => id,
