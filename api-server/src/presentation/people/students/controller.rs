@@ -844,10 +844,9 @@ async fn get_my_official_profile(
     })?
     .ok_or_else(|| {
         ApiError::new(
-            school_core::common::error::ApplicationError::Domain(
-                school_core::common::error::DomainError::NotFound(
-                    "Biodata resmi peserta didik tidak ditemukan".to_string(),
-                ),
+            school_core::common::error::ApplicationError::NotFound(
+                school_core::common::error_code::ErrorCode::StudentNotFound,
+                "Biodata resmi peserta didik tidak ditemukan".to_string(),
             ),
             &req_ctx.request_id,
         )
