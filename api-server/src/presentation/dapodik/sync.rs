@@ -1276,6 +1276,93 @@ pub async fn agent_sync_async_handler(
     ))
 }
 
+pub fn parse_grade_level(nama_rombel: &str, tingkat_str: Option<&str>) -> (i32, String) {
+    if let Some(t) = tingkat_str {
+        let t_clean = t.trim();
+        if let Ok(lvl) = t_clean.parse::<i32>() {
+            if (1..=12).contains(&lvl) {
+                return (lvl, format!("Tingkat {}", lvl));
+            }
+        }
+    }
+
+    let upper = nama_rombel.trim().to_uppercase();
+
+    // PKBM Package handling
+    // Paket C (SMA/SMK level): Tingkat 10, 11, 12
+    if upper.contains("PAKET C") {
+        if upper.contains("12") {
+            return (12, "Tingkat 12".to_string());
+        } else if upper.contains("11") {
+            return (11, "Tingkat 11".to_string());
+        } else if upper.contains("10") {
+            return (10, "Tingkat 10".to_string());
+        }
+        return (10, "Tingkat 10".to_string());
+    }
+
+    // Paket B (SMP level): Tingkat 7, 8, 9
+    if upper.contains("PAKET B") {
+        for ch in upper.chars() {
+            if ch.is_ascii_digit() {
+                let lvl = ch.to_digit(10).unwrap() as i32;
+                if (7..=9).contains(&lvl) {
+                    return (lvl, format!("Tingkat {}", lvl));
+                }
+            }
+        }
+        return (7, "Tingkat 7".to_string());
+    }
+
+    // Paket A (SD level): Tingkat 1, 2, 3, 4, 5, 6
+    if upper.contains("PAKET A") {
+        for ch in upper.chars() {
+            if ch.is_ascii_digit() {
+                let lvl = ch.to_digit(10).unwrap() as i32;
+                if (1..=6).contains(&lvl) {
+                    return (lvl, format!("Tingkat {}", lvl));
+                }
+            }
+        }
+        return (1, "Tingkat 1".to_string());
+    }
+
+    // Roman Numerals
+    if upper.contains("XII") {
+        return (12, "Tingkat 12".to_string());
+    } else if upper.contains("XI") {
+        return (11, "Tingkat 11".to_string());
+    } else if upper.contains("IX") {
+        return (9, "Tingkat 9".to_string());
+    } else if upper.contains("VIII") {
+        return (8, "Tingkat 8".to_string());
+    } else if upper.contains("VII") {
+        return (7, "Tingkat 7".to_string());
+    } else if upper.contains("VI") {
+        return (6, "Tingkat 6".to_string());
+    } else if upper.contains("IV") {
+        return (4, "Tingkat 4".to_string());
+    } else if upper.contains("V") {
+        return (5, "Tingkat 5".to_string());
+    } else if upper.contains("III") {
+        return (3, "Tingkat 3".to_string());
+    } else if upper.contains("II") {
+        return (2, "Tingkat 2".to_string());
+    } else if upper.contains("X") {
+        return (10, "Tingkat 10".to_string());
+    }
+
+    // Direct digit extraction
+    let digits: String = upper.chars().filter(|c| c.is_ascii_digit()).collect();
+    if let Ok(lvl) = digits.parse::<i32>() {
+        if (1..=12).contains(&lvl) {
+            return (lvl, format!("Tingkat {}", lvl));
+        }
+    }
+
+    (1, "Tingkat 1".to_string())
+}
+
 pub async fn pull_dapodik_records(
     ctx: RequestContext,
     state: State<ApplicationContext>,
@@ -1558,6 +1645,43 @@ pub async fn pull_dapodik_records(
     };
 
     // ── 4. In-Memory Cache Pre-loading (Eliminating N+1) ───────────
+    let grade_level_rows = sqlx::query!(
+        "SELECT id, level FROM grade_levels WHERE tenant_id = $1",
+        ctx.tenant_id
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap_or_default();
+    let mut grade_level_map: HashMap<i32, Uuid> = grade_level_rows
+        .into_iter()
+        .map(|r| (r.level, r.id))
+        .collect();
+
+    #[derive(sqlx::FromRow)]
+    struct ActiveEnrollmentCache {
+        student_id: Uuid,
+        class_id: Uuid,
+        class_name: String,
+        grade_level: i32,
+    }
+    let active_enrollments = sqlx::query_as::<_, ActiveEnrollmentCache>(
+        r#"
+        SELECT e.student_id, e.class_id, c.name as class_name, gl.level as grade_level
+        FROM enrollments e
+        JOIN classes c ON c.id = e.class_id
+        JOIN grade_levels gl ON gl.id = c.grade_level_id
+        WHERE e.tenant_id = $1 AND (e.status = 'Active' OR e.status = 'active')
+        "#
+    )
+    .bind(ctx.tenant_id)
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap_or_default();
+    let mut student_active_enrollment: HashMap<Uuid, (Uuid, String, i32)> = HashMap::new();
+    for ae in active_enrollments {
+        student_active_enrollment.insert(ae.student_id, (ae.class_id, ae.class_name, ae.grade_level));
+    }
+
     let class_rows = sqlx::query!(
         "SELECT id, name FROM classes WHERE tenant_id = $1",
         ctx.tenant_id
@@ -2326,6 +2450,40 @@ pub async fn pull_dapodik_records(
                     guru_name.and_then(|gn| teacher_by_name.get(gn).copied())
                 });
 
+            let (target_level, target_level_name) =
+                parse_grade_level(&nama_rombel, rmbl.tingkat_pendidikan_id.as_deref());
+            let target_gl_id = if let Some(&id) = grade_level_map.get(&target_level) {
+                id
+            } else {
+                let new_gl_id = Uuid::now_v7();
+                let _ = sqlx::query(
+                    r#"
+                    INSERT INTO grade_levels (id, tenant_id, level, name, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $5)
+                    ON CONFLICT (tenant_id, level) DO UPDATE SET updated_at = EXCLUDED.updated_at
+                    "#,
+                )
+                .bind(new_gl_id)
+                .bind(ctx.tenant_id)
+                .bind(target_level)
+                .bind(&target_level_name)
+                .bind(now)
+                .execute(&mut *tx)
+                .await;
+
+                let actual_id = sqlx::query_scalar::<_, Uuid>(
+                    "SELECT id FROM grade_levels WHERE tenant_id = $1 AND level = $2 LIMIT 1",
+                )
+                .bind(ctx.tenant_id)
+                .bind(target_level)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap_or(new_gl_id);
+
+                grade_level_map.insert(target_level, actual_id);
+                actual_id
+            };
+
             let class_upsert_res = if !class_map.contains_key(&nama_rombel) {
                 let res = sqlx::query(
                     r#"
@@ -2333,7 +2491,7 @@ pub async fn pull_dapodik_records(
                     VALUES ($1, $2, $3, $4, $5, 30, $6, $7, $7)
                     "#
                 )
-                .bind(new_id).bind(ctx.tenant_id).bind(academic_year_id).bind(grade_level_id)
+                .bind(new_id).bind(ctx.tenant_id).bind(academic_year_id).bind(target_gl_id)
                 .bind(&nama_rombel).bind(matched_teacher_id).bind(now).execute(&mut *tx).await;
 
                 if res.is_ok() {
@@ -2341,12 +2499,8 @@ pub async fn pull_dapodik_records(
                 }
                 res
             } else if let Some(existing_cid) = class_map.get(&nama_rombel) {
-                if let Some(tid) = matched_teacher_id {
-                    sqlx::query("UPDATE classes SET homeroom_teacher_id = $1, updated_at = $2 WHERE id = $3")
-                        .bind(tid).bind(now).bind(existing_cid).execute(&mut *tx).await
-                } else {
-                    Ok(sqlx::postgres::PgQueryResult::default())
-                }
+                sqlx::query("UPDATE classes SET grade_level_id = $1, homeroom_teacher_id = COALESCE($2, classes.homeroom_teacher_id), updated_at = $3 WHERE id = $4")
+                    .bind(target_gl_id).bind(matched_teacher_id).bind(now).bind(existing_cid).execute(&mut *tx).await
             } else {
                 Ok(sqlx::postgres::PgQueryResult::default())
             };
@@ -2589,9 +2743,23 @@ pub async fn pull_dapodik_records(
                 });
 
                 if let Some(sid) = existing_id {
-                    let is_lulus = std.status.as_deref().map(|s| s.to_lowercase() == "lulus").unwrap_or(false)
-                        || std.status_di_sekolah.as_deref().map(|s| s.to_lowercase() == "lulus").unwrap_or(false);
-                    let target_status = if is_lulus { "graduated" } else { "transferred" };
+                    let keluar_str = std.jenis_keluar_id_str.as_deref().unwrap_or("").to_lowercase();
+                    let status_str = std.status.as_deref().unwrap_or("").to_lowercase();
+                    let status_sek_str = std.status_di_sekolah.as_deref().unwrap_or("").to_lowercase();
+
+                    let is_lulus = keluar_str.contains("lulus") || status_str == "lulus" || status_sek_str == "lulus";
+                    let is_meninggal = keluar_str.contains("meninggal") || keluar_str.contains("wafat");
+                    let is_drop_out = keluar_str.contains("putus") || keluar_str.contains("dikeluarkan") || keluar_str.contains("mengundurkan");
+
+                    let (target_status, identity_state, mobility_case, classification, action_msg) = if is_lulus {
+                        ("graduated", "LULUS", "GRADUATED", "LULUS", "Siswa telah lulus / alumni; akun dan kelas dinonaktifkan")
+                    } else if is_meninggal {
+                        ("deceased", "MENINGGAL", "DECEASED", "MENINGGAL", "Siswa telah meninggal dunia; akun dan kelas dinonaktifkan")
+                    } else if is_drop_out {
+                        ("dropped_out", "KELUAR", "DROPPED_OUT", "MUTASI", "Siswa telah keluar/putus sekolah; akun dan kelas dinonaktifkan")
+                    } else {
+                        ("transferred", "MUTASI_OUT", "TRANSFERRED_OUT", "MUTASI", "Siswa keluar/mutasi telah dinonaktifkan di sistem secara realtime")
+                    };
 
                     let _ = sqlx::query(
                         r#"
@@ -2632,32 +2800,35 @@ pub async fn pull_dapodik_records(
                     .execute(&mut *tx)
                     .await;
 
-                    let _ = sqlx::query(
-                        r#"
-                        INSERT INTO dapodik_sync_records (
-                            id, tenant_id, nisn, nik, nama_school_os, nama_dapodik, rombel,
-                            identity_state, mobility_case, classification, action_recommended, stage, last_synced_at
+                    if let Some(&rec_id) = sync_by_nisn.get(&final_nisn) {
+                        let _ = sqlx::query(
+                            r#"
+                            UPDATE dapodik_sync_records
+                            SET nik = $1, nama_school_os = $2, nama_dapodik = $3, rombel = '-',
+                                identity_state = $4, mobility_case = $5, classification = $6,
+                                action_recommended = $7, stage = 'RESOLVED', last_synced_at = $8
+                            WHERE id = $9
+                            "#
                         )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, 'MUTASI_OUT', 'TRANSFERRED_OUT', 'RESOLVED', 'Siswa keluar/mutasi telah dinonaktifkan di sistem secara realtime', 'RESOLVED', $8)
-                        ON CONFLICT (tenant_id, nisn)
-                        DO UPDATE SET 
-                            identity_state = 'MUTASI_OUT',
-                            mobility_case = 'TRANSFERRED_OUT',
-                            action_recommended = 'Siswa keluar/mutasi telah dinonaktifkan di sistem secara realtime',
-                            stage = 'RESOLVED',
-                            last_synced_at = EXCLUDED.last_synced_at
-                        "#
-                    )
-                    .bind(Uuid::now_v7())
-                    .bind(ctx.tenant_id)
-                    .bind(&final_nisn)
-                    .bind(nik.as_deref().unwrap_or("-"))
-                    .bind(&nama_upper)
-                    .bind(&nama)
-                    .bind("-")
-                    .bind(now)
-                    .execute(&mut *tx)
-                    .await;
+                        .bind(nik.as_deref().unwrap_or("-")).bind(&nama_upper).bind(&nama)
+                        .bind(identity_state).bind(mobility_case).bind(classification)
+                        .bind(action_msg).bind(now).bind(rec_id).execute(&mut *tx).await;
+                    } else {
+                        let rec_id = Uuid::now_v7();
+                        let _ = sqlx::query(
+                            r#"
+                            INSERT INTO dapodik_sync_records (
+                                id, tenant_id, nisn, nik, nama_school_os, nama_dapodik, rombel,
+                                identity_state, mobility_case, classification, action_recommended, stage, last_synced_at
+                            )
+                            VALUES ($1, $2, $3, $4, $5, $6, '-', $7, $8, $9, $10, 'RESOLVED', $11)
+                            "#
+                        )
+                        .bind(rec_id).bind(ctx.tenant_id).bind(&final_nisn).bind(nik.as_deref().unwrap_or("-"))
+                        .bind(&nama_upper).bind(&nama).bind(identity_state).bind(mobility_case).bind(classification)
+                        .bind(action_msg).bind(now).execute(&mut *tx).await;
+                        sync_by_nisn.insert(final_nisn.clone(), rec_id);
+                    }
 
                     imported_records.push(DapodikSyncRecordDto {
                         id: sid.to_string(),
@@ -2666,10 +2837,10 @@ pub async fn pull_dapodik_records(
                         nama_school_os: nama_upper,
                         nama_dapodik: nama,
                         rombel: "-".into(),
-                        identity_state: "MUTASI_OUT".into(),
-                        mobility_case: "TRANSFERRED_OUT".into(),
-                        classification: "MUTASI".into(),
-                        action_recommended: "Data Siswa Keluar / Mutasi dari Dapodik telah diperbarui secara realtime".into(),
+                        identity_state: identity_state.into(),
+                        mobility_case: mobility_case.into(),
+                        classification: classification.into(),
+                        action_recommended: action_msg.into(),
                         stage: "RESOLVED".into(),
                         last_synced_at: now.to_rfc3339(),
                     });
@@ -2892,6 +3063,7 @@ pub async fn pull_dapodik_records(
             });
 
             let new_id = Uuid::now_v7();
+            let rombel_str = valid_rombel.as_deref().map(|s| truncate_str(s, 150));
             let student_db_id = if let Some(sid) = existing_student_id {
                 let update_res = sqlx::query(
                     r#"
@@ -2912,7 +3084,8 @@ pub async fn pull_dapodik_records(
                         nama_di_kip = COALESCE($35, students.nama_di_kip), nomor_kks = COALESCE($36, students.nomor_kks),
                         layak_pip = COALESCE($37, students.layak_pip), alasan_layak_pip = COALESCE($38, students.alasan_layak_pip),
                         bank = COALESCE($39, students.bank), nomor_rekening_bank = COALESCE($40, students.nomor_rekening_bank),
-                        rekening_atas_nama = COALESCE($41, students.rekening_atas_nama)
+                        rekening_atas_nama = COALESCE($41, students.rekening_atas_nama),
+                        rombel = COALESCE($42, students.rombel)
                     WHERE id = $17
                     "#
                 )
@@ -2936,6 +3109,7 @@ pub async fn pull_dapodik_records(
                 .bind(layak_pip_val).bind(&alasan_layak_pip_val)
                 .bind(&bank_val).bind(&nomor_rekening_bank_val)
                 .bind(&rekening_atas_nama_val)
+                .bind(rombel_str.as_deref())
                 .execute(&mut *tx).await;
 
                 if let Err(e) = update_res {
@@ -2967,14 +3141,14 @@ pub async fn pull_dapodik_records(
                         rt, rw, dusun, kelurahan, kecamatan, kode_pos,
                         pekerjaan_ayah, penghasilan_ayah, pekerjaan_ibu, penghasilan_ibu, nama_wali, pekerjaan_wali, penghasilan_wali,
                         penerima_kps, no_kps, penerima_kip, nomor_kip, nama_di_kip, nomor_kks, layak_pip, alasan_layak_pip,
-                        bank, nomor_rekening_bank, rekening_atas_nama
+                        bank, nomor_rekening_bank, rekening_atas_nama, rombel
                     )
                     VALUES (
                         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, 'active', $18, $18,
                         $19, $20, $21, $22, $23, $24,
                         $25, $26, $27, $28, $29, $30, $31,
                         COALESCE($32, false), $33, COALESCE($34, false), $35, $36, $37, COALESCE($38, false), $39,
-                        $40, $41, $42
+                        $40, $41, $42, $43
                     )
                     ON CONFLICT (tenant_id, nisn) DO UPDATE
                     SET full_name = EXCLUDED.full_name,
@@ -3017,7 +3191,8 @@ pub async fn pull_dapodik_records(
                         alasan_layak_pip = COALESCE(EXCLUDED.alasan_layak_pip, students.alasan_layak_pip),
                         bank = COALESCE(EXCLUDED.bank, students.bank),
                         nomor_rekening_bank = COALESCE(EXCLUDED.nomor_rekening_bank, students.nomor_rekening_bank),
-                        rekening_atas_nama = COALESCE(EXCLUDED.rekening_atas_nama, students.rekening_atas_nama)
+                        rekening_atas_nama = COALESCE(EXCLUDED.rekening_atas_nama, students.rekening_atas_nama),
+                        rombel = COALESCE(EXCLUDED.rombel, students.rombel)
                     RETURNING id
                     "#
                 )
@@ -3042,6 +3217,7 @@ pub async fn pull_dapodik_records(
                 .bind(layak_pip_val).bind(&alasan_layak_pip_val)
                 .bind(&bank_val).bind(&nomor_rekening_bank_val)
                 .bind(&rekening_atas_nama_val)
+                .bind(rombel_str.as_deref())
                 .fetch_one(&mut *tx).await;
 
                 let inserted_id = match insert_res {
@@ -3072,10 +3248,46 @@ pub async fn pull_dapodik_records(
 
             active_student_ids.insert(student_db_id);
 
-            // ── 8. Enrollment & Rombel Association Logic ─────────────
+            // ── 8. Enrollment & Dynamic Mobility Association Logic ─────────────
+            let mut mobility_case = "NONE".to_string();
+            let mut action_recommended = "Pulled Real-Time from Dapodik Localhost WebService".to_string();
+
             if let Some(ref r_name) = valid_rombel {
                 let r_upper = r_name.to_uppercase();
                 if !r_upper.starts_with("KKA") && !r_upper.contains("KKA") {
+                    let (target_level, target_level_name) = parse_grade_level(r_name, None);
+                    let target_gl_id = if let Some(&id) = grade_level_map.get(&target_level) {
+                        id
+                    } else {
+                        let new_gl_id = Uuid::now_v7();
+                        let _ = sqlx::query(
+                            r#"
+                            INSERT INTO grade_levels (id, tenant_id, level, name, created_at, updated_at)
+                            VALUES ($1, $2, $3, $4, $5, $5)
+                            ON CONFLICT (tenant_id, level) DO UPDATE SET updated_at = EXCLUDED.updated_at
+                            "#,
+                        )
+                        .bind(new_gl_id)
+                        .bind(ctx.tenant_id)
+                        .bind(target_level)
+                        .bind(&target_level_name)
+                        .bind(now)
+                        .execute(&mut *tx)
+                        .await;
+
+                        let actual_id = sqlx::query_scalar::<_, Uuid>(
+                            "SELECT id FROM grade_levels WHERE tenant_id = $1 AND level = $2 LIMIT 1",
+                        )
+                        .bind(ctx.tenant_id)
+                        .bind(target_level)
+                        .fetch_one(&mut *tx)
+                        .await
+                        .unwrap_or(new_gl_id);
+
+                        grade_level_map.insert(target_level, actual_id);
+                        actual_id
+                    };
+
                     let c_id = if let Some(&id) = class_map.get(r_name) {
                         id
                     } else {
@@ -3084,9 +3296,16 @@ pub async fn pull_dapodik_records(
                             r#"
                             INSERT INTO classes (id, tenant_id, academic_year_id, grade_level_id, name, capacity, created_at, updated_at)
                             VALUES ($1, $2, $3, $4, $5, 30, $6, $6)
-                            "#
+                            "#,
                         )
-                        .bind(new_c_id).bind(ctx.tenant_id).bind(academic_year_id).bind(grade_level_id).bind(r_name).bind(now).execute(&mut *tx).await;
+                        .bind(new_c_id)
+                        .bind(ctx.tenant_id)
+                        .bind(academic_year_id)
+                        .bind(target_gl_id)
+                        .bind(r_name)
+                        .bind(now)
+                        .execute(&mut *tx)
+                        .await;
 
                         if cls_res.is_ok() {
                             class_map.insert(r_name.clone(), new_c_id);
@@ -3094,20 +3313,80 @@ pub async fn pull_dapodik_records(
                         new_c_id
                     };
 
+                    // Deteksi Mobilitas: Naik Kelas, Pindah Rombel, Penyesuaian Kelas, Masuk Baru
+                    let prev_enrollment = student_active_enrollment.get(&student_db_id).cloned();
+                    if let Some((old_c_id, ref old_c_name, old_lvl)) = prev_enrollment {
+                        if old_c_id != c_id {
+                            // Tutup enrollment aktif di kelas lama agar siswa tidak duplikat di roster guru
+                            let _ = sqlx::query(
+                                "UPDATE enrollments SET status = 'Closed' WHERE tenant_id = $1 AND student_id = $2 AND class_id != $3 AND (status = 'Active' OR status = 'active')",
+                            )
+                            .bind(ctx.tenant_id)
+                            .bind(student_db_id)
+                            .bind(c_id)
+                            .execute(&mut *tx)
+                            .await;
+
+                            if target_level > old_lvl {
+                                mobility_case = "PROMOTED".to_string();
+                                action_recommended = format!(
+                                    "Naik Kelas: {} (Tingkat {}) -> {} (Tingkat {})",
+                                    old_c_name, old_lvl, r_name, target_level
+                                );
+                            } else if target_level < old_lvl {
+                                mobility_case = "CLASS_DEMOTION".to_string();
+                                action_recommended = format!("Penyesuaian Kelas: {} -> {}", old_c_name, r_name);
+                            } else {
+                                mobility_case = "CLASS_TRANSFER".to_string();
+                                action_recommended = format!("Pindah Rombel: {} -> {}", old_c_name, r_name);
+                            }
+                        } else {
+                            mobility_case = "NONE".to_string();
+                            action_recommended = "Pulled Real-Time from Dapodik Localhost WebService".to_string();
+                        }
+                    } else if existing_student_id.is_some() {
+                        mobility_case = "TRANSFERRED_IN".to_string();
+                        action_recommended = format!("Siswa aktif masuk rombel {}", r_name);
+                    } else {
+                        mobility_case = "NEW_ENROLLMENT".to_string();
+                        action_recommended = format!("Siswa baru terdaftar di rombel {}", r_name);
+                    }
+
+                    // Upsert status enrollment aktif pada kelas baru
                     let _ = sqlx::query(
                         r#"
                         INSERT INTO enrollments (id, tenant_id, student_id, class_id, academic_year_id, status, enrolled_at)
                         VALUES ($1, $2, $3, $4, $5, 'Active', $6)
                         ON CONFLICT (student_id, academic_year_id) WHERE status = 'Active'
                         DO UPDATE SET class_id = EXCLUDED.class_id, status = 'Active'
-                        "#
+                        "#,
                     )
-                    .bind(Uuid::now_v7()).bind(ctx.tenant_id).bind(student_db_id).bind(c_id)
-                    .bind(academic_year_id).bind(now).execute(&mut *tx).await;
+                    .bind(Uuid::now_v7())
+                    .bind(ctx.tenant_id)
+                    .bind(student_db_id)
+                    .bind(c_id)
+                    .bind(academic_year_id)
+                    .bind(now)
+                    .execute(&mut *tx)
+                    .await;
+
+                    // Update data rombel pada tabel students
+                    let _ = sqlx::query(
+                        "UPDATE students SET rombel = $1, updated_at = NOW() WHERE tenant_id = $2 AND id = $3",
+                    )
+                    .bind(r_name)
+                    .bind(ctx.tenant_id)
+                    .bind(student_db_id)
+                    .execute(&mut *tx)
+                    .await;
+
+                    student_active_enrollment.insert(student_db_id, (c_id, r_name.clone(), target_level));
                 }
             } else {
-                // Siswa belum memiliki rombel di Dapodik: pertahankan rombel SchoolOS yang sudah ada agar nilai dan data kelas tidak hilang.
-                tracing::debug!("Siswa {} belum ada rombel di Dapodik, mempertahankan data enrollments yang ada.", student_db_id);
+                tracing::debug!(
+                    "Siswa {} belum ada rombel di Dapodik, mempertahankan data enrollments yang ada.",
+                    student_db_id
+                );
             }
 
             let nisn_str = final_nisn.clone();
@@ -3115,6 +3394,53 @@ pub async fn pull_dapodik_records(
             let _ = sqlx::query(&format!("RELEASE SAVEPOINT {}", sp_std))
                 .execute(&mut *tx)
                 .await;
+
+            // Catat & perbarui riwayat sinkronisasi di dapodik_sync_records
+            if let Some(&rec_id) = sync_by_nisn.get(&nisn_str) {
+                let _ = sqlx::query(
+                    r#"
+                    UPDATE dapodik_sync_records
+                    SET nik = $1, nama_school_os = $2, nama_dapodik = $3, rombel = $4,
+                        identity_state = 'ACTIVE', mobility_case = $5, classification = 'MATCH',
+                        action_recommended = $6, stage = 'VERIFIED', last_synced_at = $7
+                    WHERE id = $8
+                    "#,
+                )
+                .bind(&nik_str)
+                .bind(&nama_upper)
+                .bind(&nama)
+                .bind(&sync_rombel_label)
+                .bind(&mobility_case)
+                .bind(&action_recommended)
+                .bind(now)
+                .bind(rec_id)
+                .execute(&mut *tx)
+                .await;
+            } else {
+                let rec_id = Uuid::now_v7();
+                let _ = sqlx::query(
+                    r#"
+                    INSERT INTO dapodik_sync_records (
+                        id, tenant_id, nisn, nik, nama_school_os, nama_dapodik, rombel,
+                        identity_state, mobility_case, classification, action_recommended, stage, last_synced_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, 'ACTIVE', $8, 'MATCH', $9, 'VERIFIED', $10)
+                    "#,
+                )
+                .bind(rec_id)
+                .bind(ctx.tenant_id)
+                .bind(&nisn_str)
+                .bind(&nik_str)
+                .bind(&nama_upper)
+                .bind(&nama)
+                .bind(&sync_rombel_label)
+                .bind(&mobility_case)
+                .bind(&action_recommended)
+                .bind(now)
+                .execute(&mut *tx)
+                .await;
+                sync_by_nisn.insert(nisn_str.clone(), rec_id);
+            }
 
             imported_records.push(DapodikSyncRecordDto {
                 id: new_id.to_string(),
@@ -3124,9 +3450,9 @@ pub async fn pull_dapodik_records(
                 nama_dapodik: nama,
                 rombel: sync_rombel_label,
                 identity_state: "ACTIVE".into(),
-                mobility_case: "NONE".into(),
+                mobility_case,
                 classification: "MATCH".into(),
-                action_recommended: "Pulled Real-Time from Dapodik Localhost WebService".into(),
+                action_recommended,
                 stage: "VERIFIED".into(),
                 last_synced_at: now.to_rfc3339(),
             });
