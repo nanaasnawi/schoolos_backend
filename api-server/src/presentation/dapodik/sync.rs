@@ -1645,10 +1645,15 @@ pub async fn pull_dapodik_records(
     };
 
     // ── 4. In-Memory Cache Pre-loading (Eliminating N+1) ───────────
-    let grade_level_rows = sqlx::query!(
+    #[derive(sqlx::FromRow)]
+    struct GradeLevelCacheRow {
+        id: Uuid,
+        level: i32,
+    }
+    let grade_level_rows = sqlx::query_as::<_, GradeLevelCacheRow>(
         "SELECT id, level FROM grade_levels WHERE tenant_id = $1",
-        ctx.tenant_id
     )
+    .bind(ctx.tenant_id)
     .fetch_all(&mut *tx)
     .await
     .unwrap_or_default();

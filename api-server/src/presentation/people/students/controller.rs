@@ -488,7 +488,7 @@ async fn update(
         place_of_birth: payload.place_of_birth,
         date_of_birth: payload.date_of_birth,
         religion: payload.religion,
-        status: payload.status,
+        status: payload.status.clone(),
         request_id: Some(req_ctx.correlation_id.clone()),
     };
 
