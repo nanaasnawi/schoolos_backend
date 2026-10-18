@@ -189,4 +189,6 @@ pub struct StudentOfficialProfileResponse {
     pub nomor_rekening_bank: Option<String>,
     pub rekening_atas_nama: Option<String>,
     pub foto_profile: Option<String>,
+    pub status: Option<String>,
+    pub is_active: Option<bool>,
 }

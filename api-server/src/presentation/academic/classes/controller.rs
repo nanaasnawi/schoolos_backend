@@ -367,6 +367,10 @@ async fn list_class_students(
         JOIN enrollments en ON en.student_id = s.id
         JOIN classes c ON c.id = en.class_id
         WHERE c.tenant_id = $1
+          AND (en.status = 'Active' OR en.status = 'active')
+          AND s.is_active = true
+          AND (s.status = 'active' OR s.status = 'Active')
+          AND s.deleted_at IS NULL
           AND ($2::uuid IS NULL OR c.id = $2)
           AND ($3::text IS NULL OR $3 = '' OR c.name ILIKE '%' || $3 || '%')
           AND (
@@ -420,6 +424,10 @@ async fn get_class_students_by_id(
         JOIN enrollments en ON en.student_id = s.id
         JOIN classes c ON c.id = en.class_id
         WHERE c.id = $1
+          AND (en.status = 'Active' OR en.status = 'active')
+          AND s.is_active = true
+          AND (s.status = 'active' OR s.status = 'Active')
+          AND s.deleted_at IS NULL
         ORDER BY s.full_name ASC
         "#,
     )
