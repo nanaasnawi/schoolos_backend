@@ -1486,7 +1486,7 @@ pub async fn pull_dapodik_records(
                 )
             })?;
 
-    let grade_level_id = match default_gl {
+    let _grade_level_id = match default_gl {
         Some(id) => id,
         None => {
             let new_gl = Uuid::now_v7();
@@ -2840,7 +2840,7 @@ pub async fn pull_dapodik_records(
                         nisn: final_nisn,
                         nik: nik.unwrap_or_else(|| "-".to_string()),
                         nama_school_os: nama_upper,
-                        nama_dapodik: nama,
+                        nama_dapodik: nama.clone(),
                         rombel: "-".into(),
                         identity_state: identity_state.into(),
                         mobility_case: mobility_case.into(),
