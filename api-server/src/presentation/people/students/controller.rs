@@ -202,15 +202,15 @@ async fn list(
             search: filter.search,
             grade_level_id: filter.grade_level_id,
             class_id: filter.class_id,
-            status: filter.status.and_then(|s| match s.as_str() {
-                "Active" => Some(school_core::people::domain::student::StudentStatus::Active),
-                "Inactive" => Some(school_core::people::domain::student::StudentStatus::Inactive),
-                "Graduated" => Some(school_core::people::domain::student::StudentStatus::Graduated),
-                "Transferred" => {
+            status: filter.status.and_then(|s| match s.trim().to_lowercase().as_str() {
+                "active" => Some(school_core::people::domain::student::StudentStatus::Active),
+                "inactive" => Some(school_core::people::domain::student::StudentStatus::Inactive),
+                "graduated" => Some(school_core::people::domain::student::StudentStatus::Graduated),
+                "transferred" | "transferredout" | "transferred_out" | "mutasi_out" | "mutasi" => {
                     Some(school_core::people::domain::student::StudentStatus::Transferred)
                 }
-                "Pending" => Some(school_core::people::domain::student::StudentStatus::Pending),
-                "Archived" => Some(school_core::people::domain::student::StudentStatus::Archived),
+                "pending" => Some(school_core::people::domain::student::StudentStatus::Pending),
+                "archived" => Some(school_core::people::domain::student::StudentStatus::Archived),
                 _ => None,
             }),
             created_after: filter.created_at_from,
@@ -497,6 +497,53 @@ async fn update(
         .execute(command)
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
+
+    // Handle status change synchronization with is_active, enrollments and user account
+    if let Some(ref st) = payload.status {
+        let is_now_active = st.trim().eq_ignore_ascii_case("active");
+        if !is_now_active {
+            // Tutup enrollments aktif agar siswa tidak muncul lagi di rombel / absensi / workstation guru
+            let _ = sqlx::query(
+                "UPDATE enrollments SET status = 'Closed' WHERE student_id = $1 AND tenant_id = $2 AND (status = 'Active' OR status = 'active')"
+            )
+            .bind(id)
+            .bind(req_ctx.tenant_id)
+            .execute(&ctx.pool)
+            .await;
+
+            let _ = sqlx::query(
+                "UPDATE users SET is_active = false, updated_at = NOW() WHERE tenant_id = $1 AND id IN (SELECT user_id FROM students WHERE id = $2 AND user_id IS NOT NULL)"
+            )
+            .bind(req_ctx.tenant_id)
+            .bind(id)
+            .execute(&ctx.pool)
+            .await;
+
+            let _ = sqlx::query(
+                "UPDATE students SET is_active = false WHERE id = $1 AND tenant_id = $2"
+            )
+            .bind(id)
+            .bind(req_ctx.tenant_id)
+            .execute(&ctx.pool)
+            .await;
+        } else {
+            let _ = sqlx::query(
+                "UPDATE users SET is_active = true, updated_at = NOW() WHERE tenant_id = $1 AND id IN (SELECT user_id FROM students WHERE id = $2 AND user_id IS NOT NULL)"
+            )
+            .bind(req_ctx.tenant_id)
+            .bind(id)
+            .execute(&ctx.pool)
+            .await;
+
+            let _ = sqlx::query(
+                "UPDATE students SET is_active = true WHERE id = $1 AND tenant_id = $2"
+            )
+            .bind(id)
+            .bind(req_ctx.tenant_id)
+            .execute(&ctx.pool)
+            .await;
+        }
+    }
 
     // Handle class enrollment update if class_id or class_name is provided
     let target_class_id = match (payload.class_id, payload.class_name.as_deref()) {
@@ -819,7 +866,8 @@ async fn get_my_official_profile(
             COALESCE(s.penerima_kps, false) as penerima_kps, s.no_kps,
             COALESCE(s.penerima_kip, false) as penerima_kip, s.nomor_kip, s.nama_di_kip, s.nomor_kks,
             COALESCE(s.layak_pip, false) as layak_pip, s.alasan_layak_pip,
-            s.bank, s.nomor_rekening_bank, s.rekening_atas_nama, s.foto_profile
+            s.bank, s.nomor_rekening_bank, s.rekening_atas_nama, s.foto_profile,
+            s.status, COALESCE(s.is_active, true) as is_active
         FROM students s
         LEFT JOIN LATERAL (
             SELECT c.name FROM enrollments e
@@ -895,6 +943,8 @@ async fn get_my_official_profile(
         nomor_rekening_bank: row.try_get("nomor_rekening_bank").ok(),
         rekening_atas_nama: row.try_get("rekening_atas_nama").ok(),
         foto_profile: row.try_get("foto_profile").ok(),
+        status: row.try_get("status").ok(),
+        is_active: row.try_get("is_active").ok(),
     };
 
     Ok(Json(ApiResponse::success(dto, req_ctx.request_id)))

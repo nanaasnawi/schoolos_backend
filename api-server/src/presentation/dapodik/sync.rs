@@ -2548,17 +2548,6 @@ pub async fn pull_dapodik_records(
                 })
                 .unwrap_or(false);
 
-            if is_keluar || is_explicitly_inactive {
-                let _ = sqlx::query(&format!("RELEASE SAVEPOINT {}", sp_std))
-                    .execute(&mut *tx)
-                    .await;
-                tracing::info!(
-                    "Melewati siswa non-aktif/keluar/lulus dari Dapodik: {:?}",
-                    std.nama
-                );
-                continue;
-            }
-
             let pd_id = std
                 .peserta_didik_id
                 .clone()
@@ -2586,6 +2575,122 @@ pub async fn pull_dapodik_records(
 
             let nik = sanitize_clean_code(std.nik.as_deref()).map(|s| truncate_str(&s, 50));
             let nipd_val = sanitize_clean_code(std.nipd.as_deref()).map(|s| truncate_str(&s, 50));
+
+            if is_keluar || is_explicitly_inactive {
+                let existing_id = student_by_nisn.get(&final_nisn).copied().or_else(|| {
+                    nik.as_ref().and_then(|n| {
+                        let trimmed = n.trim();
+                        if trimmed.len() >= 10 && !trimmed.chars().all(|c| c == '0' || c == '-') {
+                            student_by_nik.get(trimmed).copied()
+                        } else {
+                            None
+                        }
+                    })
+                });
+
+                if let Some(sid) = existing_id {
+                    let is_lulus = std.status.as_deref().map(|s| s.to_lowercase() == "lulus").unwrap_or(false)
+                        || std.status_di_sekolah.as_deref().map(|s| s.to_lowercase() == "lulus").unwrap_or(false);
+                    let target_status = if is_lulus { "graduated" } else { "transferred" };
+
+                    let _ = sqlx::query(
+                        r#"
+                        UPDATE students
+                        SET status = $1, is_active = false, updated_at = NOW()
+                        WHERE tenant_id = $2 AND id = $3
+                        "#
+                    )
+                    .bind(target_status)
+                    .bind(ctx.tenant_id)
+                    .bind(sid)
+                    .execute(&mut *tx)
+                    .await;
+
+                    let _ = sqlx::query(
+                        r#"
+                        UPDATE enrollments
+                        SET status = 'Closed'
+                        WHERE tenant_id = $1 AND student_id = $2 AND (status = 'Active' OR status = 'active')
+                        "#
+                    )
+                    .bind(ctx.tenant_id)
+                    .bind(sid)
+                    .execute(&mut *tx)
+                    .await;
+
+                    let _ = sqlx::query(
+                        r#"
+                        UPDATE users
+                        SET is_active = false, updated_at = NOW()
+                        WHERE tenant_id = $1 AND id IN (
+                            SELECT user_id FROM students WHERE tenant_id = $1 AND id = $2 AND user_id IS NOT NULL
+                        )
+                        "#
+                    )
+                    .bind(ctx.tenant_id)
+                    .bind(sid)
+                    .execute(&mut *tx)
+                    .await;
+
+                    let _ = sqlx::query(
+                        r#"
+                        INSERT INTO dapodik_sync_records (
+                            id, tenant_id, nisn, nik, nama_school_os, nama_dapodik, rombel,
+                            identity_state, mobility_case, classification, action_recommended, stage, last_synced_at
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, 'MUTASI_OUT', 'TRANSFERRED_OUT', 'RESOLVED', 'Siswa keluar/mutasi telah dinonaktifkan di sistem secara realtime', 'RESOLVED', $8)
+                        ON CONFLICT (tenant_id, nisn)
+                        DO UPDATE SET 
+                            identity_state = 'MUTASI_OUT',
+                            mobility_case = 'TRANSFERRED_OUT',
+                            action_recommended = 'Siswa keluar/mutasi telah dinonaktifkan di sistem secara realtime',
+                            stage = 'RESOLVED',
+                            last_synced_at = EXCLUDED.last_synced_at
+                        "#
+                    )
+                    .bind(Uuid::now_v7())
+                    .bind(ctx.tenant_id)
+                    .bind(&final_nisn)
+                    .bind(nik.as_deref().unwrap_or("-"))
+                    .bind(&nama_upper)
+                    .bind(&nama)
+                    .bind("-")
+                    .bind(now)
+                    .execute(&mut *tx)
+                    .await;
+
+                    imported_records.push(DapodikSyncRecordDto {
+                        id: sid.to_string(),
+                        nisn: final_nisn,
+                        nik: nik.unwrap_or_else(|| "-".to_string()),
+                        nama_school_os: nama_upper,
+                        nama_dapodik: nama,
+                        rombel: "-".into(),
+                        identity_state: "MUTASI_OUT".into(),
+                        mobility_case: "TRANSFERRED_OUT".into(),
+                        classification: "MUTASI".into(),
+                        action_recommended: "Data Siswa Keluar / Mutasi dari Dapodik telah diperbarui secara realtime".into(),
+                        stage: "RESOLVED".into(),
+                        last_synced_at: now.to_rfc3339(),
+                    });
+
+                    tracing::info!(
+                        "Memperbarui status siswa mutasi/keluar di database: {} (ID: {})",
+                        nama,
+                        sid
+                    );
+                } else {
+                    tracing::info!(
+                        "Melewati siswa non-aktif/keluar/lulus dari Dapodik (belum ada di DB): {:?}",
+                        std.nama
+                    );
+                }
+
+                let _ = sqlx::query(&format!("RELEASE SAVEPOINT {}", sp_std))
+                    .execute(&mut *tx)
+                    .await;
+                continue;
+            }
 
             // Filter out KKA dari rombel siswa
             let raw_rombel = std.rombel.clone().or(std.nama_rombel.clone());
@@ -2795,7 +2900,7 @@ pub async fn pull_dapodik_records(
                         guardian_id = COALESCE($8, students.guardian_id), nipd = COALESCE($9, students.nipd),
                         alamat_jalan = COALESCE($10, students.alamat_jalan), no_hp = COALESCE($11, students.no_hp),
                         email = COALESCE($12, students.email), nama_ayah = COALESCE($13, students.nama_ayah), nama_ibu = COALESCE($14, students.nama_ibu),
-                        status = 'active', updated_at = $15, nisn = $16,
+                        status = 'active', is_active = true, updated_at = $15, nisn = $16,
                         rt = COALESCE($18, students.rt), rw = COALESCE($19, students.rw),
                         dusun = COALESCE($20, students.dusun), kelurahan = COALESCE($21, students.kelurahan),
                         kecamatan = COALESCE($22, students.kecamatan), kode_pos = COALESCE($23, students.kode_pos),
@@ -2887,6 +2992,7 @@ pub async fn pull_dapodik_records(
                         nama_ayah = COALESCE(EXCLUDED.nama_ayah, students.nama_ayah),
                         nama_ibu = COALESCE(EXCLUDED.nama_ibu, students.nama_ibu),
                         status = 'active',
+                        is_active = true,
                         updated_at = EXCLUDED.updated_at,
                         rt = COALESCE(EXCLUDED.rt, students.rt),
                         rw = COALESCE(EXCLUDED.rw, students.rw),
@@ -3049,7 +3155,7 @@ pub async fn pull_dapodik_records(
 
             // Cari siswa di PostgreSQL yang sudah tidak ada lagi di data aktif Dapodik (termutasi / keluar / lulus)
             let removed_students = sqlx::query_as::<_, RemovedStudentRow>(
-                "SELECT id, user_id, full_name, nisn FROM students WHERE tenant_id = $1 AND NOT (id = ANY($2))",
+                "SELECT id, user_id, full_name, nisn FROM students WHERE tenant_id = $1 AND deleted_at IS NULL AND (status = 'active' OR is_active = true) AND NOT (id = ANY($2))",
             )
             .bind(ctx.tenant_id)
             .bind(&active_ids_vec)
@@ -3064,12 +3170,56 @@ pub async fn pull_dapodik_records(
                     .map(|s| s.full_name.clone())
                     .collect();
 
+                // 1. Update status siswa menjadi 'transferred' dan is_active = false
                 let update_std_res =
-                    sqlx::query("UPDATE students SET status = 'inactive', updated_at = NOW() WHERE tenant_id = $1 AND id = ANY($2)")
+                    sqlx::query("UPDATE students SET status = 'transferred', is_active = false, updated_at = NOW() WHERE tenant_id = $1 AND id = ANY($2)")
                         .bind(ctx.tenant_id)
                         .bind(&removed_ids)
                         .execute(&mut *tx)
                         .await;
+
+                // 2. Tutup status enrollments kelas aktif agar tidak muncul lagi di workstation guru / rombel
+                let _ = sqlx::query(
+                    "UPDATE enrollments SET status = 'Closed' WHERE tenant_id = $1 AND student_id = ANY($2) AND (status = 'Active' OR status = 'active')"
+                )
+                .bind(ctx.tenant_id)
+                .bind(&removed_ids)
+                .execute(&mut *tx)
+                .await;
+
+                // 3. Nonaktifkan akun login pengguna bagi siswa yang keluar/mutasi
+                let _ = sqlx::query(
+                    r#"
+                    UPDATE users 
+                    SET is_active = false, updated_at = NOW() 
+                    WHERE tenant_id = $1 AND id IN (
+                        SELECT user_id FROM students WHERE tenant_id = $1 AND id = ANY($2) AND user_id IS NOT NULL
+                    )
+                    "#
+                )
+                .bind(ctx.tenant_id)
+                .bind(&removed_ids)
+                .execute(&mut *tx)
+                .await;
+
+                // 4. Update riwayat sinkronisasi dapodik
+                let _ = sqlx::query(
+                    r#"
+                    UPDATE dapodik_sync_records
+                    SET identity_state = 'MUTASI_OUT',
+                        mobility_case = 'TRANSFERRED_OUT',
+                        action_recommended = 'Siswa keluar/mutasi dari Dapodik telah dinonaktifkan secara otomatis',
+                        stage = 'RESOLVED',
+                        last_synced_at = NOW()
+                    WHERE tenant_id = $1 AND nisn IN (
+                        SELECT nisn FROM students WHERE tenant_id = $1 AND id = ANY($2)
+                    )
+                    "#
+                )
+                .bind(ctx.tenant_id)
+                .bind(&removed_ids)
+                .execute(&mut *tx)
+                .await;
 
                 if update_std_res.is_ok() {
                     let _ = sqlx::query("RELEASE SAVEPOINT sp_cleanup_students")
@@ -3077,7 +3227,7 @@ pub async fn pull_dapodik_records(
                         .await;
 
                     tracing::info!(
-                        "Memperbarui status {} siswa menjadi 'inactive' (nilai dan riwayat akademik tetap terlindungi): {:?}",
+                        "Memperbarui status {} siswa menjadi 'transferred' & nonaktif (enrollments closed, nilai & riwayat tetap terlindungi): {:?}",
                         removed_students.len(),
                         removed_names
                     );

@@ -68,6 +68,13 @@ impl AuthenticateUserUseCase {
         };
 
         if let Some(user) = user_opt {
+            if !user.is_active {
+                return Err(ApplicationError::Unauthorized(
+                    ErrorCode::AuthPermissionDenied,
+                    "Akun pengguna dinonaktifkan atau peserta didik telah dimutasi/keluar".to_string(),
+                ));
+            }
+
             let password_hash_str = user.password_hash.clone();
             let password_bytes = command.password.into_bytes();
             let is_valid =

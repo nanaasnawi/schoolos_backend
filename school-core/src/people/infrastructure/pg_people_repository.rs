@@ -959,7 +959,8 @@ impl StudentRepository for PgPeopleRepository {
         sqlx::query(
             r#"
             UPDATE students
-            SET nisn = $1, full_name = $2, nik = $3, gender = $4, place_of_birth = $5, date_of_birth = $6, religion = $7, nipd = $8, alamat_jalan = $9, no_hp = $10, email = $11, guardian_id = $12, status = $13, nama_ayah = $14, nama_ibu = $15, updated_at = $16
+            SET nisn = $1, full_name = $2, nik = $3, gender = $4, place_of_birth = $5, date_of_birth = $6, religion = $7, nipd = $8, alamat_jalan = $9, no_hp = $10, email = $11, guardian_id = $12, status = $13, nama_ayah = $14, nama_ibu = $15, updated_at = $16,
+                is_active = CASE WHEN $13 = 'active' THEN true ELSE false END
             WHERE id = $17 AND tenant_id = $18
             "#,
         )
