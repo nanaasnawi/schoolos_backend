@@ -857,7 +857,7 @@ async fn get_my_official_profile(
         r#"
         SELECT 
             s.id, s.nisn, s.full_name, s.nik, s.nipd, s.gender, s.place_of_birth, s.date_of_birth, s.religion,
-            c.name as class_name,
+            COALESCE(c.name, s.rombel, '-') as class_name,
             s.alamat_jalan, s.rt, s.rw, s.dusun, s.kelurahan, s.kecamatan, s.kode_pos,
             s.no_hp, s.email,
             s.nama_ayah, s.pekerjaan_ayah, s.penghasilan_ayah,
@@ -873,6 +873,7 @@ async fn get_my_official_profile(
             SELECT c.name FROM enrollments e
             JOIN classes c ON c.id = e.class_id
             WHERE e.student_id = s.id AND (e.status = 'active' OR e.status = 'Active')
+            ORDER BY e.enrolled_at DESC
             LIMIT 1
         ) c ON true
         WHERE (s.user_id = $1 OR s.guardian_id IN (SELECT id FROM guardians WHERE user_id = $1))

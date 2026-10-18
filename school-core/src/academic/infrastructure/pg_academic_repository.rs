@@ -242,6 +242,17 @@ impl ClassRepository for PgAcademicRepository {
 #[async_trait]
 impl EnrollmentRepository for PgAcademicRepository {
     async fn create(&self, enrollment: &Enrollment) -> Result<(), InfrastructureError> {
+        // 1. Close any existing active enrollment in a DIFFERENT class for this student
+        let _ = sqlx::query(
+            "UPDATE enrollments SET status = 'Closed' WHERE tenant_id = $1 AND student_id = $2 AND class_id != $3 AND (status = 'Active' OR status = 'active')"
+        )
+        .bind(enrollment.tenant_id)
+        .bind(enrollment.student_id)
+        .bind(enrollment.class_id)
+        .execute(&self.pool)
+        .await;
+
+        // 2. Upsert active enrollment in the target class
         sqlx::query(
             r#"
             INSERT INTO enrollments (id, tenant_id, student_id, class_id, academic_year_id, status, enrolled_at)
@@ -260,6 +271,21 @@ impl EnrollmentRepository for PgAcademicRepository {
         .execute(&self.pool)
         .await
         .map_err(InfrastructureError::Database)?;
+
+        // 3. Keep students.rombel in sync
+        let _ = sqlx::query(
+            r#"
+            UPDATE students 
+            SET rombel = (SELECT name FROM classes WHERE id = $1 LIMIT 1),
+                updated_at = NOW()
+            WHERE tenant_id = $2 AND id = $3
+            "#
+        )
+        .bind(enrollment.class_id)
+        .bind(enrollment.tenant_id)
+        .bind(enrollment.student_id)
+        .execute(&self.pool)
+        .await;
 
         Ok(())
     }
