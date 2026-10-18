@@ -611,7 +611,7 @@ async fn get_pip_students(
         ));
     }
 
-    // 1. Calculate Summary Counters for the tenant (Filtered strictly to students with PIP / Bansos records)
+    // 1. Calculate Summary Counters for the tenant (Filtered strictly to students with PIP records)
     let summary_row = sqlx::query(
         r#"
         SELECT 
