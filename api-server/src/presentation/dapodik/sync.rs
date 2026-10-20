@@ -1708,6 +1708,7 @@ pub async fn pull_dapodik_records(
     let mut teacher_by_nuptk: HashMap<String, Uuid> = HashMap::new();
     let mut teacher_by_name: HashMap<String, Uuid> = HashMap::new();
     let mut teacher_by_email: HashMap<String, Uuid> = HashMap::new();
+    let mut teacher_by_ptk_id: HashMap<String, Uuid> = HashMap::new();
     for t in teacher_rows {
         if let Some(n) = t.nip {
             teacher_by_nip.insert(n, t.id);
@@ -2268,6 +2269,11 @@ pub async fn pull_dapodik_records(
                         tracing::warn!("Failed to update teacher {}: {}", nama, e);
                         continue;
                     }
+
+                    if let Some(ref pid) = gtk.ptk_id {
+                        teacher_by_ptk_id.insert(pid.clone(), tid);
+                    }
+                    teacher_by_email.insert(email.to_lowercase(), tid);
                 } else {
                     let teacher_insert = sqlx::query(
                         r#"
@@ -2302,6 +2308,10 @@ pub async fn pull_dapodik_records(
                     if let Some(ref nup) = nuptk {
                         teacher_by_nuptk.insert(nup.clone(), new_id);
                     }
+                    if let Some(ref pid) = gtk.ptk_id {
+                        teacher_by_ptk_id.insert(pid.clone(), new_id);
+                    }
+                    teacher_by_email.insert(email.to_lowercase(), new_id);
                     teacher_by_name.insert(nama_upper.clone(), new_id);
                 }
 
@@ -2432,27 +2442,22 @@ pub async fn pull_dapodik_records(
             let matched_teacher_id = rmbl
                 .ptk_id
                 .as_ref()
-                .and_then(|pid| {
-                    let prefix = pid.chars().take(8).collect::<String>();
-                    let expected_email =
-                        format!("{}@guru.pkbmassalafiyah.id", prefix).to_lowercase();
-                    teacher_by_email.get(&expected_email).copied()
+                .and_then(|pid| teacher_by_ptk_id.get(pid).copied())
+                .or_else(|| {
+                    rmbl.ptk_id.as_ref().and_then(|pid| {
+                        let prefix = pid.chars().take(8).collect::<String>();
+                        let expected_schoolos =
+                            format!("{}@guru.schoolos.id", prefix).to_lowercase();
+                        let expected_salafiyah =
+                            format!("{}@guru.pkbmassalafiyah.id", prefix).to_lowercase();
+                        teacher_by_email
+                            .get(&expected_schoolos)
+                            .or_else(|| teacher_by_email.get(&expected_salafiyah))
+                            .copied()
+                    })
                 })
                 .or_else(|| {
-                    let guru_name = match nama_rombel.trim() {
-                        "PAKET A4" => Some("KRISTIANTI"),
-                        "PAKET A5" => Some("AMIN LISANA"),
-                        "PAKET A6" => Some("ASEP RIFAI"),
-                        "PAKET B7" => Some("KRISTIANTI"),
-                        "PAKET B8" | "PAKET B8a" => Some("SITI MUNIROH"),
-                        "PAKET B8b" => Some("FITRI NAFISAH"),
-                        "PAKET B9" => Some("SRI MULYANI.S.AG"),
-                        "PAKET C10" => Some("ESI ROKESI"),
-                        "PAKET C11a" | "PAKET C11b" => Some("TAUFIQ HIDAYAT"),
-                        "PAKET C12a" | "PAKET C12b" => Some("ASY SYIFA RAHMAH IHSANI"),
-                        _ => None,
-                    };
-                    guru_name.and_then(|gn| teacher_by_name.get(gn).copied())
+                    teacher_by_name.get(&nama_upper).copied()
                 });
 
             let (target_level, target_level_name) =
