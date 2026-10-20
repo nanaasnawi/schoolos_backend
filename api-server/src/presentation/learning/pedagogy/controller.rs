@@ -923,18 +923,18 @@ pub async fn get_active_kosp(
         .cloned()
         .unwrap_or_else(|| "2026/2027".to_string());
 
-    // 1. Fetch KOSP Document for tenant (or default to PKBM As-Salafiyah)
-    let doc_row = sqlx::query(
+    // 1. Fetch KOSP Document for tenant strictly isolated (Single Source of Truth)
+    let mut doc_row = sqlx::query(
         r#"
         SELECT 
             id, tenant_id, academic_year, title, legal_basis_statement,
             establishment_place, establishment_date, effective_weeks_odd, effective_weeks_even,
             status, created_at, updated_at
         FROM kosp_documents
-        WHERE (tenant_id = $1 OR tenant_id = 'e3c4d8da-ff44-4d87-bb13-759a54f49bd0')
+        WHERE tenant_id = $1
           AND academic_year = $2
           AND deleted_at IS NULL
-        ORDER BY (tenant_id = $1) DESC, created_at DESC
+        ORDER BY created_at DESC
         LIMIT 1
         "#,
     )
@@ -950,6 +950,86 @@ pub async fn get_active_kosp(
             &req_ctx.request_id,
         )
     })?;
+
+    // If tenant does not have a KOSP document yet, dynamically provision an initial DRAFT for their school
+    if doc_row.is_none() {
+        let school_name: String = sqlx::query_scalar(
+            "SELECT name FROM schools WHERE tenant_id = $1 LIMIT 1",
+        )
+        .bind(req_ctx.tenant_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .unwrap_or_default()
+        .unwrap_or_else(|| "Satuan Pendidikan".to_string());
+
+        let new_kosp_id = Uuid::new_v4();
+        let auto_title = format!("Kurikulum Operasional Satuan Pendidikan (KOSP) {}", school_name);
+        let auto_legal = format!(
+            "Kurikulum Operasional Satuan Pendidikan (KOSP) {} Tahun Pelajaran {} telah diperiksa, disetujui, dan disahkan untuk digunakan sebagai pedoman penyelenggaraan pembelajaran.",
+            school_name, academic_year
+        );
+        let auto_place = "Kabupaten Cirebon".to_string();
+        let auto_date = chrono::NaiveDate::from_ymd_opt(2026, 7, 13)
+            .unwrap_or_else(|| chrono::Utc::now().date_naive());
+
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO kosp_documents (
+                id, tenant_id, academic_year, title, legal_basis_statement,
+                establishment_place, establishment_date, effective_weeks_odd, effective_weeks_even,
+                status, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, 18, 18, 'DRAFT', NOW(), NOW())
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(new_kosp_id)
+        .bind(req_ctx.tenant_id)
+        .bind(&academic_year)
+        .bind(&auto_title)
+        .bind(&auto_legal)
+        .bind(&auto_place)
+        .bind(auto_date)
+        .execute(&ctx.pool)
+        .await;
+
+        // Auto-seed default signatories for the school
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO kosp_signatories (id, kosp_document_id, signatory_role, position_title, name, nip, has_signature, has_official_seal, order_index)
+            VALUES 
+                (gen_random_uuid(), $1, 'PENILIK', 'Penilik PNF', 'Penilik Pembina PNF', NULL, true, false, 1),
+                (gen_random_uuid(), $1, 'KEPALA_SEKOLAH', 'Kepala Satuan Pendidikan', 'Kepala Sekolah', NULL, true, true, 2),
+                (gen_random_uuid(), $1, 'KADISDIK', 'Kepala Bidang PNF Disdik Kab. Cirebon', 'Kepala Bidang PAUD & PNF', NULL, true, true, 3)
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(new_kosp_id)
+        .execute(&ctx.pool)
+        .await;
+
+        // Re-fetch the newly created document
+        doc_row = sqlx::query(
+            r#"
+            SELECT 
+                id, tenant_id, academic_year, title, legal_basis_statement,
+                establishment_place, establishment_date, effective_weeks_odd, effective_weeks_even,
+                status, created_at, updated_at
+            FROM kosp_documents
+            WHERE id = $1
+            "#,
+        )
+        .bind(new_kosp_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+    }
 
     let doc = match doc_row {
         Some(row) => row,
