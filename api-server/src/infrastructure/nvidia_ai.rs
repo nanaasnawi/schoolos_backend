@@ -1446,6 +1446,7 @@ pub fn generate_pedagogical_question_templates(
     difficulty: &str,
     count: usize,
 ) -> Vec<(String, Vec<String>, usize, String)> {
+    let subject_name = subject;
     let lower = subject.trim().to_lowercase();
     let is_english = lower.contains("inggris") || lower.contains("english");
     let is_math = lower.contains("matematika") || lower.contains("math") || lower.contains("aljabar") || lower.contains("geometri") || lower.contains("kalkulus");
