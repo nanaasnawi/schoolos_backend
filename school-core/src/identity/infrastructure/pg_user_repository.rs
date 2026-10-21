@@ -29,6 +29,38 @@ impl PgUserRepository {
     }
 }
 
+#[derive(sqlx::FromRow)]
+struct PgUserRecord {
+    id: Uuid,
+    tenant_id: Uuid,
+    username: Option<String>,
+    #[sqlx(default)]
+    avatar_url: Option<String>,
+    email: String,
+    password_hash: String,
+    full_name: String,
+    is_active: bool,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<PgUserRecord> for User {
+    fn from(r: PgUserRecord) -> Self {
+        User {
+            id: r.id,
+            tenant_id: r.tenant_id,
+            username: r.username,
+            avatar_url: r.avatar_url,
+            email: r.email,
+            password_hash: r.password_hash,
+            full_name: r.full_name,
+            is_active: r.is_active,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }
+    }
+}
+
 #[async_trait]
 impl UserRepository for PgUserRepository {
     async fn create(&self, user: &User) -> Result<(), InfrastructureError> {
@@ -58,7 +90,7 @@ impl UserRepository for PgUserRepository {
         tenant_id: Uuid,
         email: &str,
     ) -> Result<Option<User>, InfrastructureError> {
-        let user = sqlx::query_as::<_, User>(
+        let user = sqlx::query_as::<_, PgUserRecord>(
             r#"
             SELECT u.id, u.tenant_id, u.username, u.email, u.password_hash, u.full_name, u.is_active, u.created_at, u.updated_at
             FROM users u
@@ -126,11 +158,11 @@ impl UserRepository for PgUserRepository {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(user)
+        Ok(user.map(Into::into))
     }
 
     async fn find_by_email_global(&self, email: &str) -> Result<Option<User>, InfrastructureError> {
-        let user = sqlx::query_as::<_, User>(
+        let user = sqlx::query_as::<_, PgUserRecord>(
             r#"
             SELECT u.id, u.tenant_id, u.username, u.email, u.password_hash, u.full_name, u.is_active, u.created_at, u.updated_at
             FROM users u
@@ -198,11 +230,11 @@ impl UserRepository for PgUserRepository {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(user)
+        Ok(user.map(Into::into))
     }
 
     async fn find_by_id(&self, id: Uuid) -> Result<Option<User>, InfrastructureError> {
-        let user = sqlx::query_as::<_, User>(
+        let user = sqlx::query_as::<_, PgUserRecord>(
             r#"
             SELECT id, tenant_id, username, email, password_hash, full_name, is_active, created_at, updated_at
             FROM users
@@ -213,7 +245,7 @@ impl UserRepository for PgUserRepository {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(user)
+        Ok(user.map(Into::into))
     }
 
     async fn find_primary_role(

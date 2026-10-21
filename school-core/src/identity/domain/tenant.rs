@@ -4,9 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use sqlx::FromRow;
-
-#[derive(Debug, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Tenant {
     pub id: Uuid,
     pub name: String,
@@ -16,7 +14,6 @@ pub struct Tenant {
     pub updated_at: DateTime<Utc>,
 
     #[serde(skip)]
-    #[sqlx(skip)]
     pub domain_events: Vec<Box<dyn crate::common::domain::event::DomainEvent>>,
     pub version: i32,
 }

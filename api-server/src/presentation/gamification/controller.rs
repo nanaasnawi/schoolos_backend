@@ -180,24 +180,72 @@ pub async fn award_student_xp(
     req_ctx: RequestContext,
     Json(payload): Json<AwardXpPayload>,
 ) -> Result<Json<ApiResponse<AwardXpResponse>>, ApiError> {
-    // Resolve target student id & tenant id
+    // Enforce actor authentication
+    let actor = req_ctx.actor.as_ref().ok_or_else(|| {
+        ApiError::new(
+            ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthTokenInvalid,
+                "Authentication required".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    // Determine target student id with strict tenant isolation and role validation
     let (effective_student_id, effective_tenant_id) = match payload.student_id {
         Some(sid) => {
+            let is_staff_or_admin = actor.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n == "admin" || n == "teacher" || n == "guru" || n == "superadmin" || n == "super_admin" || n == "kepala_sekolah" || n == "operator"
+            });
+
+            if !is_staff_or_admin && sid != actor.id {
+                let own_record = sqlx::query_scalar::<_, Uuid>(
+                    "SELECT id FROM students WHERE id = $1 AND user_id = $2 AND tenant_id = $3 LIMIT 1"
+                )
+                .bind(sid)
+                .bind(actor.id)
+                .bind(req_ctx.tenant_id)
+                .fetch_optional(&ctx.pool)
+                .await
+                .ok()
+                .flatten();
+
+                if own_record.is_none() {
+                    return Err(ApiError::new(
+                        ApplicationError::Unauthorized(
+                            school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                            "Siswa dilarang memanipulasi XP akun siswa lain.".to_string(),
+                        ),
+                        &req_ctx.request_id,
+                    ));
+                }
+            }
+
             let resolved = sqlx::query(
-                "SELECT id, tenant_id FROM students WHERE (id = $1 OR user_id = $1) LIMIT 1"
+                "SELECT id, tenant_id FROM students WHERE (id = $1 OR user_id = $1) AND tenant_id = $2 LIMIT 1"
             )
             .bind(sid)
+            .bind(req_ctx.tenant_id)
             .fetch_optional(&ctx.pool)
             .await
             .map_err(|e| ApiError::new(ApplicationError::Infrastructure(InfrastructureError::Database(e)), &req_ctx.request_id))?;
 
             match resolved {
                 Some(r) => (r.get::<Uuid, _>("id"), r.get::<Uuid, _>("tenant_id")),
-                None => (sid, req_ctx.tenant_id),
+                None => {
+                    return Err(ApiError::new(
+                        ApplicationError::NotFound(
+                            school_core::common::error_code::ErrorCode::EntityNotFound,
+                            "Data siswa tidak ditemukan pada sekolah ini.".to_string(),
+                        ),
+                        &req_ctx.request_id,
+                    ));
+                }
             }
         }
         None => {
-            let actor_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
+            let actor_id = actor.id;
             let resolved = sqlx::query(
                 "SELECT id, tenant_id FROM students WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 LIMIT 1"
             )
