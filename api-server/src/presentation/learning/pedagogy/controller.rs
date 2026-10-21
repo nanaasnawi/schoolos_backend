@@ -2151,7 +2151,7 @@ pub async fn get_habits_calendar(
         LEFT JOIN enrollments e ON e.student_id = s.id AND e.status = 'ACTIVE'
         LEFT JOIN classes c ON e.class_id = c.id
         WHERE ($1 IS NULL OR h.tenant_id = $1)
-          AND ($2 IS NULL OR h.student_id = $2)
+          AND ($2 IS NULL OR h.student_id = $2 OR s.user_id = $2)
           AND ($3 IS NULL OR e.class_id = $3)
         ORDER BY h.entry_date DESC, u.full_name ASC
         LIMIT 200
@@ -2215,7 +2215,12 @@ pub async fn record_habit_entry(
             tenant_id, student_id, entry_date, academic_year, semester,
             habits, habits_notes, verification_status
         ) VALUES (
-            $1, $2, $3::date, $4, $5, $6, $7, 'PENDING'
+            $1, 
+            COALESCE(
+                (SELECT id FROM students WHERE id = $2 OR user_id = $2 LIMIT 1),
+                $2
+            ),
+            $3::date, $4, $5, $6, $7, 'PENDING'
         )
         ON CONFLICT (tenant_id, student_id, entry_date) DO UPDATE
         SET habits = EXCLUDED.habits,
