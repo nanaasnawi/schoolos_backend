@@ -354,7 +354,8 @@ async fn get_by_id(
                pekerjaan_ayah, penghasilan_ayah, pekerjaan_ibu, penghasilan_ibu,
                nama_wali, pekerjaan_wali, penghasilan_wali,
                penerima_kps, no_kps, penerima_kip, nomor_kip, nama_di_kip, nomor_kks,
-               layak_pip, alasan_layak_pip, bank, nomor_rekening_bank, rekening_atas_nama, foto_profile,
+               layak_pip, alasan_layak_pip, bank, nomor_rekening_bank, rekening_atas_nama,
+               COALESCE(foto_profile, (SELECT avatar_url FROM users WHERE id = students.user_id)) as foto_profile,
                exit_category, exit_date, target_school, exit_reference_no, exit_notes, last_rombel
         FROM students WHERE id = $1
         "#
@@ -813,7 +814,8 @@ async fn get_pip_students(
             COALESCE(s.penerima_kps, false) as penerima_kps, s.no_kps,
             COALESCE(s.penerima_kip, false) as penerima_kip, s.nomor_kip, s.nama_di_kip, s.nomor_kks,
             COALESCE(s.layak_pip, false) as layak_pip, s.alasan_layak_pip,
-            s.bank, s.nomor_rekening_bank, s.rekening_atas_nama, s.foto_profile
+            s.bank, s.nomor_rekening_bank, s.rekening_atas_nama,
+            COALESCE(s.foto_profile, (SELECT avatar_url FROM users WHERE id = s.user_id)) as foto_profile
         FROM students s
         LEFT JOIN LATERAL (
             SELECT c.name FROM enrollments e
@@ -959,7 +961,8 @@ async fn get_my_official_profile(
             COALESCE(s.penerima_kps, false) as penerima_kps, s.no_kps,
             COALESCE(s.penerima_kip, false) as penerima_kip, s.nomor_kip, s.nama_di_kip, s.nomor_kks,
             COALESCE(s.layak_pip, false) as layak_pip, s.alasan_layak_pip,
-            s.bank, s.nomor_rekening_bank, s.rekening_atas_nama, s.foto_profile,
+            s.bank, s.nomor_rekening_bank, s.rekening_atas_nama,
+            COALESCE(s.foto_profile, (SELECT avatar_url FROM users WHERE id = s.user_id)) as foto_profile,
             s.status, COALESCE(s.is_active, true) as is_active
         FROM students s
         LEFT JOIN LATERAL (
