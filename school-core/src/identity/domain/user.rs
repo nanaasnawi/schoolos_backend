@@ -3,17 +3,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use sqlx::FromRow;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct User {
     pub id: Uuid,
     pub tenant_id: Uuid,
     #[serde(default)]
-    #[sqlx(default)]
     pub username: Option<String>,
     #[serde(default)]
-    #[sqlx(default)]
     pub avatar_url: Option<String>,
     pub email: String,
     pub password_hash: String,

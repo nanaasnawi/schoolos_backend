@@ -354,7 +354,8 @@ async fn get_by_id(
                pekerjaan_ayah, penghasilan_ayah, pekerjaan_ibu, penghasilan_ibu,
                nama_wali, pekerjaan_wali, penghasilan_wali,
                penerima_kps, no_kps, penerima_kip, nomor_kip, nama_di_kip, nomor_kks,
-               layak_pip, alasan_layak_pip, bank, nomor_rekening_bank, rekening_atas_nama, foto_profile
+               layak_pip, alasan_layak_pip, bank, nomor_rekening_bank, rekening_atas_nama, foto_profile,
+               exit_category, exit_date, target_school, exit_reference_no, exit_notes, last_rombel
         FROM students WHERE id = $1
         "#
     )
@@ -433,6 +434,12 @@ async fn get_by_id(
         nomor_rekening_bank: ext_row.as_ref().and_then(|r| r.try_get("nomor_rekening_bank").ok()),
         rekening_atas_nama: ext_row.as_ref().and_then(|r| r.try_get("rekening_atas_nama").ok()),
         foto_profile: ext_row.as_ref().and_then(|r| r.try_get("foto_profile").ok()),
+        exit_category: ext_row.as_ref().and_then(|r| r.try_get("exit_category").ok()),
+        exit_date: ext_row.as_ref().and_then(|r| r.try_get("exit_date").ok()),
+        target_school: ext_row.as_ref().and_then(|r| r.try_get("target_school").ok()),
+        exit_reference_no: ext_row.as_ref().and_then(|r| r.try_get("exit_reference_no").ok()),
+        exit_notes: ext_row.as_ref().and_then(|r| r.try_get("exit_notes").ok()),
+        last_rombel: ext_row.as_ref().and_then(|r| r.try_get("last_rombel").ok()),
     };
 
     Ok(Json(ApiResponse::success(
@@ -537,6 +544,92 @@ async fn update(
 
             let _ = sqlx::query(
                 "UPDATE students SET is_active = true WHERE id = $1 AND tenant_id = $2"
+            )
+            .bind(id)
+            .bind(req_ctx.tenant_id)
+            .execute(&ctx.pool)
+            .await;
+        }
+    }
+
+    // Handle student mutation metadata (SSOT persistence)
+    let has_mutation_payload = payload.exit_category.is_some()
+        || payload.exit_date.is_some()
+        || payload.target_school.is_some()
+        || payload.exit_reference_no.is_some()
+        || payload.exit_notes.is_some()
+        || payload.last_rombel.is_some();
+
+    if has_mutation_payload {
+        let parsed_exit_date: Option<chrono::NaiveDate> = payload
+            .exit_date
+            .as_deref()
+            .and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok());
+
+        let _ = sqlx::query(
+            r#"
+            UPDATE students
+            SET exit_category = COALESCE($1, exit_category),
+                exit_date = COALESCE($2, exit_date),
+                target_school = COALESCE($3, target_school),
+                exit_reference_no = COALESCE($4, exit_reference_no),
+                exit_notes = COALESCE($5, exit_notes),
+                last_rombel = COALESCE($6, last_rombel),
+                updated_at = NOW()
+            WHERE id = $7 AND tenant_id = $8
+            "#
+        )
+        .bind(payload.exit_category.as_deref())
+        .bind(parsed_exit_date)
+        .bind(payload.target_school.as_deref())
+        .bind(payload.exit_reference_no.as_deref())
+        .bind(payload.exit_notes.as_deref())
+        .bind(payload.last_rombel.as_deref())
+        .bind(id)
+        .bind(req_ctx.tenant_id)
+        .execute(&ctx.pool)
+        .await;
+
+        if let Some(cat) = payload.exit_category.as_deref() {
+            let mutation_id = uuid::Uuid::now_v7();
+            let ref_no = payload.exit_reference_no.as_deref().unwrap_or("-");
+            let date_val = parsed_exit_date.unwrap_or_else(|| chrono::Utc::now().date_naive());
+            let _ = sqlx::query(
+                r#"
+                INSERT INTO student_mutations (
+                    id, tenant_id, student_id, mutation_type, exit_date,
+                    target_school, reference_no, notes, last_rombel, created_by
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                "#
+            )
+            .bind(mutation_id)
+            .bind(req_ctx.tenant_id)
+            .bind(id)
+            .bind(cat)
+            .bind(date_val)
+            .bind(payload.target_school.as_deref())
+            .bind(ref_no)
+            .bind(payload.exit_notes.as_deref())
+            .bind(payload.last_rombel.as_deref())
+            .bind(req_ctx.actor.as_ref().map(|a| a.id))
+            .execute(&ctx.pool)
+            .await;
+        }
+    } else if let Some(ref st) = payload.status {
+        // If reactivating to Active, clear mutation fields
+        if st.trim().eq_ignore_ascii_case("active") {
+            let _ = sqlx::query(
+                r#"
+                UPDATE students
+                SET exit_category = NULL,
+                    exit_date = NULL,
+                    target_school = NULL,
+                    exit_reference_no = NULL,
+                    exit_notes = NULL,
+                    last_rombel = NULL,
+                    updated_at = NOW()
+                WHERE id = $1 AND tenant_id = $2
+                "#
             )
             .bind(id)
             .bind(req_ctx.tenant_id)

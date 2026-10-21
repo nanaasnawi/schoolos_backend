@@ -23,4 +23,16 @@ pub struct UpdateStudentRequest {
     pub class_id: Option<uuid::Uuid>,
     #[schema(value_type = Option<String>)]
     pub class_name: Option<String>,
+    #[schema(value_type = Option<String>)]
+    pub exit_category: Option<String>,
+    #[schema(value_type = Option<String>)]
+    pub exit_date: Option<String>,
+    #[schema(value_type = Option<String>)]
+    pub target_school: Option<String>,
+    #[schema(value_type = Option<String>)]
+    pub exit_reference_no: Option<String>,
+    #[schema(value_type = Option<String>)]
+    pub exit_notes: Option<String>,
+    #[schema(value_type = Option<String>)]
+    pub last_rombel: Option<String>,
 }

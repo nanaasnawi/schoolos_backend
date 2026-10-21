@@ -86,6 +86,12 @@ pub struct StudentProfileResponse {
     pub nomor_rekening_bank: Option<String>,
     pub rekening_atas_nama: Option<String>,
     pub foto_profile: Option<String>,
+    pub exit_category: Option<String>,
+    pub exit_date: Option<chrono::NaiveDate>,
+    pub target_school: Option<String>,
+    pub exit_reference_no: Option<String>,
+    pub exit_notes: Option<String>,
+    pub last_rombel: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, ToSchema)]
