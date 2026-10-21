@@ -184,7 +184,7 @@ pub async fn award_student_xp(
     let actor = req_ctx.actor.as_ref().ok_or_else(|| {
         ApiError::new(
             ApplicationError::Unauthorized(
-                school_core::common::error_code::ErrorCode::AuthTokenInvalid,
+                school_core::common::error_code::ErrorCode::AuthInvalidToken,
                 "Authentication required".to_string(),
             ),
             &req_ctx.request_id,
@@ -236,7 +236,7 @@ pub async fn award_student_xp(
                 None => {
                     return Err(ApiError::new(
                         ApplicationError::NotFound(
-                            school_core::common::error_code::ErrorCode::EntityNotFound,
+                            school_core::common::error_code::ErrorCode::StudentNotFound,
                             "Data siswa tidak ditemukan pada sekolah ini.".to_string(),
                         ),
                         &req_ctx.request_id,
