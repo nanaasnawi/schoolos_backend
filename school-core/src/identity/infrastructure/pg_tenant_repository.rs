@@ -20,7 +20,6 @@ impl PgTenantRepository {
     }
 }
 
-#[async_trait]
 #[derive(sqlx::FromRow)]
 struct PgTenantRecord {
     id: Uuid,
@@ -46,6 +45,7 @@ impl From<PgTenantRecord> for Tenant {
     }
 }
 
+#[async_trait]
 impl TenantRepository for PgTenantRepository {
     async fn create(&self, tenant: &Tenant) -> Result<(), InfrastructureError> {
         sqlx::query(
@@ -67,7 +67,7 @@ impl TenantRepository for PgTenantRepository {
     }
 
     async fn find_by_id(&self, id: Uuid) -> Result<Option<Tenant>, InfrastructureError> {
-        let tenant = sqlx::query_as::<_, PgTenantRecord>(
+        let tenant: Option<PgTenantRecord> = sqlx::query_as::<_, PgTenantRecord>(
             r#"
             SELECT id, name, domain, is_active, created_at, updated_at
             FROM tenants
@@ -76,9 +76,8 @@ impl TenantRepository for PgTenantRepository {
         )
         .bind(id)
         .fetch_optional(&self.pool)
-        .await?
-        .map(Into::into);
+        .await?;
 
-        Ok(tenant)
+        Ok(tenant.map(Into::into))
     }
 }
