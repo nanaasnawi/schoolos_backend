@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use uuid::Uuid;
 
-const DEFAULT_NVIDIA_MODEL: &str = "meta/llama-3.2-11b-vision-instruct";
+const DEFAULT_NVIDIA_MODEL: &str = "nvidia/nemotron-3-ultra-550b-a55b";
 const DEFAULT_NVIDIA_URL: &str = "https://integrate.api.nvidia.com/v1/chat/completions";
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -57,16 +57,20 @@ pub async fn call_nvidia_nim(
     let (api_key, configured_model, api_url) = get_config()?;
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(90))
+        .timeout(Duration::from_secs(25))
         .build()
         .map_err(|e| ApplicationError::Internal(format!("Failed to build HTTP client: {e}")))?;
 
     let mut candidate_models = vec![configured_model.as_str()];
-    if !candidate_models.contains(&"meta/llama-3.2-11b-vision-instruct") {
-        candidate_models.push("meta/llama-3.2-11b-vision-instruct");
-    }
-    if !candidate_models.contains(&"nvidia/llama-3.1-nemotron-70b-instruct") {
-        candidate_models.push("nvidia/llama-3.1-nemotron-70b-instruct");
+    let active_models = [
+        "nvidia/nemotron-3-ultra-550b-a55b",
+        "nvidia/ising-calibration-1.5-31b",
+        "stepfun-ai/step-5-preview",
+    ];
+    for m in active_models {
+        if !candidate_models.contains(&m) {
+            candidate_models.push(m);
+        }
     }
 
     let mut last_error = String::new();
@@ -592,14 +596,22 @@ Output HANYA JSON tanpa teks pembuka/penutup."#
         },
     ];
 
-    let raw = call_nvidia_nim(messages, 0.3, 1800).await?;
+    let raw = match call_nvidia_nim(messages, 0.3, 1800).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("call_nvidia_nim failed for infographic: {e}. Utilizing pedagogical fallback.");
+            return Ok(fallback_generate_infographic(topic, grade_level, subject_name).await);
+        }
+    };
     let cleaned = extract_clean_json(&raw);
 
-    let parsed: RawInfographicResponse = serde_json::from_str(cleaned).map_err(|e| {
-        ApplicationError::Domain(DomainError::Validation(format!(
-            "Invalid AI Infographic JSON: {e}"
-        )))
-    })?;
+    let parsed: RawInfographicResponse = match serde_json::from_str(cleaned) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Failed to parse AI Infographic JSON ({e}). Utilizing pedagogical fallback.");
+            return Ok(fallback_generate_infographic(topic, grade_level, subject_name).await);
+        }
+    };
 
     let now_ts = chrono::Utc::now().timestamp_millis();
     let mut blocks = Vec::new();
@@ -642,6 +654,65 @@ Output HANYA JSON tanpa teks pembuka/penutup."#
         description: parsed.description,
         blocks,
     })
+}
+
+pub async fn fallback_generate_infographic(
+    topic: &str,
+    grade_level: &str,
+    subject_name: &str,
+) -> GeneratedInfographicDto {
+    let now_ts = chrono::Utc::now().timestamp_millis();
+    let cover_url = search_real_educational_image(topic, subject_name).await;
+    let mut blocks = Vec::new();
+
+    blocks.push(InfographicBlockDto {
+        id: format!("ai-block-hero-cover-{}", now_ts),
+        block_type: "IMAGE".to_string(),
+        content: cover_url,
+    });
+
+    let cards = [
+        (
+            1,
+            format!("Pengenalan {topic}"),
+            format!("Mempelajari dasar-dasar {topic} pada mata pelajaran {subject_name} ({grade_level}) guna membangun pemahaman konseptual yang kokoh."),
+        ),
+        (
+            2,
+            "Prinsip Utama & Karakteristik".to_string(),
+            format!("Konsep {topic} memiliki karakteristik spesifik yang menghubungkan teori dasar dengan fenomena yang terjadi di lingkungan sekitar."),
+        ),
+        (
+            3,
+            "Aplikasi & Penerapan Nyata".to_string(),
+            format!("Dalam kehidupan sehari-hari, prinsip {topic} diterapkan untuk menyelesaikan berbagai tantangan dan masalah kontekstual secara analitis."),
+        ),
+        (
+            4,
+            "Kesimpulan & Refleksi Belajar".to_string(),
+            format!("Penguasaan materi {topic} membentuk kecakapan bernalar kritis sesuai capaian pembelajaran Kurikulum Merdeka."),
+        ),
+    ];
+
+    for (step_no, headline, summary) in cards {
+        let img = get_safe_curated_educational_image(subject_name, topic);
+        blocks.push(InfographicBlockDto {
+            id: format!("ai-block-img-{}-{}", step_no, now_ts),
+            block_type: "IMAGE".to_string(),
+            content: img,
+        });
+        blocks.push(InfographicBlockDto {
+            id: format!("ai-block-text-{}-{}", step_no, now_ts),
+            block_type: "TEXT".to_string(),
+            content: format!("### 📌 {}. {}\n\n{}", step_no, headline, summary),
+        });
+    }
+
+    GeneratedInfographicDto {
+        title: format!("Infografis Modul: {topic}"),
+        description: format!("Media pembelajaran visual Kurikulum Merdeka jenjang {grade_level} ({subject_name})."),
+        blocks,
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -792,10 +863,65 @@ Pastikan teks padat, mendalam, format JSON valid dengan escape karakter benar, d
         },
     ];
 
-    let raw = call_nvidia_nim(messages, 0.4, 4000).await?;
+    let raw = match call_nvidia_nim(messages, 0.4, 4000).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("call_nvidia_nim failed for article: {e}. Utilizing pedagogical fallback.");
+            return Ok(fallback_generate_article(topic, grade_level, subject_name));
+        }
+    };
     let result = parse_or_extract_article(&raw, topic, subject_name);
 
     Ok(result)
+}
+
+pub fn fallback_generate_article(
+    topic: &str,
+    grade_level: &str,
+    subject_name: &str,
+) -> GeneratedArticleDto {
+    let article_md = format!(
+        r#"# Modul Pembelajaran: {topic}
+**Mata Pelajaran:** {subject_name} | **Jenjang:** {grade_level} | **Standar:** Kurikulum Merdeka
+
+---
+
+## 1. Pengantar & Apersepsi
+Pernahkah Anda memperhatikan bagaimana konsep **{topic}** bekerja dan diterapkan dalam kehidupan sehari-hari? Memahami konsep ini memberikan landasan berpikir analitis dan kritis dalam memecahkan masalah kontekstual. Modul ini disusun untuk membimbing siswa {grade_level} dalam memahami konsep secara bertahap, mendalam, dan aplikatif.
+
+## 2. Pemahaman Konsep Inti
+Secara mendasar, kajian **{topic}** dalam mata pelajaran {subject_name} mencakup pilar-pilar penting sebagai berikut:
+1. **Landasan Teoretis:** Pemahaman definisi, kaidah dasar, dan batasan ruang lingkup materi.
+2. **Karakteristik & Hubungan Antar-Konsep:** Bagaimana unsur-unsur di dalamnya saling mempengaruhi dan membentuk kesatuan sistem.
+3. **Mekanisme & Kaidah Operasional:** Langkah runtut dan pembuktian logis yang melandasi fenomena atau perhitungan terkait.
+
+> 💡 **Kunci Pedagogis Kurikulum Merdeka:** Belajar bermakna berakar pada pemahaman konseptual dan penalaran logis, bukan sekadar menghafal rumus atau istilah tanpa makna.
+
+## 3. Contoh Terapan & Analisis Kasus
+Untuk memperkuat pemahaman aplikatif, perhatikan skenario berikut:
+- **Konteks Masalah:** Penerapan nyata prinsip {topic} dalam lingkungan akademik, sosial, atau teknologi di sekitar kita.
+- **Langkah Pemecahan Sistematis:**
+  1. *Identifikasi:* Telaah parameter utama dan informasi penting yang diketahui.
+  2. *Analisis:* Gunakan konsep {subject_name} yang relevan untuk merancang alur pemecahan.
+  3. *Verifikasi:* Uji kembali keabsahan hasil atau kesimpulan agar tepat sasaran.
+
+## 4. Rangkuman Intisari
+- **{topic}** adalah kompetensi krusial pada mata pelajaran {subject_name} jenjang {grade_level}.
+- Penguasaan konsep ini melatih kemandirian, nalar kritis, dan keterampilan memecahkan masalah kompleks.
+- Kolaborasi antara teori terstruktur dan studi kasus kontekstual menghasilkan pemahaman yang mendalam dan berdaya guna.
+
+## 5. Glosarium & Refleksi Mandiri
+- **{topic}:** Tema sentral pembelajaran yang mengintegrasikan kompetensi pengetahuan dan keterampilan.
+- **Pendekatan Saintifik:** Pola berpikir sistematis berbasis pengamatan, penalaran, dan evaluasi logis.
+- **Refleksi Pembelajaran:** Apa wawasan paling berharga yang Anda peroleh dari topik ini, dan bagaimana Anda dapat menerapkannya dalam memecahkan persoalan nyata?
+"#
+    );
+
+    GeneratedArticleDto {
+        title: format!("Materi Pembelajaran: {topic}"),
+        description: format!("Naskah modul belajar terstruktur Kurikulum Merdeka untuk {subject_name} ({grade_level})."),
+        article_content: article_md,
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1025,7 +1151,22 @@ PENTING & WAJIB:
         },
     ];
 
-    let raw = call_nvidia_nim(messages, 0.65, 3800).await?;
+    let raw = match call_nvidia_nim(messages, 0.65, 3800).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("call_nvidia_nim failed for assignment: {e}. Utilizing pedagogical fallback.");
+            return Ok(fallback_generate_assignment(
+                topic,
+                grade_level,
+                subject_name,
+                assignment_format,
+                num_mcq,
+                num_essay,
+                difficulty,
+                include_images,
+            ));
+        }
+    };
     let cleaned = extract_clean_json(&raw);
     let sanitized = sanitize_json_control_chars(cleaned);
 
@@ -1042,11 +1183,22 @@ PENTING & WAJIB:
         questions: Vec<serde_json::Value>,
     }
 
-    let parsed: RawAssignmentResponse = serde_json::from_str(&sanitized).map_err(|e| {
-        ApplicationError::Domain(DomainError::Validation(format!(
-            "Invalid AI Assignment JSON: {e}"
-        )))
-    })?;
+    let parsed: RawAssignmentResponse = match serde_json::from_str(&sanitized) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Failed to parse AI Assignment JSON ({e}). Utilizing pedagogical fallback.");
+            return Ok(fallback_generate_assignment(
+                topic,
+                grade_level,
+                subject_name,
+                assignment_format,
+                num_mcq,
+                num_essay,
+                difficulty,
+                include_images,
+            ));
+        }
+    };
 
     let safe_visual_url = if include_images {
         Some(get_safe_curated_educational_image(subject_name, topic))
@@ -1287,6 +1439,415 @@ PENTING & WAJIB:
     })
 }
 
+pub fn generate_pedagogical_question_templates(
+    subject: &str,
+    topic: &str,
+    grade_level: &str,
+    difficulty: &str,
+    count: usize,
+) -> Vec<(String, Vec<String>, usize, String)> {
+    let lower = subject.trim().to_lowercase();
+    let is_english = lower.contains("inggris") || lower.contains("english");
+    let is_math = lower.contains("matematika") || lower.contains("math") || lower.contains("aljabar") || lower.contains("geometri") || lower.contains("kalkulus");
+    let is_science = lower.contains("ipa") || lower.contains("sains") || lower.contains("fisika") || lower.contains("biologi") || lower.contains("kimia");
+    let is_social = lower.contains("ips") || lower.contains("sejarah") || lower.contains("geografi") || lower.contains("sosiologi") || lower.contains("ekonomi");
+
+    let base_templates: Vec<(String, Vec<String>, usize, String)> = if is_english {
+        vec![
+            (
+                format!("What is the primary function of learning '{topic}' in {grade_level} English language studies?"),
+                vec![
+                    "To enhance contextual communicative competence and subject-specific vocabulary".to_string(),
+                    "To memorize isolated grammatical rules without practical communication".to_string(),
+                    "To replace modern sentence structures with archaic dialects".to_string(),
+                    "To avoid formal writing conventions in academic discourse".to_string(),
+                ],
+                0,
+                format!("Studying {topic} aims to foster authentic communicative proficiency and analytical expression in English."),
+            ),
+            (
+                format!("Which of the following best exemplifies an accurate application of '{topic}'?"),
+                vec![
+                    "Ignoring cohesive markers and syntactic word order in discourse".to_string(),
+                    "Employing appropriate terminology with consistent grammatical agreement".to_string(),
+                    "Translating sentences verbatim without considering pragmatic meaning".to_string(),
+                    "Using informal expressions exclusively in formal documentation".to_string(),
+                ],
+                1,
+                format!("Accurate application of {topic} requires linguistic coherence, grammatical precision, and contextual awareness."),
+            ),
+            (
+                format!("When analyzing a reading text concerning '{topic}', which analytical strategy is most recommended?"),
+                vec![
+                    "Relying strictly on personal assumptions without textual citations".to_string(),
+                    "Skipping introductory and summary paragraphs entirely".to_string(),
+                    "Identifying main ideas, supporting arguments, and contextual inferences".to_string(),
+                    "Disregarding unfamiliar key terminology".to_string(),
+                ],
+                2,
+                format!("Reading comprehension under Kurikulum Merdeka emphasizes evidence-based inference and critical text analysis."),
+            ),
+            (
+                format!("In communicative tasks, how should students evaluate their presentation on '{topic}'?"),
+                vec![
+                    "By speaking rapidly regardless of audience comprehension".to_string(),
+                    "By omitting logical transitions between concepts".to_string(),
+                    "By avoiding interactive engagement with peers".to_string(),
+                    "By assessing clarity of delivery, audience engagement, and logical organization".to_string(),
+                ],
+                3,
+                format!("Effective communication is measured by structural clarity, coherence, and successful message transmission."),
+            ),
+            (
+                format!("How does mastering '{topic}' contribute to interdisciplinary learning for {grade_level} students?"),
+                vec![
+                    "It equips students with communicative tools to analyze and synthesize global academic resources".to_string(),
+                    "It limits analytical thinking strictly to localized vocabulary".to_string(),
+                    "It prevents integration with scientific and mathematical concepts".to_string(),
+                    "It replaces analytical discussion with repetitive mechanical drills".to_string(),
+                ],
+                0,
+                format!("English serves as an academic bridge language for multidimensional knowledge acquisition."),
+            ),
+        ]
+    } else if is_math {
+        vec![
+            (
+                format!("Dalam mempelajari konsep '{topic}' ({grade_level}), manakah pernyataan matematis berikut yang paling tepat menggambarkan relasi antar-variabelnya?"),
+                vec![
+                    "Relasi proporsional terstruktur yang menghubungkan input dan output secara konsisten".to_string(),
+                    "Hubungan acak tanpa pola keteraturan matematis".to_string(),
+                    "Persamaan yang mengabaikan urutan hierarki operasi hitung baku".to_string(),
+                    "Nilai konstan mutlak yang tidak dipengaruhi parameter kondisi awal".to_string(),
+                ],
+                0,
+                format!("Konsep {topic} dalam matematika bertumpu pada relasi logis, pola fungsi, dan kaidah operasi hitung yang teruji."),
+            ),
+            (
+                format!("Pada sebuah perhitungan kontekstual terkait '{topic}', jika suatu besaran awal bernilai 40 meningkat sebesar 25%, berapakah nilai akhirnya?"),
+                vec![
+                    "45".to_string(),
+                    "50".to_string(),
+                    "55".to_string(),
+                    "60".to_string(),
+                ],
+                1,
+                format!("Kenaikan 25% dari 40 adalah 0,25 x 40 = 10. Nilai akhir = 40 + 10 = 50."),
+            ),
+            (
+                format!("Diberikan permasalahan kontekstual materi '{topic}': suatu persamaan linear memenuhi $2x - 6 = 18$. Berapakah nilai dari $x^2 - 14$?"),
+                vec![
+                    "116".to_string(),
+                    "125".to_string(),
+                    "130".to_string(),
+                    "144".to_string(),
+                ],
+                2,
+                format!("Dari persamaan $2x = 24$, diperoleh $x = 12$. Maka $x^2 - 14 = 144 - 14 = 130$."),
+            ),
+            (
+                format!("Langkah awal yang paling sistematis dalam menyelesaikan soal cerita berbasis pemecahan masalah materi '{topic}' adalah..."),
+                vec![
+                    "Langsung menebak hasil akhir tanpa merumuskan variabel permasalahan".to_string(),
+                    "Mengabaikan satuan besaran dan konteks cerita yang diberikan".to_string(),
+                    "Mengalikan seluruh angka yang muncul tanpa membuat model persamaan".to_string(),
+                    "Mengidentifikasi data yang diketahui, besaran yang ditanyakan, lalu menyusun model matematika".to_string(),
+                ],
+                3,
+                format!("Pemecahan masalah matematis analitis diawali dengan dekomposisi parameter dan formulasi model matematika yang valid."),
+            ),
+            (
+                format!("Sebuah kumpulan data pengamatan tentang '{topic}' memiliki rata-rata 80 dari 4 kali percobaan awal. Jika pada percobaan kelima diperoleh nilai 95, berapa rata-rata barunya?"),
+                vec![
+                    "83".to_string(),
+                    "85".to_string(),
+                    "87".to_string(),
+                    "81".to_string(),
+                ],
+                0,
+                format!("Total nilai awal = 4 x 80 = 320. Total nilai baru = 320 + 95 = 415. Rata-rata baru = 415 / 5 = 83."),
+            ),
+        ]
+    } else if is_science {
+        vec![
+            (
+                format!("Berdasarkan metode ilmiah, variabel bebas yang paling relevan dalam menyelidiki fenomena '{topic}' adalah..."),
+                vec![
+                    "Faktor perlakuan yang sengaja diubah oleh peneliti untuk mengamati respons sistem".to_string(),
+                    "Parameter pengamatan yang dijaga tetap konstan sepanjang percobaan".to_string(),
+                    "Hasil akhir yang dicatat setelah siklus reaksi berakhir".to_string(),
+                    "Wadah eksperimen yang digunakan di laboratorium".to_string(),
+                ],
+                0,
+                format!("Variabel bebas adalah perlakuan yang sengaja dimanipulasi untuk mengukur dampaknya terhadap variabel terikat."),
+            ),
+            (
+                format!("Mekanisme keterkaitan sebab-akibat yang mendasari prinsip kerja materi '{topic}' ditunjukkan oleh peristiwa..."),
+                vec![
+                    "Perubahan energi spontan yang tidak mematuhi hukum kekekalan".to_string(),
+                    "Interaksi sistemik di mana perubahan input memicu respons adaptif pada kesetimbangan sistem".to_string(),
+                    "Terjadinya reaksi tanpa adanya gaya pemicu atau gradien konsentrasi".to_string(),
+                    "Penyusutan massa zat tanpa konversi radiasi".to_string(),
+                ],
+                1,
+                format!("Fenomena sains bekerja berdasarkan interaksi dinamis dan hukum kekekalan materi serta energi."),
+            ),
+            (
+                format!("Bagaimana dampak penerapan teknologi ramah lingkungan berbasis prinsip '{topic}' terhadap keberlanjutan ekosistem?"),
+                vec![
+                    "Meningkatkan pelepasan emisi karbon dan polusi kimiawi".to_string(),
+                    "Mengabaikan efisiensi daur ulang materi dan energi".to_string(),
+                    "Mengoptimalkan efisiensi energi serta meminimalkan residu limbah pencemar lingkungan".to_string(),
+                    "Menghentikan seluruh aktivitas riset laboratorium secara permanen".to_string(),
+                ],
+                2,
+                format!("Teknologi sains Kurikulum Merdeka berorientasi pada keberlanjutan ekologis dan efisiensi sumber daya alam."),
+            ),
+            (
+                format!("Dalam melakukan pengukuran eksperimental fenomena '{topic}', prosedur validasi data yang paling tepat adalah..."),
+                vec![
+                    "Mengandalkan taksiran visual sepintas tanpa kalibrasi alat".to_string(),
+                    "Mencatat satu kali pembacaan skala tanpa uji pengulangan".to_string(),
+                    "Memanipulasi angka agar selalu cocok dengan ekspektasi awal".to_string(),
+                    "Menggunakan instrumen terkalibrasi dan melakukan pengukuran berulang untuk memperoleh data rerata yang presisi".to_string(),
+                ],
+                3,
+                format!("Presisi dan reliabilitas saintifik diperoleh melalui kalibrasi instrumen dan replikasi pengukuran empiris."),
+            ),
+            (
+                format!("Korelasi antara struktur dan fungsi pada komponen kajian '{topic}' menggambarkan prinsip bahwa..."),
+                vec![
+                    "Bentuk struktural materi atau organ dirancang spesifik untuk mengoptimalkan kinerja fungsionalnya".to_string(),
+                    "Struktur material sama sekali tidak berhubungan dengan sifat fisik atau biologisnya".to_string(),
+                    "Fungsi dapat berjalan optimal tanpa memerlukan keteraturan struktur".to_string(),
+                    "Semua komponen penyusun memiliki sifat mekanis yang identik tanpa diferensiasi".to_string(),
+                ],
+                0,
+                format!("Prinsip universal sains menyatakan bahwa karakteristik struktural menentukan kapabilitas fungsional."),
+            ),
+        ]
+    } else if is_social {
+        vec![
+            (
+                format!("Ditinjau dari perspektif interaksi keruangan, faktor pendorong utama terjadinya fenomena '{topic}' adalah..."),
+                vec![
+                    "Perbedaan potensi sumber daya dan kebutuhan saling melengkapi (komplementaritas) antarwilayah".to_string(),
+                    "Keterisolasian mutlak yang menghambat komunikasi antar-kelompok masyarakat".to_string(),
+                    "Keseragaman bentang alam yang menghilangkan motif pertukaran".to_string(),
+                    "Penolakan terhadap segala bentuk inovasi dan pembangunan".to_string(),
+                ],
+                0,
+                format!("Dinamika geografis dan sosial digerakkan oleh komplementaritas spasial akibat variasi potensi wilayah."),
+            ),
+            (
+                format!("Bagaimana pengaruh dinamika historis dan kearifan lokal terkait '{topic}' terhadap kehidupan sosial masyarakat saat ini?"),
+                vec![
+                    "Menghapuskan seluruh identitas kultural generasi terdahulu".to_string(),
+                    "Mewariskan nilai gotong royong, identitas kebangsaan, dan ketahanan sosial yang adaptif".to_string(),
+                    "Menghalangi keterbukaan masyarakat terhadap ilmu pengetahuan modern".to_string(),
+                    "Memicu fragmentasi sosial yang melemahkan persatuan".to_string(),
+                ],
+                1,
+                format!("Nilai historis dan sosial memperkuat kohesi sosial dan Profil Pelajar Pancasila dalam bermasyarakat."),
+            ),
+            (
+                format!("Dalam kerangka pembangunan berkelanjutan, pengelolaan potensi '{topic}' secara bijak harus mengedepankan..."),
+                vec![
+                    "Pemanfaatan sumber daya alam tanpa batas demi laba sesaat".to_string(),
+                    "Pemusatan fasilitas publik hanya di wilayah perkotaan".to_string(),
+                    "Keseimbangan proporsional antara kemajuan ekonomi, keadilan sosial, dan pelestarian lingkungan hidup".to_string(),
+                    "Pengabaian aspirasi masyarakat lokal dalam penentuan kebijakan".to_string(),
+                ],
+                2,
+                format!("Pembangunan berkelanjutan mensinergikan pilar ekonomi, keadilan sosial, dan kelestarian ekologi."),
+            ),
+            (
+                format!("Peran proaktif yang dapat dijalankan oleh generasi muda dalam mengoptimalkan potensi '{topic}' di era globalisasi adalah..."),
+                vec![
+                    "Menjadi konsumen pasif produk luar tanpa daya saing".to_string(),
+                    "Menolak perkembangan teknologi informasi terkini".to_string(),
+                    "Mengabaikan kelestarian warisan budaya daerah sendiri".to_string(),
+                    "Mengembangkan inovasi kreatif, literasi digital kritis, dan solusi nyata bagi kemajuan komunitas".to_string(),
+                ],
+                3,
+                format!("Generasi muda Kurikulum Merdeka berperan sebagai agen perubahan yang kreatif, kritis, dan berwawasan kebangsaan."),
+            ),
+            (
+                format!("Keterkaitan antara bentang alam fisik dan mata pencaharian penduduk pada materi '{topic}' membuktikan bahwa..."),
+                vec![
+                    "Kondisi geografis menyediakan peluang adaptasi yang membentuk pola sosio-ekonomi masyarakat setempat".to_string(),
+                    "Aktivitas ekonomi manusia sama sekali tidak dipengaruhi oleh iklim dan topografi".to_string(),
+                    "Manusia tidak memiliki kapasitas inovasi dalam menyesuaikan diri dengan lingkungan".to_string(),
+                    "Pola permukiman selalu seragam di segala medan topografi".to_string(),
+                ],
+                0,
+                format!("Pola sosio-ekonomi masyarakat berkembang sebagai respons adaptif terhadap karakteristik bentang alam geografis."),
+            ),
+        ]
+    } else {
+        vec![
+            (
+                format!("Konsep fundamental yang menjadi inti bahasan materi '{topic}' pada mata pelajaran {subject_name} ({grade_level}) adalah..."),
+                vec![
+                    "Landasan konseptual terstruktur yang menghubungkan pemahaman teori dengan pemecahan masalah kontekstual".to_string(),
+                    "Kumpulan hafalan definisi tanpa kaitan dengan penerapan kehidupan nyata".to_string(),
+                    "Kaidah teoritis semata yang tidak dapat diuji atau diterapkan secara praktis".to_string(),
+                    "Asumsi subjektif yang belum terverifikasi secara metodologis".to_string(),
+                ],
+                0,
+                format!("Pembelajaran bermakna Kurikulum Merdeka menitikberatkan pada pemahaman konseptual dan aplikasinya di dunia nyata."),
+            ),
+            (
+                format!("Ciri utama yang menandai penguasaan kompetensi tingkat {difficulty} pada materi '{topic}' adalah kemampuan siswa untuk..."),
+                vec![
+                    "Menyalin teks materi secara berulang tanpa menganalisis maknanya".to_string(),
+                    "Melakukan penalaran logis, mengevaluasi bukti, dan merumuskan kesimpulan analitis secara mandiri".to_string(),
+                    "Menghindari pertanyaan reflektif yang memerlukan pertimbangan kritis".to_string(),
+                    "Menjawab secara terburu-buru tanpa memperhatikan kaidah ilmu terkait".to_string(),
+                ],
+                1,
+                format!("Karakteristik asesmen Kurikulum Merdeka adalah penguatan daya nalar kritis dan pemecahan masalah mandiri."),
+            ),
+            (
+                format!("Dalam menghadapi permasalahan kontekstual mengenai '{topic}', tindakan awal yang paling tepat dilakukan adalah..."),
+                vec![
+                    "Menarik kesimpulan tanpa memeriksa data dan fakta pendukung".to_string(),
+                    "Mengabaikan pandangan atau masukan yang berbeda dari pihak lain".to_string(),
+                    "Menelaah situasi secara objektif, memetakan akar masalah, dan merancang alternatif pemecahan yang terukur".to_string(),
+                    "Menyerahkan penyelesaian sepenuhnya kepada orang lain tanpa keterlibatan aktif".to_string(),
+                ],
+                2,
+                format!("Pemecahan masalah sistematis menuntut observasi cermat, identifikasi akar persoalan, dan formulasi solusi."),
+            ),
+            (
+                format!("Penerapan etika, integritas, dan kolaborasi positif saat mempelajari materi '{topic}' diwujudkan melalui..."),
+                vec![
+                    "Memanfaatkan pengetahuan hanya untuk keuntungan pribadi dengan mengabaikan norma bersama".to_string(),
+                    "Menolak bekerja sama dengan rekan kelompok yang berbeda latar belakang".to_string(),
+                    "Menyampaikan argumen secara sepihak tanpa menghargai etika komunikasi".to_string(),
+                    "Menghargai keragaman pendapat, bertanggung jawab atas hasil kerja, dan mengutamakan kemaslahatan bersama".to_string(),
+                ],
+                3,
+                format!("Profil Pelajar Pancasila menekankan integritas, gotong royong, dan akhlak mulia dalam penerapan ilmu."),
+            ),
+            (
+                format!("Langkah reflektif yang paling konstruktif untuk memperdalam pemahaman materi '{topic}' secara berkelanjutan adalah..."),
+                vec![
+                    "Mengevaluasi proses belajar mandiri, mengidentifikasi ruang pengembangan, dan menindaklanjuti umpan balik".to_string(),
+                    "Hanya mempelajari materi saat menjelang waktu evaluasi berkala".to_string(),
+                    "Menghindari topik materi yang dirasa membutuhkan konsentrasi lebih".to_string(),
+                    "Mengabaikan catatan evaluasi dari guru pengampu".to_string(),
+                ],
+                0,
+                format!("Metakognisi dan evaluasi diri merupakan pilar utama pembelajaran sepanjang hayat."),
+            ),
+        ]
+    };
+
+    let mut result = Vec::with_capacity(count);
+    for i in 0..count {
+        let base = &base_templates[i % base_templates.len()];
+        let q_num = i + 1;
+        let mut q_text = base.0.clone();
+        if i >= base_templates.len() {
+            q_text = format!("(Butir {q_num}) {q_text}");
+        }
+        result.push((q_text, base.1.clone(), base.2, base.3.clone()));
+    }
+    result
+}
+
+pub fn fallback_generate_assignment(
+    topic: &str,
+    grade_level: &str,
+    subject_name: &str,
+    assignment_format: Option<&str>,
+    num_mcq: usize,
+    num_essay: usize,
+    difficulty: &str,
+    include_images: bool,
+) -> GeneratedAssignmentDto {
+    let now_ts = chrono::Utc::now().timestamp_millis();
+    let is_homework = assignment_format
+        .map(|f| f.to_uppercase() == "HOMEWORK_PR")
+        .unwrap_or(false);
+
+    let safe_image = if include_images {
+        Some(get_safe_curated_educational_image(subject_name, topic))
+    } else {
+        None
+    };
+
+    let mcq_templates = generate_pedagogical_question_templates(subject_name, topic, grade_level, difficulty, num_mcq);
+    let mut questions = Vec::new();
+
+    if !is_homework {
+        for (idx, (q_text, choices_text, correct_idx, expl)) in mcq_templates.into_iter().enumerate() {
+            let choices = choices_text
+                .into_iter()
+                .enumerate()
+                .map(|(c_idx, text)| CbtQuestionChoiceDto {
+                    choice_text: text,
+                    is_correct: c_idx == correct_idx,
+                })
+                .collect();
+
+            questions.push(AssignmentQuestionDto {
+                id: format!("asg-mcq-{}-{now_ts}", idx + 1),
+                question_text: q_text,
+                question_type: "MULTIPLE_CHOICE".to_string(),
+                points: 10,
+                image_url: safe_image.clone(),
+                choices,
+                explanation: expl,
+            });
+        }
+    }
+
+    let essay_count = if is_homework { num_essay.max(1) } else { num_essay };
+    let essay_pts = (100 / essay_count.max(1) as i32).max(15);
+
+    let essay_prompts = [
+        format!("Jelaskan pemahaman komprehensif Anda mengenai konsep '{topic}' pada mata pelajaran {subject_name} ({grade_level}). Tuliskan minimal dua contoh penerapan nyata dalam kehidupan sehari-hari!"),
+        format!("Lakukan analisis terhadap sebuah permasalahan kontekstual yang berkaitan dengan materi '{topic}'. Uraikan langkah-langkah pemecahan masalah secara terstruktur dan berikan kesimpulan logis!"),
+        format!("Susunlah sebuah telaah kritis mengenai tantangan yang dihadapi dalam penguasaan materi '{topic}', serta usulkan ide inovatif untuk mengatasinya!"),
+        format!("Buatlah refleksi pembelajaran mendalam mengenai nilai-nilai baru yang Anda peroleh setelah mempelajari '{topic}', dan bagaimana materi ini membentuk cara berpikir kritis Anda!"),
+    ];
+
+    for idx in 0..essay_count {
+        let prompt_text = essay_prompts[idx % essay_prompts.len()].clone();
+        let q_num = questions.len() + 1;
+        questions.push(AssignmentQuestionDto {
+            id: format!("asg-essay-{}-{now_ts}", idx + 1),
+            question_text: if essay_count > essay_prompts.len() {
+                format!("(Uraian {q_num}) {prompt_text}")
+            } else {
+                prompt_text
+            },
+            question_type: "ESSAY".to_string(),
+            points: essay_pts,
+            image_url: None,
+            choices: Vec::new(),
+            explanation: "Rubrik Penskoran: Skor maksimal diberikan bila siswa menjabarkan konsep secara tepat, argumentasi logis runtut, disertai contoh kontekstual yang relevan (Skala 0 - 100).".to_string(),
+        });
+    }
+
+    let tasks = vec![
+        format!("Tugas 1: Pelajari rangkuman materi pokok '{topic}' dengan seksama."),
+        format!("Tugas 2: Kerjakan butir soal terstruktur sesuai instruksi dan rubrik yang ditetapkan."),
+        format!("Tugas 3: Lakukan evaluasi mandiri terhadap jawaban Anda sebelum mengumpulkan tugas."),
+    ];
+
+    GeneratedAssignmentDto {
+        title: format!("Tugas Siswa: {topic}"),
+        instructions: format!("Petunjuk Pengerjaan ({grade_level} - {subject_name}):\n1. Bacalah materi tentang '{topic}' dengan teliti.\n2. Jawab setiap butir tugas dan soal dengan sistematis, teliti, dan mengedepankan nalar kritis.\n3. Tingkat kesulitan: {difficulty}. Periksa kembali pekerjaan sebelum diserahkan."),
+        assignment_type: if is_homework { "HOMEWORK_PR".to_string() } else { "STRUCTURED_QUESTIONS".to_string() },
+        rubric: "Rubrik Penilaian Kurikulum Merdeka (Skor 0 - 100):\n- 85 - 100: Pemahaman konsep akurat, analisis mendalam, argumen runtut.\n- 70 - 84: Konsep tepat, penjelasan jelas, sedikit kekurangan teknis.\n- 55 - 69: Konsep dasar dipahami, membutuhkan penguatan analisis.\n- < 55: Membutuhkan pendampingan remedial dan penguatan konsep dasar.".to_string(),
+        tasks,
+        questions,
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 4. CBT QUIZ / EXAM GENERATION DTOs & FUNCTION
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1422,7 +1983,22 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#,
         },
     ];
 
-    let raw = call_nvidia_nim(messages, 0.65, 4500).await?;
+    let raw = match call_nvidia_nim(messages, 0.65, 4500).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("call_nvidia_nim failed for CBT quiz: {e}. Utilizing pedagogical fallback.");
+            return Ok(fallback_generate_cbt_quiz(
+                topic,
+                grade_level,
+                subject_name,
+                quiz_format,
+                num_mcq,
+                num_essay,
+                difficulty,
+                _include_images,
+            ));
+        }
+    };
     let cleaned = extract_clean_json(&raw);
     let sanitized = sanitize_json_control_chars(cleaned);
 
@@ -1434,11 +2010,22 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#,
         questions: Vec<serde_json::Value>,
     }
 
-    let parsed: RawQuizResponse = serde_json::from_str(&sanitized).map_err(|e| {
-        ApplicationError::Domain(DomainError::Validation(format!(
-            "Invalid AI CBT Quiz JSON: {e}"
-        )))
-    })?;
+    let parsed: RawQuizResponse = match serde_json::from_str(&sanitized) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Failed to parse AI CBT Quiz JSON ({e}). Utilizing pedagogical fallback.");
+            return Ok(fallback_generate_cbt_quiz(
+                topic,
+                grade_level,
+                subject_name,
+                quiz_format,
+                num_mcq,
+                num_essay,
+                difficulty,
+                _include_images,
+            ));
+        }
+    };
 
     let default_pts = (100 / total_questions.max(1) as i32).max(5);
     let mut questions: Vec<CbtQuestionDto> = Vec::new();
@@ -1683,6 +2270,86 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#,
         description: desc_str,
         questions,
     })
+}
+
+pub fn fallback_generate_cbt_quiz(
+    topic: &str,
+    grade_level: &str,
+    subject_name: &str,
+    quiz_format: Option<&str>,
+    num_mcq: usize,
+    num_essay: usize,
+    difficulty: &str,
+    _include_images: bool,
+) -> GeneratedCbtQuizDto {
+    let now_ts = chrono::Utc::now().timestamp_millis();
+    let is_mixed = num_essay > 0
+        || quiz_format
+            .map(|f| f.to_uppercase() == "MIXED" || f.to_uppercase().contains("CAMPURAN"))
+            .unwrap_or(false);
+    let total_questions = if is_mixed { num_mcq + num_essay } else { num_mcq };
+    let default_pts = (100 / total_questions.max(1) as i32).max(5);
+
+    let templates = generate_pedagogical_question_templates(subject_name, topic, grade_level, difficulty, num_mcq);
+    let key_labels = ["A", "B", "C", "D"];
+    let bloom_levels = ["C2", "C3", "C4", "C3", "C4"];
+
+    let mut questions = Vec::new();
+
+    for (idx, (q_text, choices_text, correct_idx, expl)) in templates.into_iter().enumerate() {
+        let choices = choices_text
+            .into_iter()
+            .enumerate()
+            .map(|(c_idx, text)| CbtQuestionChoiceDto {
+                choice_text: text,
+                is_correct: c_idx == correct_idx,
+            })
+            .collect();
+
+        questions.push(CbtQuestionDto {
+            id: format!("cbt-q-{}-{now_ts}", idx + 1),
+            question_text: q_text,
+            question_type: Some("MULTIPLE_CHOICE".to_string()),
+            choices,
+            correct_key: key_labels[correct_idx % 4].to_string(),
+            explanation: expl,
+            bloom_level: bloom_levels[idx % bloom_levels.len()].to_string(),
+            points: default_pts,
+        });
+    }
+
+    if is_mixed && num_essay > 0 {
+        let essay_prompts = [
+            format!("Analisis dan uraikan secara mendalam bagaimana prinsip utama '{topic}' ({subject_name}) diterapkan dalam memecahkan masalah nyata bagi siswa {grade_level}!"),
+            format!("Berdasarkan materi '{topic}', jelaskan hubungan sebab-akibat antar-komponen utama dan berikan satu studi kasus konkret beserta pembahasannya!"),
+            format!("Evaluasilah kelebihan dan tantangan dalam penerapan konsep '{topic}' serta rumuskan rekomendasi solusi yang inovatif dan terukur!"),
+        ];
+
+        for idx in 0..num_essay {
+            let prompt = essay_prompts[idx % essay_prompts.len()].clone();
+            let q_num = questions.len() + 1;
+            questions.push(CbtQuestionDto {
+                id: format!("cbt-essay-{}-{now_ts}", idx + 1),
+                question_text: if num_essay > essay_prompts.len() {
+                    format!("(Uraian {q_num}) {prompt}")
+                } else {
+                    prompt
+                },
+                question_type: Some("ESSAY".to_string()),
+                choices: Vec::new(),
+                correct_key: "ESSAY".to_string(),
+                explanation: "Rubrik Penskoran: Skor penuh diberikan bila jawaban memuat analisis konsep akurat, argumentasi logis runtut, dan bukti/contoh aplikatif yang valid.".to_string(),
+                bloom_level: "C4".to_string(),
+                points: 20,
+            });
+        }
+    }
+
+    GeneratedCbtQuizDto {
+        title: format!("Paket Soal CBT: {topic}"),
+        description: format!("Ujian CBT {total_questions} butir soal materi {topic} ({subject_name}) jenjang {grade_level} ({difficulty})."),
+        questions,
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
