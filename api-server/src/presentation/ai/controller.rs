@@ -124,9 +124,32 @@ async fn generate_content(
             )))
         }
         "ASSIGNMENT" => {
-            let num_mcq = payload.num_mcq.unwrap_or(4).clamp(0, 15);
-            let num_essay = payload.num_essay.unwrap_or(2).clamp(0, 10);
             let format = payload.assignment_format.as_deref().unwrap_or("STRUCTURED_QUESTIONS");
+            let is_homework = format.eq_ignore_ascii_case("HOMEWORK_PR")
+                || format.to_uppercase().contains("HOMEWORK")
+                || format.to_uppercase().contains("PR");
+
+            let num_mcq = if is_homework {
+                0
+            } else {
+                payload.num_mcq
+                    .or_else(|| payload.num_questions.map(|q| (q * 7 / 10).max(1)))
+                    .unwrap_or(4)
+                    .clamp(0, 25)
+            };
+
+            let num_essay = if is_homework {
+                payload.num_essay
+                    .or(payload.num_questions)
+                    .unwrap_or(2)
+                    .clamp(1, 15)
+            } else {
+                payload.num_essay
+                    .or_else(|| payload.num_questions.map(|q| q.saturating_sub(num_mcq).max(1)))
+                    .unwrap_or(2)
+                    .clamp(0, 15)
+            };
+
             let include_images = payload.include_images.unwrap_or(false);
 
             let task = nvidia_ai::generate_assignment(
@@ -158,9 +181,21 @@ async fn generate_content(
             let is_mixed = quiz_format
                 .map(|f| f.to_uppercase() == "MIXED" || f.to_uppercase().contains("CAMPURAN"))
                 .unwrap_or_else(|| payload.num_essay.map(|e| e > 0).unwrap_or(false));
-            let num_mcq = payload.num_mcq.or(payload.num_questions).unwrap_or(if is_mixed { 10 } else { num_q }).clamp(0, 20);
+            let num_mcq = payload.num_mcq
+                .or_else(|| {
+                    if is_mixed {
+                        payload.num_questions.map(|q| (q * 7 / 10).max(1))
+                    } else {
+                        payload.num_questions
+                    }
+                })
+                .unwrap_or(if is_mixed { 10 } else { num_q })
+                .clamp(0, 30);
             let num_essay = if is_mixed {
-                payload.num_essay.unwrap_or(5).clamp(0, 10)
+                payload.num_essay
+                    .or_else(|| payload.num_questions.map(|q| q.saturating_sub(num_mcq).max(1)))
+                    .unwrap_or(5)
+                    .clamp(0, 20)
             } else {
                 0
             };
