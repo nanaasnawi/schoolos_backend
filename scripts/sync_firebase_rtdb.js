@@ -1,7 +1,13 @@
 const { Pool } = require('pg');
 
+const connectionString = process.env.DATABASE_URL;
+if (!connectionString) {
+  console.error("FATAL: DATABASE_URL environment variable is required.");
+  process.exit(1);
+}
+
 const pool = new Pool({
-  connectionString: 'postgresql://postgres:REDACTED@REDACTED_DB_HOST:5432/railway'
+  connectionString
 });
 
 async function syncFirebaseToDb() {
