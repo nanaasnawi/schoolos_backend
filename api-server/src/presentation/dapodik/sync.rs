@@ -3749,33 +3749,55 @@ pub async fn reconcile_student(
 ) -> Result<Json<ApiResponse<DapodikSyncRecordDto>>, ApiError> {
     let target_upper = payload.target_name.to_uppercase();
 
-    if let Ok(record_uuid) = Uuid::parse_str(&payload.sync_id) {
-        let _ = sqlx::query(
-            r#"
-            UPDATE dapodik_sync_records
-            SET nama_school_os = $1, classification = 'MATCH', action_recommended = 'Reconciled & Normalized', stage = 'VERIFIED', last_synced_at = NOW()
-            WHERE id = $2
-            "#
+    let record_uuid = Uuid::parse_str(&payload.sync_id).map_err(|e| {
+        ApiError::new(
+            ApplicationError::Domain(DomainError::Validation(format!("Invalid sync_id UUID: {e}"))),
+            &ctx.request_id,
         )
-        .bind(&target_upper)
-        .bind(record_uuid)
-        .execute(&state.pool)
-        .await;
-    }
+    })?;
+
+    let row = sqlx::query(
+        r#"
+        UPDATE dapodik_sync_records
+        SET nama_school_os = $1,
+            nama_dapodik = COALESCE(NULLIF($2, ''), nama_dapodik),
+            classification = 'MATCH',
+            action_recommended = 'Reconciled & Normalized',
+            stage = 'VERIFIED',
+            last_synced_at = NOW()
+        WHERE id = $3 AND tenant_id = $4
+        RETURNING id, nisn, nik, nama_school_os, nama_dapodik, rombel, identity_state, mobility_case, classification, action_recommended, stage, last_synced_at
+        "#
+    )
+    .bind(&target_upper)
+    .bind(&payload.target_name)
+    .bind(record_uuid)
+    .bind(ctx.tenant_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| ApiError::new(ApplicationError::Internal(format!("Database error reconciling student: {e}")), &ctx.request_id))?
+    .ok_or_else(|| {
+        ApiError::new(
+            ApplicationError::Domain(DomainError::Validation(format!("Dapodik sync record with ID {} was not found", payload.sync_id))),
+            &ctx.request_id,
+        )
+    })?;
 
     let updated = DapodikSyncRecordDto {
-        id: payload.sync_id,
-        nisn: "0081293819".into(),
-        nik: "3273015509080003".into(),
-        nama_school_os: target_upper,
-        nama_dapodik: payload.target_name,
-        rombel: "10B".into(),
-        identity_state: "ACTIVE".into(),
-        mobility_case: "NONE".into(),
-        classification: "MATCH".into(),
-        action_recommended: "Reconciled & Normalized".into(),
-        stage: "VERIFIED".into(),
-        last_synced_at: Utc::now().to_rfc3339(),
+        id: row.get::<Uuid, _>("id").to_string(),
+        nisn: row.get("nisn"),
+        nik: row.get("nik"),
+        nama_school_os: row.get("nama_school_os"),
+        nama_dapodik: row.get("nama_dapodik"),
+        rombel: row.get("rombel"),
+        identity_state: row.get("identity_state"),
+        mobility_case: row.get("mobility_case"),
+        classification: row.get("classification"),
+        action_recommended: row.get("action_recommended"),
+        stage: row.get("stage"),
+        last_synced_at: row
+            .get::<chrono::DateTime<Utc>, _>("last_synced_at")
+            .to_rfc3339(),
     };
 
     Ok(Json(ApiResponse::success(updated, ctx.request_id)))
