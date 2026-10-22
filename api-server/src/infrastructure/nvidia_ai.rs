@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use uuid::Uuid;
 
-const DEFAULT_NVIDIA_MODEL: &str = "nvidia/nemotron-3-ultra-550b-a55b";
+const DEFAULT_NVIDIA_MODEL: &str = "nvidia/nemotron-3.5-lightning-30b-a3b";
 const DEFAULT_NVIDIA_URL: &str = "https://integrate.api.nvidia.com/v1/chat/completions";
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -18,6 +18,8 @@ struct ChatCompletionRequest<'a> {
     messages: Vec<ChatMessage<'a>>,
     temperature: f32,
     max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'a str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -28,6 +30,8 @@ struct ChatChoice {
 #[derive(Debug, Deserialize)]
 struct ChatMessageResponse {
     content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,15 +64,15 @@ pub async fn call_nvidia_nim(
     let (api_key, configured_model, api_url) = get_config()?;
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(25))
+        .timeout(Duration::from_secs(60))
         .build()
         .map_err(|e| ApplicationError::Internal(format!("Failed to build HTTP client: {e}")))?;
 
     let mut candidate_models = vec![configured_model.as_str()];
     let active_models = [
+        "nvidia/nemotron-3.5-lightning-30b-a3b",
+        "nvidia/nemotron-3.5-super-vl-120b-a12b",
         "nvidia/nemotron-3-ultra-550b-a55b",
-        "nvidia/ising-calibration-1.5-31b",
-        "stepfun-ai/step-5-preview",
     ];
     for m in active_models {
         if !candidate_models.contains(&m) {
@@ -84,6 +88,7 @@ pub async fn call_nvidia_nim(
             messages: messages.clone(),
             temperature,
             max_tokens,
+            reasoning_effort: Some("none"),
         };
 
         let resp = match client
@@ -96,7 +101,7 @@ pub async fn call_nvidia_nim(
         {
             Ok(r) => r,
             Err(e) => {
-                last_error = format!("Failed to send request to NVIDIA NIM: {e}");
+                last_error = format!("Failed to send request to NVIDIA NIM ({candidate}): {e}");
                 continue;
             }
         };
@@ -104,26 +109,27 @@ pub async fn call_nvidia_nim(
         let status = resp.status();
         if !status.is_success() {
             let err_body = resp.text().await.unwrap_or_default();
-            last_error = format!("NVIDIA NIM API responded with HTTP {status}: {err_body}");
+            last_error = format!("NVIDIA NIM API ({candidate}) responded with HTTP {status}: {err_body}");
             continue;
         }
 
         let parsed: ChatCompletionResponse = match resp.json().await {
             Ok(p) => p,
             Err(e) => {
-                last_error = format!("Failed to parse NVIDIA NIM response: {e}");
+                last_error = format!("Failed to parse NVIDIA NIM response ({candidate}): {e}");
                 continue;
             }
         };
 
-        if let Some(content) = parsed
-            .choices
-            .into_iter()
-            .next()
-            .and_then(|c| c.message.content)
-        {
-            if !content.trim().is_empty() {
+        if let Some(choice) = parsed.choices.into_iter().next() {
+            let msg = choice.message;
+            if let Some(content) = msg.content.filter(|c| !c.trim().is_empty()) {
                 return Ok(content);
+            }
+            if let Some(reasoning) = msg.reasoning_content.filter(|r| !r.trim().is_empty()) {
+                if reasoning.contains('{') && reasoning.contains('}') {
+                    return Ok(reasoning);
+                }
             }
         }
     }

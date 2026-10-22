@@ -255,7 +255,7 @@ async fn analyze_student(
         r#"
         SELECT s.id, s.name, COALESCE(c.name, 'Kelas Umum') as class_name
         FROM students s
-        LEFT JOIN enrollments e ON e.student_id = s.id AND e.deleted_at IS NULL
+        LEFT JOIN enrollments e ON e.student_id = s.id AND e.status = 'ACTIVE'
         LEFT JOIN classes c ON c.id = e.class_id
         WHERE s.id = $1 AND s.tenant_id = $2 AND s.deleted_at IS NULL
         LIMIT 1
