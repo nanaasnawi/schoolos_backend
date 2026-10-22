@@ -3,8 +3,14 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+const connectionString = process.env.DATABASE_URL;
+if (!connectionString) {
+  console.error("FATAL: DATABASE_URL environment variable is required.");
+  process.exit(1);
+}
+
 const client = new Client({
-  connectionString: 'postgresql://postgres:ePssELIUrkhPIlsGqKvIgGvMuDodFsYM@altaria.proxy.rlwy.net:21200/railway',
+  connectionString,
   ssl: false,
 });
 

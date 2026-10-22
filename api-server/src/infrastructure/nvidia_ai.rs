@@ -36,12 +36,15 @@ struct ChatCompletionResponse {
 }
 
 fn get_config() -> Result<(String, String, String), ApplicationError> {
-    // 1. Prioritaskan pembacaan aman dari environment variable server
-    let env_key = std::env::var("NVIDIA_API_KEY").ok();
-    let key = env_key.filter(|k| !k.trim().is_empty()).unwrap_or_else(|| {
-        // Fallback aman jika environment variable belum dikonfigurasi di cloud dashboard
-        "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".to_string()
-    });
+    // Strictly load NVIDIA API key from environment variable (Never hardcode secrets!)
+    let key = std::env::var("NVIDIA_API_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty())
+        .ok_or_else(|| {
+            ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::System(
+                "NVIDIA_API_KEY environment variable is not configured or revoked".to_string(),
+            ))
+        })?;
 
     let model = std::env::var("NVIDIA_MODEL").unwrap_or_else(|_| DEFAULT_NVIDIA_MODEL.to_string());
     let url = std::env::var("NVIDIA_API_URL").unwrap_or_else(|_| DEFAULT_NVIDIA_URL.to_string());

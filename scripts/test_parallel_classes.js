@@ -1,6 +1,10 @@
 const { Client } = require('pg');
 
-const DATABASE_URL = 'postgresql://postgres:ePssELIUrkhPIlsGqKvIgGvMuDodFsYM@altaria.proxy.rlwy.net:21200/railway';
+const DATABASE_URL = process.env.DATABASE_URL;
+if (!DATABASE_URL) {
+    console.error("FATAL: DATABASE_URL environment variable is required.");
+    process.exit(1);
+}
 
 async function testParallelClassQueries() {
     const client = new Client({ connectionString: DATABASE_URL });
