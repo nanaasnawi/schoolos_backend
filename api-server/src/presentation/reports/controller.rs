@@ -310,7 +310,11 @@ pub async fn export_report(
     if let Some(ref actor) = req_ctx.actor {
         let has_export_perm = actor.roles.iter().any(|r| {
             let n = r.name.to_lowercase();
-            n.contains("admin") || n.contains("kepala") || n.contains("staff") || n.contains("tata usaha") || n.contains("guru")
+            n.contains("admin")
+                || n.contains("kepala")
+                || n.contains("staff")
+                || n.contains("tata usaha")
+                || n.contains("guru")
         });
         if !has_export_perm {
             return Err(ApiError::new(
@@ -361,12 +365,37 @@ pub async fn export_report(
                 .bind(query.class_id)
                 .fetch_all(pool)
                 .await
-                .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
+                .map_err(|e| {
+                    ApiError::new(
+                        ApplicationError::Infrastructure(
+                            school_core::common::error::InfrastructureError::Database(e),
+                        ),
+                        &req_ctx.request_id,
+                    )
+                })?;
 
             let cols = vec![
-                "NISN", "NIK", "NIPD", "Nama Lengkap Siswa", "Jenis Kelamin", "Tempat Lahir",
-                "Tanggal Lahir", "Agama", "Rombel", "Alamat Jalan", "RT", "RW", "Dusun",
-                "Kelurahan", "Kecamatan", "Kode Pos", "No HP", "Nama Ayah", "Nama Ibu", "Nama Wali", "Status Dapodik"
+                "NISN",
+                "NIK",
+                "NIPD",
+                "Nama Lengkap Siswa",
+                "Jenis Kelamin",
+                "Tempat Lahir",
+                "Tanggal Lahir",
+                "Agama",
+                "Rombel",
+                "Alamat Jalan",
+                "RT",
+                "RW",
+                "Dusun",
+                "Kelurahan",
+                "Kecamatan",
+                "Kode Pos",
+                "No HP",
+                "Nama Ayah",
+                "Nama Ibu",
+                "Nama Wali",
+                "Status Dapodik",
             ];
 
             let mut data: Vec<Vec<String>> = Vec::with_capacity(db_rows.len());
@@ -377,11 +406,14 @@ pub async fn export_report(
                     r.get::<Option<String>, _>("nipd").unwrap_or_default(),
                     r.get::<Option<String>, _>("full_name").unwrap_or_default(),
                     r.get::<Option<String>, _>("gender").unwrap_or_default(),
-                    r.get::<Option<String>, _>("place_of_birth").unwrap_or_default(),
-                    r.get::<Option<String>, _>("date_of_birth").unwrap_or_default(),
+                    r.get::<Option<String>, _>("place_of_birth")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("date_of_birth")
+                        .unwrap_or_default(),
                     r.get::<Option<String>, _>("religion").unwrap_or_default(),
                     r.get::<Option<String>, _>("rombel").unwrap_or_default(),
-                    r.get::<Option<String>, _>("alamat_jalan").unwrap_or_default(),
+                    r.get::<Option<String>, _>("alamat_jalan")
+                        .unwrap_or_default(),
                     r.get::<Option<String>, _>("rt").unwrap_or_default(),
                     r.get::<Option<String>, _>("rw").unwrap_or_default(),
                     r.get::<Option<String>, _>("dusun").unwrap_or_default(),
@@ -422,11 +454,25 @@ pub async fn export_report(
                 .bind(tid)
                 .fetch_all(pool)
                 .await
-                .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
+                .map_err(|e| {
+                    ApiError::new(
+                        ApplicationError::Infrastructure(
+                            school_core::common::error::InfrastructureError::Database(e),
+                        ),
+                        &req_ctx.request_id,
+                    )
+                })?;
 
             let cols = vec![
-                "NISN", "Nama Siswa", "Jenis Kelamin", "Jenis Mutasi", "Tanggal Mutasi",
-                "Sekolah Tujuan", "Nomor SK Mutasi", "Rombel Terakhir", "Alasan / Keterangan"
+                "NISN",
+                "Nama Siswa",
+                "Jenis Kelamin",
+                "Jenis Mutasi",
+                "Tanggal Mutasi",
+                "Sekolah Tujuan",
+                "Nomor SK Mutasi",
+                "Rombel Terakhir",
+                "Alasan / Keterangan",
             ];
 
             let mut data: Vec<Vec<String>> = Vec::with_capacity(db_rows.len());
@@ -435,11 +481,15 @@ pub async fn export_report(
                     r.get::<Option<String>, _>("nisn").unwrap_or_default(),
                     r.get::<Option<String>, _>("full_name").unwrap_or_default(),
                     r.get::<Option<String>, _>("gender").unwrap_or_default(),
-                    r.get::<Option<String>, _>("jenis_mutasi").unwrap_or_default(),
-                    r.get::<Option<String>, _>("tanggal_mutasi").unwrap_or_default(),
-                    r.get::<Option<String>, _>("sekolah_tujuan").unwrap_or_default(),
+                    r.get::<Option<String>, _>("jenis_mutasi")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("tanggal_mutasi")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("sekolah_tujuan")
+                        .unwrap_or_default(),
                     r.get::<Option<String>, _>("nomor_sk").unwrap_or_default(),
-                    r.get::<Option<String>, _>("rombel_terakhir").unwrap_or_default(),
+                    r.get::<Option<String>, _>("rombel_terakhir")
+                        .unwrap_or_default(),
                     r.get::<Option<String>, _>("keterangan").unwrap_or_default(),
                 ]);
             }
@@ -476,12 +526,30 @@ pub async fn export_report(
                 .bind(tid)
                 .fetch_all(pool)
                 .await
-                .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
+                .map_err(|e| {
+                    ApiError::new(
+                        ApplicationError::Infrastructure(
+                            school_core::common::error::InfrastructureError::Database(e),
+                        ),
+                        &req_ctx.request_id,
+                    )
+                })?;
 
             let cols = vec![
-                "NISN", "Nama Siswa", "Rombel", "Penerima KIP", "Nomor KIP", "Nama di KIP",
-                "Penerima KPS", "Nomor KPS", "Nomor KKS", "Layak PIP", "Alasan Layak PIP",
-                "Bank Penyalur", "Nomor Rekening", "Rekening Atas Nama"
+                "NISN",
+                "Nama Siswa",
+                "Rombel",
+                "Penerima KIP",
+                "Nomor KIP",
+                "Nama di KIP",
+                "Penerima KPS",
+                "Nomor KPS",
+                "Nomor KKS",
+                "Layak PIP",
+                "Alasan Layak PIP",
+                "Bank Penyalur",
+                "Nomor Rekening",
+                "Rekening Atas Nama",
             ];
 
             let mut data: Vec<Vec<String>> = Vec::with_capacity(db_rows.len());
@@ -490,17 +558,24 @@ pub async fn export_report(
                     r.get::<Option<String>, _>("nisn").unwrap_or_default(),
                     r.get::<Option<String>, _>("full_name").unwrap_or_default(),
                     r.get::<Option<String>, _>("rombel").unwrap_or_default(),
-                    r.get::<Option<String>, _>("penerima_kip").unwrap_or_default(),
+                    r.get::<Option<String>, _>("penerima_kip")
+                        .unwrap_or_default(),
                     r.get::<Option<String>, _>("nomor_kip").unwrap_or_default(),
-                    r.get::<Option<String>, _>("nama_di_kip").unwrap_or_default(),
-                    r.get::<Option<String>, _>("penerima_kps").unwrap_or_default(),
+                    r.get::<Option<String>, _>("nama_di_kip")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("penerima_kps")
+                        .unwrap_or_default(),
                     r.get::<Option<String>, _>("nomor_kps").unwrap_or_default(),
                     r.get::<Option<String>, _>("nomor_kks").unwrap_or_default(),
                     r.get::<Option<String>, _>("layak_pip").unwrap_or_default(),
-                    r.get::<Option<String>, _>("alasan_layak_pip").unwrap_or_default(),
-                    r.get::<Option<String>, _>("bank_penyalur").unwrap_or_default(),
-                    r.get::<Option<String>, _>("nomor_rekening").unwrap_or_default(),
-                    r.get::<Option<String>, _>("rekening_atas_nama").unwrap_or_default(),
+                    r.get::<Option<String>, _>("alasan_layak_pip")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("bank_penyalur")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("nomor_rekening")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("rekening_atas_nama")
+                        .unwrap_or_default(),
                 ]);
             }
 
@@ -538,12 +613,28 @@ pub async fn export_report(
                 .bind(query.class_id)
                 .fetch_all(pool)
                 .await
-                .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
+                .map_err(|e| {
+                    ApiError::new(
+                        ApplicationError::Infrastructure(
+                            school_core::common::error::InfrastructureError::Database(e),
+                        ),
+                        &req_ctx.request_id,
+                    )
+                })?;
 
             let cols = vec![
-                "NISN", "Nama Siswa", "Rombel", "Mata Pelajaran", "Kode Mapel", "Nilai Formatif TP",
-                "Nilai Sumatif SAS", "Nilai Akhir Rapor", "Predikat", "Status KKTP / KKM",
-                "Capaian Tertinggi", "Perlu Peningkatan"
+                "NISN",
+                "Nama Siswa",
+                "Rombel",
+                "Mata Pelajaran",
+                "Kode Mapel",
+                "Nilai Formatif TP",
+                "Nilai Sumatif SAS",
+                "Nilai Akhir Rapor",
+                "Predikat",
+                "Status KKTP / KKM",
+                "Capaian Tertinggi",
+                "Perlu Peningkatan",
             ];
 
             let mut data: Vec<Vec<String>> = Vec::with_capacity(db_rows.len());
@@ -552,15 +643,21 @@ pub async fn export_report(
                     r.get::<Option<String>, _>("nisn").unwrap_or_default(),
                     r.get::<Option<String>, _>("full_name").unwrap_or_default(),
                     r.get::<Option<String>, _>("rombel").unwrap_or_default(),
-                    r.get::<Option<String>, _>("mata_pelajaran").unwrap_or_default(),
+                    r.get::<Option<String>, _>("mata_pelajaran")
+                        .unwrap_or_default(),
                     r.get::<Option<String>, _>("kode_mapel").unwrap_or_default(),
-                    r.get::<Option<String>, _>("nilai_formatif_tp").unwrap_or_default(),
-                    r.get::<Option<String>, _>("nilai_sumatif_sas").unwrap_or_default(),
-                    r.get::<Option<String>, _>("nilai_akhir_rapor").unwrap_or_default(),
+                    r.get::<Option<String>, _>("nilai_formatif_tp")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("nilai_sumatif_sas")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("nilai_akhir_rapor")
+                        .unwrap_or_default(),
                     r.get::<Option<String>, _>("predikat").unwrap_or_default(),
                     r.get::<Option<String>, _>("status_kkm").unwrap_or_default(),
-                    r.get::<Option<String>, _>("capaian_tertinggi").unwrap_or_default(),
-                    r.get::<Option<String>, _>("perlu_peningkatan").unwrap_or_default(),
+                    r.get::<Option<String>, _>("capaian_tertinggi")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("perlu_peningkatan")
+                        .unwrap_or_default(),
                 ]);
             }
 
@@ -604,11 +701,26 @@ pub async fn export_report(
                 .bind(query.class_id)
                 .fetch_all(pool)
                 .await
-                .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
+                .map_err(|e| {
+                    ApiError::new(
+                        ApplicationError::Infrastructure(
+                            school_core::common::error::InfrastructureError::Database(e),
+                        ),
+                        &req_ctx.request_id,
+                    )
+                })?;
 
             let cols = vec![
-                "NISN", "Nama Siswa", "Rombel", "Total Pertemuan", "Hadir (H)", "Sakit (S)",
-                "Izin (I)", "Alpa (A)", "Persentase Kehadiran (%)", "Status Kehadiran"
+                "NISN",
+                "Nama Siswa",
+                "Rombel",
+                "Total Pertemuan",
+                "Hadir (H)",
+                "Sakit (S)",
+                "Izin (I)",
+                "Alpa (A)",
+                "Persentase Kehadiran (%)",
+                "Status Kehadiran",
             ];
 
             let mut data: Vec<Vec<String>> = Vec::with_capacity(db_rows.len());
@@ -617,13 +729,16 @@ pub async fn export_report(
                     r.get::<Option<String>, _>("nisn").unwrap_or_default(),
                     r.get::<Option<String>, _>("full_name").unwrap_or_default(),
                     r.get::<Option<String>, _>("rombel").unwrap_or_default(),
-                    r.get::<Option<String>, _>("total_pertemuan").unwrap_or_default(),
+                    r.get::<Option<String>, _>("total_pertemuan")
+                        .unwrap_or_default(),
                     r.get::<Option<String>, _>("hadir").unwrap_or_default(),
                     r.get::<Option<String>, _>("sakit").unwrap_or_default(),
                     r.get::<Option<String>, _>("izin").unwrap_or_default(),
                     r.get::<Option<String>, _>("alpa").unwrap_or_default(),
-                    r.get::<Option<String>, _>("persentase_kehadiran").unwrap_or_default(),
-                    r.get::<Option<String>, _>("status_kehadiran").unwrap_or_default(),
+                    r.get::<Option<String>, _>("persentase_kehadiran")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("status_kehadiran")
+                        .unwrap_or_default(),
                 ]);
             }
 
@@ -670,12 +785,28 @@ pub async fn export_report(
                 .bind(tid)
                 .fetch_all(pool)
                 .await
-                .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
+                .map_err(|e| {
+                    ApiError::new(
+                        ApplicationError::Infrastructure(
+                            school_core::common::error::InfrastructureError::Database(e),
+                        ),
+                        &req_ctx.request_id,
+                    )
+                })?;
 
             let cols = vec![
-                "NUPTK", "NIP", "Nama Lengkap & Gelar", "Jenis Kelamin", "Tempat Lahir",
-                "Tanggal Lahir", "Jabatan PTK", "Status Kepegawaian", "Mata Pelajaran Diampu",
-                "No HP", "Email", "Status Keaktifan"
+                "NUPTK",
+                "NIP",
+                "Nama Lengkap & Gelar",
+                "Jenis Kelamin",
+                "Tempat Lahir",
+                "Tanggal Lahir",
+                "Jabatan PTK",
+                "Status Kepegawaian",
+                "Mata Pelajaran Diampu",
+                "No HP",
+                "Email",
+                "Status Keaktifan",
             ];
 
             let mut data: Vec<Vec<String>> = Vec::with_capacity(db_rows.len());
@@ -684,15 +815,22 @@ pub async fn export_report(
                     r.get::<Option<String>, _>("nuptk").unwrap_or_default(),
                     r.get::<Option<String>, _>("nip").unwrap_or_default(),
                     r.get::<Option<String>, _>("full_name").unwrap_or_default(),
-                    r.get::<Option<String>, _>("jenis_kelamin").unwrap_or_default(),
-                    r.get::<Option<String>, _>("tempat_lahir").unwrap_or_default(),
-                    r.get::<Option<String>, _>("tanggal_lahir").unwrap_or_default(),
-                    r.get::<Option<String>, _>("jabatan_ptk").unwrap_or_default(),
-                    r.get::<Option<String>, _>("status_kepegawaian").unwrap_or_default(),
-                    r.get::<Option<String>, _>("mata_pelajaran").unwrap_or_default(),
+                    r.get::<Option<String>, _>("jenis_kelamin")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("tempat_lahir")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("tanggal_lahir")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("jabatan_ptk")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("status_kepegawaian")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("mata_pelajaran")
+                        .unwrap_or_default(),
                     r.get::<Option<String>, _>("no_hp").unwrap_or_default(),
                     r.get::<Option<String>, _>("email").unwrap_or_default(),
-                    r.get::<Option<String>, _>("status_aktif").unwrap_or_default(),
+                    r.get::<Option<String>, _>("status_aktif")
+                        .unwrap_or_default(),
                 ]);
             }
 
@@ -730,26 +868,47 @@ pub async fn export_report(
                 .bind(query.class_id)
                 .fetch_all(pool)
                 .await
-                .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
+                .map_err(|e| {
+                    ApiError::new(
+                        ApplicationError::Infrastructure(
+                            school_core::common::error::InfrastructureError::Database(e),
+                        ),
+                        &req_ctx.request_id,
+                    )
+                })?;
 
             let cols = vec![
-                "Judul Ujian CBT", "Mata Pelajaran", "Rombel", "NISN Siswa", "Nama Siswa",
-                "Nilai Diperoleh", "KKM Lulus", "Status Kelulusan", "Waktu Mulai", "Waktu Selesai"
+                "Judul Ujian CBT",
+                "Mata Pelajaran",
+                "Rombel",
+                "NISN Siswa",
+                "Nama Siswa",
+                "Nilai Diperoleh",
+                "KKM Lulus",
+                "Status Kelulusan",
+                "Waktu Mulai",
+                "Waktu Selesai",
             ];
 
             let mut data: Vec<Vec<String>> = Vec::with_capacity(db_rows.len());
             for r in db_rows {
                 data.push(vec![
-                    r.get::<Option<String>, _>("judul_ujian").unwrap_or_default(),
-                    r.get::<Option<String>, _>("mata_pelajaran").unwrap_or_default(),
+                    r.get::<Option<String>, _>("judul_ujian")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("mata_pelajaran")
+                        .unwrap_or_default(),
                     r.get::<Option<String>, _>("rombel").unwrap_or_default(),
                     r.get::<Option<String>, _>("nisn_siswa").unwrap_or_default(),
                     r.get::<Option<String>, _>("nama_siswa").unwrap_or_default(),
-                    r.get::<Option<String>, _>("nilai_diperoleh").unwrap_or_default(),
+                    r.get::<Option<String>, _>("nilai_diperoleh")
+                        .unwrap_or_default(),
                     r.get::<Option<String>, _>("kkm_lulus").unwrap_or_default(),
-                    r.get::<Option<String>, _>("status_kelulusan").unwrap_or_default(),
-                    r.get::<Option<String>, _>("waktu_mulai").unwrap_or_default(),
-                    r.get::<Option<String>, _>("waktu_selesai").unwrap_or_default(),
+                    r.get::<Option<String>, _>("status_kelulusan")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("waktu_mulai")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("waktu_selesai")
+                        .unwrap_or_default(),
                 ]);
             }
 
@@ -780,11 +939,23 @@ pub async fn export_report(
                 .bind(query.class_id)
                 .fetch_all(pool)
                 .await
-                .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
+                .map_err(|e| {
+                    ApiError::new(
+                        ApplicationError::Infrastructure(
+                            school_core::common::error::InfrastructureError::Database(e),
+                        ),
+                        &req_ctx.request_id,
+                    )
+                })?;
 
             let cols = vec![
-                "Hari", "Jam Mulai", "Jam Selesai", "Rombel / Kelas", "Mata Pelajaran",
-                "Guru Pengampu", "Ruang Kelas"
+                "Hari",
+                "Jam Mulai",
+                "Jam Selesai",
+                "Rombel / Kelas",
+                "Mata Pelajaran",
+                "Guru Pengampu",
+                "Ruang Kelas",
             ];
 
             let mut data: Vec<Vec<String>> = Vec::with_capacity(db_rows.len());
@@ -792,10 +963,14 @@ pub async fn export_report(
                 data.push(vec![
                     r.get::<Option<String>, _>("hari").unwrap_or_default(),
                     r.get::<Option<String>, _>("jam_mulai").unwrap_or_default(),
-                    r.get::<Option<String>, _>("jam_selesai").unwrap_or_default(),
-                    r.get::<Option<String>, _>("rombel_kelas").unwrap_or_default(),
-                    r.get::<Option<String>, _>("mata_pelajaran").unwrap_or_default(),
-                    r.get::<Option<String>, _>("guru_pengampu").unwrap_or_default(),
+                    r.get::<Option<String>, _>("jam_selesai")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("rombel_kelas")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("mata_pelajaran")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("guru_pengampu")
+                        .unwrap_or_default(),
                     r.get::<Option<String>, _>("ruangan").unwrap_or_default(),
                 ]);
             }
@@ -835,12 +1010,31 @@ pub async fn export_report(
                 .bind(query.class_id)
                 .fetch_all(pool)
                 .await
-                .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
+                .map_err(|e| {
+                    ApiError::new(
+                        ApplicationError::Infrastructure(
+                            school_core::common::error::InfrastructureError::Database(e),
+                        ),
+                        &req_ctx.request_id,
+                    )
+                })?;
 
             let cols = vec![
-                "Tanggal", "NISN", "Nama Siswa", "Rombel", "Bangun Pagi", "Beribadah",
-                "Berolahraga", "Makan Sehat", "Gemar Belajar", "Bermasyarakat", "Tidur Tepat Waktu",
-                "Total Terpenuhi (0-7)", "Persentase (%)", "Status Verifikasi", "Catatan Orang Tua"
+                "Tanggal",
+                "NISN",
+                "Nama Siswa",
+                "Rombel",
+                "Bangun Pagi",
+                "Beribadah",
+                "Berolahraga",
+                "Makan Sehat",
+                "Gemar Belajar",
+                "Bermasyarakat",
+                "Tidur Tepat Waktu",
+                "Total Terpenuhi (0-7)",
+                "Persentase (%)",
+                "Status Verifikasi",
+                "Catatan Orang Tua",
             ];
 
             let mut data: Vec<Vec<String>> = Vec::with_capacity(db_rows.len());
@@ -850,17 +1044,27 @@ pub async fn export_report(
                     r.get::<Option<String>, _>("nisn").unwrap_or_default(),
                     r.get::<Option<String>, _>("full_name").unwrap_or_default(),
                     r.get::<Option<String>, _>("rombel").unwrap_or_default(),
-                    r.get::<Option<String>, _>("bangun_pagi").unwrap_or_default(),
+                    r.get::<Option<String>, _>("bangun_pagi")
+                        .unwrap_or_default(),
                     r.get::<Option<String>, _>("beribadah").unwrap_or_default(),
-                    r.get::<Option<String>, _>("berolahraga").unwrap_or_default(),
-                    r.get::<Option<String>, _>("makan_sehat").unwrap_or_default(),
-                    r.get::<Option<String>, _>("gemar_belajar").unwrap_or_default(),
-                    r.get::<Option<String>, _>("bermasyarakat").unwrap_or_default(),
-                    r.get::<Option<String>, _>("tidur_tepat_waktu").unwrap_or_default(),
-                    r.get::<Option<String>, _>("total_kebiasaan_terpenuhi").unwrap_or_default(),
-                    r.get::<Option<String>, _>("persentase_kepatuhan").unwrap_or_default(),
-                    r.get::<Option<String>, _>("status_verifikasi").unwrap_or_default(),
-                    r.get::<Option<String>, _>("catatan_orang_tua").unwrap_or_default(),
+                    r.get::<Option<String>, _>("berolahraga")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("makan_sehat")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("gemar_belajar")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("bermasyarakat")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("tidur_tepat_waktu")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("total_kebiasaan_terpenuhi")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("persentase_kepatuhan")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("status_verifikasi")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("catatan_orang_tua")
+                        .unwrap_or_default(),
                 ]);
             }
 
@@ -888,21 +1092,37 @@ pub async fn export_report(
                 .bind(tid)
                 .fetch_all(pool)
                 .await
-                .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
+                .map_err(|e| {
+                    ApiError::new(
+                        ApplicationError::Infrastructure(
+                            school_core::common::error::InfrastructureError::Database(e),
+                        ),
+                        &req_ctx.request_id,
+                    )
+                })?;
 
             let cols = vec![
-                "Timestamp (WIB)", "Nama Pengguna", "Email", "Aksi Operasi",
-                "Entitas Resource", "IP Address", "User Agent"
+                "Timestamp (WIB)",
+                "Nama Pengguna",
+                "Email",
+                "Aksi Operasi",
+                "Entitas Resource",
+                "IP Address",
+                "User Agent",
             ];
 
             let mut data: Vec<Vec<String>> = Vec::with_capacity(db_rows.len());
             for r in db_rows {
                 data.push(vec![
-                    r.get::<Option<String>, _>("timestamp_wib").unwrap_or_default(),
-                    r.get::<Option<String>, _>("nama_pengguna").unwrap_or_default(),
+                    r.get::<Option<String>, _>("timestamp_wib")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("nama_pengguna")
+                        .unwrap_or_default(),
                     r.get::<Option<String>, _>("email").unwrap_or_default(),
-                    r.get::<Option<String>, _>("aksi_operasi").unwrap_or_default(),
-                    r.get::<Option<String>, _>("entitas_resource").unwrap_or_default(),
+                    r.get::<Option<String>, _>("aksi_operasi")
+                        .unwrap_or_default(),
+                    r.get::<Option<String>, _>("entitas_resource")
+                        .unwrap_or_default(),
                     r.get::<Option<String>, _>("ip_address").unwrap_or_default(),
                     r.get::<Option<String>, _>("user_agent").unwrap_or_default(),
                 ]);
@@ -915,7 +1135,10 @@ pub async fn export_report(
             return Err(ApiError::new(
                 ApplicationError::NotFound(
                     ErrorCode::ResourceNotFound,
-                    format!("Laporan jenis '{}' tidak dikenali atau belum didukung.", report_type),
+                    format!(
+                        "Laporan jenis '{}' tidak dikenali atau belum didukung.",
+                        report_type
+                    ),
                 ),
                 req_ctx.request_id,
             ));
@@ -924,17 +1147,35 @@ pub async fn export_report(
 
     if format == "csv" {
         let mut csv = String::from("\u{FEFF}"); // UTF-8 BOM for Excel
-        csv.push_str(&headers_list.iter().map(|h| escape_csv(h)).collect::<Vec<_>>().join(","));
+        csv.push_str(
+            &headers_list
+                .iter()
+                .map(|h| escape_csv(h))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
         csv.push('\n');
 
         for row in rows_data {
-            csv.push_str(&row.iter().map(|v| escape_csv(v)).collect::<Vec<_>>().join(","));
+            csv.push_str(
+                &row.iter()
+                    .map(|v| escape_csv(v))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
             csv.push('\n');
         }
 
         let mut headers = HeaderMap::new();
-        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/csv; charset=utf-8"));
-        let cd_val = format!("attachment; filename=\"{}_{}.csv\"", filename_prefix, chrono::Utc::now().format("%Y%m%d_%H%M%S"));
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/csv; charset=utf-8"),
+        );
+        let cd_val = format!(
+            "attachment; filename=\"{}_{}.csv\"",
+            filename_prefix,
+            chrono::Utc::now().format("%Y%m%d_%H%M%S")
+        );
         if let Ok(hv) = HeaderValue::from_str(&cd_val) {
             headers.insert(header::CONTENT_DISPOSITION, hv);
         }
