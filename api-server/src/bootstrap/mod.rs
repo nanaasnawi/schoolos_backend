@@ -185,6 +185,7 @@ use crate::presentation::{
     people::teacher::controller::teacher_routes, school::controller::get_school_public_info,
     school::controller::school_routes, tenant::controller::tenant_routes,
     gamification::controller::gamification_routes,
+    reports::controller::report_routes,
 };
 use crate::ApiDoc;
 
@@ -847,6 +848,13 @@ impl Bootstrap {
             .nest(
                 "/api/v1/analytics",
                 analytics_routes().layer(axum::middleware::from_fn_with_state(
+                    context.clone(),
+                    auth_middleware,
+                )),
+            )
+            .nest(
+                "/api/v1/reports",
+                report_routes().layer(axum::middleware::from_fn_with_state(
                     context.clone(),
                     auth_middleware,
                 )),
