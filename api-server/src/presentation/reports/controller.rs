@@ -55,7 +55,7 @@ pub fn report_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/types", get(list_report_types))
         .route("/stats", get(get_report_hub_stats))
-        .route("/export/:report_type", get(export_report))
+        .route("/export/{report_type}", get(export_report))
 }
 
 #[utoipa::path(
