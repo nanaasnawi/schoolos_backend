@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     routing::{get, post},
     Json, Router,
 };
@@ -20,6 +20,7 @@ use sqlx::Row;
 pub fn subject_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/", post(create).get(list))
+        .route("/rapor-structure", get(list_rapor_subjects))
         .route("/{id}", get(get_by_id))
 }
 
@@ -316,4 +317,115 @@ async fn get_by_id(
         SubjectResponse::from(subject),
         req_ctx.request_id,
     )))
+}
+
+#[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
+pub struct RaporSubjectsQuery {
+    pub student_id: Option<Uuid>,
+    pub class_id: Option<Uuid>,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct RaporSubjectItem {
+    pub student_id: Uuid,
+    pub student_name: String,
+    pub gender: Option<String>,
+    pub class_id: Uuid,
+    pub class_name: String,
+    pub phase: String,
+    pub subject_code: String,
+    pub subject_name: String,
+    pub subject_group: String,
+    pub academic_year: String,
+    pub semester: String,
+}
+
+pub async fn list_rapor_subjects(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Query(query): Query<RaporSubjectsQuery>,
+) -> Result<Json<ApiResponse<Vec<RaporSubjectItem>>>, ApiError> {
+    let rows = if let Some(student_id) = query.student_id {
+        sqlx::query(
+            r#"
+            SELECT student_id, student_name, gender, class_id, class_name, phase,
+                   subject_code, subject_name, subject_group, academic_year, semester
+            FROM rapor_mata_pelajaran
+            WHERE tenant_id = $1 AND student_id = $2
+            ORDER BY 
+                CASE subject_group 
+                    WHEN 'UMUM' THEN 1 
+                    WHEN 'PILIHAN' THEN 2 
+                    WHEN 'MUATAN_LOKAL' THEN 3 
+                    ELSE 4 
+                END,
+                subject_name ASC
+            "#
+        )
+        .bind(req_ctx.tenant_id)
+        .bind(student_id)
+        .fetch_all(&ctx.pool)
+        .await
+        .unwrap_or_default()
+    } else if let Some(class_id) = query.class_id {
+        sqlx::query(
+            r#"
+            SELECT student_id, student_name, gender, class_id, class_name, phase,
+                   subject_code, subject_name, subject_group, academic_year, semester
+            FROM rapor_mata_pelajaran
+            WHERE tenant_id = $1 AND class_id = $2
+            ORDER BY student_name ASC, 
+                CASE subject_group 
+                    WHEN 'UMUM' THEN 1 
+                    WHEN 'PILIHAN' THEN 2 
+                    WHEN 'MUATAN_LOKAL' THEN 3 
+                    ELSE 4 
+                END,
+                subject_name ASC
+            "#
+        )
+        .bind(req_ctx.tenant_id)
+        .bind(class_id)
+        .fetch_all(&ctx.pool)
+        .await
+        .unwrap_or_default()
+    } else {
+        sqlx::query(
+            r#"
+            SELECT student_id, student_name, gender, class_id, class_name, phase,
+                   subject_code, subject_name, subject_group, academic_year, semester
+            FROM rapor_mata_pelajaran
+            WHERE tenant_id = $1
+            ORDER BY student_name ASC, 
+                CASE subject_group 
+                    WHEN 'UMUM' THEN 1 
+                    WHEN 'PILIHAN' THEN 2 
+                    WHEN 'MUATAN_LOKAL' THEN 3 
+                    ELSE 4 
+                END,
+                subject_name ASC
+            LIMIT 500
+            "#
+        )
+        .bind(req_ctx.tenant_id)
+        .fetch_all(&ctx.pool)
+        .await
+        .unwrap_or_default()
+    };
+
+    let items = rows.into_iter().map(|r| RaporSubjectItem {
+        student_id: r.get("student_id"),
+        student_name: r.get("student_name"),
+        gender: r.get("gender"),
+        class_id: r.get("class_id"),
+        class_name: r.get("class_name"),
+        phase: r.get("phase"),
+        subject_code: r.get("subject_code"),
+        subject_name: r.get("subject_name"),
+        subject_group: r.get("subject_group"),
+        academic_year: r.get("academic_year"),
+        semester: r.get("semester"),
+    }).collect();
+
+    Ok(Json(ApiResponse::success(items, req_ctx.request_id)))
 }
