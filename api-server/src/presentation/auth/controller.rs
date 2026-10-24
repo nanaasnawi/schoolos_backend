@@ -128,7 +128,19 @@ async fn login(
         r#"
         SELECT u.id, u.tenant_id, u.username, u.email, u.full_name, u.avatar_url,
                COALESCE(
-                 (SELECT r.name FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = u.id LIMIT 1),
+                 (
+                   SELECT r.name FROM user_roles ur JOIN roles r ON r.id = ur.role_id 
+                   WHERE ur.user_id = u.id 
+                   ORDER BY CASE 
+                       WHEN LOWER(r.name) LIKE '%kepala%' OR LOWER(r.name) LIKE '%principal%' THEN 1
+                       WHEN LOWER(r.name) LIKE '%admin%' THEN 2
+                       WHEN LOWER(r.name) LIKE '%operator%' THEN 3
+                       WHEN LOWER(r.name) LIKE '%guru%' OR LOWER(r.name) LIKE '%teacher%' THEN 4
+                       WHEN LOWER(r.name) LIKE '%wali%' OR LOWER(r.name) LIKE '%parent%' THEN 5
+                       ELSE 6
+                   END ASC
+                   LIMIT 1
+                 ),
                  'Siswa'
                ) as role_name,
                COALESCE(
@@ -861,6 +873,14 @@ async fn get_me(
         LEFT JOIN user_roles ur ON u.id = ur.user_id
         LEFT JOIN roles r ON ur.role_id = r.id
         WHERE u.id = $1
+        ORDER BY CASE 
+            WHEN LOWER(r.name) LIKE '%kepala%' OR LOWER(r.name) LIKE '%principal%' THEN 1
+            WHEN LOWER(r.name) LIKE '%admin%' THEN 2
+            WHEN LOWER(r.name) LIKE '%operator%' THEN 3
+            WHEN LOWER(r.name) LIKE '%guru%' OR LOWER(r.name) LIKE '%teacher%' THEN 4
+            WHEN LOWER(r.name) LIKE '%wali%' OR LOWER(r.name) LIKE '%parent%' THEN 5
+            ELSE 6
+        END ASC
         LIMIT 1
         "#,
     )

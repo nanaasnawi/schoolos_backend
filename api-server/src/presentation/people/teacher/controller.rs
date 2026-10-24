@@ -18,6 +18,7 @@ use crate::{
     response::{ApiErrorDetail, ApiMeta, ApiResponse, PaginationMeta},
 };
 use school_core::people::domain::teacher::Teacher;
+use sqlx::Row;
 
 #[derive(Deserialize)]
 pub struct TeacherFilter {
@@ -32,6 +33,8 @@ pub struct TeacherFilter {
 pub fn teacher_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/", post(create).get(list))
+        .route("/me/official-profile", get(get_my_teacher_profile))
+        .route("/me", get(get_my_teacher_profile))
         .route("/remind", post(super::remind::remind_students).get(super::remind::get_reminders))
         .route("/{id}", get(get_by_id).patch(update).put(update))
 }
@@ -498,4 +501,207 @@ async fn update(
         map_teacher_response(teacher),
         req_ctx.correlation_id,
     )))
+}
+
+/// Retrieve the official verified Dapodik/GTK biodata for current authenticated teacher or staff.
+#[utoipa::path(
+    get,
+    operation_id = "getMyTeacherProfile",
+    path = "/api/v1/teachers/me/official-profile",
+    responses(
+        (status = 200, description = "Official GTK biodata retrieved successfully", body = inline(ApiResponse<super::dto::teacher_responses::TeacherDetailResponse>)),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Data profil resmi GTK tidak ditemukan")
+    ),
+    security(
+        ("Bearer" = [])
+    ),
+    tag = "Teacher"
+)]
+async fn get_my_teacher_profile(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+) -> Result<Json<ApiResponse<super::dto::teacher_responses::TeacherDetailResponse>>, ApiError> {
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id).ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthInvalidToken,
+                "Authentication required".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    // 1. Try finding teacher in teachers table
+    let teacher_row = sqlx::query(
+        r#"
+        SELECT 
+            t.id, t.tenant_id, t.user_id, t.nip, t.full_name, t.nuptk, t.jk,
+            t.tempat_lahir, t.tanggal_lahir, t.status_kepegawaian, t.jenis_ptk,
+            t.agama, t.alamat_jalan, t.no_hp, t.email, t.subject,
+            CASE WHEN t.is_active THEN 'Active' ELSE 'Inactive' END as status,
+            t.created_at, t.updated_at
+        FROM teachers t
+        WHERE (
+            t.user_id = $1 
+            OR ((SELECT email FROM users WHERE id = $1) IS NOT NULL AND LOWER(t.email) = LOWER((SELECT email FROM users WHERE id = $1)))
+            OR ((SELECT full_name FROM users WHERE id = $1) IS NOT NULL AND LOWER(t.full_name) = LOWER((SELECT full_name FROM users WHERE id = $1)))
+        )
+        AND t.tenant_id = $2
+        ORDER BY (t.user_id = $1) DESC, t.updated_at DESC
+        LIMIT 1
+        "#
+    )
+    .bind(actor_id)
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    if let Some(r) = teacher_row {
+        let resp = super::dto::teacher_responses::TeacherDetailResponse {
+            id: r.get("id"),
+            tenant_id: r.get("tenant_id"),
+            user_id: r.try_get("user_id").ok(),
+            nip: r.try_get("nip").ok(),
+            full_name: r.get("full_name"),
+            nuptk: r.try_get("nuptk").ok(),
+            jk: r.try_get("jk").ok(),
+            tempat_lahir: r.try_get("tempat_lahir").ok(),
+            tanggal_lahir: r.try_get("tanggal_lahir").ok(),
+            status_kepegawaian: r.try_get("status_kepegawaian").ok(),
+            jenis_ptk: r.try_get("jenis_ptk").ok(),
+            agama: r.try_get("agama").ok(),
+            alamat_jalan: r.try_get("alamat_jalan").ok(),
+            no_hp: r.try_get("no_hp").ok(),
+            email: r.try_get("email").ok(),
+            subject: r.try_get("subject").ok(),
+            status: r.get("status"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
+        };
+        return Ok(Json(ApiResponse::success(resp, req_ctx.request_id)));
+    }
+
+    // 2. Try finding staff in staff table (Tenaga Kependidikan, TU, Kepala Sekolah)
+    let staff_row = sqlx::query(
+        r#"
+        SELECT 
+            s.id, s.tenant_id, s.user_id, s.nip, s.full_name, s.nuptk, s.jk,
+            s.tempat_lahir, s.tanggal_lahir, s.status_kepegawaian, s.jenis_ptk,
+            s.agama, s.alamat_jalan, s.no_hp, s.email, s.job_title as subject,
+            CASE WHEN s.is_active THEN 'Active' ELSE 'Inactive' END as status,
+            s.created_at, s.updated_at
+        FROM staff s
+        WHERE (
+            s.user_id = $1 
+            OR ((SELECT email FROM users WHERE id = $1) IS NOT NULL AND LOWER(s.email) = LOWER((SELECT email FROM users WHERE id = $1)))
+            OR ((SELECT full_name FROM users WHERE id = $1) IS NOT NULL AND LOWER(s.full_name) = LOWER((SELECT full_name FROM users WHERE id = $1)))
+        )
+        AND s.tenant_id = $2
+        ORDER BY (s.user_id = $1) DESC, s.updated_at DESC
+        LIMIT 1
+        "#
+    )
+    .bind(actor_id)
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    if let Some(r) = staff_row {
+        let resp = super::dto::teacher_responses::TeacherDetailResponse {
+            id: r.get("id"),
+            tenant_id: r.get("tenant_id"),
+            user_id: r.try_get("user_id").ok(),
+            nip: r.try_get("nip").ok(),
+            full_name: r.get("full_name"),
+            nuptk: r.try_get("nuptk").ok(),
+            jk: r.try_get("jk").ok(),
+            tempat_lahir: r.try_get("tempat_lahir").ok(),
+            tanggal_lahir: r.try_get("tanggal_lahir").ok(),
+            status_kepegawaian: r.try_get("status_kepegawaian").ok(),
+            jenis_ptk: r.try_get("jenis_ptk").ok(),
+            agama: r.try_get("agama").ok(),
+            alamat_jalan: r.try_get("alamat_jalan").ok(),
+            no_hp: r.try_get("no_hp").ok(),
+            email: r.try_get("email").ok(),
+            subject: r.try_get("subject").ok(),
+            status: r.get("status"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
+        };
+        return Ok(Json(ApiResponse::success(resp, req_ctx.request_id)));
+    }
+
+    // 3. Fallback to users table so profile always renders gracefully
+    let user_row = sqlx::query(
+        r#"
+        SELECT 
+            u.id, u.tenant_id, u.full_name, u.email, u.phone_number,
+            COALESCE((SELECT r.name FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = u.id LIMIT 1), 'Pendidik') as role_name
+        FROM users u
+        WHERE u.id = $1 AND u.tenant_id = $2
+        LIMIT 1
+        "#
+    )
+    .bind(actor_id)
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    if let Some(u) = user_row {
+        let resp = super::dto::teacher_responses::TeacherDetailResponse {
+            id: u.get("id"),
+            tenant_id: u.get("tenant_id"),
+            user_id: Some(u.get("id")),
+            nip: None,
+            full_name: u.get("full_name"),
+            nuptk: None,
+            jk: None,
+            tempat_lahir: None,
+            tanggal_lahir: None,
+            status_kepegawaian: Some("Pendidik / Tenaga Kependidikan".to_string()),
+            jenis_ptk: Some(u.try_get("role_name").unwrap_or_else(|_| "Guru / Tutor".to_string())),
+            agama: None,
+            alamat_jalan: None,
+            no_hp: u.try_get("phone_number").ok(),
+            email: Some(u.get("email")),
+            subject: None,
+            status: "Active".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        return Ok(Json(ApiResponse::success(resp, req_ctx.request_id)));
+    }
+
+    Err(ApiError::new(
+        school_core::common::error::ApplicationError::NotFound(
+            school_core::common::error_code::ErrorCode::TeacherNotFound,
+            "Biodata resmi Pendidik & Tenaga Kependidikan (GTK) tidak ditemukan".to_string(),
+        ),
+        &req_ctx.request_id,
+    ))
 }
