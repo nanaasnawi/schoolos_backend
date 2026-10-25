@@ -4,6 +4,7 @@ use axum::{
     Json, Router,
 };
 use serde::Deserialize;
+use sqlx::Row;
 use uuid::Uuid;
 
 use super::dto::{
@@ -23,13 +24,47 @@ pub struct SchoolInfoQuery {
     pub tenant_id: Option<Uuid>,
 }
 
+fn row_to_school_response(r: &sqlx::postgres::PgRow) -> SchoolResponse {
+    let created_at: chrono::DateTime<chrono::Utc> = r
+        .try_get("created_at")
+        .unwrap_or_else(|_| chrono::Utc::now());
+    let updated_at: chrono::DateTime<chrono::Utc> = r
+        .try_get("updated_at")
+        .unwrap_or_else(|_| chrono::Utc::now());
+
+    SchoolResponse {
+        id: r.get("id"),
+        tenant_id: r.get("tenant_id"),
+        name: r.get("name"),
+        npsn: r.try_get("npsn").ok().flatten(),
+        logo_url: r.try_get("logo_url").ok().flatten(),
+        address: r.try_get("address").ok().flatten(),
+        village: r.try_get("village").ok().flatten(),
+        district: r.try_get("district").ok().flatten(),
+        regency: r.try_get("regency").ok().flatten(),
+        province: r.try_get("province").ok().flatten(),
+        postal_code: r.try_get("postal_code").ok().flatten(),
+        phone_number: r.try_get("phone_number").ok().flatten(),
+        email: r.try_get("email").ok().flatten(),
+        website: r.try_get("website").ok().flatten(),
+        headmaster_name: r.try_get("headmaster_name").ok().flatten(),
+        headmaster_nip: r.try_get("headmaster_nip").ok().flatten(),
+        status: r.get("status"),
+        dapodik_url: r.try_get("dapodik_url").ok().flatten(),
+        dapodik_token: r.try_get("dapodik_token").ok().flatten(),
+        accreditation: r.try_get("accreditation").ok().flatten(),
+        created_at: created_at.to_rfc3339(),
+        updated_at: updated_at.to_rfc3339(),
+    }
+}
+
 /// Public endpoint — returns basic school info (name, logo) without authentication.
 /// Used by the mobile app login screen to show the school identity before login.
 pub async fn get_school_public_info(
     State(ctx): State<ApplicationContext>,
     Query(params): Query<SchoolInfoQuery>,
 ) -> Result<Json<ApiResponse<SchoolPublicInfo>>, ApiError> {
-    let row = sqlx::query!(
+    let row = sqlx::query(
         r#"
         SELECT s.name, s.logo_url, s.npsn
         FROM schools s
@@ -41,9 +76,9 @@ pub async fn get_school_public_info(
           s.updated_at DESC
         LIMIT 1
         "#,
-        params.npsn.as_deref(),
-        params.tenant_id
     )
+    .bind(params.npsn.as_deref())
+    .bind(params.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| {
@@ -55,11 +90,11 @@ pub async fn get_school_public_info(
         )
     })?;
 
-    let data = if let Some(r) = row {
+    let data = if let Some(ref r) = row {
         SchoolPublicInfo {
-            name: r.name,
-            logo_url: r.logo_url,
-            npsn: r.npsn,
+            name: r.get("name"),
+            logo_url: r.try_get("logo_url").ok().flatten(),
+            npsn: r.try_get("npsn").ok().flatten(),
         }
     } else {
         SchoolPublicInfo {
@@ -105,21 +140,22 @@ pub async fn get_current_school_profile(
         "get_current_school_profile called with tenant_id: {}",
         req_ctx.tenant_id
     );
-    let row = sqlx::query!(
+    let row = sqlx::query(
         r#"
         SELECT id, tenant_id, name, npsn, address, village, district, regency, province, postal_code, phone_number, email, website, headmaster_name, headmaster_nip, logo_url, status, dapodik_url, dapodik_token, accreditation, created_at, updated_at
         FROM schools
         WHERE tenant_id = $1 AND deleted_at IS NULL
         LIMIT 1
         "#,
-        req_ctx.tenant_id
     )
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
 
-    let response_data = if let Some(r) = row {
-        let final_school_name = if r.name.trim().is_empty() {
+    let response_data = if let Some(ref r) = row {
+        let raw_name: String = r.get("name");
+        let final_school_name = if raw_name.trim().is_empty() {
             sqlx::query_scalar::<_, String>("SELECT name FROM tenants WHERE id = $1")
                 .bind(req_ctx.tenant_id)
                 .fetch_optional(&ctx.pool)
@@ -128,39 +164,18 @@ pub async fn get_current_school_profile(
                 .flatten()
                 .unwrap_or_else(|| "Nama Sekolah".to_string())
         } else {
-            r.name
+            raw_name
         };
 
-        SchoolResponse {
-            id: r.id,
-            tenant_id: r.tenant_id,
-            name: final_school_name,
-            npsn: r.npsn,
-            logo_url: r.logo_url,
-            address: r.address,
-            village: r.village,
-            district: r.district,
-            regency: r.regency,
-            province: r.province,
-            postal_code: r.postal_code,
-            phone_number: r.phone_number,
-            email: r.email,
-            website: r.website,
-            headmaster_name: r.headmaster_name,
-            headmaster_nip: r.headmaster_nip,
-            status: r.status,
-            dapodik_url: r.dapodik_url,
-            dapodik_token: r.dapodik_token,
-            accreditation: r.accreditation,
-            created_at: r.created_at.to_rfc3339(),
-            updated_at: r.updated_at.to_rfc3339(),
-        }
+        let mut res = row_to_school_response(r);
+        res.name = final_school_name;
+        res
     } else {
         // Multi-Tenant Isolation: Fetch tenant name & NPSN from tenants table
-        let tenant_info = sqlx::query!(
+        let tenant_info = sqlx::query(
             r#"SELECT name, npsn FROM tenants WHERE id = $1"#,
-            req_ctx.tenant_id
         )
+        .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await
         .ok()
@@ -168,50 +183,29 @@ pub async fn get_current_school_profile(
 
         let default_name = tenant_info
             .as_ref()
-            .map(|t| t.name.clone())
+            .map(|t| t.get::<String, _>("name"))
             .unwrap_or_else(|| "Nama Sekolah".to_string());
-        let default_npsn = tenant_info.as_ref().and_then(|t| t.npsn.clone());
+        let default_npsn: Option<String> = tenant_info
+            .as_ref()
+            .and_then(|t| t.try_get("npsn").ok().flatten());
 
         let new_id = Uuid::now_v7();
-        let inserted = sqlx::query!(
+        let inserted = sqlx::query(
             r#"
             INSERT INTO schools (id, tenant_id, name, npsn, status, created_at, updated_at)
             VALUES ($1, $2, $3, $4, 'Active', NOW(), NOW())
             RETURNING id, tenant_id, name, npsn, address, village, district, regency, province, postal_code, phone_number, email, website, headmaster_name, headmaster_nip, logo_url, status, dapodik_url, dapodik_token, accreditation, created_at, updated_at
             "#,
-            new_id,
-            req_ctx.tenant_id,
-            default_name,
-            default_npsn
         )
+        .bind(new_id)
+        .bind(req_ctx.tenant_id)
+        .bind(default_name)
+        .bind(default_npsn)
         .fetch_one(&ctx.pool)
         .await
         .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
 
-        SchoolResponse {
-            id: inserted.id,
-            tenant_id: inserted.tenant_id,
-            name: inserted.name,
-            npsn: inserted.npsn,
-            logo_url: inserted.logo_url,
-            address: inserted.address,
-            village: inserted.village,
-            district: inserted.district,
-            regency: inserted.regency,
-            province: inserted.province,
-            postal_code: inserted.postal_code,
-            phone_number: inserted.phone_number,
-            email: inserted.email,
-            website: inserted.website,
-            headmaster_name: inserted.headmaster_name,
-            headmaster_nip: inserted.headmaster_nip,
-            status: inserted.status,
-            dapodik_url: inserted.dapodik_url,
-            dapodik_token: inserted.dapodik_token,
-            accreditation: inserted.accreditation,
-            created_at: inserted.created_at.to_rfc3339(),
-            updated_at: inserted.updated_at.to_rfc3339(),
-        }
+        row_to_school_response(&inserted)
     };
 
     Ok(Json(ApiResponse::success(
@@ -239,10 +233,10 @@ pub async fn update_current_school_profile(
     req_ctx: RequestContext,
     Json(payload): Json<UpdateSchoolRequest>,
 ) -> Result<Json<ApiResponse<SchoolResponse>>, ApiError> {
-    let existing = sqlx::query!(
+    let existing = sqlx::query(
         r#"SELECT id FROM schools WHERE tenant_id = $1 AND deleted_at IS NULL LIMIT 1"#,
-        req_ctx.tenant_id
     )
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| {
@@ -254,8 +248,8 @@ pub async fn update_current_school_profile(
         )
     })?;
 
-    let school_id = if let Some(e) = existing {
-        e.id
+    let school_id = if let Some(ref e) = existing {
+        e.get("id")
     } else {
         Uuid::now_v7()
     };
@@ -286,7 +280,7 @@ pub async fn update_current_school_profile(
             .await;
     }
 
-    let updated = sqlx::query!(
+    let updated = sqlx::query(
         r#"
         INSERT INTO schools (
             id, tenant_id, name, npsn, logo_url, address, village, district, regency, province, postal_code,
@@ -318,55 +312,32 @@ pub async fn update_current_school_profile(
             updated_at = NOW()
         RETURNING id, tenant_id, name, npsn, address, village, district, regency, province, postal_code, phone_number, email, website, headmaster_name, headmaster_nip, logo_url, status, dapodik_url, dapodik_token, accreditation, created_at, updated_at
         "#,
-        school_id,
-        req_ctx.tenant_id,
-        name_trimmed,
-        npsn_trimmed,
-        payload.logo_url,
-        payload.address,
-        payload.village,
-        payload.district,
-        payload.regency,
-        payload.province,
-        payload.postal_code,
-        payload.phone_number,
-        payload.email,
-        payload.website,
-        payload.headmaster_name,
-        payload.headmaster_nip,
-        payload.status,
-        payload.dapodik_url,
-        payload.dapodik_token,
-        payload.accreditation
     )
+    .bind(school_id)
+    .bind(req_ctx.tenant_id)
+    .bind(name_trimmed)
+    .bind(npsn_trimmed)
+    .bind(payload.logo_url)
+    .bind(payload.address)
+    .bind(payload.village)
+    .bind(payload.district)
+    .bind(payload.regency)
+    .bind(payload.province)
+    .bind(payload.postal_code)
+    .bind(payload.phone_number)
+    .bind(payload.email)
+    .bind(payload.website)
+    .bind(payload.headmaster_name)
+    .bind(payload.headmaster_nip)
+    .bind(payload.status)
+    .bind(payload.dapodik_url)
+    .bind(payload.dapodik_token)
+    .bind(payload.accreditation)
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
 
-    let response_data = SchoolResponse {
-        id: updated.id,
-        tenant_id: updated.tenant_id,
-        name: updated.name,
-        npsn: updated.npsn,
-        logo_url: updated.logo_url,
-        address: updated.address,
-        village: updated.village,
-        district: updated.district,
-        regency: updated.regency,
-        province: updated.province,
-        postal_code: updated.postal_code,
-        phone_number: updated.phone_number,
-        email: updated.email,
-        website: updated.website,
-        headmaster_name: updated.headmaster_name,
-        headmaster_nip: updated.headmaster_nip,
-        status: updated.status,
-        dapodik_url: updated.dapodik_url,
-        dapodik_token: updated.dapodik_token,
-        accreditation: updated.accreditation,
-        created_at: updated.created_at.to_rfc3339(),
-        updated_at: updated.updated_at.to_rfc3339(),
-    };
+    let response_data = row_to_school_response(&updated);
 
     Ok(Json(ApiResponse::success(
         response_data,
@@ -380,11 +351,11 @@ pub async fn update_current_school_profile(
     operation_id = "getSchool",
     path = "/api/v1/schools/{id}",
     params(
-        ("id" = Uuid, Path, description = "School UUID")
+        ("id" = Uuid, Path, description = "School ID")
     ),
     responses(
         (status = 200, description = "School retrieved successfully", body = inline(ApiResponse<SchoolResponse>)),
-        (status = 404, description = "School not found")
+        (status = 404, description = "School not found", body = inline(ApiResponse<()>)),
     ),
     security(
         ("Bearer" = [])
@@ -396,45 +367,21 @@ pub async fn get_school(
     req_ctx: RequestContext,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<SchoolResponse>>, ApiError> {
-    let row = sqlx::query!(
+    let row = sqlx::query(
         r#"
         SELECT id, tenant_id, name, npsn, address, village, district, regency, province, postal_code, phone_number, email, website, headmaster_name, headmaster_nip, logo_url, status, dapodik_url, dapodik_token, accreditation, created_at, updated_at
         FROM schools
         WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
         "#,
-        id,
-        req_ctx.tenant_id
     )
+    .bind(id)
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
 
-    if let Some(r) = row {
-        let response_data = SchoolResponse {
-            id: r.id,
-            tenant_id: r.tenant_id,
-            name: r.name,
-            npsn: r.npsn,
-            logo_url: r.logo_url,
-            address: r.address,
-            village: r.village,
-            district: r.district,
-            regency: r.regency,
-            province: r.province,
-            postal_code: r.postal_code,
-            phone_number: r.phone_number,
-            email: r.email,
-            website: r.website,
-            headmaster_name: r.headmaster_name,
-            headmaster_nip: r.headmaster_nip,
-            status: r.status,
-            dapodik_url: r.dapodik_url,
-            dapodik_token: r.dapodik_token,
-            accreditation: r.accreditation,
-            created_at: r.created_at.to_rfc3339(),
-            updated_at: r.updated_at.to_rfc3339(),
-        };
-
+    if let Some(ref r) = row {
+        let response_data = row_to_school_response(r);
         return Ok(Json(ApiResponse::success(
             response_data,
             req_ctx.request_id,

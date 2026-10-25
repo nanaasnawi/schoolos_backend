@@ -5,6 +5,7 @@ use axum::{
 };
 use chrono::Datelike;
 use serde::Deserialize;
+use sqlx::Row;
 use uuid::Uuid;
 
 use super::dto::{
@@ -192,6 +193,22 @@ fn calculate_promotion_decision(
     }
 }
 
+struct StudentRow {
+    student_id: Uuid,
+    nisn: String,
+    nipd: Option<String>,
+    student_name: String,
+    gender: Option<String>,
+    place_of_birth: Option<String>,
+    date_of_birth: Option<chrono::NaiveDate>,
+    religion: Option<String>,
+    address: Option<String>,
+    parent_phone: Option<String>,
+    class_name: Option<String>,
+    homeroom_teacher_name: Option<String>,
+    guardian_name: Option<String>,
+}
+
 /// Retrieve unified e-Rapor cards for students in the active academic context.
 #[utoipa::path(
     get,
@@ -200,10 +217,10 @@ fn calculate_promotion_decision(
     params(
         ("class_id" = Option<Uuid>, Query, description = "Filter by class UUID"),
         ("academic_year_id" = Option<Uuid>, Query, description = "Filter by academic year UUID"),
-        ("semester" = Option<i16>, Query, description = "Filter by semester (1 or 2)")
+        ("semester" = Option<i16>, Query, description = "Filter by semester (1 for Gasal, 2 for Genap)"),
     ),
     responses(
-        (status = 200, description = "Report cards retrieved successfully", body = inline(ApiResponse<ReportCardsResponse>)),
+        (status = 200, description = "Unified report cards retrieved successfully", body = inline(ApiResponse<ReportCardsResponse>)),
     ),
     security(
         ("Bearer" = [])
@@ -217,28 +234,31 @@ pub async fn get_report_cards(
 ) -> Result<Json<ApiResponse<ReportCardsResponse>>, ApiError> {
     // 1. Fetch Academic Year & Semester SSOT
     let year_row = if let Some(year_id) = params.academic_year_id {
-        sqlx::query!(
+        sqlx::query(
             r#"SELECT id, name, start_date, end_date, current_semester, report_date FROM academic_years WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL"#,
-            year_id,
-            req_ctx.tenant_id
         )
+        .bind(year_id)
+        .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await
     } else {
-        sqlx::query!(
+        sqlx::query(
             r#"SELECT id, name, start_date, end_date, current_semester, report_date FROM academic_years WHERE tenant_id = $1 AND is_active = true AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 1"#,
-            req_ctx.tenant_id
         )
+        .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await
     }
     .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
 
     let (active_year_name, active_semester, report_date_str) = match year_row {
-        Some(y) => {
-            let sem = params.semester.unwrap_or(y.current_semester);
-            let rd = y.report_date.map(|d| d.format("%Y-%m-%d").to_string());
-            (y.name, sem, rd)
+        Some(ref y) => {
+            let name: String = y.get("name");
+            let db_sem: i16 = y.try_get::<Option<i16>, _>("current_semester").ok().flatten().unwrap_or(1);
+            let sem = params.semester.unwrap_or(db_sem);
+            let rd: Option<chrono::NaiveDate> = y.try_get("report_date").ok().flatten();
+            let rd_str = rd.map(|d| d.format("%Y-%m-%d").to_string());
+            (name, sem, rd_str)
         }
         None => (
             "2026/2027".to_string(),
@@ -254,38 +274,38 @@ pub async fn get_report_cards(
     };
 
     // 2. Fetch School Profile SSOT
-    let school_row = sqlx::query!(
+    let school_row = sqlx::query(
         r#"
         SELECT name, npsn, headmaster_name, headmaster_nip, address, village, district, regency, province, postal_code
         FROM schools
         WHERE tenant_id = $1 AND deleted_at IS NULL
         LIMIT 1
         "#,
-        req_ctx.tenant_id
     )
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
 
     let school_name = school_row
         .as_ref()
-        .map(|s| s.name.clone())
+        .map(|s| s.get::<String, _>("name"))
         .unwrap_or_else(|| "Nama Sekolah".to_string());
     let school_npsn = school_row
         .as_ref()
-        .and_then(|s| s.npsn.clone())
+        .and_then(|s| s.try_get::<Option<String>, _>("npsn").ok().flatten())
         .unwrap_or_else(|| "-".to_string());
     let headmaster_name = school_row
         .as_ref()
-        .and_then(|s| s.headmaster_name.clone())
+        .and_then(|s| s.try_get::<Option<String>, _>("headmaster_name").ok().flatten())
         .unwrap_or_else(|| "Kepala Sekolah".to_string());
     let headmaster_nip = school_row
         .as_ref()
-        .and_then(|s| s.headmaster_nip.clone())
+        .and_then(|s| s.try_get::<Option<String>, _>("headmaster_nip").ok().flatten())
         .unwrap_or_else(|| "-".to_string());
 
     // 3. Query Students with Class, Teacher, and Guardian
-    let students = sqlx::query!(
+    let student_rows = sqlx::query(
         r#"
         SELECT 
             s.id AS student_id,
@@ -312,15 +332,34 @@ pub async fn get_report_cards(
           AND ($2::uuid IS NULL OR c.id = $2)
         ORDER BY c.name, s.full_name
         "#,
-        req_ctx.tenant_id,
-        params.class_id
     )
+    .bind(req_ctx.tenant_id)
+    .bind(params.class_id)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
 
+    let students: Vec<StudentRow> = student_rows
+        .iter()
+        .map(|row| StudentRow {
+            student_id: row.get("student_id"),
+            nisn: row.get("nisn"),
+            nipd: row.try_get("nipd").ok().flatten(),
+            student_name: row.get("student_name"),
+            gender: row.try_get("gender").ok().flatten(),
+            place_of_birth: row.try_get("place_of_birth").ok().flatten(),
+            date_of_birth: row.try_get("date_of_birth").ok().flatten(),
+            religion: row.try_get("religion").ok().flatten(),
+            address: row.try_get("address").ok().flatten(),
+            parent_phone: row.try_get("parent_phone").ok().flatten(),
+            class_name: row.try_get("class_name").ok().flatten(),
+            homeroom_teacher_name: row.try_get("homeroom_teacher_name").ok().flatten(),
+            guardian_name: row.try_get("guardian_name").ok().flatten(),
+        })
+        .collect();
+
     // 4. Query Gradebook Snapshots
-    let snapshots = sqlx::query!(
+    let snapshot_rows = sqlx::query(
         r#"
         SELECT 
             student_id,
@@ -335,10 +374,10 @@ pub async fn get_report_cards(
           AND academic_year = $2
           AND semester = $3
         "#,
-        req_ctx.tenant_id,
-        active_year_name,
-        semester_label
     )
+    .bind(req_ctx.tenant_id)
+    .bind(&active_year_name)
+    .bind(&semester_label)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
@@ -347,13 +386,19 @@ pub async fn get_report_cards(
     let mut snapshots_by_student: std::collections::HashMap<Uuid, Vec<SubjectCompetencyDto>> =
         std::collections::HashMap::new();
 
-    for sn in snapshots {
-        if let Some(st_id) = sn.student_id {
-            let final_sc = sn
-                .final_score
-                .map(|sc| sc.to_string().parse::<f64>().unwrap_or(80.0))
-                .unwrap_or(80.0);
+    for row in snapshot_rows {
+        let st_id: Option<Uuid> = row.try_get("student_id").ok().flatten();
+        let subj_name: String = row.try_get("subject_name").unwrap_or_default();
+        let highest_desc: Option<String> = row.try_get("highest_achievement_desc").ok().flatten();
 
+        let final_sc: f64 = row
+            .try_get::<rust_decimal::Decimal, _>("final_score")
+            .ok()
+            .and_then(|d| d.to_string().parse::<f64>().ok())
+            .or_else(|| row.try_get::<f64, _>("final_score").ok())
+            .unwrap_or(80.0);
+
+        if let Some(student_id) = st_id {
             let predicate = if final_sc >= 88.0 {
                 "A".to_string()
             } else if final_sc >= 78.0 {
@@ -364,25 +409,24 @@ pub async fn get_report_cards(
                 "D".to_string()
             };
 
-            let desc = sn
-                .highest_achievement_desc
+            let desc = highest_desc
                 .filter(|d| !d.trim().is_empty())
                 .unwrap_or_else(|| {
                     format!(
                         "Menunjukkan pemahaman yang baik dalam mata pelajaran {}.",
-                        sn.subject_name
+                        subj_name
                     )
                 });
 
-            let group = if sn.subject_name.to_lowercase().contains("pilihan")
-                || sn.subject_name.to_lowercase().contains("sosiologi")
-                || sn.subject_name.to_lowercase().contains("ekonomi")
-                || sn.subject_name.to_lowercase().contains("geografi")
+            let group = if subj_name.to_lowercase().contains("pilihan")
+                || subj_name.to_lowercase().contains("sosiologi")
+                || subj_name.to_lowercase().contains("ekonomi")
+                || subj_name.to_lowercase().contains("geografi")
             {
                 "PILIHAN".to_string()
-            } else if sn.subject_name.to_lowercase().contains("muatan lokal")
-                || sn.subject_name.to_lowercase().contains("daerah")
-                || sn.subject_name.to_lowercase().contains("cirebon")
+            } else if subj_name.to_lowercase().contains("muatan lokal")
+                || subj_name.to_lowercase().contains("daerah")
+                || subj_name.to_lowercase().contains("cirebon")
             {
                 "MUATAN_LOKAL".to_string()
             } else {
@@ -390,10 +434,10 @@ pub async fn get_report_cards(
             };
 
             snapshots_by_student
-                .entry(st_id)
+                .entry(student_id)
                 .or_default()
                 .push(SubjectCompetencyDto {
-                    subject_name: sn.subject_name,
+                    subject_name: subj_name,
                     final_score: final_sc,
                     predicate,
                     description: desc,
@@ -403,7 +447,7 @@ pub async fn get_report_cards(
     }
 
     // 5. Query Attendance Summary
-    let attendances = sqlx::query!(
+    let attendance_rows = sqlx::query(
         r#"
         SELECT 
             student_id,
@@ -413,8 +457,8 @@ pub async fn get_report_cards(
         WHERE tenant_id = $1
         GROUP BY student_id, status
         "#,
-        req_ctx.tenant_id
     )
+    .bind(req_ctx.tenant_id)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
@@ -422,18 +466,21 @@ pub async fn get_report_cards(
     let mut attendance_by_student: std::collections::HashMap<Uuid, AttendanceSummaryDto> =
         std::collections::HashMap::new();
 
-    for att in attendances {
-        if let Some(st_id) = att.student_id {
+    for row in attendance_rows {
+        let st_id: Option<Uuid> = row.try_get("student_id").ok().flatten();
+        let status: String = row.try_get("status").unwrap_or_default();
+        let cnt: i64 = row.try_get("count").unwrap_or(0);
+
+        if let Some(student_id) = st_id {
             let entry = attendance_by_student
-                .entry(st_id)
+                .entry(student_id)
                 .or_insert_with(|| AttendanceSummaryDto {
                     sakit: 0,
                     izin: 0,
                     alpha: 0,
                 });
 
-            let status_upper = att.status.to_uppercase();
-            let cnt = att.count.unwrap_or(0);
+            let status_upper = status.to_uppercase();
             if status_upper.contains("SAKIT") {
                 entry.sakit += cnt;
             } else if status_upper.contains("IZIN") {
@@ -588,7 +635,7 @@ pub async fn get_report_cards(
             gender: s.gender.unwrap_or_else(|| "L".to_string()),
             birth_place_date: birth_str,
             religion: s.religion.unwrap_or_else(|| "Islam".to_string()),
-            address: s.address.unwrap_or_else(|| "-".to_string()),
+            address: s.address.clone().unwrap_or_else(|| "-".to_string()),
             father_name: "-".to_string(),
             mother_name: "-".to_string(),
             parent_address: s.address.unwrap_or_else(|| "-".to_string()),
