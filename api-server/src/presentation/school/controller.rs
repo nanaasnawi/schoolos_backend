@@ -43,16 +43,30 @@ fn row_to_school_response(r: &sqlx::postgres::PgRow) -> SchoolResponse {
         district: r.try_get::<Option<String>, _>("district").unwrap_or(None),
         regency: r.try_get::<Option<String>, _>("regency").unwrap_or(None),
         province: r.try_get::<Option<String>, _>("province").unwrap_or(None),
-        postal_code: r.try_get::<Option<String>, _>("postal_code").unwrap_or(None),
-        phone_number: r.try_get::<Option<String>, _>("phone_number").unwrap_or(None),
+        postal_code: r
+            .try_get::<Option<String>, _>("postal_code")
+            .unwrap_or(None),
+        phone_number: r
+            .try_get::<Option<String>, _>("phone_number")
+            .unwrap_or(None),
         email: r.try_get::<Option<String>, _>("email").unwrap_or(None),
         website: r.try_get::<Option<String>, _>("website").unwrap_or(None),
-        headmaster_name: r.try_get::<Option<String>, _>("headmaster_name").unwrap_or(None),
-        headmaster_nip: r.try_get::<Option<String>, _>("headmaster_nip").unwrap_or(None),
+        headmaster_name: r
+            .try_get::<Option<String>, _>("headmaster_name")
+            .unwrap_or(None),
+        headmaster_nip: r
+            .try_get::<Option<String>, _>("headmaster_nip")
+            .unwrap_or(None),
         status: r.get("status"),
-        dapodik_url: r.try_get::<Option<String>, _>("dapodik_url").unwrap_or(None),
-        dapodik_token: r.try_get::<Option<String>, _>("dapodik_token").unwrap_or(None),
-        accreditation: r.try_get::<Option<String>, _>("accreditation").unwrap_or(None),
+        dapodik_url: r
+            .try_get::<Option<String>, _>("dapodik_url")
+            .unwrap_or(None),
+        dapodik_token: r
+            .try_get::<Option<String>, _>("dapodik_token")
+            .unwrap_or(None),
+        accreditation: r
+            .try_get::<Option<String>, _>("accreditation")
+            .unwrap_or(None),
         created_at: created_at.to_rfc3339(),
         updated_at: updated_at.to_rfc3339(),
     }
@@ -172,14 +186,12 @@ pub async fn get_current_school_profile(
         res
     } else {
         // Multi-Tenant Isolation: Fetch tenant name & NPSN from tenants table
-        let tenant_info = sqlx::query(
-            r#"SELECT name, npsn FROM tenants WHERE id = $1"#,
-        )
-        .bind(req_ctx.tenant_id)
-        .fetch_optional(&ctx.pool)
-        .await
-        .ok()
-        .flatten();
+        let tenant_info = sqlx::query(r#"SELECT name, npsn FROM tenants WHERE id = $1"#)
+            .bind(req_ctx.tenant_id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .ok()
+            .flatten();
 
         let default_name = tenant_info
             .as_ref()
@@ -345,7 +357,6 @@ pub async fn update_current_school_profile(
     )))
 }
 
-/// Retrieve school details by ID.
 #[utoipa::path(
     get,
     operation_id = "getSchool",
