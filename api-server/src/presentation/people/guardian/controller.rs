@@ -298,7 +298,7 @@ async fn get_guardians_overview(
             s.nama_ibu as nama_ibu
         FROM students s
         LEFT JOIN guardians g ON g.id = s.guardian_id
-        WHERE s.tenant_id = $1
+        WHERE s.tenant_id = $1 AND (s.status = 'active' OR s.status = 'Active') AND s.is_active = true
         ORDER BY s.full_name ASC
         "#,
     )

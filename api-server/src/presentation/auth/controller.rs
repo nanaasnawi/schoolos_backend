@@ -1794,7 +1794,7 @@ async fn list_users_qr_status(
             (SELECT q.last_used_at FROM user_qr_tokens q WHERE q.user_id = u.id AND q.is_active = true ORDER BY q.created_at DESC LIMIT 1) as token_last_used_at,
             (SELECT q.raw_token FROM user_qr_tokens q WHERE q.user_id = u.id AND q.is_active = true ORDER BY q.created_at DESC LIMIT 1) as active_raw_token
         FROM users u
-        WHERE u.tenant_id = $1
+        WHERE u.tenant_id = $1 AND u.is_active = true
         ORDER BY u.created_at DESC
         "#,
     )
