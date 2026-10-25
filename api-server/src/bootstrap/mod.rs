@@ -162,8 +162,10 @@ use crate::presentation::{
     academic::academic_years::controller::academic_year_routes,
     academic::calendar::controller::calendar_routes,
     academic::classes::controller::class_routes,
+    academic::context::controller::academic_context_routes,
     academic::enrollments::controller::enrollment_routes,
     academic::grade_levels::controller::grade_level_routes,
+    academic::rapor::controller::report_card_routes,
     academic::schedules::controller::schedule_routes,
     academic::subjects::controller::subject_routes, academic::terms::controller::term_routes,
     ai::controller::ai_routes,
@@ -940,6 +942,22 @@ impl Bootstrap {
                         context.clone(),
                         idempotency::idempotency_middleware,
                     ))
+                    .layer(axum::middleware::from_fn_with_state(
+                        context.clone(),
+                        auth_middleware,
+                    )),
+            )
+            .nest(
+                "/api/v1/academic/context",
+                academic_context_routes()
+                    .layer(axum::middleware::from_fn_with_state(
+                        context.clone(),
+                        auth_middleware,
+                    )),
+            )
+            .nest(
+                "/api/v1/academic/rapor",
+                report_card_routes()
                     .layer(axum::middleware::from_fn_with_state(
                         context.clone(),
                         auth_middleware,
