@@ -370,6 +370,30 @@ impl Bootstrap {
         {
             tracing::warn!("Notice on avatar_data/avatar_mime columns check: {:?}", e);
         }
+        if let Err(e) = sqlx::query(
+            "ALTER TABLE academic_years ADD COLUMN IF NOT EXISTS current_semester SMALLINT NOT NULL DEFAULT 1, ADD COLUMN IF NOT EXISTS report_date DATE;"
+        )
+        .execute(&pool)
+        .await
+        {
+            tracing::warn!("Notice on academic_years column check: {:?}", e);
+        }
+        if let Err(e) = sqlx::query(
+            "ALTER TABLE schools \
+             ADD COLUMN IF NOT EXISTS headmaster_name VARCHAR(255), \
+             ADD COLUMN IF NOT EXISTS headmaster_nip VARCHAR(50), \
+             ADD COLUMN IF NOT EXISTS village VARCHAR(100), \
+             ADD COLUMN IF NOT EXISTS district VARCHAR(100), \
+             ADD COLUMN IF NOT EXISTS regency VARCHAR(100), \
+             ADD COLUMN IF NOT EXISTS province VARCHAR(100), \
+             ADD COLUMN IF NOT EXISTS postal_code VARCHAR(20), \
+             ADD COLUMN IF NOT EXISTS website VARCHAR(255);"
+        )
+        .execute(&pool)
+        .await
+        {
+            tracing::warn!("Notice on schools metadata column check: {:?}", e);
+        }
 
         // Infrastructure
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
