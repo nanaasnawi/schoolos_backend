@@ -259,8 +259,8 @@ pub async fn get_report_hub_stats(
         tot_audit,
     ) = tokio::join!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM students WHERE tenant_id = $1 AND deleted_at IS NULL").bind(tid).fetch_one(pool),
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM students WHERE tenant_id = $1 AND status IN ('Active', 'active') AND deleted_at IS NULL").bind(tid).fetch_one(pool),
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM students WHERE tenant_id = $1 AND (exit_category IS NOT NULL OR status IN ('transferred', 'Transferred', 'MUTATED', 'DROPPED_OUT', 'GRADUATED')) AND deleted_at IS NULL").bind(tid).fetch_one(pool),
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM students WHERE tenant_id = $1 AND (status IN ('Active', 'active') OR (status IS NULL AND is_active = true)) AND deleted_at IS NULL").bind(tid).fetch_one(pool),
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM students WHERE tenant_id = $1 AND (status IN ('transferred', 'Transferred', 'MUTATED', 'DROPPED_OUT', 'GRADUATED') OR is_active = false) AND deleted_at IS NULL").bind(tid).fetch_one(pool),
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM students WHERE tenant_id = $1 AND (penerima_kip = true OR layak_pip = true OR penerima_kps = true) AND deleted_at IS NULL").bind(tid).fetch_one(pool),
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM teachers WHERE tenant_id = $1 AND deleted_at IS NULL").bind(tid).fetch_one(pool),
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM staff WHERE tenant_id = $1 AND deleted_at IS NULL").bind(tid).fetch_one(pool),
@@ -271,9 +271,10 @@ pub async fn get_report_hub_stats(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM audit_logs WHERE tenant_id = $1").bind(tid).fetch_one(pool),
     );
 
+    let active_students = act_stud.unwrap_or(0);
     let stats = ReportHubStats {
-        total_students: tot_stud.unwrap_or(0),
-        active_students: act_stud.unwrap_or(0),
+        total_students: active_students,
+        active_students,
         mutated_students: mut_stud.unwrap_or(0),
         pip_students: pip_stud.unwrap_or(0),
         total_teachers: tot_teach.unwrap_or(0),
@@ -351,9 +352,13 @@ pub async fn export_report(
                     COALESCE(s.nama_ayah, '') as nama_ayah,
                     COALESCE(s.nama_ibu, '') as nama_ibu,
                     COALESCE(s.nama_wali, '') as nama_wali,
-                    COALESCE(s.status, 'Active') as status
+                    CASE 
+                        WHEN s.status IN ('Active', 'active') OR (s.status IS NULL AND s.is_active = true) THEN 'Aktif'
+                        WHEN s.status IN ('transferred', 'Transferred') THEN 'Mutasi / Keluar'
+                        ELSE COALESCE(s.status, 'Aktif')
+                    END as status
                 FROM students s
-                LEFT JOIN enrollments e ON e.student_id = s.id AND e.status = 'Active' AND e.deleted_at IS NULL
+                LEFT JOIN enrollments e ON e.student_id = s.id AND (e.status = 'Active' OR e.status = 'active')
                 LEFT JOIN classes c ON c.id = e.class_id AND c.deleted_at IS NULL
                 WHERE s.tenant_id = $1 AND s.deleted_at IS NULL
                   AND ($2::uuid IS NULL OR c.id = $2)
@@ -437,17 +442,16 @@ pub async fn export_report(
                     COALESCE(s.nisn, '') as nisn,
                     s.full_name,
                     COALESCE(s.gender, '') as gender,
-                    COALESCE(sm.mutation_type, s.exit_category, s.status, 'MUTASI') as jenis_mutasi,
-                    COALESCE(TO_CHAR(COALESCE(sm.exit_date, s.exit_date, s.updated_at), 'YYYY-MM-DD'), '') as tanggal_mutasi,
-                    COALESCE(sm.target_school, s.target_school, '-') as sekolah_tujuan,
-                    COALESCE(sm.reference_no, s.exit_reference_no, '-') as nomor_sk,
-                    COALESCE(sm.last_rombel, s.last_rombel, s.rombel, '-') as rombel_terakhir,
-                    COALESCE(sm.notes, s.exit_notes, '-') as keterangan
+                    'Pindah / Mutasi Keluar' as jenis_mutasi,
+                    COALESCE(TO_CHAR(s.updated_at, 'YYYY-MM-DD'), '') as tanggal_mutasi,
+                    '-' as sekolah_tujuan,
+                    '-' as nomor_sk,
+                    COALESCE(s.rombel, 'Belum Diplot') as rombel_terakhir,
+                    'Siswa pindah sekolah / mutasi' as keterangan
                 FROM students s
-                LEFT JOIN student_mutations sm ON sm.student_id = s.id AND sm.deleted_at IS NULL
                 WHERE s.tenant_id = $1 
-                  AND (s.exit_category IS NOT NULL OR sm.id IS NOT NULL OR s.status IN ('transferred', 'Transferred', 'MUTATED', 'DROPPED_OUT', 'GRADUATED'))
-                ORDER BY COALESCE(sm.exit_date, s.exit_date, s.updated_at) DESC
+                  AND (s.status IN ('transferred', 'Transferred', 'MUTATED', 'DROPPED_OUT', 'GRADUATED') OR s.is_active = false)
+                ORDER BY s.updated_at DESC
             "#;
 
             let db_rows = sqlx::query(sql)
@@ -515,7 +519,7 @@ pub async fn export_report(
                     COALESCE(s.nomor_rekening_bank, '-') as nomor_rekening,
                     COALESCE(s.rekening_atas_nama, s.full_name) as rekening_atas_nama
                 FROM students s
-                LEFT JOIN enrollments e ON e.student_id = s.id AND e.status = 'Active' AND e.deleted_at IS NULL
+                LEFT JOIN enrollments e ON e.student_id = s.id AND (e.status = 'Active' OR e.status = 'active')
                 LEFT JOIN classes c ON c.id = e.class_id AND c.deleted_at IS NULL
                 WHERE s.tenant_id = $1 AND s.deleted_at IS NULL
                   AND (s.penerima_kip = true OR s.layak_pip = true OR s.penerima_kps = true OR s.nomor_kks IS NOT NULL)
@@ -598,7 +602,7 @@ pub async fn export_report(
                     COALESCE(gs.highest_achievement_desc, '-') as capaian_tertinggi,
                     COALESCE(gs.lowest_improvement_desc, '-') as perlu_peningkatan
                 FROM students s
-                LEFT JOIN enrollments e ON e.student_id = s.id AND e.status = 'Active' AND e.deleted_at IS NULL
+                LEFT JOIN enrollments e ON e.student_id = s.id AND (e.status = 'Active' OR e.status = 'active')
                 LEFT JOIN classes c ON c.id = e.class_id AND c.deleted_at IS NULL
                 LEFT JOIN gradebook_snapshots gs ON gs.student_id = s.id AND gs.tenant_id = s.tenant_id
                 LEFT JOIN gradebooks g ON g.student_id = s.id AND g.tenant_id = s.tenant_id
@@ -687,7 +691,7 @@ pub async fn export_report(
                         ELSE 'Perlu Pembinaan'
                     END as status_kehadiran
                 FROM students s
-                LEFT JOIN enrollments e ON e.student_id = s.id AND e.status = 'Active' AND e.deleted_at IS NULL
+                LEFT JOIN enrollments e ON e.student_id = s.id AND (e.status = 'Active' OR e.status = 'active')
                 LEFT JOIN classes c ON c.id = e.class_id AND c.deleted_at IS NULL
                 LEFT JOIN session_attendances sa ON sa.student_id = s.id
                 WHERE s.tenant_id = $1 AND s.deleted_at IS NULL
@@ -998,7 +1002,7 @@ pub async fn export_report(
                     COALESCE(h.parent_feedback, '-') as catatan_orang_tua
                 FROM habit_tracker_entries h
                 JOIN students s ON s.id = h.student_id
-                LEFT JOIN enrollments e ON e.student_id = s.id AND e.status = 'Active' AND e.deleted_at IS NULL
+                LEFT JOIN enrollments e ON e.student_id = s.id AND (e.status = 'Active' OR e.status = 'active')
                 LEFT JOIN classes c ON c.id = e.class_id
                 WHERE h.tenant_id = $1
                   AND ($2::uuid IS NULL OR c.id = $2)
@@ -1074,17 +1078,17 @@ pub async fn export_report(
         "audit-security" => {
             let sql = r#"
                 SELECT 
-                    TO_CHAR(a.created_at, 'YYYY-MM-DD HH24:MI:SS') as timestamp_wib,
-                    COALESCE(u.name, 'System') as nama_pengguna,
+                    TO_CHAR(a.timestamp, 'YYYY-MM-DD HH24:MI:SS') as timestamp_wib,
+                    COALESCE(u.full_name, 'Sistem') as nama_pengguna,
                     COALESCE(u.email, '-') as email,
                     a.action as aksi_operasi,
                     COALESCE(a.resource, '-') as entitas_resource,
-                    COALESCE(a.ip_address, '-') as ip_address,
+                    COALESCE(a.ip, '-') as ip_address,
                     COALESCE(a.user_agent, '-') as user_agent
                 FROM audit_logs a
-                LEFT JOIN users u ON u.id = a.user_id
+                LEFT JOIN users u ON u.id = a.actor_id
                 WHERE a.tenant_id = $1
-                ORDER BY a.created_at DESC
+                ORDER BY a.timestamp DESC
                 LIMIT 1000
             "#;
 
