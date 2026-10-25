@@ -77,6 +77,111 @@ fn format_indonesian_date(date: Option<chrono::NaiveDate>, place: Option<&str>) 
     }
 }
 
+fn build_empty_curriculum_subjects(
+    class_name: &str,
+    _phase: &str,
+    religion: Option<&str>,
+) -> Vec<SubjectCompetencyDto> {
+    let rel_str = religion.unwrap_or("Islam").to_lowercase();
+    let agama_name = if rel_str.contains("kristen") {
+        "Pendidikan Agama Kristen dan Budi Pekerti"
+    } else if rel_str.contains("katolik") {
+        "Pendidikan Agama Katolik dan Budi Pekerti"
+    } else if rel_str.contains("hindu") {
+        "Pendidikan Agama Hindu dan Budi Pekerti"
+    } else if rel_str.contains("buddha") {
+        "Pendidikan Agama Buddha dan Budi Pekerti"
+    } else {
+        "Pendidikan Agama Islam dan Budi Pekerti"
+    };
+
+    let upper = class_name.to_uppercase();
+    let is_paket_c = upper.contains("PAKET C") || upper.contains("SMA");
+    let is_paket_b = upper.contains("PAKET B") || upper.contains("SMP");
+    let is_paket_a = upper.contains("PAKET A") || upper.contains("SD");
+    let is_kelas_10 = upper.contains("10") || upper.contains(" X");
+
+    let mut list = Vec::new();
+    let default_desc = "Belum ada penilaian capaian kompetensi yang diinput oleh guru pengampu.".to_string();
+
+    let mut add_subj = |name: &str, group: &str| {
+        list.push(SubjectCompetencyDto {
+            subject_name: name.to_string(),
+            final_score: 0.0,
+            predicate: "-".to_string(),
+            description: default_desc.clone(),
+            group: group.to_string(),
+        });
+    };
+
+    if is_paket_c {
+        if is_kelas_10 {
+            add_subj(agama_name, "UMUM");
+            add_subj("Pendidikan Pancasila", "UMUM");
+            add_subj("Bahasa Indonesia", "UMUM");
+            add_subj("Matematika (Umum)", "UMUM");
+            add_subj("Ilmu Pengetahuan Alam (IPA)", "UMUM");
+            add_subj("Ilmu Pengetahuan Sosial (IPS)", "UMUM");
+            add_subj("Bahasa Inggris", "UMUM");
+            add_subj("Pendidikan Jasmani, Olahraga, dan Kesehatan (PJOK)", "UMUM");
+            add_subj("Informatika", "UMUM");
+            add_subj("Seni Budaya", "UMUM");
+            add_subj("Pemberdayaan", "UMUM");
+            add_subj("Keterampilan Fungsional", "UMUM");
+            add_subj("Muatan Lokal (Bahasa Daerah)", "MUATAN_LOKAL");
+        } else {
+            // Fase F (Kelas 11 & 12)
+            add_subj(agama_name, "UMUM");
+            add_subj("Pendidikan Pancasila", "UMUM");
+            add_subj("Bahasa Indonesia", "UMUM");
+            add_subj("Matematika (Umum)", "UMUM");
+            add_subj("Bahasa Inggris", "UMUM");
+            add_subj("Sejarah", "UMUM");
+            add_subj("Pendidikan Jasmani, Olahraga, dan Kesehatan (PJOK)", "UMUM");
+            add_subj("Seni Budaya", "UMUM");
+            add_subj("Pemberdayaan", "UMUM");
+            add_subj("Keterampilan Fungsional", "UMUM");
+            add_subj("Sosiologi", "PILIHAN");
+            add_subj("Ekonomi", "PILIHAN");
+            add_subj("Muatan Lokal (Bahasa Daerah)", "MUATAN_LOKAL");
+        }
+    } else if is_paket_b {
+        add_subj(agama_name, "UMUM");
+        add_subj("Pendidikan Pancasila", "UMUM");
+        add_subj("Bahasa Indonesia", "UMUM");
+        add_subj("Matematika", "UMUM");
+        add_subj("Ilmu Pengetahuan Alam (IPA)", "UMUM");
+        add_subj("Ilmu Pengetahuan Sosial (IPS)", "UMUM");
+        add_subj("Bahasa Inggris", "UMUM");
+        add_subj("Pendidikan Jasmani, Olahraga, dan Kesehatan (PJOK)", "UMUM");
+        add_subj("Informatika", "UMUM");
+        add_subj("Seni Budaya", "UMUM");
+        add_subj("Pemberdayaan", "UMUM");
+        add_subj("Keterampilan", "UMUM");
+        add_subj("Muatan Lokal (Bahasa Daerah)", "MUATAN_LOKAL");
+    } else if is_paket_a {
+        add_subj(agama_name, "UMUM");
+        add_subj("Pendidikan Pancasila", "UMUM");
+        add_subj("Bahasa Indonesia", "UMUM");
+        add_subj("Matematika", "UMUM");
+        add_subj("Ilmu Pengetahuan Alam dan Sosial (IPAS)", "UMUM");
+        add_subj("Pendidikan Jasmani, Olahraga, dan Kesehatan (PJOK)", "UMUM");
+        add_subj("Seni Budaya", "UMUM");
+        add_subj("Pemberdayaan", "UMUM");
+        add_subj("Keterampilan", "UMUM");
+        add_subj("Muatan Lokal (Bahasa Daerah)", "MUATAN_LOKAL");
+    } else {
+        add_subj(agama_name, "UMUM");
+        add_subj("Pendidikan Pancasila", "UMUM");
+        add_subj("Bahasa Indonesia", "UMUM");
+        add_subj("Matematika (Umum)", "UMUM");
+        add_subj("Bahasa Inggris", "UMUM");
+        add_subj("Muatan Lokal (Bahasa Daerah)", "MUATAN_LOKAL");
+    }
+
+    list
+}
+
 struct PromotionEvaluation {
     is_passed: bool,
     decision_text: String,
@@ -100,6 +205,20 @@ fn calculate_promotion_decision(
         };
     }
 
+    let valid_scores: Vec<f64> = subjects
+        .iter()
+        .map(|s| s.final_score)
+        .filter(|&sc| sc > 0.0)
+        .collect();
+
+    if valid_scores.is_empty() {
+        return PromotionEvaluation {
+            is_passed: false,
+            decision_text: "AKTIF (Dalam Proses Pembelajaran)".to_string(),
+            summary_reason: "Nilai mata pelajaran belum diinput oleh guru pengampu pada Buku Nilai.".to_string(),
+        };
+    }
+
     let upper = class_name.to_uppercase();
     let mut grade_num: Option<i32> = None;
     if upper.contains("12") || upper.contains("XII") {
@@ -119,18 +238,7 @@ fn calculate_promotion_decision(
     }
 
     let is_graduation = grade_num == Some(12) || grade_num == Some(9) || grade_num == Some(6);
-
-    let valid_scores: Vec<f64> = subjects
-        .iter()
-        .map(|s| s.final_score)
-        .filter(|&sc| sc > 0.0)
-        .collect();
-
-    let avg_score = if !valid_scores.is_empty() {
-        valid_scores.iter().sum::<f64>() / (valid_scores.len() as f64)
-    } else {
-        80.0
-    };
+    let avg_score = valid_scores.iter().sum::<f64>() / (valid_scores.len() as f64);
 
     let failed_count = subjects
         .iter()
@@ -307,30 +415,35 @@ pub async fn get_report_cards(
     // 3. Query Students with Class, Teacher, and Guardian
     let student_rows = sqlx::query(
         r#"
-        SELECT 
-            s.id AS student_id,
-            s.nisn,
-            s.nipd,
-            s.full_name AS student_name,
-            s.gender,
-            s.place_of_birth,
-            s.date_of_birth,
-            s.religion,
-            s.alamat_jalan AS address,
-            s.no_hp AS parent_phone,
-            c.id AS class_id,
-            c.name AS class_name,
-            t.full_name AS homeroom_teacher_name,
-            g.full_name AS guardian_name
-        FROM students s
-        LEFT JOIN enrollments e ON e.student_id = s.id AND e.tenant_id = s.tenant_id
-        LEFT JOIN classes c ON c.id = e.class_id AND c.tenant_id = s.tenant_id
-        LEFT JOIN teachers t ON t.id = c.homeroom_teacher_id AND t.tenant_id = s.tenant_id
-        LEFT JOIN guardians g ON g.id = s.guardian_id AND g.tenant_id = s.tenant_id
-        WHERE s.tenant_id = $1 
-          AND s.deleted_at IS NULL
-          AND ($2::uuid IS NULL OR c.id = $2)
-        ORDER BY c.name, s.full_name
+        WITH active_student_roster AS (
+            SELECT DISTINCT ON (s.id)
+                s.id AS student_id,
+                s.nisn,
+                s.nipd,
+                s.full_name AS student_name,
+                s.gender,
+                s.place_of_birth,
+                s.date_of_birth,
+                s.religion,
+                s.alamat_jalan AS address,
+                s.no_hp AS parent_phone,
+                c.id AS class_id,
+                c.name AS class_name,
+                t.full_name AS homeroom_teacher_name,
+                g.full_name AS guardian_name
+            FROM students s
+            LEFT JOIN enrollments e ON e.student_id = s.id AND e.tenant_id = s.tenant_id AND (e.status = 'Active' OR e.status = 'active')
+            LEFT JOIN classes c ON c.id = e.class_id AND c.tenant_id = s.tenant_id
+            LEFT JOIN teachers t ON t.id = c.homeroom_teacher_id AND t.tenant_id = s.tenant_id
+            LEFT JOIN guardians g ON g.id = s.guardian_id AND g.tenant_id = s.tenant_id
+            WHERE s.tenant_id = $1 
+              AND s.deleted_at IS NULL
+              AND (s.status = 'active' OR (s.status IS NULL AND s.is_active = true))
+              AND ($2::uuid IS NULL OR c.id = $2)
+            ORDER BY s.id, e.enrolled_at DESC NULLS LAST
+        )
+        SELECT * FROM active_student_roster
+        ORDER BY class_name NULLS LAST, student_name ASC
         "#,
     )
     .bind(req_ctx.tenant_id)
@@ -510,95 +623,12 @@ pub async fn get_report_cards(
         let subjects = if let Some(snaps) = snapshots_by_student.remove(&s.student_id) {
             snaps
         } else {
-            // Standard Kurikulum Merdeka Fase F / Umum Subject Template
-            let agama_title = if s.religion.as_deref() == Some("Kristen") {
-                "Pendidikan Agama Kristen dan Budi Pekerti"
-            } else if s.religion.as_deref() == Some("Katolik") {
-                "Pendidikan Agama Katolik dan Budi Pekerti"
-            } else {
-                "Pendidikan Agama Islam dan Budi Pekerti"
-            };
-
-            vec![
-                SubjectCompetencyDto {
-                    subject_name: agama_title.to_string(),
-                    final_score: 84.0,
-                    predicate: "B".to_string(),
-                    description: "Menunjukkan pemahaman yang baik dalam memahami nilai-nilai keimanan dan penerapannya dalam kehidupan bermasyarakat.".to_string(),
-                    group: "UMUM".to_string(),
-                },
-                SubjectCompetencyDto {
-                    subject_name: "Pendidikan Pancasila".to_string(),
-                    final_score: 82.0,
-                    predicate: "B".to_string(),
-                    description: "Mampu menganalisis penerapan nilai-nilai Pancasila dalam konteks kehidupan berbangsa dan bernegara.".to_string(),
-                    group: "UMUM".to_string(),
-                },
-                SubjectCompetencyDto {
-                    subject_name: "Bahasa Indonesia".to_string(),
-                    final_score: 80.0,
-                    predicate: "B".to_string(),
-                    description: "Terampil menulis teks argumentasi dan mengevaluasi gagasan kritis dalam teks sastra dan faktual.".to_string(),
-                    group: "UMUM".to_string(),
-                },
-                SubjectCompetencyDto {
-                    subject_name: "Matematika (Umum)".to_string(),
-                    final_score: 78.0,
-                    predicate: "B".to_string(),
-                    description: "Memahami konsep statistika, peluang, dan penyelesaian masalah matematika dalam kehidupan sehari-hari.".to_string(),
-                    group: "UMUM".to_string(),
-                },
-                SubjectCompetencyDto {
-                    subject_name: "Bahasa Inggris".to_string(),
-                    final_score: 81.0,
-                    predicate: "B".to_string(),
-                    description: "Mampu menyusun teks transaksional lisan dan tulisan untuk berkomunikasi secara efektif.".to_string(),
-                    group: "UMUM".to_string(),
-                },
-                SubjectCompetencyDto {
-                    subject_name: "Sejarah".to_string(),
-                    final_score: 83.0,
-                    predicate: "B".to_string(),
-                    description: "Memahami dinamika peristiwa sejarah bangsa Indonesia dan mampu mengambil hikmah keteladanan para tokoh bangsa.".to_string(),
-                    group: "UMUM".to_string(),
-                },
-                SubjectCompetencyDto {
-                    subject_name: "Pendidikan Jasmani, Olahraga, dan Kesehatan (PJOK)".to_string(),
-                    final_score: 85.0,
-                    predicate: "B".to_string(),
-                    description: "Mempraktikkan keterampilan gerak spesifik olahraga kebugaran dan menerapkan pola hidup sehat.".to_string(),
-                    group: "UMUM".to_string(),
-                },
-                SubjectCompetencyDto {
-                    subject_name: "Seni Budaya".to_string(),
-                    final_score: 86.0,
-                    predicate: "B".to_string(),
-                    description: "Mampu mengekspresikan gagasan seni dan mengapresiasi keragaman karya seni budaya nusantara.".to_string(),
-                    group: "UMUM".to_string(),
-                },
-                SubjectCompetencyDto {
-                    subject_name: "Sosiologi".to_string(),
-                    final_score: 84.0,
-                    predicate: "B".to_string(),
-                    description: "Mampu menganalisis permasalahan sosial dan perubahan sosial budaya di tengah masyarakat modern.".to_string(),
-                    group: "PILIHAN".to_string(),
-                },
-                SubjectCompetencyDto {
-                    subject_name: "Ekonomi".to_string(),
-                    final_score: 82.0,
-                    predicate: "B".to_string(),
-                    description: "Mampu memahami prinsip ekonomi, pengelolaan keuangan, dan peran kewirausahaan dalam perekonomian.".to_string(),
-                    group: "PILIHAN".to_string(),
-                },
-                SubjectCompetencyDto {
-                    subject_name: "Muatan Lokal (Bahasa Cirebon)".to_string(),
-                    final_score: 83.0,
-                    predicate: "B".to_string(),
-                    description: "Mampu berkomunikasi menggunakan tata krama bahasa daerah dan melestarikan kearifan lokal.".to_string(),
-                    group: "MUATAN_LOKAL".to_string(),
-                },
-            ]
+            // When teachers have not yet inputted grades into gradebook,
+            // subjects are created with 0.0 scores, predicate "-", and description "-" / belum dinilai.
+            build_empty_curriculum_subjects(&cls_name, &phase, s.religion.as_deref())
         };
+
+        let has_scores = subjects.iter().any(|sub| sub.final_score > 0.0);
 
         let attendance = attendance_by_student
             .remove(&s.student_id)
@@ -620,6 +650,12 @@ pub async fn get_report_cards(
             school_npsn,
             s.nisn
         );
+
+        let card_status = if has_scores {
+            "SIAP_CETAK".to_string()
+        } else {
+            "DRAF_BELUM_DINILAI".to_string()
+        };
 
         cards.push(StudentReportCardDto {
             student_id: s.student_id,
@@ -644,13 +680,17 @@ pub async fn get_report_cards(
             guardian_name: s.guardian_name.unwrap_or_else(|| "-".to_string()),
             subjects,
             attendance,
-            extracurricular: default_extracurricular.clone(),
-            p5_character_note: "Peserta didik aktif bergotong royong, memiliki daya nalar kritis yang baik, dan menunjukkan sikap mandiri dalam menyelesaikan tugas pembelajaran.".to_string(),
+            extracurricular: if has_scores { default_extracurricular.clone() } else { Vec::new() },
+            p5_character_note: if has_scores {
+                "Peserta didik aktif bergotong royong, memiliki daya nalar kritis yang baik, dan menunjukkan sikap mandiri dalam menyelesaikan tugas pembelajaran.".to_string()
+            } else {
+                "Dalam proses pemantauan dan pembiasaan karakter profil pelajar Pancasila.".to_string()
+            },
             promotion_status: promo_eval.decision_text,
             is_promotion_passed: promo_eval.is_passed,
             promotion_reason: Some(promo_eval.summary_reason),
             qr_token,
-            status: "SIAP_CETAK".to_string(),
+            status: card_status,
         });
     }
 
