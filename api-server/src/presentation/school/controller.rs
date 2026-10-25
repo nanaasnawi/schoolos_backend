@@ -26,33 +26,33 @@ pub struct SchoolInfoQuery {
 
 fn row_to_school_response(r: &sqlx::postgres::PgRow) -> SchoolResponse {
     let created_at: chrono::DateTime<chrono::Utc> = r
-        .try_get("created_at")
+        .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
         .unwrap_or_else(|_| chrono::Utc::now());
     let updated_at: chrono::DateTime<chrono::Utc> = r
-        .try_get("updated_at")
+        .try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at")
         .unwrap_or_else(|_| chrono::Utc::now());
 
     SchoolResponse {
         id: r.get("id"),
         tenant_id: r.get("tenant_id"),
         name: r.get("name"),
-        npsn: r.try_get("npsn").ok().flatten(),
-        logo_url: r.try_get("logo_url").ok().flatten(),
-        address: r.try_get("address").ok().flatten(),
-        village: r.try_get("village").ok().flatten(),
-        district: r.try_get("district").ok().flatten(),
-        regency: r.try_get("regency").ok().flatten(),
-        province: r.try_get("province").ok().flatten(),
-        postal_code: r.try_get("postal_code").ok().flatten(),
-        phone_number: r.try_get("phone_number").ok().flatten(),
-        email: r.try_get("email").ok().flatten(),
-        website: r.try_get("website").ok().flatten(),
-        headmaster_name: r.try_get("headmaster_name").ok().flatten(),
-        headmaster_nip: r.try_get("headmaster_nip").ok().flatten(),
+        npsn: r.try_get::<Option<String>, _>("npsn").unwrap_or(None),
+        logo_url: r.try_get::<Option<String>, _>("logo_url").unwrap_or(None),
+        address: r.try_get::<Option<String>, _>("address").unwrap_or(None),
+        village: r.try_get::<Option<String>, _>("village").unwrap_or(None),
+        district: r.try_get::<Option<String>, _>("district").unwrap_or(None),
+        regency: r.try_get::<Option<String>, _>("regency").unwrap_or(None),
+        province: r.try_get::<Option<String>, _>("province").unwrap_or(None),
+        postal_code: r.try_get::<Option<String>, _>("postal_code").unwrap_or(None),
+        phone_number: r.try_get::<Option<String>, _>("phone_number").unwrap_or(None),
+        email: r.try_get::<Option<String>, _>("email").unwrap_or(None),
+        website: r.try_get::<Option<String>, _>("website").unwrap_or(None),
+        headmaster_name: r.try_get::<Option<String>, _>("headmaster_name").unwrap_or(None),
+        headmaster_nip: r.try_get::<Option<String>, _>("headmaster_nip").unwrap_or(None),
         status: r.get("status"),
-        dapodik_url: r.try_get("dapodik_url").ok().flatten(),
-        dapodik_token: r.try_get("dapodik_token").ok().flatten(),
-        accreditation: r.try_get("accreditation").ok().flatten(),
+        dapodik_url: r.try_get::<Option<String>, _>("dapodik_url").unwrap_or(None),
+        dapodik_token: r.try_get::<Option<String>, _>("dapodik_token").unwrap_or(None),
+        accreditation: r.try_get::<Option<String>, _>("accreditation").unwrap_or(None),
         created_at: created_at.to_rfc3339(),
         updated_at: updated_at.to_rfc3339(),
     }
@@ -93,8 +93,8 @@ pub async fn get_school_public_info(
     let data = if let Some(ref r) = row {
         SchoolPublicInfo {
             name: r.get("name"),
-            logo_url: r.try_get("logo_url").ok().flatten(),
-            npsn: r.try_get("npsn").ok().flatten(),
+            logo_url: r.try_get::<Option<String>, _>("logo_url").unwrap_or(None),
+            npsn: r.try_get::<Option<String>, _>("npsn").unwrap_or(None),
         }
     } else {
         SchoolPublicInfo {
@@ -187,7 +187,7 @@ pub async fn get_current_school_profile(
             .unwrap_or_else(|| "Nama Sekolah".to_string());
         let default_npsn: Option<String> = tenant_info
             .as_ref()
-            .and_then(|t| t.try_get("npsn").ok().flatten());
+            .and_then(|t| t.try_get::<Option<String>, _>("npsn").unwrap_or(None));
 
         let new_id = Uuid::now_v7();
         let inserted = sqlx::query(

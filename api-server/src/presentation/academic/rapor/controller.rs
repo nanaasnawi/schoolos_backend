@@ -254,9 +254,9 @@ pub async fn get_report_cards(
     let (active_year_name, active_semester, report_date_str) = match year_row {
         Some(ref y) => {
             let name: String = y.get("name");
-            let db_sem: i16 = y.try_get::<Option<i16>, _>("current_semester").ok().flatten().unwrap_or(1);
+            let db_sem: i16 = y.try_get::<i16, _>("current_semester").unwrap_or(1);
             let sem = params.semester.unwrap_or(db_sem);
-            let rd: Option<chrono::NaiveDate> = y.try_get("report_date").ok().flatten();
+            let rd: Option<chrono::NaiveDate> = y.try_get::<Option<chrono::NaiveDate>, _>("report_date").unwrap_or(None);
             let rd_str = rd.map(|d| d.format("%Y-%m-%d").to_string());
             (name, sem, rd_str)
         }
@@ -293,15 +293,15 @@ pub async fn get_report_cards(
         .unwrap_or_else(|| "Nama Sekolah".to_string());
     let school_npsn = school_row
         .as_ref()
-        .and_then(|s| s.try_get::<Option<String>, _>("npsn").ok().flatten())
+        .and_then(|s| s.try_get::<Option<String>, _>("npsn").unwrap_or(None))
         .unwrap_or_else(|| "-".to_string());
     let headmaster_name = school_row
         .as_ref()
-        .and_then(|s| s.try_get::<Option<String>, _>("headmaster_name").ok().flatten())
+        .and_then(|s| s.try_get::<Option<String>, _>("headmaster_name").unwrap_or(None))
         .unwrap_or_else(|| "Kepala Sekolah".to_string());
     let headmaster_nip = school_row
         .as_ref()
-        .and_then(|s| s.try_get::<Option<String>, _>("headmaster_nip").ok().flatten())
+        .and_then(|s| s.try_get::<Option<String>, _>("headmaster_nip").unwrap_or(None))
         .unwrap_or_else(|| "-".to_string());
 
     // 3. Query Students with Class, Teacher, and Guardian
@@ -344,28 +344,28 @@ pub async fn get_report_cards(
         .map(|row| StudentRow {
             student_id: row.get("student_id"),
             nisn: row.get("nisn"),
-            nipd: row.try_get("nipd").ok().flatten(),
+            nipd: row.try_get::<Option<String>, _>("nipd").unwrap_or(None),
             student_name: row.get("student_name"),
-            gender: row.try_get("gender").ok().flatten(),
-            place_of_birth: row.try_get("place_of_birth").ok().flatten(),
-            date_of_birth: row.try_get("date_of_birth").ok().flatten(),
-            religion: row.try_get("religion").ok().flatten(),
-            address: row.try_get("address").ok().flatten(),
-            parent_phone: row.try_get("parent_phone").ok().flatten(),
-            class_name: row.try_get("class_name").ok().flatten(),
-            homeroom_teacher_name: row.try_get("homeroom_teacher_name").ok().flatten(),
-            guardian_name: row.try_get("guardian_name").ok().flatten(),
+            gender: row.try_get::<Option<String>, _>("gender").unwrap_or(None),
+            place_of_birth: row.try_get::<Option<String>, _>("place_of_birth").unwrap_or(None),
+            date_of_birth: row.try_get::<Option<chrono::NaiveDate>, _>("date_of_birth").unwrap_or(None),
+            religion: row.try_get::<Option<String>, _>("religion").unwrap_or(None),
+            address: row.try_get::<Option<String>, _>("address").unwrap_or(None),
+            parent_phone: row.try_get::<Option<String>, _>("parent_phone").unwrap_or(None),
+            class_name: row.try_get::<Option<String>, _>("class_name").unwrap_or(None),
+            homeroom_teacher_name: row.try_get::<Option<String>, _>("homeroom_teacher_name").unwrap_or(None),
+            guardian_name: row.try_get::<Option<String>, _>("guardian_name").unwrap_or(None),
         })
         .collect();
 
-    // 4. Query Gradebook Snapshots
+    // 4. Query Gradebook Snapshots (Cast final_score to float8 for direct native f64 decoding)
     let snapshot_rows = sqlx::query(
         r#"
         SELECT 
             student_id,
             subject_code,
             subject_name,
-            final_score,
+            final_score::float8 AS final_score,
             status_kktp,
             highest_achievement_desc,
             lowest_improvement_desc
@@ -387,16 +387,10 @@ pub async fn get_report_cards(
         std::collections::HashMap::new();
 
     for row in snapshot_rows {
-        let st_id: Option<Uuid> = row.try_get("student_id").ok().flatten();
-        let subj_name: String = row.try_get("subject_name").unwrap_or_default();
-        let highest_desc: Option<String> = row.try_get("highest_achievement_desc").ok().flatten();
-
-        let final_sc: f64 = row
-            .try_get::<rust_decimal::Decimal, _>("final_score")
-            .ok()
-            .and_then(|d| d.to_string().parse::<f64>().ok())
-            .or_else(|| row.try_get::<f64, _>("final_score").ok())
-            .unwrap_or(80.0);
+        let st_id: Option<Uuid> = row.try_get::<Option<Uuid>, _>("student_id").unwrap_or(None);
+        let subj_name: String = row.try_get::<String, _>("subject_name").unwrap_or_default();
+        let highest_desc: Option<String> = row.try_get::<Option<String>, _>("highest_achievement_desc").unwrap_or(None);
+        let final_sc: f64 = row.try_get::<f64, _>("final_score").unwrap_or(80.0);
 
         if let Some(student_id) = st_id {
             let predicate = if final_sc >= 88.0 {
@@ -467,9 +461,9 @@ pub async fn get_report_cards(
         std::collections::HashMap::new();
 
     for row in attendance_rows {
-        let st_id: Option<Uuid> = row.try_get("student_id").ok().flatten();
-        let status: String = row.try_get("status").unwrap_or_default();
-        let cnt: i64 = row.try_get("count").unwrap_or(0);
+        let st_id: Option<Uuid> = row.try_get::<Option<Uuid>, _>("student_id").unwrap_or(None);
+        let status: String = row.try_get::<String, _>("status").unwrap_or_default();
+        let cnt: i64 = row.try_get::<i64, _>("count").unwrap_or(0);
 
         if let Some(student_id) = st_id {
             let entry = attendance_by_student

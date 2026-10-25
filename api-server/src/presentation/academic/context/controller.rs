@@ -32,17 +32,17 @@ struct YearData {
 
 fn parse_year_row(row: &sqlx::postgres::PgRow) -> YearData {
     let start_date: chrono::NaiveDate = row
-        .try_get("start_date")
+        .try_get::<chrono::NaiveDate, _>("start_date")
         .unwrap_or_else(|_| chrono::NaiveDate::from_ymd_opt(2026, 7, 1).unwrap());
     let end_date: chrono::NaiveDate = row
-        .try_get("end_date")
+        .try_get::<chrono::NaiveDate, _>("end_date")
         .unwrap_or_else(|_| chrono::NaiveDate::from_ymd_opt(2027, 6, 30).unwrap());
     let current_semester: i16 = row
-        .try_get::<Option<i16>, _>("current_semester")
-        .ok()
-        .flatten()
+        .try_get::<i16, _>("current_semester")
         .unwrap_or(1);
-    let report_date: Option<chrono::NaiveDate> = row.try_get("report_date").ok().flatten();
+    let report_date: Option<chrono::NaiveDate> = row
+        .try_get::<Option<chrono::NaiveDate>, _>("report_date")
+        .unwrap_or(None);
 
     YearData {
         id: row.get("id"),
@@ -75,20 +75,20 @@ struct SchoolData {
 fn parse_school_row(row: &sqlx::postgres::PgRow) -> SchoolData {
     SchoolData {
         id: row.get("id"),
-        name: row.try_get("name").unwrap_or_default(),
-        npsn: row.try_get("npsn").ok().flatten(),
-        logo_url: row.try_get("logo_url").ok().flatten(),
-        headmaster_name: row.try_get("headmaster_name").ok().flatten(),
-        headmaster_nip: row.try_get("headmaster_nip").ok().flatten(),
-        address: row.try_get("address").ok().flatten(),
-        village: row.try_get("village").ok().flatten(),
-        district: row.try_get("district").ok().flatten(),
-        regency: row.try_get("regency").ok().flatten(),
-        province: row.try_get("province").ok().flatten(),
-        postal_code: row.try_get("postal_code").ok().flatten(),
-        phone_number: row.try_get("phone_number").ok().flatten(),
-        email: row.try_get("email").ok().flatten(),
-        website: row.try_get("website").ok().flatten(),
+        name: row.try_get::<String, _>("name").unwrap_or_default(),
+        npsn: row.try_get::<Option<String>, _>("npsn").unwrap_or(None),
+        logo_url: row.try_get::<Option<String>, _>("logo_url").unwrap_or(None),
+        headmaster_name: row.try_get::<Option<String>, _>("headmaster_name").unwrap_or(None),
+        headmaster_nip: row.try_get::<Option<String>, _>("headmaster_nip").unwrap_or(None),
+        address: row.try_get::<Option<String>, _>("address").unwrap_or(None),
+        village: row.try_get::<Option<String>, _>("village").unwrap_or(None),
+        district: row.try_get::<Option<String>, _>("district").unwrap_or(None),
+        regency: row.try_get::<Option<String>, _>("regency").unwrap_or(None),
+        province: row.try_get::<Option<String>, _>("province").unwrap_or(None),
+        postal_code: row.try_get::<Option<String>, _>("postal_code").unwrap_or(None),
+        phone_number: row.try_get::<Option<String>, _>("phone_number").unwrap_or(None),
+        email: row.try_get::<Option<String>, _>("email").unwrap_or(None),
+        website: row.try_get::<Option<String>, _>("website").unwrap_or(None),
     }
 }
 
