@@ -107,7 +107,7 @@ pub async fn get_current_school_profile(
     );
     let row = sqlx::query!(
         r#"
-        SELECT id, tenant_id, name, npsn, address, phone_number, email, logo_url, status, dapodik_url, dapodik_token, accreditation, created_at, updated_at
+        SELECT id, tenant_id, name, npsn, address, village, district, regency, province, postal_code, phone_number, email, website, headmaster_name, headmaster_nip, logo_url, status, dapodik_url, dapodik_token, accreditation, created_at, updated_at
         FROM schools
         WHERE tenant_id = $1 AND deleted_at IS NULL
         LIMIT 1
@@ -138,8 +138,16 @@ pub async fn get_current_school_profile(
             npsn: r.npsn,
             logo_url: r.logo_url,
             address: r.address,
+            village: r.village,
+            district: r.district,
+            regency: r.regency,
+            province: r.province,
+            postal_code: r.postal_code,
             phone_number: r.phone_number,
             email: r.email,
+            website: r.website,
+            headmaster_name: r.headmaster_name,
+            headmaster_nip: r.headmaster_nip,
             status: r.status,
             dapodik_url: r.dapodik_url,
             dapodik_token: r.dapodik_token,
@@ -169,7 +177,7 @@ pub async fn get_current_school_profile(
             r#"
             INSERT INTO schools (id, tenant_id, name, npsn, status, created_at, updated_at)
             VALUES ($1, $2, $3, $4, 'Active', NOW(), NOW())
-            RETURNING id, tenant_id, name, npsn, address, phone_number, email, logo_url, status, dapodik_url, dapodik_token, accreditation, created_at, updated_at
+            RETURNING id, tenant_id, name, npsn, address, village, district, regency, province, postal_code, phone_number, email, website, headmaster_name, headmaster_nip, logo_url, status, dapodik_url, dapodik_token, accreditation, created_at, updated_at
             "#,
             new_id,
             req_ctx.tenant_id,
@@ -187,8 +195,16 @@ pub async fn get_current_school_profile(
             npsn: inserted.npsn,
             logo_url: inserted.logo_url,
             address: inserted.address,
+            village: inserted.village,
+            district: inserted.district,
+            regency: inserted.regency,
+            province: inserted.province,
+            postal_code: inserted.postal_code,
             phone_number: inserted.phone_number,
             email: inserted.email,
+            website: inserted.website,
+            headmaster_name: inserted.headmaster_name,
+            headmaster_nip: inserted.headmaster_nip,
             status: inserted.status,
             dapodik_url: inserted.dapodik_url,
             dapodik_token: inserted.dapodik_token,
@@ -272,21 +288,35 @@ pub async fn update_current_school_profile(
 
     let updated = sqlx::query!(
         r#"
-        INSERT INTO schools (id, tenant_id, name, npsn, logo_url, address, phone_number, email, status, dapodik_url, dapodik_token, accreditation, created_at, updated_at)
-        VALUES ($1, $2, COALESCE($3, 'Nama Sekolah'), $4, $5, $6, $7, $8, COALESCE($9, 'Active'), $10, $11, $12, NOW(), NOW())
+        INSERT INTO schools (
+            id, tenant_id, name, npsn, logo_url, address, village, district, regency, province, postal_code,
+            phone_number, email, website, headmaster_name, headmaster_nip, status, dapodik_url, dapodik_token, accreditation, created_at, updated_at
+        )
+        VALUES (
+            $1, $2, COALESCE($3, 'Nama Sekolah'), $4, $5, $6, $7, $8, $9, $10, $11,
+            $12, $13, $14, $15, $16, COALESCE($17, 'Active'), $18, $19, $20, NOW(), NOW()
+        )
         ON CONFLICT (tenant_id) DO UPDATE SET
             name = COALESCE(EXCLUDED.name, schools.name),
             npsn = COALESCE(EXCLUDED.npsn, schools.npsn),
             logo_url = EXCLUDED.logo_url,
             address = COALESCE(EXCLUDED.address, schools.address),
+            village = COALESCE(EXCLUDED.village, schools.village),
+            district = COALESCE(EXCLUDED.district, schools.district),
+            regency = COALESCE(EXCLUDED.regency, schools.regency),
+            province = COALESCE(EXCLUDED.province, schools.province),
+            postal_code = COALESCE(EXCLUDED.postal_code, schools.postal_code),
             phone_number = COALESCE(EXCLUDED.phone_number, schools.phone_number),
             email = COALESCE(EXCLUDED.email, schools.email),
+            website = COALESCE(EXCLUDED.website, schools.website),
+            headmaster_name = COALESCE(EXCLUDED.headmaster_name, schools.headmaster_name),
+            headmaster_nip = COALESCE(EXCLUDED.headmaster_nip, schools.headmaster_nip),
             status = COALESCE(EXCLUDED.status, schools.status),
             dapodik_url = COALESCE(EXCLUDED.dapodik_url, schools.dapodik_url),
             dapodik_token = COALESCE(EXCLUDED.dapodik_token, schools.dapodik_token),
             accreditation = COALESCE(EXCLUDED.accreditation, schools.accreditation),
             updated_at = NOW()
-        RETURNING id, tenant_id, name, npsn, address, phone_number, email, logo_url, status, dapodik_url, dapodik_token, accreditation, created_at, updated_at
+        RETURNING id, tenant_id, name, npsn, address, village, district, regency, province, postal_code, phone_number, email, website, headmaster_name, headmaster_nip, logo_url, status, dapodik_url, dapodik_token, accreditation, created_at, updated_at
         "#,
         school_id,
         req_ctx.tenant_id,
@@ -294,8 +324,16 @@ pub async fn update_current_school_profile(
         npsn_trimmed,
         payload.logo_url,
         payload.address,
+        payload.village,
+        payload.district,
+        payload.regency,
+        payload.province,
+        payload.postal_code,
         payload.phone_number,
         payload.email,
+        payload.website,
+        payload.headmaster_name,
+        payload.headmaster_nip,
         payload.status,
         payload.dapodik_url,
         payload.dapodik_token,
@@ -312,8 +350,16 @@ pub async fn update_current_school_profile(
         npsn: updated.npsn,
         logo_url: updated.logo_url,
         address: updated.address,
+        village: updated.village,
+        district: updated.district,
+        regency: updated.regency,
+        province: updated.province,
+        postal_code: updated.postal_code,
         phone_number: updated.phone_number,
         email: updated.email,
+        website: updated.website,
+        headmaster_name: updated.headmaster_name,
+        headmaster_nip: updated.headmaster_nip,
         status: updated.status,
         dapodik_url: updated.dapodik_url,
         dapodik_token: updated.dapodik_token,
@@ -352,7 +398,7 @@ pub async fn get_school(
 ) -> Result<Json<ApiResponse<SchoolResponse>>, ApiError> {
     let row = sqlx::query!(
         r#"
-        SELECT id, tenant_id, name, npsn, address, phone_number, email, logo_url, status, dapodik_url, dapodik_token, accreditation, created_at, updated_at
+        SELECT id, tenant_id, name, npsn, address, village, district, regency, province, postal_code, phone_number, email, website, headmaster_name, headmaster_nip, logo_url, status, dapodik_url, dapodik_token, accreditation, created_at, updated_at
         FROM schools
         WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
         "#,
@@ -371,8 +417,16 @@ pub async fn get_school(
             npsn: r.npsn,
             logo_url: r.logo_url,
             address: r.address,
+            village: r.village,
+            district: r.district,
+            regency: r.regency,
+            province: r.province,
+            postal_code: r.postal_code,
             phone_number: r.phone_number,
             email: r.email,
+            website: r.website,
+            headmaster_name: r.headmaster_name,
+            headmaster_nip: r.headmaster_nip,
             status: r.status,
             dapodik_url: r.dapodik_url,
             dapodik_token: r.dapodik_token,
