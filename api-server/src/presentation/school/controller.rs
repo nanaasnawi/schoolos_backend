@@ -355,7 +355,7 @@ pub async fn update_current_school_profile(
     ),
     responses(
         (status = 200, description = "School retrieved successfully", body = inline(ApiResponse<SchoolResponse>)),
-        (status = 404, description = "School not found", body = inline(ApiResponse<()>)),
+        (status = 404, description = "School not found")
     ),
     security(
         ("Bearer" = [])
