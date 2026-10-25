@@ -301,7 +301,7 @@ async fn get_dashboard(
         total_notifications_res,
     ) = tokio::join!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM students WHERE tenant_id = $1 AND deleted_at IS NULL").bind(tid).fetch_one(pool),
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM students WHERE tenant_id = $1 AND status IN ('Active', 'active') AND deleted_at IS NULL").bind(tid).fetch_one(pool),
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM students WHERE tenant_id = $1 AND (status IN ('Active', 'active') OR (status IS NULL AND is_active = true)) AND deleted_at IS NULL").bind(tid).fetch_one(pool),
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM students WHERE tenant_id = $1 AND status IN ('transferred', 'Transferred') AND deleted_at IS NULL").bind(tid).fetch_one(pool),
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM teachers WHERE tenant_id = $1 AND deleted_at IS NULL").bind(tid).fetch_one(pool),
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM teachers WHERE tenant_id = $1 AND is_active = true AND deleted_at IS NULL").bind(tid).fetch_one(pool),
@@ -318,11 +318,13 @@ async fn get_dashboard(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM notifications WHERE tenant_id = $1").bind(tid).fetch_one(pool),
     );
 
-    let total_students = total_students_res.unwrap_or(0);
+    let active_students = active_students_res.unwrap_or(0);
+    let transferred_students = transferred_students_res.unwrap_or(0);
+
     let metrics = DashboardMetricsDto {
-        total_students,
-        active_students: active_students_res.unwrap_or(0),
-        transferred_students: transferred_students_res.unwrap_or(0),
+        total_students: active_students,
+        active_students,
+        transferred_students,
         total_teachers: total_teachers_res.unwrap_or(0),
         active_teachers: active_teachers_res.unwrap_or(0),
         total_tendik: total_tendik_res.unwrap_or(0),
@@ -338,18 +340,20 @@ async fn get_dashboard(
         total_notifications: total_notifications_res.unwrap_or(0),
     };
 
-    let total_students_num = if total_students > 0 {
-        total_students
+    let total_students_num = if active_students > 0 {
+        active_students
     } else {
         1
     } as f64;
 
-    // Gender distribution
+    // Gender distribution (strictly active students)
     let gender_rows = sqlx::query(
         r#"
         SELECT gender, COUNT(*)::int8 AS count
         FROM students
-        WHERE tenant_id = $1 AND deleted_at IS NULL
+        WHERE tenant_id = $1 
+          AND deleted_at IS NULL 
+          AND (status IN ('Active', 'active') OR (status IS NULL AND is_active = true))
         GROUP BY gender
         ORDER BY gender
         "#,
