@@ -800,6 +800,9 @@ pub async fn get_rekap_rombel(
             LIMIT 1
         ) c ON true
         WHERE s.tenant_id = $1 AND s.deleted_at IS NULL
+          AND (s.status IN ('Active', 'active') OR (s.status IS NULL AND s.is_active = true))
+          AND (s.status NOT IN ('transferred', 'Transferred', 'mutasi', 'Mutasi', 'keluar', 'Keluar', 'dropped_out', 'graduated', 'Graduated'))
+          AND s.is_active IS NOT FALSE
           AND ($2::uuid IS NULL OR c.id = $2)
           AND ($3::text IS NULL OR s.full_name ILIKE ('%' || $3 || '%') OR s.nisn ILIKE ('%' || $3 || '%'))
         ORDER BY c.name ASC NULLS LAST, s.full_name ASC
@@ -1011,6 +1014,9 @@ pub async fn broadcast_document_reminder(
         FROM students s
         LEFT JOIN enrollments e ON e.student_id = s.id AND (e.status = 'active' OR e.status = 'Active')
         WHERE s.tenant_id = $1 AND s.deleted_at IS NULL
+          AND (s.status IN ('Active', 'active') OR (s.status IS NULL AND s.is_active = true))
+          AND (s.status NOT IN ('transferred', 'Transferred', 'mutasi', 'Mutasi', 'keluar', 'Keluar', 'dropped_out', 'graduated', 'Graduated'))
+          AND s.is_active IS NOT FALSE
           AND ($2::uuid IS NULL OR e.class_id = $2)
           AND s.user_id IS NOT NULL
         "#,
