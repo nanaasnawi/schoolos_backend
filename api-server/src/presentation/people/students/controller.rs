@@ -1,6 +1,6 @@
 use axum::{
-    extract::{Path, Query, State},
-    routing::{get, post},
+    extract::{DefaultBodyLimit, Path, Query, State},
+    routing::{get, patch, post},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
@@ -50,7 +50,26 @@ pub fn student_routes() -> Router<ApplicationContext> {
         .route("/", post(create).get(list))
         .route("/pip", get(get_pip_students))
         .route("/me/official-profile", get(get_my_official_profile))
+        .route(
+            "/me/documents",
+            get(super::documents::get_my_documents)
+                .post(super::documents::upload_my_document)
+                .layer(DefaultBodyLimit::max(20 * 1024 * 1024)),
+        )
+        .route("/documents/rekap-rombel", get(super::documents::get_rekap_rombel))
+        .route("/documents/broadcast-reminder", post(super::documents::broadcast_document_reminder))
+        .route(
+            "/documents/{doc_id}/verify",
+            patch(super::documents::verify_student_document)
+                .post(super::documents::verify_student_document),
+        )
         .route("/{id}", get(get_by_id).patch(update))
+        .route(
+            "/{id}/documents",
+            get(super::documents::get_student_documents)
+                .post(super::documents::upload_student_document)
+                .layer(DefaultBodyLimit::max(20 * 1024 * 1024)),
+        )
 }
 
 fn map_student_response(student: Student) -> StudentResponse {
