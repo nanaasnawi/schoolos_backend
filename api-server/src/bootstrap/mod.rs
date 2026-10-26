@@ -370,6 +370,12 @@ impl Bootstrap {
         {
             tracing::warn!("Notice on avatar_data/avatar_mime columns check: {:?}", e);
         }
+        if let Err(e) = sqlx::query("ALTER TABLE student_documents ADD COLUMN IF NOT EXISTS file_data BYTEA;")
+            .execute(&pool)
+            .await
+        {
+            tracing::warn!("Notice on student_documents.file_data column check: {:?}", e);
+        }
         if let Err(e) = sqlx::query(
             "ALTER TABLE academic_years ADD COLUMN IF NOT EXISTS current_semester SMALLINT NOT NULL DEFAULT 1, ADD COLUMN IF NOT EXISTS report_date DATE;"
         )

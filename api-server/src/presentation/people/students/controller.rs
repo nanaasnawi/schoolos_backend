@@ -59,6 +59,10 @@ pub fn student_routes() -> Router<ApplicationContext> {
         .route("/documents/rekap-rombel", get(super::documents::get_rekap_rombel))
         .route("/documents/broadcast-reminder", post(super::documents::broadcast_document_reminder))
         .route(
+            "/documents/{doc_id}/file",
+            get(super::documents::stream_student_document_file),
+        )
+        .route(
             "/documents/{doc_id}/verify",
             patch(super::documents::verify_student_document)
                 .post(super::documents::verify_student_document),
