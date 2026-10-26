@@ -34,6 +34,10 @@ pub fn auth_routes(context: ApplicationContext) -> Router<ApplicationContext> {
         .route("/refresh", post(refresh))
         .route("/register", post(register))
         .route("/avatar/{id}", axum::routing::get(get_user_avatar))
+        .route(
+            "/documents/{id}/file",
+            axum::routing::get(super::super::people::students::documents::stream_student_document_file),
+        )
         .merge(
             Router::new()
                 .route("/me", axum::routing::get(get_me))

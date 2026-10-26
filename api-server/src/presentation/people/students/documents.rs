@@ -219,14 +219,16 @@ pub async fn build_student_dossier_response(
                 rejected_count += 1;
             }
 
+            let doc_id: Uuid = r.get("id");
+            let file_url = Some(format!("/api/v1/auth/documents/{doc_id}/file"));
             items.push(DocumentItemDto {
-                id: Some(r.get("id")),
+                id: Some(doc_id),
                 document_type: spec.doc_type.to_string(),
                 label: spec.label.to_string(),
                 description: spec.description.to_string(),
                 is_required: spec.is_required,
                 status,
-                file_url: Some(r.get("file_url")),
+                file_url,
                 file_name: Some(r.get("file_name")),
                 file_size_bytes: Some(r.get("file_size_bytes")),
                 mime_type: Some(r.get("mime_type")),
@@ -359,6 +361,97 @@ pub async fn get_my_documents(
     Ok(Json(ApiResponse::success(dossier, req_ctx.correlation_id.clone())))
 }
 
+/// GET /api/v1/auth/documents/:id/file
+/// Stream student document file directly from PostgreSQL BYTEA or local disk cache
+pub async fn stream_student_document_file(
+    State(ctx): State<ApplicationContext>,
+    Path(doc_id): Path<Uuid>,
+) -> Result<axum::response::Response, ApiError> {
+    let row = sqlx::query(
+        "SELECT file_data, file_url, file_name, mime_type FROM student_documents WHERE id = $1",
+    )
+    .bind(doc_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &Uuid::new_v4().to_string(),
+        )
+    })?;
+
+    if let Some(r) = row {
+        let file_data: Option<Vec<u8>> = r.try_get("file_data").ok().flatten();
+        let mime_type: String = r.try_get("mime_type").unwrap_or_else(|_| "application/pdf".to_string());
+        let file_name: String = r.try_get("file_name").unwrap_or_else(|_| "dokumen".to_string());
+
+        if let Some(bytes) = file_data {
+            if !bytes.is_empty() {
+                // Background cache to disk if possible
+                let uploads_dir = std::path::PathBuf::from("uploads").join("documents");
+                let _ = tokio::fs::create_dir_all(&uploads_dir).await;
+                if let Ok(furl) = r.try_get::<String, _>("file_url") {
+                    if let Some(fname) = furl.strip_prefix("/uploads/documents/") {
+                        let disk_path = uploads_dir.join(fname);
+                        let _ = tokio::fs::write(&disk_path, &bytes).await;
+                    }
+                }
+
+                let resp = axum::response::Response::builder()
+                    .status(axum::http::StatusCode::OK)
+                    .header(axum::http::header::CONTENT_TYPE, mime_type)
+                    .header(
+                        axum::http::header::CONTENT_DISPOSITION,
+                        format!("inline; filename=\"{file_name}\""),
+                    )
+                    .header(axum::http::header::CACHE_CONTROL, "public, max-age=86400")
+                    .body(axum::body::Body::from(bytes))
+                    .map_err(|e| {
+                        ApiError::new(
+                            school_core::common::error::ApplicationError::Internal(e.to_string()),
+                            &Uuid::new_v4().to_string(),
+                        )
+                    })?;
+                return Ok(resp);
+            }
+        }
+
+        // Fallback: check disk
+        if let Ok(furl) = r.try_get::<String, _>("file_url") {
+            let relative_path = furl.trim_start_matches('/');
+            let disk_path = std::path::PathBuf::from(relative_path);
+            if let Ok(bytes) = tokio::fs::read(&disk_path).await {
+                let resp = axum::response::Response::builder()
+                    .status(axum::http::StatusCode::OK)
+                    .header(axum::http::header::CONTENT_TYPE, mime_type)
+                    .header(
+                        axum::http::header::CONTENT_DISPOSITION,
+                        format!("inline; filename=\"{file_name}\""),
+                    )
+                    .header(axum::http::header::CACHE_CONTROL, "public, max-age=86400")
+                    .body(axum::body::Body::from(bytes))
+                    .map_err(|e| {
+                        ApiError::new(
+                            school_core::common::error::ApplicationError::Internal(e.to_string()),
+                            &Uuid::new_v4().to_string(),
+                        )
+                    })?;
+                return Ok(resp);
+            }
+        }
+    }
+
+    Err(ApiError::new(
+        school_core::common::error::ApplicationError::NotFound(
+            school_core::common::error_code::ErrorCode::StudentNotFound,
+            "Berkas dokumen tidak ditemukan di server".to_string(),
+        ),
+        &Uuid::new_v4().to_string(),
+    ))
+}
+
 /// Helper to save uploaded document file and update database
 pub async fn process_document_upload(
     pool: &sqlx::PgPool,
@@ -383,6 +476,7 @@ pub async fn process_document_upload(
     let mut file_name: Option<String> = None;
     let mut file_size: i64 = 0;
     let mut mime_type: Option<String> = None;
+    let mut file_bytes_data: Option<Vec<u8>> = None;
 
     while let Some(field) = multipart.next_field().await.map_err(|e| {
         ApiError::new(
@@ -460,6 +554,7 @@ pub async fn process_document_upload(
                 )
             })?;
 
+            file_bytes_data = Some(bytes.to_vec());
             file_url = Some(format!("/uploads/documents/{unique_file}"));
         }
     }
@@ -489,20 +584,21 @@ pub async fn process_document_upload(
     let fname = file_name.unwrap_or_else(|| format!("{dtype}.jpg"));
     let fmime = mime_type.unwrap_or_else(|| "image/jpeg".to_string());
 
-    // Insert or update on conflict (tenant_id, student_id, document_type)
+    // Insert or update on conflict (tenant_id, student_id, document_type) with file_data BYTEA persistence
     let saved_row = sqlx::query(
         r#"
         INSERT INTO student_documents (
             tenant_id, student_id, document_type, file_url, file_name, file_size_bytes,
-            mime_type, verification_status, rejection_reason, notes, updated_at
+            mime_type, file_data, verification_status, rejection_reason, notes, updated_at
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, 'PENDING', NULL, $8, NOW()
+            $1, $2, $3, $4, $5, $6, $7, $8, 'PENDING', NULL, $9, NOW()
         )
         ON CONFLICT (tenant_id, student_id, document_type) DO UPDATE SET
             file_url = EXCLUDED.file_url,
             file_name = EXCLUDED.file_name,
             file_size_bytes = EXCLUDED.file_size_bytes,
             mime_type = EXCLUDED.mime_type,
+            file_data = EXCLUDED.file_data,
             verification_status = 'PENDING',
             rejection_reason = NULL,
             verified_by = NULL,
@@ -519,6 +615,7 @@ pub async fn process_document_upload(
     .bind(&fname)
     .bind(file_size)
     .bind(&fmime)
+    .bind(file_bytes_data)
     .bind(&notes)
     .fetch_one(pool)
     .await
@@ -531,14 +628,17 @@ pub async fn process_document_upload(
         )
     })?;
 
+    let saved_id: Uuid = saved_row.get("id");
+    let stream_url = format!("/api/v1/auth/documents/{saved_id}/file");
+
     Ok(DocumentItemDto {
-        id: Some(saved_row.get("id")),
+        id: Some(saved_id),
         document_type: dtype.clone(),
         label: dtype.clone(),
         description: String::new(),
         is_required: true,
         status: saved_row.get("verification_status"),
-        file_url: Some(furl),
+        file_url: Some(stream_url),
         file_name: Some(fname),
         file_size_bytes: Some(file_size),
         mime_type: Some(fmime),
