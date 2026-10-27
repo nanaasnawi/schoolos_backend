@@ -220,7 +220,10 @@ pub async fn build_student_dossier_response(
             }
 
             let doc_id: Uuid = r.get("id");
-            let file_url = Some(format!("/api/v1/auth/documents/{doc_id}/file"));
+            let updated_ts: i64 = r.try_get::<chrono::DateTime<Utc>, _>("updated_at")
+                .map(|t| t.timestamp())
+                .unwrap_or_else(|_| Utc::now().timestamp());
+            let file_url = Some(format!("/api/v1/auth/documents/{doc_id}/file?v={updated_ts}"));
             items.push(DocumentItemDto {
                 id: Some(doc_id),
                 document_type: spec.doc_type.to_string(),
@@ -406,7 +409,9 @@ pub async fn stream_student_document_file(
                         axum::http::header::CONTENT_DISPOSITION,
                         format!("inline; filename=\"{file_name}\""),
                     )
-                    .header(axum::http::header::CACHE_CONTROL, "public, max-age=86400")
+                    .header(axum::http::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
+                    .header(axum::http::header::PRAGMA, "no-cache")
+                    .header(axum::http::header::EXPIRES, "0")
                     .body(axum::body::Body::from(bytes))
                     .map_err(|e| {
                         ApiError::new(
@@ -430,7 +435,9 @@ pub async fn stream_student_document_file(
                         axum::http::header::CONTENT_DISPOSITION,
                         format!("inline; filename=\"{file_name}\""),
                     )
-                    .header(axum::http::header::CACHE_CONTROL, "public, max-age=86400")
+                    .header(axum::http::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
+                    .header(axum::http::header::PRAGMA, "no-cache")
+                    .header(axum::http::header::EXPIRES, "0")
                     .body(axum::body::Body::from(bytes))
                     .map_err(|e| {
                         ApiError::new(
