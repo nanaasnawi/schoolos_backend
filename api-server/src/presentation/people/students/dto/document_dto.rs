@@ -55,6 +55,7 @@ pub struct StudentDocumentSummaryRow {
     pub program_tier: String,
     pub is_complete: bool,
     pub completeness_percentage: f64,
+    pub formulir_status: String,
     pub kk_status: String,
     pub akta_status: String,
     pub ijazah_status: String,
