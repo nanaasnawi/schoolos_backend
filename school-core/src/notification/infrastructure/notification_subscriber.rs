@@ -123,6 +123,8 @@ impl NotificationEventSubscriber {
             info!(
                 component = "notification_engine",
                 "Notification Engine started — listening for domain events"
+            );
+
             loop {
                 let event = match receiver.recv().await {
                     Ok(e) => e,
