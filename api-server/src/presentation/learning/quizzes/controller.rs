@@ -598,7 +598,7 @@ async fn list(
                     teacher_name: r.get("teacher_name"),
                     session_id: r.get("session_id"),
                     exam_mode: r.get::<Option<String>, _>("exam_mode").or_else(|| Some("HOMEWORK_QUIZ".to_string())),
-                    exam_token: r.get("exam_token"),
+                    exam_token: None,
                     token_expires_at: r.get("token_expires_at"),
                     max_token_attempts: r.get::<Option<i32>, _>("max_token_attempts").or(Some(5)),
                     student_attempt_status,
@@ -747,10 +747,39 @@ async fn get_by_id(
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
+    let is_student_or_parent = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            let has_staff_role = a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("guru")
+                    || n.contains("teacher")
+                    || n.contains("admin")
+                    || n.contains("kepala")
+                    || n.contains("operator")
+            });
+            !has_staff_role
+                && a.roles.iter().any(|r| {
+                    let n = r.name.to_lowercase();
+                    n.contains("siswa")
+                        || n.contains("student")
+                        || n.contains("murid")
+                        || n.contains("wali")
+                        || n.contains("orang tua")
+                        || n.contains("parent")
+                })
+        })
+        .unwrap_or(true);
+
     let mut resp = QuizResponse::from(quiz);
     resp.session_id = meta.get("session_id");
     resp.exam_mode = meta.get::<Option<String>, _>("exam_mode").or_else(|| Some("HOMEWORK_QUIZ".to_string()));
-    resp.exam_token = meta.get("exam_token");
+    resp.exam_token = if is_student_or_parent {
+        None
+    } else {
+        meta.get("exam_token")
+    };
     resp.token_expires_at = meta.get("token_expires_at");
     resp.max_token_attempts = meta.get::<Option<i32>, _>("max_token_attempts").or(Some(5));
     resp.class_id = meta_class_id;
@@ -1103,8 +1132,9 @@ async fn publish(
 
     // ── FCM + in-app untuk KUIS/CBT yang di-publish ──
     {
-        let meta = sqlx::query("SELECT tenant_id, class_id FROM quizzes WHERE id = $1")
+        let meta = sqlx::query("SELECT tenant_id, class_id FROM quizzes WHERE id = $1 AND tenant_id = $2")
             .bind(id)
+            .bind(req_ctx.tenant_id)
             .fetch_optional(&ctx.pool)
             .await
             .ok()
@@ -1152,10 +1182,11 @@ async fn publish(
                 SELECT sib.id FROM classes c
                 JOIN classes sib ON sib.tenant_id = c.tenant_id
                      AND (sib.id = c.id OR (sib.tingkat IS NOT NULL AND sib.tingkat != '' AND sib.tingkat = c.tingkat))
-                WHERE c.id = $1
+                WHERE c.id = $1 AND c.tenant_id = $2
                 "#
             )
             .bind(class_uuid)
+            .bind(req_ctx.tenant_id)
             .fetch_all(&ctx.pool)
             .await
             .unwrap_or_else(|_| vec![class_uuid]);
@@ -1379,7 +1410,7 @@ async fn start_attempt(
     })?;
 
     let meta = sqlx::query(
-        "SELECT tenant_id, class_id, teacher_id, created_by FROM quizzes WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+        "SELECT tenant_id, class_id, teacher_id, created_by, exam_token, token_expires_at FROM quizzes WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
     )
     .bind(id)
     .bind(req_ctx.tenant_id)
@@ -1407,6 +1438,9 @@ async fn start_attempt(
     let meta_class_id: Option<Uuid> = meta.get("class_id");
     let meta_teacher_id: Option<Uuid> = meta.get("teacher_id");
     let meta_created_by: Option<Uuid> = meta.get("created_by");
+    let meta_exam_token: Option<String> = meta.try_get("exam_token").ok().flatten();
+    let meta_token_expires_at: Option<chrono::DateTime<chrono::Utc>> =
+        meta.try_get("token_expires_at").ok().flatten();
 
     // Verify student belongs to the class of this quiz
     crate::authorization_helpers::AuthorizationScope::verify_learning_resource_access(
@@ -1457,6 +1491,76 @@ async fn start_attempt(
             ),
             &req_ctx.request_id,
         ));
+    }
+
+    // Jika kuis memiliki exam_token aktif, wajibkan verifikasi token terlebih dahulu
+    if let Some(ref expected_token) = meta_exam_token {
+        let clean_expected = expected_token.trim();
+        if !clean_expected.is_empty() {
+            if let Some(exp) = meta_token_expires_at {
+                if exp < chrono::Utc::now() {
+                    return Err(ApiError::new(
+                        school_core::common::error::ApplicationError::Domain(
+                            school_core::common::error::DomainError::Validation(
+                                "Token ujian telah kedaluwarsa. Hubungi pengawas atau guru untuk memperbarui token ujian.".to_string(),
+                            ),
+                        ),
+                        &req_ctx.request_id,
+                    ));
+                }
+            }
+
+            let provided_matches = payload
+                .exam_token
+                .as_deref()
+                .map(|t| t.trim().eq_ignore_ascii_case(clean_expected))
+                .unwrap_or(false);
+
+            let previously_verified = if provided_matches {
+                let _ = sqlx::query(
+                    r#"
+                    INSERT INTO quiz_token_attempts (id, tenant_id, quiz_id, student_id, failed_attempts, locked_until, last_attempt_at)
+                    VALUES (gen_random_uuid(), $1, $2, $3, 0, NULL, NOW())
+                    ON CONFLICT (tenant_id, quiz_id, student_id)
+                    DO UPDATE SET failed_attempts = 0, locked_until = NULL, last_attempt_at = NOW()
+                    "#,
+                )
+                .bind(req_ctx.tenant_id)
+                .bind(id)
+                .bind(effective_student_id)
+                .execute(&ctx.pool)
+                .await;
+                true
+            } else {
+                sqlx::query_scalar::<_, bool>(
+                    r#"
+                    SELECT EXISTS(
+                        SELECT 1 FROM quiz_token_attempts
+                        WHERE tenant_id = $1 AND quiz_id = $2 AND student_id = $3
+                          AND failed_attempts = 0 AND last_attempt_at IS NOT NULL
+                          AND (locked_until IS NULL OR locked_until <= NOW())
+                    )
+                    "#,
+                )
+                .bind(req_ctx.tenant_id)
+                .bind(id)
+                .bind(effective_student_id)
+                .fetch_one(&ctx.pool)
+                .await
+                .unwrap_or(false)
+            };
+
+            if !previously_verified {
+                return Err(ApiError::new(
+                    school_core::common::error::ApplicationError::Domain(
+                        school_core::common::error::DomainError::Validation(
+                            "Token ujian wajib diverifikasi terlebih dahulu sebelum memulai pengerjaan kuis/CBT.".to_string(),
+                        ),
+                    ),
+                    &req_ctx.request_id,
+                ));
+            }
+        }
     }
 
     let command = StartAttemptCommand {
@@ -1601,13 +1705,15 @@ async fn submit_attempt(
             ans.text_answer,
             ans.points_earned
         FROM attempt_answers ans
+        JOIN quiz_attempts qa ON qa.id = ans.attempt_id
         JOIN quiz_questions q ON q.id = ans.question_id
         LEFT JOIN quiz_choices c ON c.id = ans.chosen_choice_id
-        WHERE ans.attempt_id = $1
+        WHERE ans.attempt_id = $1 AND qa.tenant_id = $2
         ORDER BY q.order_index ASC, q.created_at ASC
         "#,
     )
     .bind(attempt_id)
+    .bind(req_ctx.tenant_id)
     .fetch_all(&ctx.pool)
     .await
     .unwrap_or_default();
@@ -1659,15 +1765,18 @@ async fn grade_attempt(
             for ag in answer_grades {
                 let _ = sqlx::query(
                     r#"
-                    UPDATE attempt_answers 
+                    UPDATE attempt_answers ans
                     SET points_earned = $1, text_answer = COALESCE(text_answer, $2)
-                    WHERE attempt_id = $3 AND question_id = $4
+                    FROM quiz_attempts qa
+                    WHERE ans.attempt_id = $3 AND ans.question_id = $4
+                      AND qa.id = ans.attempt_id AND qa.tenant_id = $5
                     "#,
                 )
                 .bind(ag.points_earned)
                 .bind(&ag.teacher_feedback)
                 .bind(attempt_id)
                 .bind(ag.question_id)
+                .bind(req_ctx.tenant_id)
                 .execute(&ctx.pool)
                 .await;
             }
@@ -1677,18 +1786,25 @@ async fn grade_attempt(
             manual_score
         } else {
             sqlx::query_scalar::<_, i32>(
-                r#"SELECT COALESCE(SUM(points_earned), 0)::int FROM attempt_answers WHERE attempt_id = $1"#,
+                r#"
+                SELECT COALESCE(SUM(ans.points_earned), 0)::int
+                FROM attempt_answers ans
+                JOIN quiz_attempts qa ON qa.id = ans.attempt_id
+                WHERE ans.attempt_id = $1 AND qa.tenant_id = $2
+                "#,
             )
             .bind(attempt_id)
+            .bind(req_ctx.tenant_id)
             .fetch_one(&ctx.pool)
             .await
             .unwrap_or(0)
         };
 
         let pass_info = sqlx::query(
-            "SELECT q.passing_score, q.max_score FROM quizzes q JOIN quiz_attempts a ON a.quiz_id = q.id WHERE a.id = $1"
+            "SELECT q.passing_score, q.max_score FROM quizzes q JOIN quiz_attempts a ON a.quiz_id = q.id WHERE a.id = $1 AND a.tenant_id = $2 AND q.tenant_id = $2"
         )
         .bind(attempt_id)
+        .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await
         .ok()
@@ -1707,12 +1823,13 @@ async fn grade_attempt(
             r#"
             UPDATE quiz_attempts 
             SET score = $1, passed = $2, status = 'graded', completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
-            WHERE id = $3
+            WHERE id = $3 AND tenant_id = $4
             "#
         )
         .bind(new_score)
         .bind(is_passed)
         .bind(attempt_id)
+        .bind(req_ctx.tenant_id)
         .execute(&ctx.pool)
         .await;
     } else {
@@ -1724,9 +1841,10 @@ async fn grade_attempt(
     {
         use sqlx::Row;
         if let Some(row) = sqlx::query(
-            "SELECT q.tenant_id AS tenant_id, q.title AS title, s.user_id AS user_id, st.full_name AS sname, a.score AS score FROM quiz_attempts a JOIN quizzes q ON q.id = a.quiz_id JOIN students s ON s.id = a.student_id JOIN students st ON st.id = a.student_id WHERE a.id = $1 LIMIT 1",
+            "SELECT q.tenant_id AS tenant_id, q.title AS title, s.user_id AS user_id, st.full_name AS sname, a.score AS score FROM quiz_attempts a JOIN quizzes q ON q.id = a.quiz_id JOIN students s ON s.id = a.student_id JOIN students st ON st.id = a.student_id WHERE a.id = $1 AND a.tenant_id = $2 LIMIT 1",
         )
         .bind(attempt_id)
+        .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await
         .ok()
@@ -1776,11 +1894,12 @@ async fn grade_attempt(
         JOIN quizzes q ON q.id = a.quiz_id
         LEFT JOIN students s ON s.id = a.student_id OR s.user_id = a.student_id
         LEFT JOIN users u ON u.id = a.student_id OR u.id = s.user_id
-        WHERE a.id = $1
+        WHERE a.id = $1 AND a.tenant_id = $2
         LIMIT 1
         "#,
     )
     .bind(attempt_id)
+    .bind(req_ctx.tenant_id)
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
@@ -2041,13 +2160,15 @@ async fn get_attempt_by_id(
             ans.text_answer,
             ans.points_earned
         FROM attempt_answers ans
+        JOIN quiz_attempts qa ON qa.id = ans.attempt_id
         JOIN quiz_questions q ON q.id = ans.question_id
         LEFT JOIN quiz_choices c ON c.id = ans.chosen_choice_id
-        WHERE ans.attempt_id = $1
+        WHERE ans.attempt_id = $1 AND qa.tenant_id = $2
         ORDER BY q.order_index ASC, q.created_at ASC
         "#,
     )
     .bind(attempt_id)
+    .bind(req_ctx.tenant_id)
     .fetch_all(&ctx.pool)
     .await
     .unwrap_or_default();
@@ -2134,12 +2255,14 @@ async fn get_questions(
 
     let questions = sqlx::query!(
         r#"
-        SELECT id, question_text, question_type, points, order_index
-        FROM quiz_questions
-        WHERE quiz_id = $1
-        ORDER BY order_index ASC
+        SELECT q.id, q.question_text, q.question_type, q.points, q.order_index
+        FROM quiz_questions q
+        JOIN quizzes qz ON qz.id = q.quiz_id
+        WHERE q.quiz_id = $1 AND qz.tenant_id = $2
+        ORDER BY q.order_index ASC
         "#,
-        id
+        id,
+        req_ctx.tenant_id
     )
     .fetch_all(&ctx.pool)
     .await
@@ -2214,7 +2337,33 @@ async fn add_question(
         )
     })?;
 
-    let q_id = Uuid::new_v4();
+    let quiz_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM quizzes WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL)",
+    )
+    .bind(id)
+    .bind(req_ctx.tenant_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    if !quiz_exists {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::NotFound(
+                school_core::common::error_code::ErrorCode::QuizNotFound,
+                format!("Quiz {} not found", id),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
+    let q_id = Uuid::now_v7();
     let q_type = payload
         .question_type
         .unwrap_or_else(|| "multiple_choice".to_string());
@@ -2248,7 +2397,7 @@ async fn add_question(
         let mut order_indexes = Vec::with_capacity(choice_count);
 
         for (idx, c) in choices.into_iter().enumerate() {
-            choice_ids.push(Uuid::new_v4());
+            choice_ids.push(Uuid::now_v7());
             choice_texts.push(c.choice_text);
             is_corrects.push(c.is_correct.unwrap_or(false));
             order_indexes.push(c.order_index.unwrap_or(idx as i32 + 1));
@@ -2289,10 +2438,11 @@ async fn add_question(
         UPDATE quizzes 
         SET questions_count = (SELECT COUNT(*) FROM quiz_questions WHERE quiz_id = $1),
             max_score = (SELECT COALESCE(SUM(points), 0) FROM quiz_questions WHERE quiz_id = $1)
-        WHERE id = $1
+        WHERE id = $1 AND tenant_id = $2
         "#,
     )
     .bind(id)
+    .bind(req_ctx.tenant_id)
     .execute(&ctx.pool)
     .await;
 

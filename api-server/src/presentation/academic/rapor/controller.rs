@@ -5,6 +5,7 @@ use axum::{
 };
 use chrono::Datelike;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -25,8 +26,31 @@ pub struct ReportCardsQuery {
     pub semester: Option<i16>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct VerifyRaporQuery {
+    pub token: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct VerifyReportCardResponse {
+    pub verified: bool,
+    pub token: String,
+    pub student_name: String,
+    pub nisn: String,
+    pub class_name: String,
+    pub school_name: String,
+    pub npsn: String,
+    pub headmaster_name: String,
+    pub academic_year: String,
+    pub semester_label: String,
+    pub promotion_status: String,
+    pub signature_hash: String,
+}
+
 pub fn report_card_routes() -> Router<ApplicationContext> {
-    Router::new().route("/cards", get(get_report_cards))
+    Router::new()
+        .route("/cards", get(get_report_cards))
+        .route("/verify", get(verify_rapor_token))
 }
 
 fn get_curriculum_phase(class_name: &str) -> &'static str {
@@ -485,12 +509,13 @@ pub async fn get_report_cards(
         FROM gradebook_snapshots
         WHERE tenant_id = $1
           AND academic_year = $2
-          AND semester = $3
+          AND (semester = $3 OR UPPER(semester) = $4)
         "#,
     )
     .bind(req_ctx.tenant_id)
     .bind(&active_year_name)
     .bind(&semester_label)
+    .bind(if active_semester == 2 { "EVEN" } else { "ODD" })
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
@@ -601,19 +626,6 @@ pub async fn get_report_cards(
     // 6. Build StudentReportCardDto list
     let mut cards = Vec::with_capacity(students.len());
 
-    let default_extracurricular = vec![
-        ExtracurricularDto {
-            name: "Pramuka Penegak/Penggalang".to_string(),
-            predicate: "Sangat Baik".to_string(),
-            description: "Aktif mengikuti kegiatan kepramukaan, kepemimpinan, dan bakti sosial.".to_string(),
-        },
-        ExtracurricularDto {
-            name: "Keterampilan Komputer & Digital".to_string(),
-            predicate: "Baik".to_string(),
-            description: "Mampu mengoperasikan aplikasi perkantoran, desain grafis dasar, dan internet sehat.".to_string(),
-        },
-    ];
-
     for s in students {
         let cls_name = s.class_name.unwrap_or_else(|| "Kelas Umum".to_string());
         let phase = get_curriculum_phase(&cls_name).to_string();
@@ -645,11 +657,12 @@ pub async fn get_report_cards(
             active_semester,
         );
 
-        let qr_token = format!(
-            "QR-{}-{}-2026-VERIFIED",
-            school_npsn,
-            s.nisn
-        );
+        let secret = std::env::var("JWT_SECRET")
+            .unwrap_or_else(|_| "schoolos_rapor_secret_key_default".to_string());
+        let mut hasher = Sha256::new();
+        hasher.update(format!("{}:{}:{}:{}:{}", secret, req_ctx.tenant_id, s.student_id, active_year_name, active_semester));
+        let hmac_hex = hex::encode(&hasher.finalize()[..10]);
+        let qr_token = format!("RPR-{}.{}.{}", s.student_id, active_semester, hmac_hex);
 
         let card_status = if has_scores {
             "SIAP_CETAK".to_string()
@@ -680,7 +693,7 @@ pub async fn get_report_cards(
             guardian_name: s.guardian_name.unwrap_or_else(|| "-".to_string()),
             subjects,
             attendance,
-            extracurricular: if has_scores { default_extracurricular.clone() } else { Vec::new() },
+            extracurricular: Vec::new(),
             p5_character_note: if has_scores {
                 "Peserta didik aktif bergotong royong, memiliki daya nalar kritis yang baik, dan menunjukkan sikap mandiri dalam menyelesaikan tugas pembelajaran.".to_string()
             } else {
@@ -710,4 +723,152 @@ pub async fn get_report_cards(
     };
 
     Ok(Json(ApiResponse::success(response, req_ctx.request_id)))
+}
+
+pub async fn verify_rapor_token(
+    State(ctx): State<ApplicationContext>,
+    Query(query): Query<VerifyRaporQuery>,
+) -> Result<Json<ApiResponse<VerifyReportCardResponse>>, ApiError> {
+    let token = query.token.trim();
+    if !token.starts_with("RPR-") {
+        return Err(ApiError::new(
+            ApplicationError::Validation(
+                school_core::common::error_code::ErrorCode::InvalidCredentials,
+                "Format token e-Rapor tidak valid".to_string(),
+            ),
+            &Uuid::now_v7().to_string(),
+        ));
+    }
+
+    let parts: Vec<&str> = token[4..].split('.').collect();
+    if parts.len() != 3 {
+        return Err(ApiError::new(
+            ApplicationError::Validation(
+                school_core::common::error_code::ErrorCode::InvalidCredentials,
+                "Struktur token e-Rapor tidak sah".to_string(),
+            ),
+            &Uuid::now_v7().to_string(),
+        ));
+    }
+
+    let student_id = match Uuid::parse_str(parts[0]) {
+        Ok(id) => id,
+        Err(_) => {
+            return Err(ApiError::new(
+                ApplicationError::Validation(
+                    school_core::common::error_code::ErrorCode::InvalidCredentials,
+                    "Student ID dalam token e-Rapor tidak valid".to_string(),
+                ),
+                &Uuid::now_v7().to_string(),
+            ));
+        }
+    };
+
+    let sem_str = parts[1];
+    let given_sig = parts[2];
+
+    let student_record = sqlx::query(
+        r#"
+        SELECT 
+            s.id AS student_id,
+            s.tenant_id,
+            s.nisn,
+            s.full_name,
+            COALESCE(c.name, 'Kelas Umum') AS class_name,
+            COALESCE(sch.name, 'Satuan Pendidikan') AS school_name,
+            COALESCE(sch.npsn, '-') AS npsn,
+            COALESCE(sch.principal_name, '-') AS headmaster_name,
+            COALESCE(ay.name, '') AS academic_year_name,
+            COALESCE(ay.current_semester, 1) AS current_semester
+        FROM students s
+        LEFT JOIN enrollments e ON e.student_id = s.id AND e.tenant_id = s.tenant_id AND UPPER(e.status) = 'ACTIVE'
+        LEFT JOIN classes c ON c.id = e.class_id AND c.tenant_id = s.tenant_id
+        LEFT JOIN schools sch ON sch.tenant_id = s.tenant_id
+        LEFT JOIN academic_years ay ON ay.tenant_id = s.tenant_id AND (
+            (e.academic_year_id IS NOT NULL AND ay.id = e.academic_year_id)
+            OR (e.academic_year_id IS NULL AND ay.is_active = true)
+        )
+        WHERE s.id = $1 AND s.deleted_at IS NULL
+        LIMIT 1
+        "#,
+    )
+    .bind(student_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)),
+            &Uuid::now_v7().to_string(),
+        )
+    })?;
+
+    let row = match student_record {
+        Some(r) => r,
+        None => {
+            return Err(ApiError::new(
+                ApplicationError::NotFound(
+                    school_core::common::error_code::ErrorCode::ResourceNotFound,
+                    "Data peserta didik tidak ditemukan dalam pangkalan data e-Rapor".to_string(),
+                ),
+                &Uuid::now_v7().to_string(),
+            ));
+        }
+    };
+
+    let tenant_id: Uuid = row.try_get("tenant_id").unwrap_or_default();
+    let nisn: String = row.try_get("nisn").unwrap_or_default();
+    let full_name: String = row.try_get("full_name").unwrap_or_default();
+    let class_name: String = row.try_get("class_name").unwrap_or_default();
+    let school_name: String = row.try_get("school_name").unwrap_or_default();
+    let npsn: String = row.try_get("npsn").unwrap_or_default();
+    let headmaster_name: String = row.try_get("headmaster_name").unwrap_or_default();
+    let academic_year_name: String = row.try_get("academic_year_name").unwrap_or_default();
+    let current_semester: i16 = row.try_get("current_semester").unwrap_or(1);
+
+    let secret = std::env::var("JWT_SECRET")
+        .unwrap_or_else(|_| "schoolos_rapor_secret_key_default".to_string());
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{}:{}:{}:{}:{}", secret, tenant_id, student_id, academic_year_name, sem_str));
+    let expected_sig = hex::encode(&hasher.finalize()[..10]);
+
+    if !expected_sig.eq_ignore_ascii_case(given_sig) {
+        return Err(ApiError::new(
+            ApplicationError::Validation(
+                school_core::common::error_code::ErrorCode::InvalidCredentials,
+                "Tanda tangan kriptografis token e-Rapor tidak cocok (dokumen diduga telah dimodifikasi)".to_string(),
+            ),
+            &Uuid::now_v7().to_string(),
+        ));
+    }
+
+    let is_even = sem_str == "2" || current_semester == 2;
+    let semester_label = if is_even {
+        "Semester 2 (Genap)".to_string()
+    } else {
+        "Semester 1 (Gasal)".to_string()
+    };
+
+    let promotion_status = if !is_even {
+        "AKTIF (Dalam Proses Pembelajaran)".to_string()
+    } else {
+        "MEMENUHI SYARAT KENAIKAN / KELULUSAN".to_string()
+    };
+
+    Ok(Json(ApiResponse::success(
+        VerifyReportCardResponse {
+            verified: true,
+            token: token.to_string(),
+            student_name: full_name,
+            nisn,
+            class_name,
+            school_name,
+            npsn,
+            headmaster_name,
+            academic_year: academic_year_name,
+            semester_label,
+            promotion_status,
+            signature_hash: given_sig.to_string(),
+        },
+        Uuid::now_v7().to_string(),
+    )))
 }

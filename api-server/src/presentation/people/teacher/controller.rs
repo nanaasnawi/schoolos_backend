@@ -144,20 +144,21 @@ async fn create(
         "{}@guru.schoolos.id",
         &teacher.id.to_string().replace('-', "")[..8]
     );
-    let default_guru_pw_hash = "$argon2id$v=19$m=65536,p=4,t=3$SnCFuF71lzKF+Cuw4svZPw$c9YgXUK8C/boJ85Pb2IEuyK1xsNP28uGdzlvvflF5ts"; // guru2565
+    let default_guru_pw_hash = crate::presentation::dapodik::sync::generate_salted_default_password_hash();
 
     if let Ok(uid) = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO users (id, tenant_id, username, email, password_hash, full_name, is_active, created_at, updated_at)
-        VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, true, NOW(), NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, true, NOW(), NOW())
         ON CONFLICT (tenant_id, email) DO UPDATE SET full_name = EXCLUDED.full_name, updated_at = NOW()
         RETURNING id
         "#,
     )
+    .bind(Uuid::now_v7())
     .bind(req_ctx.tenant_id)
     .bind(&uname)
     .bind(&user_email)
-    .bind(default_guru_pw_hash)
+    .bind(&default_guru_pw_hash)
     .bind(clean_fullname)
     .fetch_one(&ctx.pool)
     .await

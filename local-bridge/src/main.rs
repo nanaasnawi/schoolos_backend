@@ -68,9 +68,40 @@ async fn health_handler() -> impl IntoResponse {
 async fn sync_handler(
     Json(payload): Json<OnDemandSyncRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiResponse<()>>)> {
-    let cloud_url = payload
+    let configured_cloud_url = std::env::var("SCHOOLOS_CLOUD_URL")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:8000".to_string());
+
+    let cloud_url = match payload
         .cloud_url
-        .unwrap_or_else(|| "https://schoolosbackend-production.up.railway.app".to_string());
+        .as_ref()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+    {
+        Some(requested_url) => {
+            let is_localhost = requested_url.starts_with("http://localhost:")
+                || requested_url.starts_with("http://127.0.0.1:");
+            if requested_url.eq_ignore_ascii_case(&configured_cloud_url) || is_localhost {
+                requested_url
+            } else {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(ApiResponse {
+                        success: false,
+                        data: None,
+                        error: Some(
+                            "cloud_url tidak sesuai dengan konfigurasi SCHOOLOS_CLOUD_URL yang diizinkan."
+                                .to_string(),
+                        ),
+                    }),
+                ));
+            }
+        }
+        None => configured_cloud_url,
+    };
+
     let cloud_token = payload.cloud_token.unwrap_or_default();
     let dapodik_url = payload
         .dapodik_url
@@ -211,9 +242,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
 
-    // Permissive CORS layer allows requests from Web Dashboard
+    // Restrict CORS origins to trusted local dashboard and configured SCHOOLOS_WEB_ORIGIN
+    let mut allowed_origins = vec![
+        axum::http::HeaderValue::from_static("http://localhost:3000"),
+        axum::http::HeaderValue::from_static("http://127.0.0.1:3000"),
+        axum::http::HeaderValue::from_static("http://localhost:5173"),
+        axum::http::HeaderValue::from_static("http://127.0.0.1:5173"),
+    ];
+    if let Ok(extra_origins) = std::env::var("SCHOOLOS_WEB_ORIGIN") {
+        for origin in extra_origins.split(',') {
+            let trimmed = origin.trim();
+            if !trimmed.is_empty() {
+                if let Ok(val) = axum::http::HeaderValue::from_str(trimmed) {
+                    allowed_origins.push(val);
+                }
+            }
+        }
+    }
+
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(allowed_origins)
         .allow_methods(Any)
         .allow_headers(Any);
 

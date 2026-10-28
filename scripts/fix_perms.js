@@ -1,5 +1,5 @@
-const { Client } = require('pg');
-const client = new Client('postgres://school_admin:secretpassword@localhost:5433/school_os');
+﻿const { Client } = require('pg');
+const client = new Client((process.env.DATABASE_URL || 'postgres://school_admin@localhost:5433/school_os'));
 client.connect().then(async () => {
   const perms = [
     'Student.Read', 'Student.Create', 'Student.Update', 'Student.Delete',

@@ -253,9 +253,9 @@ async fn analyze_student(
     // 1. Fetch student basic info
     let student_row = sqlx::query(
         r#"
-        SELECT s.id, s.name, COALESCE(c.name, 'Kelas Umum') as class_name
+        SELECT s.id, s.full_name as name, COALESCE(c.name, 'Kelas Umum') as class_name
         FROM students s
-        LEFT JOIN enrollments e ON e.student_id = s.id AND e.status = 'ACTIVE'
+        LEFT JOIN enrollments e ON e.student_id = s.id AND (e.status = 'ACTIVE' OR e.status = 'Active')
         LEFT JOIN classes c ON c.id = e.class_id
         WHERE s.id = $1 AND s.tenant_id = $2 AND s.deleted_at IS NULL
         LIMIT 1
@@ -284,8 +284,8 @@ async fn analyze_student(
         r#"
         SELECT 
             COUNT(*) as total_days,
-            COUNT(*) FILTER (WHERE status = 'PRESENT') as present_days
-        FROM student_attendances
+            COUNT(*) FILTER (WHERE UPPER(status) = 'PRESENT' OR UPPER(status) = 'HADIR') as present_days
+        FROM session_attendances
         WHERE student_id = $1 AND tenant_id = $2
         "#
     )
@@ -311,10 +311,11 @@ async fn analyze_student(
         r#"
         SELECT COALESCE(AVG(score), 75.0) as avg_score
         FROM quiz_attempts
-        WHERE student_id = $1 AND is_submitted = true
+        WHERE student_id = $1 AND tenant_id = $2 AND status IN ('submitted', 'graded')
         "#
     )
     .bind(payload.student_id)
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .ok()
@@ -326,11 +327,12 @@ async fn analyze_student(
     let uncompleted_row = sqlx::query(
         r#"
         SELECT COUNT(*) as uncompleted_count
-        FROM reading_progress
-        WHERE student_id = $1 AND is_completed = false
+        FROM student_material_completions
+        WHERE student_id = $1 AND tenant_id = $2 AND is_completed = false
         "#
     )
     .bind(payload.student_id)
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .ok()

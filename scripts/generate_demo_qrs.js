@@ -1,4 +1,4 @@
-// generate_demo_qrs.js
+﻿// generate_demo_qrs.js
 // Script to generate QR Badge tokens for sample users and save PNG files in scratch/qrcodes
 
 const { Client } = require('pg');
@@ -13,7 +13,7 @@ if (!fs.existsSync(outDir)) {
 
 
 const client = new Client({
-  connectionString: 'postgres://school_admin:secretpassword@localhost:5433/school_os'
+  connectionString: (process.env.DATABASE_URL || 'postgres://school_admin@localhost:5433/school_os')
 });
 
 async function main() {
@@ -73,7 +73,7 @@ async function main() {
           light: '#FFFFFF'
         }
       });
-      console.log(`✅ Generated PNG QR: ${pngPath}`);
+      console.log(`âœ… Generated PNG QR: ${pngPath}`);
     }
 
     generatedList.push({

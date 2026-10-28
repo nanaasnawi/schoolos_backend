@@ -1,7 +1,7 @@
-const { Client } = require('pg');
+﻿const { Client } = require('pg');
 
 async function auditSubjects() {
-  const client = new Client('postgres://school_admin:secretpassword@localhost:5433/school_os');
+  const client = new Client((process.env.DATABASE_URL || 'postgres://school_admin@localhost:5433/school_os'));
   await client.connect();
 
   const cols = await client.query(`

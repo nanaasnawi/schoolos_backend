@@ -133,6 +133,34 @@ pub fn school_routes() -> Router<ApplicationContext> {
         .route("/{id}", get(get_school).put(update_school))
 }
 
+fn is_school_admin_actor(req_ctx: &RequestContext) -> bool {
+    req_ctx
+        .actor
+        .as_ref()
+        .map(|actor| {
+            actor.roles.iter().any(|r| {
+                let lower = r.trim().to_lowercase();
+                lower.contains("admin")
+                    || lower.contains("operator")
+                    || lower.contains("kepala")
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn require_school_admin(req_ctx: &RequestContext) -> Result<(), ApiError> {
+    if !is_school_admin_actor(req_ctx) {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthInsufficientPermissions,
+                "Hanya Administrator, Operator, atau Kepala Sekolah yang dapat mengubah profil sekolah".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+    Ok(())
+}
+
 /// Retrieve current tenant school profile from PostgreSQL database.
 #[utoipa::path(
     get,
@@ -167,7 +195,7 @@ pub async fn get_current_school_profile(
     .await
     .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
 
-    let response_data = if let Some(ref r) = row {
+    let mut response_data = if let Some(ref r) = row {
         let raw_name: String = r.get("name");
         let final_school_name = if raw_name.trim().is_empty() {
             sqlx::query_scalar::<_, String>("SELECT name FROM tenants WHERE id = $1")
@@ -220,6 +248,10 @@ pub async fn get_current_school_profile(
         row_to_school_response(&inserted)
     };
 
+    if !is_school_admin_actor(&req_ctx) {
+        response_data.dapodik_token = None;
+    }
+
     Ok(Json(ApiResponse::success(
         response_data,
         req_ctx.request_id,
@@ -245,6 +277,8 @@ pub async fn update_current_school_profile(
     req_ctx: RequestContext,
     Json(payload): Json<UpdateSchoolRequest>,
 ) -> Result<Json<ApiResponse<SchoolResponse>>, ApiError> {
+    require_school_admin(&req_ctx)?;
+
     let existing = sqlx::query(
         r#"SELECT id FROM schools WHERE tenant_id = $1 AND deleted_at IS NULL LIMIT 1"#,
     )
@@ -392,7 +426,10 @@ pub async fn get_school(
     .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
 
     if let Some(ref r) = row {
-        let response_data = row_to_school_response(r);
+        let mut response_data = row_to_school_response(r);
+        if !is_school_admin_actor(&req_ctx) {
+            response_data.dapodik_token = None;
+        }
         return Ok(Json(ApiResponse::success(
             response_data,
             req_ctx.request_id,
@@ -412,5 +449,6 @@ pub async fn update_school(
     Path(_id): Path<Uuid>,
     Json(payload): Json<UpdateSchoolRequest>,
 ) -> Result<Json<ApiResponse<SchoolResponse>>, ApiError> {
+    require_school_admin(&req_ctx)?;
     update_current_school_profile(State(ctx), req_ctx, Json(payload)).await
 }

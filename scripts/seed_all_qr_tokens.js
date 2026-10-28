@@ -1,8 +1,8 @@
-const { Client } = require('pg');
+﻿const { Client } = require('pg');
 const crypto = require('crypto');
 
 const client = new Client({
-  connectionString: 'postgres://school_admin:secretpassword@localhost:5433/school_os'
+  connectionString: (process.env.DATABASE_URL || 'postgres://school_admin@localhost:5433/school_os')
 });
 
 async function main() {

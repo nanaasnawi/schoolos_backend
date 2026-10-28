@@ -410,16 +410,6 @@ pub async fn stream_student_document_file(
 
         if let Some(bytes) = file_data {
             if !bytes.is_empty() {
-                // Background cache to disk if possible
-                let uploads_dir = std::path::PathBuf::from("uploads").join("documents");
-                let _ = tokio::fs::create_dir_all(&uploads_dir).await;
-                if let Ok(furl) = r.try_get::<String, _>("file_url") {
-                    if let Some(fname) = furl.strip_prefix("/uploads/documents/") {
-                        let disk_path = uploads_dir.join(fname);
-                        let _ = tokio::fs::write(&disk_path, &bytes).await;
-                    }
-                }
-
                 let resp = axum::response::Response::builder()
                     .status(axum::http::StatusCode::OK)
                     .header(axum::http::header::CONTENT_TYPE, mime_type)
@@ -757,7 +747,7 @@ pub async fn verify_student_document(
     Path(doc_id): Path<Uuid>,
     Json(payload): Json<VerifyDocumentPayload>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    let actor_id = req_ctx.actor.as_ref().map(|a| a.id).ok_or_else(|| {
+    let actor = req_ctx.actor.as_ref().ok_or_else(|| {
         ApiError::new(
             school_core::common::error::ApplicationError::Unauthorized(
                 school_core::common::error_code::ErrorCode::AuthInvalidToken,
@@ -766,6 +756,25 @@ pub async fn verify_student_document(
             &req_ctx.request_id,
         )
     })?;
+    let actor_id = actor.id;
+    let is_verifier_role = actor.roles.iter().any(|r| {
+        let lower = r.trim().to_lowercase();
+        lower.contains("admin")
+            || lower.contains("operator")
+            || lower.contains("kepala")
+            || lower.contains("staff")
+            || lower.contains("tata usaha")
+            || lower == "tu"
+    });
+    if !is_verifier_role {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Forbidden(
+                school_core::common::error_code::ErrorCode::AuthInsufficientPermissions,
+                "Hanya Operator Sekolah, TU, Kepala Sekolah, atau Administrator yang dapat memverifikasi dokumen siswa (ADR-0020)".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
 
     let new_status = payload.status.trim().to_uppercase();
     if new_status != "VERIFIED" && new_status != "REJECTED" {

@@ -1,9 +1,9 @@
-const { Client } = require('pg');
+﻿const { Client } = require('pg');
 const crypto = require('crypto');
 
 async function main() {
   const client = new Client({
-    connectionString: 'postgresql://school_admin:secretpassword@127.0.0.1:5433/school_os',
+    connectionString: 'postgresql://school_admin@127.0.0.1:5433/school_os',
   });
 
   await client.connect();

@@ -202,6 +202,8 @@ pub struct StudentGradeInput {
     pub letter_grade: Option<String>,
     pub passed: Option<bool>,
     pub status: Option<String>,
+    pub highest_competency_desc: Option<String>,
+    pub lowest_competency_desc: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -386,8 +388,8 @@ fn evaluate_kurikulum_merdeka(
 
     // 4. Fitur Deskripsi Otomatis (Capaian Kompetensi e-Rapor Kemendikdasmen)
     let (highest_desc, lowest_desc) = if !sumatif_list.is_empty() {
-        let max_elem = sumatif_list.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap();
-        let min_elem = sumatif_list.iter().min_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap();
+        let max_elem = sumatif_list.iter().max_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
+        let min_elem = sumatif_list.iter().min_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
 
         let h = if max_elem.1 >= 85.0 {
             format!("Menunjukkan penguasaan yang sangat baik dalam mencapai capaian pembelajaran {}.", max_elem.0)
@@ -575,17 +577,21 @@ async fn save_gradebook(
             },
         };
 
+        let norm_w_sumatif = payload.weight_sumatif.map(|w| if w > 0.0 && w <= 1.0 { w * 100.0 } else { w });
+        let norm_w_ats = payload.weight_ats.map(|w| if w > 0.0 && w <= 1.0 { w * 100.0 } else { w });
+        let norm_w_sas = payload.weight_sas.map(|w| if w > 0.0 && w <= 1.0 { w * 100.0 } else { w });
+
         // 100% Backend Execution of Kurikulum Merdeka Formula
         let eval = evaluate_kurikulum_merdeka(
             g,
             target_kktp,
-            payload.weight_sumatif,
-            payload.weight_ats,
-            payload.weight_sas,
+            norm_w_sumatif,
+            norm_w_ats,
+            norm_w_sas,
             &subject_label,
         );
 
-        gb_ids.push(Uuid::new_v4());
+        gb_ids.push(Uuid::now_v7());
         gb_tenant_ids.push(req_ctx.tenant_id);
         gb_student_ids.push(g.student_id);
         gb_class_ids.push(class_id);
@@ -599,12 +605,18 @@ async fn save_gradebook(
         gb_ats_scores.push(eval.ats.map(|s| format!("{:.2}", s)));
         gb_sas_scores.push(eval.sas.map(|s| format!("{:.2}", s)));
         gb_kktp_values.push(format!("{:.2}", target_kktp));
-        gb_highest_descs.push(Some(eval.highest_desc));
-        gb_lowest_descs.push(Some(eval.lowest_desc));
+        let highest_desc_final = g.highest_competency_desc.clone()
+            .filter(|d| !d.trim().is_empty())
+            .unwrap_or(eval.highest_desc);
+        let lowest_desc_final = g.lowest_competency_desc.clone()
+            .filter(|d| !d.trim().is_empty())
+            .unwrap_or(eval.lowest_desc);
+        gb_highest_descs.push(Some(highest_desc_final));
+        gb_lowest_descs.push(Some(lowest_desc_final));
         gb_formatif_notes.push(g.formatif_notes.clone());
 
         for (comp_name, src_type, raw, weighted, weight_pct) in eval.components {
-            entry_ids.push(Uuid::new_v4());
+            entry_ids.push(Uuid::now_v7());
             entry_tenant_ids.push(req_ctx.tenant_id);
             entry_student_ids.push(g.student_id);
             entry_class_ids.push(class_id);
