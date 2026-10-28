@@ -47,6 +47,12 @@ pub fn get_specs_for_tier(tier: &str) -> Vec<DocSpec> {
     match tier {
         "PAKET_A" => vec![
             DocSpec {
+                doc_type: "FORMULIR",
+                label: "Formulir Pendaftaran",
+                description: "Scan atau foto Formulir Pendaftaran Siswa Baru yang telah diisi lengkap dan ditandatangani",
+                is_required: true,
+            },
+            DocSpec {
                 doc_type: "KK",
                 label: "Kartu Keluarga (KK)",
                 description: "Scan atau foto jelas KK asli dengan barcode / tanda tangan basah Dukcapil",
@@ -72,6 +78,12 @@ pub fn get_specs_for_tier(tier: &str) -> Vec<DocSpec> {
             },
         ],
         "PAKET_B" => vec![
+            DocSpec {
+                doc_type: "FORMULIR",
+                label: "Formulir Pendaftaran",
+                description: "Scan atau foto Formulir Pendaftaran Siswa Baru yang telah diisi lengkap dan ditandatangani",
+                is_required: true,
+            },
             DocSpec {
                 doc_type: "KK",
                 label: "Kartu Keluarga (KK)",
@@ -105,6 +117,12 @@ pub fn get_specs_for_tier(tier: &str) -> Vec<DocSpec> {
         ],
         _ => vec![
             // PAKET_C
+            DocSpec {
+                doc_type: "FORMULIR",
+                label: "Formulir Pendaftaran",
+                description: "Scan atau foto Formulir Pendaftaran Siswa Baru yang telah diisi lengkap dan ditandatangani",
+                is_required: true,
+            },
             DocSpec {
                 doc_type: "KK",
                 label: "Kartu Keluarga (KK)",
@@ -991,6 +1009,7 @@ pub async fn get_rekap_rombel(
         let empty_map = HashMap::new();
         let s_docs = student_docs_map.get(&sid).unwrap_or(&empty_map);
 
+        let formulir_status = s_docs.get("FORMULIR").cloned().unwrap_or_else(|| "UNUPLOADED".to_string());
         let kk_status = s_docs.get("KK").cloned().unwrap_or_else(|| "UNUPLOADED".to_string());
         let akta_status = s_docs.get("AKTA").cloned().unwrap_or_else(|| "UNUPLOADED".to_string());
         let ijazah_status = match tier_code {
@@ -1002,21 +1021,21 @@ pub async fn get_rekap_rombel(
         let foto_status = s_docs.get("PAS_FOTO").cloned().unwrap_or_else(|| "UNUPLOADED".to_string());
         let kip_status = s_docs.get("KIP").cloned().unwrap_or_else(|| "UNUPLOADED".to_string());
 
-        // Check required completeness according to PKBM tier:
-        // Paket A: KK & AKTA
-        // Paket B: KK & IJAZAH_SD
-        // Paket C: KK & IJAZAH_SMP
+        // Check required completeness according to PKBM tier (FORMULIR is required across all tiers):
+        // Paket A: FORMULIR, KK & AKTA (3 required)
+        // Paket B: FORMULIR, KK & IJAZAH_SD (3 required)
+        // Paket C: FORMULIR, KK & IJAZAH_SMP (3 required)
         let is_complete = match tier_code {
-            "PAKET_A" => kk_status == "VERIFIED" && akta_status == "VERIFIED",
-            "PAKET_B" => kk_status == "VERIFIED" && ijazah_status == "VERIFIED",
-            _ => kk_status == "VERIFIED" && ijazah_status == "VERIFIED",
+            "PAKET_A" => formulir_status == "VERIFIED" && kk_status == "VERIFIED" && akta_status == "VERIFIED",
+            "PAKET_B" => formulir_status == "VERIFIED" && kk_status == "VERIFIED" && ijazah_status == "VERIFIED",
+            _ => formulir_status == "VERIFIED" && kk_status == "VERIFIED" && ijazah_status == "VERIFIED",
         };
 
         let verified_req_count = match tier_code {
-            "PAKET_A" => (if kk_status == "VERIFIED" { 1 } else { 0 }) + (if akta_status == "VERIFIED" { 1 } else { 0 }),
-            _ => (if kk_status == "VERIFIED" { 1 } else { 0 }) + (if ijazah_status == "VERIFIED" { 1 } else { 0 }),
+            "PAKET_A" => (if formulir_status == "VERIFIED" { 1 } else { 0 }) + (if kk_status == "VERIFIED" { 1 } else { 0 }) + (if akta_status == "VERIFIED" { 1 } else { 0 }),
+            _ => (if formulir_status == "VERIFIED" { 1 } else { 0 }) + (if kk_status == "VERIFIED" { 1 } else { 0 }) + (if ijazah_status == "VERIFIED" { 1 } else { 0 }),
         };
-        let percentage = ((verified_req_count as f64 / 2.0) * 1000.0).round() / 10.0;
+        let percentage = ((verified_req_count as f64 / 3.0) * 1000.0).round() / 10.0;
 
         if let Some(ref sf) = query.status_filter {
             if sf == "COMPLETE" && !is_complete {
@@ -1056,6 +1075,7 @@ pub async fn get_rekap_rombel(
             program_tier: tier_code.to_string(),
             is_complete,
             completeness_percentage: percentage,
+            formulir_status,
             kk_status,
             akta_status,
             ijazah_status,
