@@ -62,6 +62,8 @@ pub async fn import_excel_dapodik(
     state: State<ApplicationContext>,
     Json(payload): Json<ExcelImportRequest>,
 ) -> Result<Json<ApiResponse<DapodikPrefillResponse>>, ApiError> {
+    super::controller::require_dapodik_admin(&ctx)?;
+
     let now = Utc::now();
     let mut total_imported = 0;
 

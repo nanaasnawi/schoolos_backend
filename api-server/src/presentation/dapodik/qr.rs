@@ -38,6 +38,8 @@ pub async fn create_qr_token(
     state: State<ApplicationContext>,
     Json(payload): Json<CreateQrTokenRequest>,
 ) -> Result<Json<ApiResponse<OpaqueQrTokenResponse>>, ApiError> {
+    super::controller::require_dapodik_admin(&ctx)?;
+
     let req_id = Uuid::now_v7();
     let opaque_token = format!("opq_{}", Uuid::now_v7());
     let nonce = format!("nonce_{}", Uuid::now_v7());

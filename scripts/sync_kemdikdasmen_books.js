@@ -1,7 +1,7 @@
-#!/usr/bin/env node
+﻿#!/usr/bin/env node
 /**
  * ==============================================================================
- * School OS — SIBI Kemendikdasmen Kurikulum Merdeka Book Scraper & Database Syncer
+ * School OS â€” SIBI Kemendikdasmen Kurikulum Merdeka Book Scraper & Database Syncer
  * ==============================================================================
  * 
  * Mengambil katalog buku teks resmi Kurikulum Merdeka langsung dari API resmi SIBI
@@ -30,7 +30,7 @@ const { pipeline } = require('stream/promises');
 
 const SIBI_API_URL = 'https://api.buku.kemendikdasmen.go.id/api/catalogue/getPenggerakTextBooks?limit=800&offset=0';
 const CDN_TARGET_DOMAIN = 'static-sc.cloudapp.web.id';
-const DEFAULT_DB_URL = process.env.DATABASE_URL || 'postgres://school_admin:secretpassword@localhost:5433/school_os';
+const DEFAULT_DB_URL = process.env.DATABASE_URL || (process.env.DATABASE_URL || 'postgres://school_admin@localhost:5433/school_os');
 
 // Parsing argumen CLI
 const args = process.argv.slice(2);
@@ -77,7 +77,7 @@ function normalizeSubjectPattern(subjectSlug, title) {
 }
 
 async function fetchSibiCatalog() {
-  console.log(`\n📡 Mengambil katalog Kurikulum Merdeka dari SIBI Kemendikdasmen...`);
+  console.log(`\nðŸ“¡ Mengambil katalog Kurikulum Merdeka dari SIBI Kemendikdasmen...`);
   console.log(`   URL: ${SIBI_API_URL}`);
   
   const response = await fetch(SIBI_API_URL, {
@@ -94,7 +94,7 @@ async function fetchSibiCatalog() {
 
   const data = await response.json();
   const rawBooks = data.results || [];
-  console.log(`✅ Berhasil mengambil ${rawBooks.length} buku dari SIBI.\n`);
+  console.log(`âœ… Berhasil mengambil ${rawBooks.length} buku dari SIBI.\n`);
   return rawBooks;
 }
 
@@ -187,10 +187,10 @@ function filterBooks(rawBooks) {
 }
 
 async function syncToDatabase(books) {
-  console.log(`🔌 Menghubungkan ke database PostgreSQL...`);
+  console.log(`ðŸ”Œ Menghubungkan ke database PostgreSQL...`);
   const client = new Client({ connectionString: DEFAULT_DB_URL });
   await client.connect();
-  console.log(`✅ Terhubung ke database: ${DEFAULT_DB_URL.replace(/:[^:@]+@/, ':***@')}`);
+  console.log(`âœ… Terhubung ke database: ${DEFAULT_DB_URL.replace(/:[^:@]+@/, ':***@')}`);
 
   try {
     // Pastikan tabel library_books sudah ada
@@ -216,13 +216,13 @@ async function syncToDatabase(books) {
     // Ambil daftar tenant
     const tenantsRes = await client.query('SELECT id, name FROM tenants');
     const tenants = tenantsRes.rows;
-    console.log(`🏢 Ditemukan ${tenants.length} tenant sekolah.`);
+    console.log(`ðŸ¢ Ditemukan ${tenants.length} tenant sekolah.`);
 
     let totalInserted = 0;
     let totalSkipped = 0;
 
     for (const tenant of tenants) {
-      console.log(`\n📌 Memproses Tenant: ${tenant.name} (${tenant.id})`);
+      console.log(`\nðŸ“Œ Memproses Tenant: ${tenant.name} (${tenant.id})`);
       
       // Ambil data subjects & grade_levels untuk tenant ini
       const subjectsRes = await client.query('SELECT id, name FROM subjects WHERE tenant_id = $1', [tenant.id]);
@@ -291,13 +291,13 @@ async function syncToDatabase(books) {
         tenantInserted++;
       }
 
-      console.log(`   ✨ Tenant ${tenant.name}: +${tenantInserted} dimasukkan, ${tenantSkipped} sudah ada.`);
+      console.log(`   âœ¨ Tenant ${tenant.name}: +${tenantInserted} dimasukkan, ${tenantSkipped} sudah ada.`);
       totalInserted += tenantInserted;
       totalSkipped += tenantSkipped;
     }
 
     console.log(`\n======================================================`);
-    console.log(`🎉 SINKRONISASI SELESAI!`);
+    console.log(`ðŸŽ‰ SINKRONISASI SELESAI!`);
     console.log(`   Total Buku Berhasil Disimpan : ${totalInserted}`);
     console.log(`   Total Buku Terlewati (Sudah Ada): ${totalSkipped}`);
     console.log(`======================================================\n`);
@@ -309,7 +309,7 @@ async function syncToDatabase(books) {
 
 function generateSqlSeed(books) {
   const outputPath = path.join(__dirname, '..', 'migrations', 'seed_sibi_books.sql');
-  console.log(`💾 Membuat file SQL seed: ${outputPath}...`);
+  console.log(`ðŸ’¾ Membuat file SQL seed: ${outputPath}...`);
 
   const escapeSql = (str) => {
     if (!str) return "NULL";
@@ -367,12 +367,12 @@ WHERE NOT EXISTS (
 `;
 
   fs.writeFileSync(outputPath, sqlContent, 'utf-8');
-  console.log(`✅ File SQL berhasil dibuat: ${outputPath} (${(fs.statSync(outputPath).size / 1024).toFixed(1)} KB)`);
+  console.log(`âœ… File SQL berhasil dibuat: ${outputPath} (${(fs.statSync(outputPath).size / 1024).toFixed(1)} KB)`);
 }
 
 function generateJsonCatalog(books) {
   const outputPath = path.join(__dirname, '..', 'scratch', 'sibi_books_catalog.json');
-  console.log(`💾 Menyimpan katalog JSON: ${outputPath}...`);
+  console.log(`ðŸ’¾ Menyimpan katalog JSON: ${outputPath}...`);
 
   const processed = books.map(b => ({
     id: b.id,
@@ -388,7 +388,7 @@ function generateJsonCatalog(books) {
   }));
 
   fs.writeFileSync(outputPath, JSON.stringify(processed, null, 2), 'utf-8');
-  console.log(`✅ File JSON berhasil dibuat: ${outputPath} (${processed.length} buku)`);
+  console.log(`âœ… File JSON berhasil dibuat: ${outputPath} (${processed.length} buku)`);
 }
 
 async function downloadPdfs(books, targetDir) {
@@ -396,7 +396,7 @@ async function downloadPdfs(books, targetDir) {
   if (!fs.existsSync(resolvedDir)) {
     fs.mkdirSync(resolvedDir, { recursive: true });
   }
-  console.log(`\n📥 Memulai pengunduhan ${books.length} file PDF ke: ${resolvedDir}`);
+  console.log(`\nðŸ“¥ Memulai pengunduhan ${books.length} file PDF ke: ${resolvedDir}`);
 
   let downloadedCount = 0;
   let skippedCount = 0;
@@ -422,14 +422,14 @@ async function downloadPdfs(books, targetDir) {
       const { Readable } = require('stream');
       await pipeline(Readable.fromWeb(res.body), fileStream);
       const sizeMb = (fs.statSync(destPath).size / (1024 * 1024)).toFixed(1);
-      console.log(`✅ Selesai (${sizeMb} MB)`);
+      console.log(`âœ… Selesai (${sizeMb} MB)`);
       downloadedCount++;
     } catch (err) {
-      console.log(`❌ Gagal: ${err.message}`);
+      console.log(`âŒ Gagal: ${err.message}`);
     }
   }
 
-  console.log(`\n📁 Unduhan Selesai: ${downloadedCount} diunduh, ${skippedCount} sudah ada sebelumnya.`);
+  console.log(`\nðŸ“ Unduhan Selesai: ${downloadedCount} diunduh, ${skippedCount} sudah ada sebelumnya.`);
 }
 
 async function main() {
@@ -439,17 +439,17 @@ async function main() {
 
     if (limitArg > 0) {
       books = books.slice(0, limitArg);
-      console.log(`🔢 Dibatasi hingga ${limitArg} buku pertama.`);
+      console.log(`ðŸ”¢ Dibatasi hingga ${limitArg} buku pertama.`);
     }
 
-    console.log(`📚 Buku siap diproses: ${books.length} buku.`);
+    console.log(`ðŸ“š Buku siap diproses: ${books.length} buku.`);
     if (books.length === 0) {
-      console.log(`⚠️ Tidak ada buku yang cocok dengan filter yang ditentukan.`);
+      console.log(`âš ï¸ Tidak ada buku yang cocok dengan filter yang ditentukan.`);
       return;
     }
 
     // Tampilkan 3 contoh buku yang ditemukan
-    console.log(`\n📋 Contoh buku hasil parsing:`);
+    console.log(`\nðŸ“‹ Contoh buku hasil parsing:`);
     books.slice(0, 3).forEach((b, idx) => {
       console.log(`   ${idx + 1}. [Kelas ${b.class} ${b.level}] ${b.title}`);
       console.log(`      PDF  : ${sanitizeUrl(b.attachment)}`);
@@ -471,11 +471,11 @@ async function main() {
     if (!isDryRun && !exportSql && !exportJson && !downloadDirArg) {
       await syncToDatabase(books);
     } else if (isDryRun) {
-      console.log(`\n💡 Mode DRY-RUN selesai. Tidak ada data yang ditulis ke database.`);
+      console.log(`\nðŸ’¡ Mode DRY-RUN selesai. Tidak ada data yang ditulis ke database.`);
     }
 
   } catch (error) {
-    console.error(`\n❌ Terjadi kesalahan:`, error.message);
+    console.error(`\nâŒ Terjadi kesalahan:`, error.message);
     process.exit(1);
   }
 }

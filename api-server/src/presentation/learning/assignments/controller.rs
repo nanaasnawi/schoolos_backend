@@ -487,32 +487,6 @@ async fn list(
             .map(|a| a.roles.iter().any(|r| r.name == "Siswa"))
             .unwrap_or(false);
 
-    // Self-healing: Ensure assignments with class_id have published status and teacher_id resolved
-    let _ = sqlx::query(
-        r#"
-        UPDATE assignments
-        SET status = 'published'
-        WHERE tenant_id = $1 
-          AND status = 'draft' 
-          AND class_id IS NOT NULL 
-          AND deleted_at IS NULL
-        "#,
-    )
-    .bind(req_ctx.tenant_id)
-    .execute(&ctx.pool)
-    .await;
-
-    let _ = sqlx::query(
-        r#"
-        UPDATE assignments a
-        SET teacher_id = (SELECT t.id FROM teachers t WHERE (t.user_id = a.created_by OR t.id = a.created_by) AND t.tenant_id = a.tenant_id LIMIT 1)
-        WHERE a.tenant_id = $1 AND a.teacher_id IS NULL AND a.deleted_at IS NULL
-        "#,
-    )
-    .bind(req_ctx.tenant_id)
-    .execute(&ctx.pool)
-    .await;
-
     let items: Vec<AssignmentResponse> = if is_teacher {
         let rows = sqlx::query(
             r#"

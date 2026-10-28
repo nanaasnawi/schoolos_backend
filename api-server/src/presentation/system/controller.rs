@@ -853,18 +853,37 @@ async fn system_login(
     req_ctx: RequestContext,
     Json(payload): Json<SystemLoginRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    let expected_email =
-        std::env::var("SYSADMIN_EMAIL").unwrap_or_else(|_| "sysadmin@schoolos.com".to_string());
-    let expected_password =
-        std::env::var("SYSADMIN_PASSWORD").unwrap_or_else(|_| "sysadmin123".to_string());
+    let expected_email = std::env::var("SYSADMIN_EMAIL")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthInvalidCredentials,
+                    "System admin authentication is not configured".to_string(),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+    let expected_password = std::env::var("SYSADMIN_PASSWORD")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthInvalidCredentials,
+                    "System admin authentication is not configured".to_string(),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
 
     let input_email = payload.email.trim();
     let input_password = payload.password.trim();
 
-    if (input_email.eq_ignore_ascii_case(&expected_email)
-        || input_email.eq_ignore_ascii_case("sysadmin@schoolos.com"))
-        && (input_password == expected_password || input_password == "sysadmin123")
-    {
+    if input_email.eq_ignore_ascii_case(&expected_email) && input_password == expected_password {
         let claims = Claims {
             sub: Uuid::nil().to_string(),
             tenant_id: Uuid::nil().to_string(),
@@ -900,7 +919,7 @@ async fn system_login(
     } else {
         Err(ApiError::new(
             school_core::common::error::ApplicationError::Unauthorized(
-                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                school_core::common::error_code::ErrorCode::AuthInvalidCredentials,
                 "Invalid sysadmin credentials".to_string(),
             ),
             &req_ctx.request_id,
@@ -941,10 +960,12 @@ async fn get_mobile_config(
         .flatten();
 
     let val = row.map(|r| r.value).unwrap_or_else(|| {
+        let public_api_url = std::env::var("PUBLIC_API_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:8000/api/v1/".to_string());
         serde_json::json!({
-            "server_url": "http://192.168.1.10:8000/api/v1/",
+            "server_url": public_api_url,
             "fallback_url": "http://127.0.0.1:8000/api/v1/",
-            "server_name": "Server Utama Sekolah (Wi-Fi LAN)",
+            "server_name": "Server Utama Sekolah",
             "allow_fallback": true
         })
     });

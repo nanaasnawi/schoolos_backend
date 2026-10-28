@@ -2,13 +2,44 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use school_core::common::{error::ApplicationError, error_code::ErrorCode};
 
-use crate::bootstrap::ApplicationContext;
+use crate::{bootstrap::ApplicationContext, error::ApiError, extractors::RequestContext};
 
 pub use super::excel::*;
 pub use super::prefill::*;
 pub use super::qr::*;
 pub use super::sync::*;
+
+pub fn is_dapodik_admin_actor(ctx: &RequestContext) -> bool {
+    ctx.actor
+        .as_ref()
+        .map(|actor| {
+            actor.roles.iter().any(|r| {
+                let lower = r.trim().to_lowercase();
+                lower.contains("admin")
+                    || lower.contains("operator")
+                    || lower.contains("kepala")
+                    || lower.contains("staff")
+                    || lower.contains("tata usaha")
+                    || lower == "tu"
+            })
+        })
+        .unwrap_or(false)
+}
+
+pub fn require_dapodik_admin(ctx: &RequestContext) -> Result<(), ApiError> {
+    if !is_dapodik_admin_actor(ctx) {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthInsufficientPermissions,
+                "Hanya Administrator, Operator Dapodik, atau Kepala Sekolah yang diizinkan mengakses modul Dapodik".to_string(),
+            ),
+            &ctx.request_id,
+        ));
+    }
+    Ok(())
+}
 
 pub fn dapodik_routes() -> Router<ApplicationContext> {
     Router::new()

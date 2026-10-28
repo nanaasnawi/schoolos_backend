@@ -515,7 +515,7 @@ pub async fn export_report(
                     COALESCE(s.nomor_kks, '-') as nomor_kks,
                     CASE WHEN s.layak_pip = true THEN 'Ya' ELSE 'Tidak' END as layak_pip,
                     COALESCE(s.alasan_layak_pip, '-') as alasan_layak_pip,
-                    COALESCE(s.bank, 'BRI') as bank_penyalur,
+                    COALESCE(s.bank, '-') as bank_penyalur,
                     COALESCE(s.nomor_rekening_bank, '-') as nomor_rekening,
                     COALESCE(s.rekening_atas_nama, s.full_name) as rekening_atas_nama
                 FROM students s
@@ -604,9 +604,9 @@ pub async fn export_report(
                 FROM students s
                 LEFT JOIN enrollments e ON e.student_id = s.id AND (e.status = 'Active' OR e.status = 'active')
                 LEFT JOIN classes c ON c.id = e.class_id AND c.deleted_at IS NULL
-                LEFT JOIN gradebook_snapshots gs ON gs.student_id = s.id AND gs.tenant_id = s.tenant_id
                 LEFT JOIN gradebooks g ON g.student_id = s.id AND g.tenant_id = s.tenant_id
                 LEFT JOIN subjects sub ON sub.id = g.subject_id
+                LEFT JOIN gradebook_snapshots gs ON gs.student_id = s.id AND gs.tenant_id = s.tenant_id AND (gs.subject_code = sub.code OR gs.subject_name = sub.name)
                 WHERE s.tenant_id = $1 AND s.deleted_at IS NULL
                   AND ($2::uuid IS NULL OR c.id = $2)
                 ORDER BY c.name ASC NULLS LAST, s.full_name ASC
@@ -1148,6 +1148,18 @@ pub async fn export_report(
             ));
         }
     };
+
+    fn escape_csv(val: &str) -> String {
+        let mut sanitized = val.to_string();
+        if sanitized.starts_with('=') || sanitized.starts_with('+') || sanitized.starts_with('-') || sanitized.starts_with('@') {
+            sanitized = format!("'{}", sanitized);
+        }
+        if sanitized.contains(',') || sanitized.contains('"') || sanitized.contains('\n') || sanitized.contains('\r') {
+            format!("\"{}\"", sanitized.replace('"', "\"\""))
+        } else {
+            sanitized
+        }
+    }
 
     if format == "csv" {
         let mut csv = String::from("\u{FEFF}"); // UTF-8 BOM for Excel

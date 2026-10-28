@@ -22,7 +22,19 @@ impl AuditEventSubscriber {
                 "Audit Engine started — listening for domain events"
             );
 
-            while let Ok(event) = receiver.recv().await {
+            loop {
+                let event = match receiver.recv().await {
+                    Ok(e) => e,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(lagged_count = n, "Audit event subscriber lagged, dropped events");
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        info!("Event bus closed, terminating audit event subscriber");
+                        break;
+                    }
+                };
+
                 let metadata = event.metadata();
                 let event_id = metadata.event_id;
                 let event_name = event.event_name();

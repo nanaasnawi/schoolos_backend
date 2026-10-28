@@ -75,6 +75,8 @@ pub async fn list_sync_records(
     ctx: RequestContext,
     state: State<ApplicationContext>,
 ) -> Result<Json<ApiResponse<Vec<DapodikSyncRecordDto>>>, ApiError> {
+    super::controller::require_dapodik_admin(&ctx)?;
+
     let rows = sqlx::query(
         r#"
         SELECT id, nisn, nik, nama_school_os, nama_dapodik, rombel, identity_state, mobility_case, classification, action_recommended, stage, last_synced_at
@@ -169,6 +171,8 @@ pub async fn list_outbox_jobs(
     ctx: RequestContext,
     state: State<ApplicationContext>,
 ) -> Result<Json<ApiResponse<Vec<DapodikOutboxJobDto>>>, ApiError> {
+    super::controller::require_dapodik_admin(&ctx)?;
+
     let rows = sqlx::query(
         r#"
         SELECT job_id, req_id, operation, entity_id, idempotency_key, attempts, status, created_at
@@ -327,6 +331,50 @@ fn sanitize_clean_code(s: Option<&str>) -> Option<String> {
             }
         }
     })
+}
+
+fn sanitize_person_name(s: Option<&str>) -> Option<String> {
+    s.and_then(|val| {
+        let trimmed = val.trim();
+        if trimmed.is_empty()
+            || trimmed == "-"
+            || trimmed == "0"
+            || trimmed.eq_ignore_ascii_case("null")
+            || trimmed.eq_ignore_ascii_case("none")
+        {
+            None
+        } else {
+            let clean: String = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+            if clean.is_empty() {
+                None
+            } else {
+                Some(clean)
+            }
+        }
+    })
+}
+
+pub fn generate_salted_default_password_hash() -> String {
+    use argon2::{
+        password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
+        Argon2,
+    };
+    let salt = SaltString::generate(&mut OsRng);
+    let default_pw = std::env::var("DEFAULT_PROVISIONED_PASSWORD")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "SchoolOS2026!".to_string());
+    Argon2::default()
+        .hash_password(default_pw.as_bytes(), &salt)
+        .map(|h| h.to_string())
+        .unwrap_or_else(|_| {
+            // Cryptographic fallback using fresh random salt
+            let fallback_salt = SaltString::generate(&mut OsRng);
+            Argon2::default()
+                .hash_password(b"SchoolOS2026!", &fallback_salt)
+                .map(|h| h.to_string())
+                .unwrap_or_default()
+        })
 }
 
 fn truncate_str(val: &str, max_len: usize) -> String {
@@ -606,6 +654,7 @@ async fn fast_safe_upsert_user(
 
     // 3. Insert with savepoint protection against unique constraint abort
     let new_uid = Uuid::now_v7();
+    let default_pw_hash = generate_salted_default_password_hash();
     let _ = sqlx::query("SAVEPOINT sp_upsert_user")
         .execute(&mut **tx)
         .await;
@@ -613,7 +662,7 @@ async fn fast_safe_upsert_user(
     let insert_res = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO users (id, tenant_id, username, email, password_hash, full_name, is_active, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, '$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY', $5, true, $6, $6)
+        VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7)
         ON CONFLICT (tenant_id, email) DO UPDATE SET
             username = COALESCE(users.username, EXCLUDED.username),
             full_name = EXCLUDED.full_name,
@@ -625,6 +674,7 @@ async fn fast_safe_upsert_user(
     .bind(tenant_id)
     .bind(&clean_uname)
     .bind(&clean_email)
+    .bind(&default_pw_hash)
     .bind(&clean_fullname)
     .bind(now)
     .fetch_one(&mut **tx)
@@ -663,7 +713,7 @@ async fn fast_safe_upsert_user(
                 let retry_res = sqlx::query_scalar::<_, Uuid>(
                     r#"
                     INSERT INTO users (id, tenant_id, username, email, password_hash, full_name, is_active, created_at, updated_at)
-                    VALUES ($1, $2, $3, $4, '$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY', $5, true, $6, $6)
+                    VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7)
                     ON CONFLICT (tenant_id, email) DO UPDATE SET
                         username = COALESCE(users.username, EXCLUDED.username),
                         full_name = EXCLUDED.full_name,
@@ -675,6 +725,7 @@ async fn fast_safe_upsert_user(
                 .bind(tenant_id)
                 .bind(&candidate)
                 .bind(&clean_email)
+                .bind(&default_pw_hash)
                 .bind(&clean_fullname)
                 .bind(now)
                 .fetch_one(&mut **tx)
@@ -805,6 +856,7 @@ async fn safe_upsert_user(
 
     // 2. Insert with savepoint protection against unique constraint abort
     let new_uid = Uuid::now_v7();
+    let default_pw_hash = generate_salted_default_password_hash();
     let _ = sqlx::query("SAVEPOINT sp_upsert_user")
         .execute(&mut **tx)
         .await;
@@ -812,7 +864,7 @@ async fn safe_upsert_user(
     let insert_res = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO users (id, tenant_id, username, email, password_hash, full_name, is_active, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, '$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY', $5, true, $6, $6)
+        VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7)
         ON CONFLICT (tenant_id, email) DO UPDATE SET
             username = COALESCE(users.username, EXCLUDED.username),
             full_name = EXCLUDED.full_name,
@@ -824,6 +876,7 @@ async fn safe_upsert_user(
     .bind(tenant_id)
     .bind(&clean_uname)
     .bind(&clean_email)
+    .bind(&default_pw_hash)
     .bind(&clean_fullname)
     .bind(now)
     .fetch_one(&mut **tx)
@@ -871,7 +924,7 @@ async fn safe_upsert_user(
                 let fb_res = sqlx::query_scalar::<_, Uuid>(
                     r#"
                     INSERT INTO users (id, tenant_id, username, email, password_hash, full_name, is_active, created_at, updated_at)
-                    VALUES ($1, $2, $3, $4, '$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY', $5, true, $6, $6)
+                    VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7)
                     RETURNING id
                     "#,
                 )
@@ -879,6 +932,7 @@ async fn safe_upsert_user(
                 .bind(tenant_id)
                 .bind(&fallback_username)
                 .bind(&clean_email)
+                .bind(&default_pw_hash)
                 .bind(&clean_fullname)
                 .bind(now)
                 .fetch_one(&mut **tx)
@@ -907,6 +961,8 @@ pub async fn check_dapodik_health(
     ctx: RequestContext,
     state: State<ApplicationContext>,
 ) -> Result<Json<ApiResponse<DapodikHealthResponse>>, ApiError> {
+    super::controller::require_dapodik_admin(&ctx)?;
+
     let (dapodik_url, host, port, _, _) =
         resolve_dapodik_config(&state.pool, ctx.tenant_id, None, None, None).await;
 
@@ -1115,6 +1171,8 @@ pub async fn get_agent_info(
     ctx: RequestContext,
     state: State<ApplicationContext>,
 ) -> Result<Json<ApiResponse<AgentInfoResponse>>, ApiError> {
+    super::controller::require_dapodik_admin(&ctx)?;
+
     let school = sqlx::query(
         "SELECT name, npsn, dapodik_url, dapodik_token, dapodik_last_synced_at, dapodik_last_synced_by FROM schools WHERE tenant_id = $1 LIMIT 1",
     )
@@ -1204,6 +1262,8 @@ pub async fn agent_sync_async_handler(
     state: State<ApplicationContext>,
     payload: Option<Json<PullDapodikRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
+    super::controller::require_dapodik_admin(&ctx)?;
+
     let req = match payload.as_ref() {
         Some(Json(r)) => r,
         None => {
@@ -1368,6 +1428,8 @@ pub async fn pull_dapodik_records(
     state: State<ApplicationContext>,
     payload: Option<Json<PullDapodikRequest>>,
 ) -> Result<Json<ApiResponse<Vec<DapodikSyncRecordDto>>>, ApiError> {
+    super::controller::require_dapodik_admin(&ctx)?;
+
     let (
         override_url,
         override_npsn,
@@ -2448,12 +2510,7 @@ pub async fn pull_dapodik_records(
                         let prefix = pid.chars().take(8).collect::<String>();
                         let expected_schoolos =
                             format!("{}@guru.schoolos.id", prefix).to_lowercase();
-                        let expected_salafiyah =
-                            format!("{}@guru.pkbmassalafiyah.id", prefix).to_lowercase();
-                        teacher_by_email
-                            .get(&expected_schoolos)
-                            .or_else(|| teacher_by_email.get(&expected_salafiyah))
-                            .copied()
+                        teacher_by_email.get(&expected_schoolos).copied()
                     })
                 })
                 .or_else(|| {
@@ -2932,11 +2989,11 @@ pub async fn pull_dapodik_records(
 
             // ── Guardian / Orang Tua Synchronization ────────────────
             let nama_ibu =
-                sanitize_clean_code(std.nama_ibu.as_deref()).map(|s| truncate_str(&s, 255));
+                sanitize_person_name(std.nama_ibu.as_deref()).map(|s| truncate_str(&s, 255));
             let nama_ayah =
-                sanitize_clean_code(std.nama_ayah.as_deref()).map(|s| truncate_str(&s, 255));
+                sanitize_person_name(std.nama_ayah.as_deref()).map(|s| truncate_str(&s, 255));
             let nama_wali =
-                sanitize_clean_code(std.nama_wali.as_deref()).map(|s| truncate_str(&s, 255));
+                sanitize_person_name(std.nama_wali.as_deref()).map(|s| truncate_str(&s, 255));
 
             // Priority akun login wali murid adalah IBU
             let (guardian_name, relationship) = if let Some(ref ibu) = nama_ibu {
@@ -3705,6 +3762,8 @@ pub async fn push_dapodik_job(
     state: State<ApplicationContext>,
     Json(payload): Json<PushDapodikJobRequest>,
 ) -> Result<Json<ApiResponse<DapodikOutboxJobDto>>, ApiError> {
+    super::controller::require_dapodik_admin(&ctx)?;
+
     let job_id = Uuid::now_v7();
     let req_id = format!("req_mut_{}", Uuid::now_v7());
     let idempotency_key = format!("sha256({}+{}+{})", ctx.tenant_id, payload.entity_id, req_id);
@@ -3747,6 +3806,8 @@ pub async fn reconcile_student(
     state: State<ApplicationContext>,
     Json(payload): Json<ReconcileStudentRequest>,
 ) -> Result<Json<ApiResponse<DapodikSyncRecordDto>>, ApiError> {
+    super::controller::require_dapodik_admin(&ctx)?;
+
     let target_upper = payload.target_name.to_uppercase();
 
     let record_uuid = Uuid::parse_str(&payload.sync_id).map_err(|e| {

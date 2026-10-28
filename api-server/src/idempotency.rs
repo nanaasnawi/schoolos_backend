@@ -42,18 +42,43 @@ pub async fn idempotency_middleware(
         .get("x-idempotency-key")
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string());
-    let tenant_id_str = headers.get("x-tenant-id").and_then(|h| h.to_str().ok());
-
-    let tenant_id = if let Some(t) = tenant_id_str {
-        Uuid::parse_str(t).unwrap_or_default()
-    } else {
-        Uuid::default()
-    };
 
     if idempotency_key.is_none() {
         return Ok(next.run(req).await);
     }
     let idempotency_key = idempotency_key.unwrap();
+
+    let actor_tenant_id = req
+        .extensions()
+        .get::<school_core::common::security::Actor>()
+        .map(|a| a.tenant_id)
+        .filter(|tid| !tid.is_nil())
+        .or_else(|| {
+            headers
+                .get(header::AUTHORIZATION)
+                .and_then(|h| h.to_str().ok())
+                .and_then(|auth| auth.strip_prefix("Bearer "))
+                .and_then(|token| {
+                    jsonwebtoken::decode::<
+                        school_core::identity::application::auth::authenticate_user::Claims,
+                    >(
+                        token.trim(),
+                        &jsonwebtoken::DecodingKey::from_secret(state.jwt_secret.as_bytes()),
+                        &jsonwebtoken::Validation::default(),
+                    )
+                    .ok()
+                })
+                .and_then(|td| Uuid::parse_str(&td.claims.tenant_id).ok())
+                .filter(|tid| !tid.is_nil())
+        });
+
+    let tenant_id = actor_tenant_id.unwrap_or_else(|| {
+        headers
+            .get("x-tenant-id")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|t| Uuid::parse_str(t).ok())
+            .unwrap_or_default()
+    });
 
     let (parts, body) = req.into_parts();
 

@@ -40,6 +40,7 @@ pub fn material_routes() -> Router<ApplicationContext> {
             "/upload",
             post(upload_file).layer(DefaultBodyLimit::max(100 * 1024 * 1024)),
         )
+        .route("/analytics/reading-summary", get(get_reading_summary))
         .route("/completed", get(get_completed_materials))
         .route("/{id}", get(get_by_id).patch(update).delete(delete))
         .route("/{id}/toggle-complete", post(toggle_complete))
@@ -1860,4 +1861,249 @@ async fn upload_file(
             &req_ctx.request_id,
         )),
     }
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ReadingSummaryResponse {
+    pub materials: Vec<MaterialSummaryItem>,
+    pub reading_rows: Vec<StudentReadingRow>,
+    pub metrics: ReadingSummaryMetrics,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct MaterialSummaryItem {
+    pub material_id: Uuid,
+    pub title: String,
+    pub material_type: String,
+    pub class_name: String,
+    pub class_id: Option<Uuid>,
+    pub subject_name: String,
+    pub start_page: i32,
+    pub end_page: i32,
+    pub total_pages: i32,
+    pub total_assigned_students: i64,
+    pub completed_students_count: i64,
+    pub average_progress_percentage: i32,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct StudentReadingRow {
+    pub student_id: Uuid,
+    pub student_name: String,
+    pub nisn: String,
+    pub gender: String,
+    pub class_id: Option<Uuid>,
+    pub class_name: String,
+    pub material_id: Uuid,
+    pub material_title: String,
+    pub subject_name: String,
+    pub current_page: i32,
+    pub total_pages: i32,
+    pub completion_percentage: i32,
+    pub is_completed: bool,
+    pub last_read_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub reading_status: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ReadingSummaryMetrics {
+    pub total_materials: i64,
+    pub total_readers: i64,
+    pub completed_readers: i64,
+    pub overall_completion_rate: i32,
+    pub total_pages_read: i64,
+}
+
+pub async fn get_reading_summary(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+) -> Result<Json<ApiResponse<ReadingSummaryResponse>>, ApiError> {
+    // Query 1: All active learning materials for the tenant with counts
+    let material_rows = sqlx::query(
+        r#"
+        SELECT 
+            m.id,
+            m.title,
+            m.material_type,
+            m.class_id,
+            COALESCE(c.name, 'Semua Rombel') AS class_name,
+            COALESCE(s.name, 'Umum') AS subject_name,
+            COALESCE(m.start_page, 1) AS start_page,
+            COALESCE(m.end_page, 15) AS end_page,
+            COALESCE((
+                SELECT COUNT(DISTINCT e.student_id)
+                FROM enrollments e
+                WHERE e.tenant_id = m.tenant_id
+                  AND (m.class_id IS NULL OR e.class_id = m.class_id)
+                  AND UPPER(e.status) = 'ACTIVE'
+            ), 0) AS total_assigned_students,
+            COALESCE((
+                SELECT COUNT(DISTINCT smc.student_id)
+                FROM student_material_completions smc
+                WHERE smc.material_id = m.id
+                  AND smc.tenant_id = m.tenant_id
+                  AND smc.is_completed = true
+            ), 0) AS completed_students_count
+        FROM learning_materials m
+        LEFT JOIN classes c ON c.id = m.class_id AND c.tenant_id = m.tenant_id
+        LEFT JOIN subjects s ON s.id = m.subject_id AND s.tenant_id = m.tenant_id
+        WHERE m.tenant_id = $1
+          AND m.deleted_at IS NULL
+        ORDER BY m.created_at DESC
+        "#,
+    )
+    .bind(req_ctx.tenant_id)
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
+
+    let mut materials = Vec::with_capacity(material_rows.len());
+    for row in &material_rows {
+        let m_id: Uuid = row.try_get("id").unwrap_or_default();
+        let title: String = row.try_get("title").unwrap_or_default();
+        let m_type: String = row.try_get("material_type").unwrap_or_else(|_| "document".to_string());
+        let c_id: Option<Uuid> = row.try_get("class_id").unwrap_or(None);
+        let c_name: String = row.try_get("class_name").unwrap_or_else(|_| "Semua Rombel".to_string());
+        let s_name: String = row.try_get("subject_name").unwrap_or_else(|_| "Umum".to_string());
+        let start_p: i32 = row.try_get("start_page").unwrap_or(1);
+        let end_p: i32 = row.try_get("end_page").unwrap_or(15);
+        let total_p = std::cmp::max(1, (end_p - start_p) + 1);
+        let assigned: i64 = row.try_get("total_assigned_students").unwrap_or(0);
+        let completed: i64 = row.try_get("completed_students_count").unwrap_or(0);
+        let avg_pct = if assigned > 0 {
+            std::cmp::min(100, ((completed * 100) / assigned) as i32)
+        } else if completed > 0 {
+            100
+        } else {
+            0
+        };
+
+        materials.push(MaterialSummaryItem {
+            material_id: m_id,
+            title,
+            material_type: m_type,
+            class_name: c_name,
+            class_id: c_id,
+            subject_name: s_name,
+            start_page: start_p,
+            end_page: end_p,
+            total_pages: total_p,
+            total_assigned_students: assigned,
+            completed_students_count: completed,
+            average_progress_percentage: avg_pct,
+        });
+    }
+
+    // Query 2: All student reading progress records for materials of this tenant
+    let reading_rows_data = sqlx::query(
+        r#"
+        SELECT 
+            smc.student_id,
+            st.full_name AS student_name,
+            COALESCE(st.nisn, '-') AS nisn,
+            COALESCE(st.gender, 'L') AS gender,
+            e.class_id,
+            COALESCE(c.name, 'Kelas Umum') AS class_name,
+            smc.material_id,
+            m.title AS material_title,
+            COALESCE(sub.name, 'Umum') AS subject_name,
+            COALESCE(smc.current_page, 0) AS current_page,
+            COALESCE(m.end_page - m.start_page + 1, 15) AS total_pages,
+            COALESCE(smc.completion_percentage, 0) AS completion_percentage,
+            COALESCE(smc.is_completed, false) AS is_completed,
+            smc.last_read_at,
+            smc.completed_at
+        FROM student_material_completions smc
+        JOIN students st ON st.id = smc.student_id AND st.tenant_id = smc.tenant_id
+        JOIN learning_materials m ON m.id = smc.material_id AND m.tenant_id = smc.tenant_id
+        LEFT JOIN enrollments e ON e.student_id = st.id AND e.tenant_id = st.tenant_id AND UPPER(e.status) = 'ACTIVE'
+        LEFT JOIN classes c ON c.id = e.class_id AND c.tenant_id = st.tenant_id
+        LEFT JOIN subjects sub ON sub.id = m.subject_id AND sub.tenant_id = m.tenant_id
+        WHERE smc.tenant_id = $1
+          AND m.deleted_at IS NULL
+          AND st.deleted_at IS NULL
+        ORDER BY smc.last_read_at DESC NULLS LAST
+        LIMIT 500
+        "#,
+    )
+    .bind(req_ctx.tenant_id)
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
+
+    let mut reading_rows = Vec::with_capacity(reading_rows_data.len());
+    let mut total_pages_read: i64 = 0;
+    let mut completed_readers_count: i64 = 0;
+
+    for r in reading_rows_data {
+        let st_id: Uuid = r.try_get("student_id").unwrap_or_default();
+        let st_name: String = r.try_get("student_name").unwrap_or_default();
+        let nisn: String = r.try_get("nisn").unwrap_or_else(|_| "-".to_string());
+        let gender: String = r.try_get("gender").unwrap_or_else(|_| "L".to_string());
+        let c_id: Option<Uuid> = r.try_get("class_id").unwrap_or(None);
+        let c_name: String = r.try_get("class_name").unwrap_or_else(|_| "Kelas Umum".to_string());
+        let m_id: Uuid = r.try_get("material_id").unwrap_or_default();
+        let m_title: String = r.try_get("material_title").unwrap_or_default();
+        let sub_name: String = r.try_get("subject_name").unwrap_or_else(|_| "Umum".to_string());
+        let curr_p: i32 = r.try_get("current_page").unwrap_or(0);
+        let tot_p: i32 = std::cmp::max(1, r.try_get("total_pages").unwrap_or(15));
+        let comp_pct: i32 = r.try_get("completion_percentage").unwrap_or(0);
+        let is_comp: bool = r.try_get("is_completed").unwrap_or(false);
+        let last_read: Option<DateTime<Utc>> = r.try_get("last_read_at").unwrap_or(None);
+        let comp_at: Option<DateTime<Utc>> = r.try_get("completed_at").unwrap_or(None);
+
+        total_pages_read += curr_p as i64;
+        if is_comp {
+            completed_readers_count += 1;
+        }
+
+        let status_label = if is_comp {
+            "Selesai Membaca".to_string()
+        } else if curr_p > 0 {
+            format!("Sedang Membaca (Halaman {})", curr_p)
+        } else {
+            "Belum Mulai".to_string()
+        };
+
+        reading_rows.push(StudentReadingRow {
+            student_id: st_id,
+            student_name: st_name,
+            nisn,
+            gender,
+            class_id: c_id,
+            class_name: c_name,
+            material_id: m_id,
+            material_title: m_title,
+            subject_name: sub_name,
+            current_page: curr_p,
+            total_pages: tot_p,
+            completion_percentage: comp_pct,
+            is_completed: is_comp,
+            last_read_at: last_read.map(|t| t.to_rfc3339()),
+            completed_at: comp_at.map(|t| t.to_rfc3339()),
+            reading_status: status_label,
+        });
+    }
+
+    let total_readers = reading_rows.len() as i64;
+    let overall_rate = if total_readers > 0 {
+        std::cmp::min(100, ((completed_readers_count * 100) / total_readers) as i32)
+    } else {
+        0
+    };
+
+    let response = ReadingSummaryResponse {
+        materials,
+        reading_rows,
+        metrics: ReadingSummaryMetrics {
+            total_materials: material_rows.len() as i64,
+            total_readers,
+            completed_readers: completed_readers_count,
+            overall_completion_rate: overall_rate,
+            total_pages_read,
+        },
+    };
+
+    Ok(Json(ApiResponse::success(response, req_ctx.request_id)))
 }

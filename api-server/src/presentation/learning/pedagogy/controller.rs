@@ -953,22 +953,30 @@ pub async fn get_active_kosp(
 
     // If tenant does not have a KOSP document yet, dynamically provision an initial DRAFT for their school
     if doc_row.is_none() {
-        let school_name: String = sqlx::query_scalar(
-            "SELECT name FROM schools WHERE tenant_id = $1 LIMIT 1",
+        let school_info: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT name, regency, district FROM schools WHERE tenant_id = $1 LIMIT 1",
         )
         .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await
-        .unwrap_or_default()
-        .unwrap_or_else(|| "Satuan Pendidikan".to_string());
+        .unwrap_or_default();
 
-        let new_kosp_id = Uuid::new_v4();
+        let (school_name, school_regency, school_district) = school_info.unwrap_or_else(|| (
+            "Satuan Pendidikan".to_string(),
+            None,
+            None,
+        ));
+
+        let new_kosp_id = Uuid::now_v7();
         let auto_title = format!("Kurikulum Operasional Satuan Pendidikan (KOSP) {}", school_name);
         let auto_legal = format!(
             "Kurikulum Operasional Satuan Pendidikan (KOSP) {} Tahun Pelajaran {} telah diperiksa, disetujui, dan disahkan untuk digunakan sebagai pedoman penyelenggaraan pembelajaran.",
             school_name, academic_year
         );
-        let auto_place = "Kabupaten Cirebon".to_string();
+        let auto_place = school_regency
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| school_district.filter(|s| !s.trim().is_empty()))
+            .unwrap_or_else(|| "-".to_string());
         let auto_date = chrono::NaiveDate::from_ymd_opt(2026, 7, 13)
             .unwrap_or_else(|| chrono::Utc::now().date_naive());
 
@@ -999,7 +1007,7 @@ pub async fn get_active_kosp(
             VALUES 
                 (gen_random_uuid(), $1, 'PENILIK', 'Penilik PNF', 'Penilik Pembina PNF', NULL, true, false, 1),
                 (gen_random_uuid(), $1, 'KEPALA_SEKOLAH', 'Kepala Satuan Pendidikan', 'Kepala Sekolah', NULL, true, true, 2),
-                (gen_random_uuid(), $1, 'KADISDIK', 'Kepala Bidang PNF Disdik Kab. Cirebon', 'Kepala Bidang PAUD & PNF', NULL, true, true, 3)
+                (gen_random_uuid(), $1, 'KADISDIK', 'Kepala Bidang PNF Disdik', 'Kepala Bidang PAUD & PNF', NULL, true, true, 3)
             ON CONFLICT DO NOTHING
             "#,
         )
@@ -1269,9 +1277,10 @@ pub async fn update_tp(
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
 
     let existing = sqlx::query(
-        "SELECT id, publication_status FROM learning_objectives WHERE id = $1 AND deleted_at IS NULL"
+        "SELECT id, publication_status FROM learning_objectives WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL"
     )
     .bind(tp_id)
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| {
@@ -1321,7 +1330,7 @@ pub async fn update_tp(
             reviewed_by = CASE WHEN $9 = 'REVIEWED' THEN $10 ELSE reviewed_by END,
             reviewed_at = CASE WHEN $9 = 'REVIEWED' THEN NOW() ELSE reviewed_at END,
             updated_at = NOW()
-        WHERE id = $1
+        WHERE id = $1 AND tenant_id = $11
         RETURNING id, code, competency, bloom_level, content_scope, statement,
                   pancasila_profiles, evidence_indicators, estimated_hours, publication_status, version
         "#
@@ -1336,6 +1345,7 @@ pub async fn update_tp(
     .bind(payload.evidence_indicators)
     .bind(&new_status)
     .bind(actor_id)
+    .bind(req_ctx.tenant_id)
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| {
@@ -2262,6 +2272,22 @@ pub async fn record_habit_entry(
     Ok(Json(ApiResponse::success(res, req_ctx.request_id)))
 }
 
+fn is_pedagogy_teacher_or_admin(req_ctx: &RequestContext) -> bool {
+    req_ctx.actor.as_ref().map_or(false, |actor| {
+        actor.roles.iter().any(|r| {
+            let role = r.name.trim().to_lowercase();
+            role.contains("teacher")
+                || role.contains("guru")
+                || role.contains("pendidik")
+                || role.contains("wali kelas")
+                || role.contains("homeroom")
+                || role.contains("admin")
+                || role.contains("kepala")
+                || role.contains("operator")
+        })
+    })
+}
+
 pub async fn verify_habit_parent(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
@@ -2279,13 +2305,14 @@ pub async fn verify_habit_parent(
             verified_at = NOW(),
             parent_feedback = COALESCE($3, parent_feedback),
             updated_at = NOW()
-        WHERE id = $1
+        WHERE id = $1 AND tenant_id = $4
         RETURNING id, student_id, verification_status, verified_at
         "#
     )
     .bind(payload.entry_id)
     .bind(actor_id)
     .bind(payload.parent_feedback)
+    .bind(req_ctx.tenant_id)
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| {
@@ -2312,6 +2339,15 @@ pub async fn override_habit_teacher(
     req_ctx: RequestContext,
     Json(payload): Json<OverrideHabitTeacherPayload>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    if !is_pedagogy_teacher_or_admin(&req_ctx) {
+        return Err(ApiError::new(
+            ApplicationError::Unauthorized(
+                ErrorCode::AuthPermissionDenied,
+                "Hanya Guru / Wali Kelas / Kepala Sekolah / Admin yang diizinkan melakukan verifikasi override.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
 
     let row = sqlx::query(
@@ -2325,7 +2361,7 @@ pub async fn override_habit_teacher(
             teacher_notes = COALESCE($3, teacher_notes),
             override_reason = COALESCE($4, override_reason),
             updated_at = NOW()
-        WHERE id = $1
+        WHERE id = $1 AND tenant_id = $5
         RETURNING id, student_id, verification_status, verified_at
         "#
     )
@@ -2333,6 +2369,7 @@ pub async fn override_habit_teacher(
     .bind(actor_id)
     .bind(payload.teacher_notes)
     .bind(payload.override_reason)
+    .bind(req_ctx.tenant_id)
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| {
@@ -2392,13 +2429,14 @@ pub async fn supervise_modul_ajar(
         SET status = $1,
             suspension_reason = COALESCE($2, suspension_reason),
             updated_at = NOW()
-        WHERE id = $3 AND deleted_at IS NULL
+        WHERE id = $3 AND tenant_id = $4 AND deleted_at IS NULL
         RETURNING id, title, status, suspension_reason
         "#,
     )
     .bind(&target_status)
     .bind(suspension_reason)
     .bind(id)
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| {
@@ -2448,7 +2486,8 @@ pub async fn get_kaldik_budget(
         r#"
         SELECT COALESCE(SUM(allocated_hours), 0)::integer AS allocated_jp
         FROM modul_ajar
-        WHERE academic_year = $1
+        WHERE tenant_id = $5
+          AND academic_year = $1
           AND semester = $2
           AND (subject_code = $3 OR subject_name ILIKE $4 OR $3 = '' OR $3 = 'ALL')
           AND status IN ('ACTIVE', 'DRAFT')
@@ -2459,6 +2498,7 @@ pub async fn get_kaldik_budget(
     .bind(&semester)
     .bind(&subject_code)
     .bind(&sub_pattern)
+    .bind(req_ctx.tenant_id)
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| {
@@ -2517,10 +2557,11 @@ pub async fn synthesize_modul_ajar(
         r#"
         SELECT id, tenant_id, code, competency, content_scope, statement, pancasila_profiles, publication_status
         FROM learning_objectives
-        WHERE id = $1 AND deleted_at IS NULL
+        WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
         "#,
     )
     .bind(tp_id)
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| {

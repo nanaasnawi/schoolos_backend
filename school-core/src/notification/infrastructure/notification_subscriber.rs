@@ -123,9 +123,19 @@ impl NotificationEventSubscriber {
             info!(
                 component = "notification_engine",
                 "Notification Engine started — listening for domain events"
-            );
+            loop {
+                let event = match receiver.recv().await {
+                    Ok(e) => e,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(lagged_count = n, "Notification subscriber lagged, dropped events");
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        info!("Event bus closed, terminating notification subscriber");
+                        break;
+                    }
+                };
 
-            while let Ok(event) = receiver.recv().await {
                 let event_name = event.event_name();
 
                 let template = match get_template(event_name) {

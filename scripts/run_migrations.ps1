@@ -1,4 +1,4 @@
-# ========================================================
+﻿# ========================================================
 # School OS Database Migration Runner (PowerShell)
 # ========================================================
 param (
@@ -17,7 +17,7 @@ if ($TargetEnv -eq "production") {
     $DbUrl = if ($env:STAGING_DATABASE_URL) { $env:STAGING_DATABASE_URL } else { $env:DATABASE_URL }
     Write-Host "Running migrations on Staging database..." -ForegroundColor Cyan
 } else {
-    $DbUrl = if ($env:DATABASE_URL) { $env:DATABASE_URL } else { "postgres://school_admin:secretpassword@localhost:5433/school_os" }
+    $DbUrl = if ($env:DATABASE_URL) { $env:DATABASE_URL } else { "postgres://school_admin:@localhost:5433/school_os" }
     Write-Host "Running migrations on Local/Dev database..." -ForegroundColor Green
 }
 
@@ -29,10 +29,10 @@ Write-Host "Migrations source: $MigrationsDir"
 
 if (Get-Command sqlx -ErrorAction SilentlyContinue) {
     sqlx migrate run --source "$MigrationsDir" --database-url "$DbUrl"
-    Write-Host "✅ Migrations completed successfully!" -ForegroundColor Green
+    Write-Host "âœ… Migrations completed successfully!" -ForegroundColor Green
 } else {
     Write-Host "sqlx-cli not detected, installing..." -ForegroundColor Yellow
     cargo install sqlx-cli --no-default-features --features native-tls,postgres
     sqlx migrate run --source "$MigrationsDir" --database-url "$DbUrl"
-    Write-Host "✅ Migrations completed successfully!" -ForegroundColor Green
+    Write-Host "âœ… Migrations completed successfully!" -ForegroundColor Green
 }

@@ -34,11 +34,69 @@ pub struct UploadPrefillRequest {
     pub content_text: String,
 }
 
+fn validate_prefill_mirror_url(raw_url: &str, request_id: &str) -> Result<reqwest::Url, ApiError> {
+    let parsed = reqwest::Url::parse(raw_url.trim()).map_err(|_| {
+        ApiError::new(
+            ApplicationError::Domain(school_core::common::error::DomainError::Validation(
+                "Format URL server mirror prefill tidak valid".into(),
+            )),
+            request_id,
+        )
+    })?;
+
+    if parsed.scheme() != "https" && parsed.scheme() != "http" {
+        return Err(ApiError::new(
+            ApplicationError::Domain(school_core::common::error::DomainError::Validation(
+                "Skema URL mirror harus menggunakan HTTP atau HTTPS".into(),
+            )),
+            request_id,
+        ));
+    }
+
+    let host = parsed.host_str().unwrap_or_default().to_lowercase();
+    let is_forbidden_host = host.is_empty()
+        || host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+        || host == "[::1]"
+        || host == "::1"
+        || host == "0.0.0.0"
+        || host.starts_with("127.")
+        || host.starts_with("10.")
+        || host.starts_with("192.168.")
+        || host.starts_with("169.254.")
+        || {
+            if let Some(rest) = host.strip_prefix("172.") {
+                rest.split('.')
+                    .next()
+                    .and_then(|o| o.parse::<u8>().ok())
+                    .map(|o| (16..=31).contains(&o))
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        };
+
+    if is_forbidden_host {
+        return Err(ApiError::new(
+            ApplicationError::Domain(school_core::common::error::DomainError::Validation(
+                "Alamat server mirror prefill menuju jaringan internal/loopback tidak diizinkan (SSRF Protection)".into(),
+            )),
+            request_id,
+        ));
+    }
+
+    Ok(parsed)
+}
+
 pub async fn generate_prefill_dapodik(
     ctx: RequestContext,
     state: State<ApplicationContext>,
     Json(payload): Json<GeneratePrefillRequest>,
 ) -> Result<Json<ApiResponse<DapodikPrefillResponse>>, ApiError> {
+    super::controller::require_dapodik_admin(&ctx)?;
+
     if payload.kode_registrasi.trim().is_empty() || payload.npsn.trim().is_empty() {
         return Err(ApiError::new(
             ApplicationError::Internal(
@@ -48,8 +106,11 @@ pub async fn generate_prefill_dapodik(
         ));
     }
 
+    let validated_mirror = validate_prefill_mirror_url(&payload.mirror_url, &ctx.request_id)?;
+
     let prefill_uuid = Uuid::now_v7();
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| {
@@ -61,7 +122,7 @@ pub async fn generate_prefill_dapodik(
 
     let download_url = format!(
         "{}/prefill/get_prefill?npsn={}&kode_reg={}",
-        payload.mirror_url.trim_end_matches('/'),
+        validated_mirror.as_str().trim_end_matches('/'),
         payload.npsn.trim(),
         payload.kode_registrasi.trim()
     );
@@ -173,6 +234,7 @@ pub async fn generate_prefill_dapodik(
                             "{}@student.schoolos.id",
                             nisn.to_lowercase().replace(" ", "")
                         );
+                        let password_hash = super::sync::generate_salted_default_password_hash();
 
                         let actual_user_id = match sqlx::query_scalar::<_, Uuid>(
                             r#"
@@ -185,7 +247,7 @@ pub async fn generate_prefill_dapodik(
                         .bind(user_id)
                         .bind(ctx.tenant_id)
                         .bind(&email)
-                        .bind("$argon2id$v=19$m=19456,t=2,p=1$TMFegmCoK1/YLe4lqUwGqg$fPzas5qwg5hV28Hv8ogNfbIBmtAAKmowx+erCcDf5UY")
+                        .bind(&password_hash)
                         .bind(&nama)
                         .bind(now)
                         .fetch_one(&state.pool)
@@ -253,6 +315,8 @@ pub async fn upload_prefill_file(
     state: State<ApplicationContext>,
     Json(payload): Json<UploadPrefillRequest>,
 ) -> Result<Json<ApiResponse<DapodikPrefillResponse>>, ApiError> {
+    super::controller::require_dapodik_admin(&ctx)?;
+
     if payload.content_text.trim().is_empty() {
         return Err(ApiError::new(
             ApplicationError::Internal("Isi file prefill (.prf) tidak boleh kosong".into()),

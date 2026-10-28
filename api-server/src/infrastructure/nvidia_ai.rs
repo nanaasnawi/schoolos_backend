@@ -55,6 +55,18 @@ fn get_config() -> Result<(String, String, String), ApplicationError> {
     Ok((key, model, url))
 }
 
+static SHARED_AI_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+fn get_ai_client() -> &'static reqwest::Client {
+    SHARED_AI_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(25))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
 /// Call NVIDIA NIM API with model fallback
 pub async fn call_nvidia_nim(
     messages: Vec<ChatMessage<'_>>,
@@ -62,11 +74,7 @@ pub async fn call_nvidia_nim(
     max_tokens: u32,
 ) -> Result<String, ApplicationError> {
     let (api_key, configured_model, api_url) = get_config()?;
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
-        .build()
-        .map_err(|e| ApplicationError::Internal(format!("Failed to build HTTP client: {e}")))?;
+    let client = get_ai_client();
 
     let mut candidate_models = vec![configured_model.as_str()];
     let active_models = [

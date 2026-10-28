@@ -357,6 +357,32 @@ async fn login(
     )))
 }
 
+fn is_privileged_admin_actor(actor: &Option<school_core::common::security::Actor>) -> bool {
+    actor.as_ref().is_some_and(|a| {
+        a.id.is_nil()
+            || a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("admin")
+                    || n.contains("kepala")
+                    || n.contains("operator")
+                    || n.contains("super")
+            })
+    })
+}
+
+fn require_admin_or_operator(req_ctx: &RequestContext) -> Result<(), ApiError> {
+    if !is_privileged_admin_actor(&req_ctx.actor) {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Forbidden(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Akses ditolak: Hanya Kepala Sekolah, Administrator, atau Operator yang diizinkan.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+    Ok(())
+}
+
 /// Register a new user.
 #[utoipa::path(
     post,
@@ -375,8 +401,57 @@ async fn login(
 async fn register(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
+    headers: axum::http::HeaderMap,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<ApiResponse<RegisterResponse>>, ApiError> {
+    if let Some(ref requested_role) = payload.role {
+        let normalized = requested_role.trim().to_lowercase();
+        let is_non_privileged = matches!(
+            normalized.as_str(),
+            "" | "siswa" | "student" | "orang tua" | "wali" | "parent" | "guardian"
+        );
+
+        if !is_non_privileged {
+            let mut caller_is_admin = is_privileged_admin_actor(&req_ctx.actor);
+            if !caller_is_admin {
+                if let Some(auth_str) = headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.strip_prefix("Bearer "))
+                {
+                    use jsonwebtoken::{decode, DecodingKey, Validation};
+                    use school_core::identity::application::auth::authenticate_user::Claims;
+                    if let Ok(token_data) = decode::<Claims>(
+                        auth_str.trim(),
+                        &DecodingKey::from_secret(ctx.jwt_secret.as_bytes()),
+                        &Validation::default(),
+                    ) {
+                        if let Some(r) = token_data.claims.role {
+                            let rn = r.to_lowercase();
+                            if rn.contains("admin")
+                                || rn.contains("kepala")
+                                || rn.contains("operator")
+                                || rn.contains("super")
+                            {
+                                caller_is_admin = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !caller_is_admin {
+                return Err(ApiError::new(
+                    school_core::common::error::ApplicationError::Forbidden(
+                        school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                        "Pendaftaran mandiri tidak diizinkan untuk menetapkan peran khusus/istimewa.".to_string(),
+                    ),
+                    &req_ctx.request_id,
+                ));
+            }
+        }
+    }
+
     let command = RegisterUserCommand {
         tenant_id: req_ctx.tenant_id,
         email: payload.email,
@@ -505,6 +580,8 @@ async fn list_users(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
 ) -> Result<Json<ApiResponse<Vec<AuthUserDto>>>, ApiError> {
+    require_admin_or_operator(&req_ctx)?;
+
     let rows = sqlx::query(
         r#"
         SELECT u.id, u.username, u.email, u.full_name, u.avatar_url, u.is_active, u.created_at,
@@ -1645,6 +1722,8 @@ async fn generate_qr_token_endpoint(
     req_ctx: RequestContext,
     Json(payload): Json<GenerateQrBadgeRequest>,
 ) -> Result<Json<ApiResponse<QrBadgeDetailDto>>, ApiError> {
+    require_admin_or_operator(&req_ctx)?;
+
     let command = GenerateQrTokenCommand {
         tenant_id: req_ctx.tenant_id,
         user_id: payload.user_id,
@@ -1744,6 +1823,8 @@ async fn list_users_qr_status(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
 ) -> Result<Json<ApiResponse<Vec<UserQrStatusDto>>>, ApiError> {
+    require_admin_or_operator(&req_ctx)?;
+
     let rows = sqlx::query(
         r#"
         SELECT 
@@ -1854,6 +1935,8 @@ async fn batch_generate_qr_tokens_endpoint(
     req_ctx: RequestContext,
     Json(payload): Json<BatchGenerateQrBadgesRequest>,
 ) -> Result<Json<ApiResponse<Vec<BatchGenerateQrItemDto>>>, ApiError> {
+    require_admin_or_operator(&req_ctx)?;
+
     let mut results = Vec::new();
 
     for user_id in payload.user_ids {
@@ -1980,7 +2063,7 @@ async fn refresh(
     use school_core::identity::application::auth::authenticate_user::Claims;
 
     let mut validation = Validation::default();
-    validation.validate_exp = false;
+    validation.validate_exp = true;
 
     let token_data = decode::<Claims>(
         &payload.refresh_token,
@@ -1991,11 +2074,72 @@ async fn refresh(
         ApiError::new(
             school_core::common::error::ApplicationError::Unauthorized(
                 school_core::common::error_code::ErrorCode::AuthInvalidToken,
-                "Invalid refresh token".to_string(),
+                "Invalid or expired refresh token".to_string(),
             ),
             &req_ctx.request_id,
         )
     })?;
+
+    let user_id = uuid::Uuid::parse_str(&token_data.claims.sub).map_err(|_| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthInvalidToken,
+                "Invalid refresh token subject".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+    let tenant_id = uuid::Uuid::parse_str(&token_data.claims.tenant_id).map_err(|_| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthInvalidToken,
+                "Invalid refresh token tenant".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    if !user_id.is_nil() {
+        let active_row = sqlx::query(
+            r#"
+            SELECT u.is_active, t.status as tenant_status
+            FROM users u
+            JOIN tenants t ON t.id = u.tenant_id
+            WHERE u.id = $1 AND u.tenant_id = $2 AND u.deleted_at IS NULL
+            LIMIT 1
+            "#,
+        )
+        .bind(user_id)
+        .bind(tenant_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+
+        let (user_active, tenant_status): (bool, String) = match active_row {
+            Some(row) => (
+                row.try_get("is_active").unwrap_or(false),
+                row.try_get("tenant_status").unwrap_or_default(),
+            ),
+            None => (false, String::new()),
+        };
+
+        if !user_active || !tenant_status.eq_ignore_ascii_case("active") {
+            return Err(ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthInvalidToken,
+                    "User account or school tenant is no longer active".to_string(),
+                ),
+                &req_ctx.request_id,
+            ));
+        }
+    }
 
     let new_access_claims = Claims {
         sub: token_data.claims.sub.clone(),

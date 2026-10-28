@@ -1,7 +1,7 @@
-const { Client } = require('pg');
+﻿const { Client } = require('pg');
 
 const client = new Client({
-  connectionString: 'postgres://school_admin:secretpassword@localhost:5433/school_os'
+  connectionString: (process.env.DATABASE_URL || 'postgres://school_admin@localhost:5433/school_os')
 });
 
 async function main() {
@@ -34,7 +34,7 @@ async function main() {
       `, [TENANT_ID, t.name, t.subject]);
       console.log(`+ Added new teacher: ${t.name}`);
     } else {
-      console.log(`✓ Teacher already exists: ${t.name}`);
+      console.log(`âœ“ Teacher already exists: ${t.name}`);
     }
   }
 
@@ -92,7 +92,7 @@ async function main() {
       SET name = EXCLUDED.name, updated_at = NOW()
     `, [TENANT_ID, s.code, s.name]);
   }
-  console.log(`✓ All ${subjectsToEnsure.length} subjects ensured.`);
+  console.log(`âœ“ All ${subjectsToEnsure.length} subjects ensured.`);
 
   // Build subject map (name -> id)
   const allSubjRes = await client.query('SELECT id, name FROM subjects WHERE tenant_id = $1', [TENANT_ID]);
@@ -230,11 +230,11 @@ async function main() {
         ]);
         totalInserted++;
       }
-      console.log(`  ✓ Inserted ${group.schedule.length} slots for ${className}`);
+      console.log(`  âœ“ Inserted ${group.schedule.length} slots for ${className}`);
     }
   }
 
-  console.log(`\n🎉 Successfully inserted a total of ${totalInserted} schedule records into database!`);
+  console.log(`\nðŸŽ‰ Successfully inserted a total of ${totalInserted} schedule records into database!`);
 
   // Verification count
   const verify = await client.query(`

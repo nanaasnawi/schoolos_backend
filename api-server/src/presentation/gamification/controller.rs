@@ -112,9 +112,10 @@ pub async fn get_student_gamification(
     };
 
     let xp_row = sqlx::query(
-        "SELECT total_xp, level, streak_days, last_activity_date FROM student_xp WHERE student_id = $1"
+        "SELECT total_xp, level, streak_days, last_activity_date FROM student_xp WHERE student_id = $1 AND tenant_id = $2"
     )
     .bind(target_student_id)
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| ApiError::new(ApplicationError::Infrastructure(InfrastructureError::Database(e)), &req_ctx.request_id))?;
@@ -138,12 +139,13 @@ pub async fn get_student_gamification(
         r#"
         SELECT id, action_type, reference_id, xp_amount, description, created_at
         FROM student_xp_transactions
-        WHERE student_id = $1
+        WHERE student_id = $1 AND tenant_id = $2
         ORDER BY created_at DESC
         LIMIT 10
         "#
     )
     .bind(target_student_id)
+    .bind(req_ctx.tenant_id)
     .fetch_all(&ctx.pool)
     .await
     .unwrap_or_default();
@@ -191,37 +193,29 @@ pub async fn award_student_xp(
         )
     })?;
 
+    // Only Teacher, Admin, Kepala Sekolah, or Operator may directly award XP via API endpoint.
+    // Student XP for reading/habits/quizzes is awarded server-side via internal helper `award_xp_internal`.
+    let is_staff_or_admin = actor.roles.iter().any(|r| {
+        let n = r.name.to_lowercase();
+        n.contains("admin")
+            || n.contains("teacher")
+            || n.contains("guru")
+            || n.contains("kepala")
+            || n.contains("operator")
+    });
+    if !is_staff_or_admin {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                school_core::common::error_code::ErrorCode::AuthInsufficientPermissions,
+                "Hanya Guru, Wali Kelas, Kepala Sekolah, atau Administrator yang diizinkan memberikan poin XP secara langsung.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     // Determine target student id with strict tenant isolation and role validation
     let (effective_student_id, effective_tenant_id) = match payload.student_id {
         Some(sid) => {
-            let is_staff_or_admin = actor.roles.iter().any(|r| {
-                let n = r.name.to_lowercase();
-                n == "admin" || n == "teacher" || n == "guru" || n == "superadmin" || n == "super_admin" || n == "kepala_sekolah" || n == "operator"
-            });
-
-            if !is_staff_or_admin && sid != actor.id {
-                let own_record = sqlx::query_scalar::<_, Uuid>(
-                    "SELECT id FROM students WHERE id = $1 AND user_id = $2 AND tenant_id = $3 LIMIT 1"
-                )
-                .bind(sid)
-                .bind(actor.id)
-                .bind(req_ctx.tenant_id)
-                .fetch_optional(&ctx.pool)
-                .await
-                .ok()
-                .flatten();
-
-                if own_record.is_none() {
-                    return Err(ApiError::new(
-                        ApplicationError::Unauthorized(
-                            school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                            "Siswa dilarang memanipulasi XP akun siswa lain.".to_string(),
-                        ),
-                        &req_ctx.request_id,
-                    ));
-                }
-            }
-
             let resolved = sqlx::query(
                 "SELECT id, tenant_id FROM students WHERE (id = $1 OR user_id = $1) AND tenant_id = $2 LIMIT 1"
             )
