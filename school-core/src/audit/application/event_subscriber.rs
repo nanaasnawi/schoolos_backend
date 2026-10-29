@@ -4,7 +4,7 @@ use crate::common::domain::clock::Clock;
 use crate::common::event_bus::InMemoryEventBus;
 use crate::permission::domain::permission_registry::Permission;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 pub struct AuditEventSubscriber;
 
