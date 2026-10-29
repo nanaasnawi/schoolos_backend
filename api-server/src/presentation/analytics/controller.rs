@@ -110,6 +110,20 @@ pub struct DashboardRecentActivityDto {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Serialize, Deserialize, utoipa::ToSchema, Clone, Debug)]
+pub struct TeacherUploadTrendDto {
+    pub day: String,
+    pub materi: i64,
+    pub tugas: i64,
+}
+
+#[derive(Serialize, Deserialize, utoipa::ToSchema, Clone, Debug)]
+pub struct StudentEngagementTrendDto {
+    pub day: String,
+    pub pembaca: i64,
+    pub submisi: i64,
+}
+
 #[derive(Serialize, Deserialize, utoipa::ToSchema)]
 pub struct DashboardDataResponse {
     pub metrics: DashboardMetricsDto,
@@ -119,6 +133,8 @@ pub struct DashboardDataResponse {
     pub academic_performance: Vec<AcademicPerformanceDto>,
     pub announcements: Vec<DashboardAnnouncementDto>,
     pub recent_activities: Vec<DashboardRecentActivityDto>,
+    pub teacher_upload_trend: Vec<TeacherUploadTrendDto>,
+    pub student_engagement_trend: Vec<StudentEngagementTrendDto>,
 }
 
 pub fn analytics_routes() -> Router<ApplicationContext> {
@@ -570,6 +586,112 @@ async fn get_dashboard(
         })
         .collect();
 
+    // Teacher upload trend (past 7 days)
+    let teacher_upload_rows = sqlx::query(
+        r#"
+        WITH days AS (
+            SELECT 
+                i,
+                to_char(CURRENT_DATE - (6 - i) * INTERVAL '1 day', 'Dy') AS day_en,
+                (CURRENT_DATE - (6 - i) * INTERVAL '1 day')::date AS date_val
+            FROM generate_series(0, 6) AS i
+        )
+        SELECT 
+            CASE 
+                WHEN day_en = 'Mon' THEN 'Sen'
+                WHEN day_en = 'Tue' THEN 'Sel'
+                WHEN day_en = 'Wed' THEN 'Rab'
+                WHEN day_en = 'Thu' THEN 'Kam'
+                WHEN day_en = 'Fri' THEN 'Jum'
+                WHEN day_en = 'Sat' THEN 'Sab'
+                WHEN day_en = 'Sun' THEN 'Min'
+                ELSE day_en
+            END AS day,
+            COALESCE(m.cnt, 0)::int8 AS materi,
+            COALESCE(a.cnt, 0)::int8 AS tugas
+        FROM days d
+        LEFT JOIN (
+            SELECT DATE(created_at AT TIME ZONE 'Asia/Jakarta') AS d_date, COUNT(*) AS cnt
+            FROM learning_materials
+            WHERE tenant_id = $1 AND deleted_at IS NULL
+            GROUP BY 1
+        ) m ON m.d_date = d.date_val
+        LEFT JOIN (
+            SELECT DATE(created_at AT TIME ZONE 'Asia/Jakarta') AS d_date, COUNT(*) AS cnt
+            FROM assignments
+            WHERE tenant_id = $1 AND deleted_at IS NULL
+            GROUP BY 1
+        ) a ON a.d_date = d.date_val
+        ORDER BY d.i ASC
+        "#,
+    )
+    .bind(tid)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let teacher_upload_trend = teacher_upload_rows
+        .into_iter()
+        .map(|r| TeacherUploadTrendDto {
+            day: r.get("day"),
+            materi: r.get("materi"),
+            tugas: r.get("tugas"),
+        })
+        .collect();
+
+    // Student engagement trend (past 7 days)
+    let student_engagement_rows = sqlx::query(
+        r#"
+        WITH days AS (
+            SELECT 
+                i,
+                to_char(CURRENT_DATE - (6 - i) * INTERVAL '1 day', 'Dy') AS day_en,
+                (CURRENT_DATE - (6 - i) * INTERVAL '1 day')::date AS date_val
+            FROM generate_series(0, 6) AS i
+        )
+        SELECT 
+            CASE 
+                WHEN day_en = 'Mon' THEN 'Sen'
+                WHEN day_en = 'Tue' THEN 'Sel'
+                WHEN day_en = 'Wed' THEN 'Rab'
+                WHEN day_en = 'Thu' THEN 'Kam'
+                WHEN day_en = 'Fri' THEN 'Jum'
+                WHEN day_en = 'Sat' THEN 'Sab'
+                WHEN day_en = 'Sun' THEN 'Min'
+                ELSE day_en
+            END AS day,
+            COALESCE(r.cnt, 0)::int8 AS pembaca,
+            COALESCE(s.cnt, 0)::int8 AS submisi
+        FROM days d
+        LEFT JOIN (
+            SELECT DATE(created_at AT TIME ZONE 'Asia/Jakarta') AS d_date, COUNT(DISTINCT student_id) AS cnt
+            FROM reading_progress
+            WHERE tenant_id = $1
+            GROUP BY 1
+        ) r ON r.d_date = d.date_val
+        LEFT JOIN (
+            SELECT DATE(COALESCE(submitted_at, created_at) AT TIME ZONE 'Asia/Jakarta') AS d_date, COUNT(DISTINCT student_id) AS cnt
+            FROM assignment_submissions
+            WHERE tenant_id = $1
+            GROUP BY 1
+        ) s ON s.d_date = d.date_val
+        ORDER BY d.i ASC
+        "#,
+    )
+    .bind(tid)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let student_engagement_trend = student_engagement_rows
+        .into_iter()
+        .map(|r| StudentEngagementTrendDto {
+            day: r.get("day"),
+            pembaca: r.get("pembaca"),
+            submisi: r.get("submisi"),
+        })
+        .collect();
+
     Ok(Json(ApiResponse::success(
         DashboardDataResponse {
             metrics,
@@ -579,6 +701,8 @@ async fn get_dashboard(
             academic_performance,
             announcements,
             recent_activities,
+            teacher_upload_trend,
+            student_engagement_trend,
         },
         req_ctx.correlation_id,
     )))
