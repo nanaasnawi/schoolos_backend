@@ -5,3 +5,5 @@ pub mod error_code;
 pub mod event_bus;
 pub mod infrastructure;
 pub mod models;
+
+pub use crate::authorization::domain::actor as security;

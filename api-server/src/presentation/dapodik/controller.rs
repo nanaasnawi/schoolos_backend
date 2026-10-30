@@ -16,7 +16,7 @@ pub fn is_dapodik_admin_actor(ctx: &RequestContext) -> bool {
         .as_ref()
         .map(|actor| {
             actor.roles.iter().any(|r| {
-                let lower = r.trim().to_lowercase();
+                let lower = r.name.trim().to_lowercase();
                 lower.contains("admin")
                     || lower.contains("operator")
                     || lower.contains("kepala")
@@ -32,7 +32,7 @@ pub fn require_dapodik_admin(ctx: &RequestContext) -> Result<(), ApiError> {
     if !is_dapodik_admin_actor(ctx) {
         return Err(ApiError::new(
             ApplicationError::Forbidden(
-                ErrorCode::AuthInsufficientPermissions,
+                ErrorCode::AuthPermissionDenied,
                 "Hanya Administrator, Operator Dapodik, atau Kepala Sekolah yang diizinkan mengakses modul Dapodik".to_string(),
             ),
             &ctx.request_id,

@@ -139,7 +139,7 @@ fn is_school_admin_actor(req_ctx: &RequestContext) -> bool {
         .as_ref()
         .map(|actor| {
             actor.roles.iter().any(|r| {
-                let lower = r.trim().to_lowercase();
+                let lower = r.name.trim().to_lowercase();
                 lower.contains("admin")
                     || lower.contains("operator")
                     || lower.contains("kepala")
@@ -152,7 +152,7 @@ fn require_school_admin(req_ctx: &RequestContext) -> Result<(), ApiError> {
     if !is_school_admin_actor(req_ctx) {
         return Err(ApiError::new(
             ApplicationError::Forbidden(
-                ErrorCode::AuthInsufficientPermissions,
+                ErrorCode::AuthPermissionDenied,
                 "Hanya Administrator, Operator, atau Kepala Sekolah yang dapat mengubah profil sekolah".to_string(),
             ),
             &req_ctx.request_id,
