@@ -246,7 +246,7 @@ pub async fn get_report_hub_stats(
     let tid = req_ctx.tenant_id;
 
     let (
-        tot_stud,
+        _tot_stud,
         act_stud,
         mut_stud,
         pip_stud,
