@@ -814,7 +814,7 @@ async fn get_me(
         return Ok(Json(ApiResponse::success(
             AuthUserDto {
                 id: uuid::Uuid::nil(),
-                email: "sysadmin@schoolos.com".to_string(),
+                email: std::env::var("SYSADMIN_EMAIL").unwrap_or_else(|_| "sysadmin@schoolos.com".to_string()),
                 full_name: "Super Admin".to_string(),
                 role: "System Administrator".to_string(),
                 is_active: true,

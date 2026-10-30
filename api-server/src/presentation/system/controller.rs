@@ -857,12 +857,28 @@ async fn system_login(
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "sysadmin@schoolos.com".to_string());
+        .ok_or_else(|| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthInvalidCredentials,
+                    "System admin authentication is not configured".to_string(),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
     let expected_password = std::env::var("SYSADMIN_PASSWORD")
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "sysadmin123".to_string());
+        .ok_or_else(|| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthInvalidCredentials,
+                    "System admin authentication is not configured".to_string(),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
 
     let input_email = payload.email.trim();
     let input_password = payload.password.trim();
