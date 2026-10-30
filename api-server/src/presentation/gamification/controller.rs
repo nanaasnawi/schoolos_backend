@@ -206,7 +206,7 @@ pub async fn award_student_xp(
     if !is_staff_or_admin {
         return Err(ApiError::new(
             ApplicationError::Forbidden(
-                school_core::common::error_code::ErrorCode::AuthInsufficientPermissions,
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
                 "Hanya Guru, Wali Kelas, Kepala Sekolah, atau Administrator yang diizinkan memberikan poin XP secara langsung.".to_string(),
             ),
             &req_ctx.request_id,

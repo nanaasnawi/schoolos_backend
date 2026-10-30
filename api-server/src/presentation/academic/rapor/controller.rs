@@ -10,7 +10,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use super::dto::{
-    AttendanceSummaryDto, ExtracurricularDto, ReportCardsResponse, StudentReportCardDto,
+    AttendanceSummaryDto, ReportCardsResponse, StudentReportCardDto,
     SubjectCompetencyDto,
 };
 use crate::{
@@ -732,8 +732,8 @@ pub async fn verify_rapor_token(
     let token = query.token.trim();
     if !token.starts_with("RPR-") {
         return Err(ApiError::new(
-            ApplicationError::Validation(
-                school_core::common::error_code::ErrorCode::InvalidCredentials,
+            ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthInvalidCredentials,
                 "Format token e-Rapor tidak valid".to_string(),
             ),
             &Uuid::now_v7().to_string(),
@@ -743,8 +743,8 @@ pub async fn verify_rapor_token(
     let parts: Vec<&str> = token[4..].split('.').collect();
     if parts.len() != 3 {
         return Err(ApiError::new(
-            ApplicationError::Validation(
-                school_core::common::error_code::ErrorCode::InvalidCredentials,
+            ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthInvalidCredentials,
                 "Struktur token e-Rapor tidak sah".to_string(),
             ),
             &Uuid::now_v7().to_string(),
@@ -755,8 +755,8 @@ pub async fn verify_rapor_token(
         Ok(id) => id,
         Err(_) => {
             return Err(ApiError::new(
-                ApplicationError::Validation(
-                    school_core::common::error_code::ErrorCode::InvalidCredentials,
+                ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthInvalidCredentials,
                     "Student ID dalam token e-Rapor tidak valid".to_string(),
                 ),
                 &Uuid::now_v7().to_string(),
@@ -833,8 +833,8 @@ pub async fn verify_rapor_token(
 
     if !expected_sig.eq_ignore_ascii_case(given_sig) {
         return Err(ApiError::new(
-            ApplicationError::Validation(
-                school_core::common::error_code::ErrorCode::InvalidCredentials,
+            ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthInvalidCredentials,
                 "Tanda tangan kriptografis token e-Rapor tidak cocok (dokumen diduga telah dimodifikasi)".to_string(),
             ),
             &Uuid::now_v7().to_string(),

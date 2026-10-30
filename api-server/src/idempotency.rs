@@ -50,7 +50,7 @@ pub async fn idempotency_middleware(
 
     let actor_tenant_id = req
         .extensions()
-        .get::<school_core::common::security::Actor>()
+        .get::<school_core::authorization::domain::actor::Actor>()
         .map(|a| a.tenant_id)
         .filter(|tid| !tid.is_nil())
         .or_else(|| {

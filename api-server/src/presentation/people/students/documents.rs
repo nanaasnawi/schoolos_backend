@@ -758,7 +758,7 @@ pub async fn verify_student_document(
     })?;
     let actor_id = actor.id;
     let is_verifier_role = actor.roles.iter().any(|r| {
-        let lower = r.trim().to_lowercase();
+        let lower = r.name.trim().to_lowercase();
         lower.contains("admin")
             || lower.contains("operator")
             || lower.contains("kepala")
@@ -769,7 +769,7 @@ pub async fn verify_student_document(
     if !is_verifier_role {
         return Err(ApiError::new(
             school_core::common::error::ApplicationError::Forbidden(
-                school_core::common::error_code::ErrorCode::AuthInsufficientPermissions,
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
                 "Hanya Operator Sekolah, TU, Kepala Sekolah, atau Administrator yang dapat memverifikasi dokumen siswa (ADR-0020)".to_string(),
             ),
             &req_ctx.request_id,

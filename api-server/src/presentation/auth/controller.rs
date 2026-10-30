@@ -357,7 +357,7 @@ async fn login(
     )))
 }
 
-fn is_privileged_admin_actor(actor: &Option<school_core::common::security::Actor>) -> bool {
+fn is_privileged_admin_actor(actor: &Option<school_core::authorization::domain::actor::Actor>) -> bool {
     actor.as_ref().is_some_and(|a| {
         a.id.is_nil()
             || a.roles.iter().any(|r| {

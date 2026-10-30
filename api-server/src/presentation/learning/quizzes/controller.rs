@@ -2253,7 +2253,24 @@ async fn get_questions(
         })
         .unwrap_or(false);
 
-    let questions = sqlx::query!(
+    #[derive(sqlx::FromRow)]
+    struct QuestionRow {
+        id: Uuid,
+        question_text: String,
+        question_type: String,
+        points: i32,
+        order_index: i32,
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct ChoiceRow {
+        id: Uuid,
+        choice_text: String,
+        order_index: i32,
+        is_correct: bool,
+    }
+
+    let questions: Vec<QuestionRow> = sqlx::query_as(
         r#"
         SELECT q.id, q.question_text, q.question_type, q.points, q.order_index
         FROM quiz_questions q
@@ -2261,9 +2278,9 @@ async fn get_questions(
         WHERE q.quiz_id = $1 AND qz.tenant_id = $2
         ORDER BY q.order_index ASC
         "#,
-        id,
-        req_ctx.tenant_id
     )
+    .bind(id)
+    .bind(req_ctx.tenant_id)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| {
@@ -2277,15 +2294,15 @@ async fn get_questions(
 
     let mut result = Vec::new();
     for q in questions {
-        let choices = sqlx::query!(
+        let choices: Vec<ChoiceRow> = sqlx::query_as(
             r#"
             SELECT id, choice_text, order_index, is_correct
             FROM quiz_choices
             WHERE question_id = $1
             ORDER BY order_index ASC
             "#,
-            q.id
         )
+        .bind(q.id)
         .fetch_all(&ctx.pool)
         .await
         .map_err(|e| {
@@ -2370,18 +2387,18 @@ async fn add_question(
     let points = payload.points.unwrap_or(10);
     let order_idx = payload.order_index.unwrap_or(1);
 
-    sqlx::query!(
+    sqlx::query(
         r#"
         INSERT INTO quiz_questions (id, quiz_id, question_text, question_type, points, order_index, created_at, updated_at)
         VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
         "#,
-        q_id,
-        id,
-        payload.question_text,
-        q_type,
-        points,
-        order_idx
     )
+    .bind(q_id)
+    .bind(id)
+    .bind(payload.question_text)
+    .bind(q_type)
+    .bind(points)
+    .bind(order_idx)
     .execute(&ctx.pool)
     .await
     .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(

@@ -338,7 +338,7 @@ async fn get_dashboard(
     let transferred_students = transferred_students_res.unwrap_or(0);
 
     let metrics = DashboardMetricsDto {
-        total_students: active_students,
+        total_students: total_students_res.unwrap_or(active_students),
         active_students,
         transferred_students,
         total_teachers: total_teachers_res.unwrap_or(0),
