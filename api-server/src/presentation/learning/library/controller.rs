@@ -99,6 +99,142 @@ async fn get_reading_recommendations(
     list_books(State(ctx), req_ctx, Query(modified_query)).await
 }
 
+fn map_subject_to_canonical_and_patterns(subject_name: &str) -> (Vec<String>, Vec<String>) {
+    let lower = subject_name.to_lowercase();
+    let mut canonicals = Vec::new();
+    let mut patterns = Vec::new();
+
+    let clean = subject_name.trim();
+    if !clean.is_empty() {
+        patterns.push(format!("%{}%", clean));
+    }
+
+    if lower.contains("matematika") {
+        canonicals.push("MATEMATIKA".to_string());
+        patterns.push("%Matematika%".to_string());
+    }
+    if lower.contains("indonesia") {
+        canonicals.push("BAHASA_INDONESIA".to_string());
+        patterns.push("%Indonesia%".to_string());
+    }
+    if lower.contains("inggris") {
+        canonicals.push("BAHASA_INGGRIS".to_string());
+        patterns.push("%Inggris%".to_string());
+    }
+    if lower.contains("jepang") {
+        canonicals.push("BAHASA_JEPANG".to_string());
+    }
+    if lower.contains("jerman") {
+        canonicals.push("BAHASA_JERMAN".to_string());
+    }
+    if lower.contains("arab") {
+        canonicals.push("BAHASA_ARAB".to_string());
+    }
+    if lower.contains("mandarin") {
+        canonicals.push("BAHASA_MANDARIN".to_string());
+    }
+    if lower.contains("prancis") {
+        canonicals.push("BAHASA_PRANCIS".to_string());
+    }
+    if lower.contains("korea") {
+        canonicals.push("BAHASA_KOREA".to_string());
+    }
+    if lower.contains("fisika") {
+        canonicals.push("FISIKA".to_string());
+        patterns.push("%Fisika%".to_string());
+    }
+    if lower.contains("biologi") {
+        canonicals.push("BIOLOGI".to_string());
+        patterns.push("%Biologi%".to_string());
+    }
+    if lower.contains("kimia") {
+        canonicals.push("KIMIA".to_string());
+        patterns.push("%Kimia%".to_string());
+    }
+    if lower.contains("informatika") || lower.contains("komputer") || lower.contains("koding") || lower.contains("tik") {
+        canonicals.push("INFORMATIKA".to_string());
+        patterns.push("%Informatika%".to_string());
+        patterns.push("%Komputer%".to_string());
+    }
+    if lower.contains("pancasila") || lower.contains("ppkn") || lower.contains("kewarganegaraan") {
+        canonicals.push("PENDIDIKAN_PANCASILA".to_string());
+        patterns.push("%Pancasila%".to_string());
+        patterns.push("%PPKn%".to_string());
+    }
+    if lower.contains("sejarah") {
+        canonicals.push("SEJARAH".to_string());
+        patterns.push("%Sejarah%".to_string());
+    }
+    if lower.contains("geografi") {
+        canonicals.push("GEOGRAFI".to_string());
+        patterns.push("%Geografi%".to_string());
+    }
+    if lower.contains("ekonomi") || lower.contains("akuntansi") {
+        canonicals.push("EKONOMI".to_string());
+        patterns.push("%Ekonomi%".to_string());
+    }
+    if lower.contains("sosiologi") {
+        canonicals.push("SOSIOLOGI".to_string());
+        patterns.push("%Sosiologi%".to_string());
+    }
+    if lower.contains("antropologi") {
+        canonicals.push("ANTROPOLOGI".to_string());
+        patterns.push("%Antropologi%".to_string());
+    }
+    if lower.contains("pjok") || lower.contains("jasmani") || lower.contains("olahraga") || lower.contains("penjaskes") || lower.contains("penjas") {
+        canonicals.push("PJOK".to_string());
+        patterns.push("%PJOK%".to_string());
+        patterns.push("%Jasmani%".to_string());
+        patterns.push("%Olahraga%".to_string());
+    }
+    if lower.contains("agama islam") || lower.contains("pai") || (lower.contains("agama") && lower.contains("islam")) {
+        canonicals.push("PENDIDIKAN_AGAMA_ISLAM".to_string());
+        patterns.push("%Agama Islam%".to_string());
+        patterns.push("%Budi Pekerti%".to_string());
+    } else if lower.contains("agama kristen") {
+        canonicals.push("PENDIDIKAN_AGAMA_KRISTEN".to_string());
+        patterns.push("%Agama Kristen%".to_string());
+    } else if lower.contains("agama katolik") {
+        canonicals.push("PENDIDIKAN_AGAMA_KATOLIK".to_string());
+        patterns.push("%Agama Katolik%".to_string());
+    } else if lower.contains("agama hindu") {
+        canonicals.push("PENDIDIKAN_AGAMA_HINDU".to_string());
+        patterns.push("%Agama Hindu%".to_string());
+    } else if lower.contains("agama buddha") {
+        canonicals.push("PENDIDIKAN_AGAMA_BUDDHA".to_string());
+        patterns.push("%Agama Buddha%".to_string());
+    } else if lower.contains("agama khonghucu") {
+        canonicals.push("PENDIDIKAN_AGAMA_KHONGHUCU".to_string());
+        patterns.push("%Agama Khonghucu%".to_string());
+    }
+    if lower.contains("seni") {
+        canonicals.push("SENI_BUDAYA".to_string());
+        canonicals.push("SENI_MUSIK".to_string());
+        canonicals.push("SENI_RUPA".to_string());
+        canonicals.push("SENI_TARI".to_string());
+        canonicals.push("SENI_TEATER".to_string());
+        patterns.push("%Seni%".to_string());
+    }
+    if lower.contains("prakarya") || lower.contains("kewirausahaan") {
+        canonicals.push("PRAKARYA".to_string());
+        patterns.push("%Prakarya%".to_string());
+    }
+    if lower.contains("ipas") {
+        canonicals.push("IPAS".to_string());
+        patterns.push("%IPAS%".to_string());
+    } else if lower.contains("ipa") || lower.contains("ilmu pengetahuan alam") {
+        canonicals.push("IPA".to_string());
+        patterns.push("%IPA%".to_string());
+        patterns.push("%Alam%".to_string());
+    } else if lower.contains("ips") || lower.contains("ilmu pengetahuan sosial") {
+        canonicals.push("IPS".to_string());
+        patterns.push("%IPS%".to_string());
+        patterns.push("%Sosial%".to_string());
+    }
+
+    (canonicals, patterns)
+}
+
 async fn list_books(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
@@ -234,7 +370,7 @@ async fn list_books(
                         c.homeroom_teacher_id = $2
                         OR EXISTS (
                           SELECT 1 FROM class_schedules cs 
-                          WHERE cs.class_id = c.id AND cs.teacher_id = $2 AND cs.tenant_id = $1
+                          WHERE cs.class_id = c.id AND cs.teacher_id = $2 AND cs.tenant_id = $1 AND cs.deleted_at IS NULL
                         )
                       )
                     "#,
@@ -259,6 +395,131 @@ async fn list_books(
             None
         };
 
+    // 4. Resolve teacher subject scope if caller is a subject teacher (guru mapel)
+    let (
+        is_teacher_subject_filter_active,
+        teacher_canonical_subjects,
+        teacher_subject_ids,
+        teacher_subject_patterns,
+    ) = if is_teacher && query.subject_id.is_none() {
+        if let Some(tid) = teacher_id {
+            // a. Query primary subject text from teachers table
+            let teacher_subject_str: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+                r#"
+                SELECT subject FROM teachers 
+                WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+                "#,
+            )
+            .bind(tid)
+            .bind(req_ctx.tenant_id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .ok()
+            .flatten()
+            .flatten();
+
+            // b. Query scheduled subjects from class_schedules
+            // If class_id was provided, prioritize subject scheduled for that class
+            let class_filtered_schedules: Vec<(Uuid, String)> = sqlx::query(
+                r#"
+                SELECT DISTINCT s.id, s.name
+                FROM class_schedules cs
+                JOIN subjects s ON s.id = cs.subject_id AND s.tenant_id = cs.tenant_id
+                WHERE cs.teacher_id = $1 AND cs.tenant_id = $2 AND cs.deleted_at IS NULL
+                  AND ($3::uuid IS NULL OR cs.class_id = $3)
+                "#,
+            )
+            .bind(tid)
+            .bind(req_ctx.tenant_id)
+            .bind(query.class_id)
+            .fetch_all(&ctx.pool)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| (r.get("id"), r.get("name")))
+            .collect();
+
+            let scheduled_subjects = if class_filtered_schedules.is_empty() && query.class_id.is_some() {
+                // Fallback to all schedules of teacher across classes
+                sqlx::query(
+                    r#"
+                    SELECT DISTINCT s.id, s.name
+                    FROM class_schedules cs
+                    JOIN subjects s ON s.id = cs.subject_id AND s.tenant_id = cs.tenant_id
+                    WHERE cs.teacher_id = $1 AND cs.tenant_id = $2 AND cs.deleted_at IS NULL
+                    "#,
+                )
+                .bind(tid)
+                .bind(req_ctx.tenant_id)
+                .fetch_all(&ctx.pool)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| (r.get("id"), r.get("name")))
+                .collect()
+            } else {
+                class_filtered_schedules
+            };
+
+            let mut subj_ids: Vec<Uuid> = scheduled_subjects.iter().map(|(id, _)| *id).collect();
+            let mut canonicals: Vec<String> = Vec::new();
+            let mut patterns: Vec<String> = Vec::new();
+
+            for (_, name) in &scheduled_subjects {
+                let (c_list, p_list) = map_subject_to_canonical_and_patterns(name);
+                canonicals.extend(c_list);
+                patterns.extend(p_list);
+            }
+
+            if let Some(ref subj_text) = teacher_subject_str {
+                let trimmed = subj_text.trim();
+                if !trimmed.is_empty() {
+                    for part in trimmed.split(&[',', '/', ';'][..]) {
+                        let clean = part.trim();
+                        if !clean.is_empty() {
+                            let (c_list, p_list) = map_subject_to_canonical_and_patterns(clean);
+                            canonicals.extend(c_list);
+                            patterns.extend(p_list);
+                        }
+                    }
+
+                    let matched_ids: Vec<Uuid> = sqlx::query_scalar::<_, Uuid>(
+                        r#"
+                        SELECT id FROM subjects
+                        WHERE tenant_id = $1 AND deleted_at IS NULL
+                          AND ($2 ILIKE ('%' || name || '%') OR name ILIKE ('%' || $2 || '%'))
+                        "#,
+                    )
+                    .bind(req_ctx.tenant_id)
+                    .bind(trimmed)
+                    .fetch_all(&ctx.pool)
+                    .await
+                    .unwrap_or_default();
+                    subj_ids.extend(matched_ids);
+                }
+            }
+
+            canonicals.sort();
+            canonicals.dedup();
+            patterns.sort();
+            patterns.dedup();
+            subj_ids.sort();
+            subj_ids.dedup();
+
+            let is_active = !canonicals.is_empty() || !patterns.is_empty() || !subj_ids.is_empty();
+            (
+                is_active,
+                if !canonicals.is_empty() { Some(canonicals) } else { None },
+                if !subj_ids.is_empty() { Some(subj_ids) } else { None },
+                if !patterns.is_empty() { Some(patterns) } else { None },
+            )
+        } else {
+            (false, None, None, None)
+        }
+    } else {
+        (false, None, None, None)
+    };
+
     // Determine target exact level: specific class_id takes top priority, then student class, then query.class_level
     let exact_class_level: Option<i32> = specific_class_level
         .or(student_class_level)
@@ -278,32 +539,46 @@ async fn list_books(
         LEFT JOIN grade_levels gl ON gl.id = b.grade_level_id AND gl.tenant_id = $1
         WHERE (b.tenant_id = $1 OR b.tenant_id IS NULL)
           AND (
-            $2::uuid IS NULL 
-            OR b.subject_id = $2
-            OR (
-                b.canonical_subject IS NOT NULL 
-                AND EXISTS (
-                    SELECT 1 FROM subjects s 
-                    WHERE s.id = $2 AND s.tenant_id = $1 
-                      AND (
-                        (b.canonical_subject = 'MATEMATIKA' AND (s.code LIKE '4010%' OR s.name ILIKE '%Matematika%'))
-                        OR (b.canonical_subject = 'BAHASA_INDONESIA' AND (s.code LIKE '3001%' OR s.name ILIKE '%Indonesia%'))
-                        OR (b.canonical_subject = 'BAHASA_INGGRIS' AND (s.code LIKE '3002%' OR s.name ILIKE '%Inggris%'))
-                        OR (b.canonical_subject = 'FISIKA' AND (s.name ILIKE '%Fisika%'))
-                        OR (b.canonical_subject = 'BIOLOGI' AND (s.name ILIKE '%Biologi%'))
-                        OR (b.canonical_subject = 'KIMIA' AND (s.name ILIKE '%Kimia%'))
-                        OR (b.canonical_subject = 'INFORMATIKA' AND (s.code LIKE '700%' OR s.name ILIKE '%Informatika%' OR s.name ILIKE '%Komputer%'))
-                        OR (b.canonical_subject = 'PENDIDIKAN_PANCASILA' AND (s.code LIKE '200%' OR s.name ILIKE '%Pancasila%' OR s.name ILIKE '%PPKn%'))
-                        OR (b.canonical_subject = 'PJOK' AND (s.code LIKE '500%' OR s.name ILIKE '%Jasmani%' OR s.name ILIKE '%PJOK%'))
-                        OR (b.canonical_subject = 'PENDIDIKAN_AGAMA_ISLAM' AND (s.code LIKE '100%' OR s.name ILIKE '%Agama Islam%'))
-                        OR (b.canonical_subject = 'SEJARAH' AND (s.name ILIKE '%Sejarah%'))
-                        OR (b.canonical_subject = 'GEOGRAFI' AND (s.name ILIKE '%Geografi%'))
-                        OR (b.canonical_subject = 'EKONOMI' AND (s.name ILIKE '%Ekonomi%'))
-                        OR (b.canonical_subject = 'SOSIOLOGI' AND (s.name ILIKE '%Sosiologi%'))
-                        OR (b.canonical_subject = 'SENI_BUDAYA' AND (s.code LIKE '843%' OR s.name ILIKE '%Seni%'))
-                        OR (b.subject_name IS NOT NULL AND (s.name ILIKE '%' || b.subject_name || '%' OR b.subject_name ILIKE '%' || s.name || '%'))
-                      )
+            -- 1. Explicit query.subject_id was requested
+            ($2::uuid IS NOT NULL AND (
+                b.subject_id = $2
+                OR (
+                    b.canonical_subject IS NOT NULL 
+                    AND EXISTS (
+                        SELECT 1 FROM subjects s 
+                        WHERE s.id = $2 AND s.tenant_id = $1 
+                          AND (
+                            (b.canonical_subject = 'MATEMATIKA' AND (s.code LIKE '4010%' OR s.name ILIKE '%Matematika%'))
+                            OR (b.canonical_subject = 'BAHASA_INDONESIA' AND (s.code LIKE '3001%' OR s.name ILIKE '%Indonesia%'))
+                            OR (b.canonical_subject = 'BAHASA_INGGRIS' AND (s.code LIKE '3002%' OR s.name ILIKE '%Inggris%'))
+                            OR (b.canonical_subject = 'FISIKA' AND (s.name ILIKE '%Fisika%'))
+                            OR (b.canonical_subject = 'BIOLOGI' AND (s.name ILIKE '%Biologi%'))
+                            OR (b.canonical_subject = 'KIMIA' AND (s.name ILIKE '%Kimia%'))
+                            OR (b.canonical_subject = 'INFORMATIKA' AND (s.code LIKE '700%' OR s.name ILIKE '%Informatika%' OR s.name ILIKE '%Komputer%'))
+                            OR (b.canonical_subject = 'PENDIDIKAN_PANCASILA' AND (s.code LIKE '200%' OR s.name ILIKE '%Pancasila%' OR s.name ILIKE '%PPKn%'))
+                            OR (b.canonical_subject = 'PJOK' AND (s.code LIKE '500%' OR s.name ILIKE '%Jasmani%' OR s.name ILIKE '%PJOK%'))
+                            OR (b.canonical_subject = 'PENDIDIKAN_AGAMA_ISLAM' AND (s.code LIKE '100%' OR s.name ILIKE '%Agama Islam%'))
+                            OR (b.canonical_subject = 'SEJARAH' AND (s.name ILIKE '%Sejarah%'))
+                            OR (b.canonical_subject = 'GEOGRAFI' AND (s.name ILIKE '%Geografi%'))
+                            OR (b.canonical_subject = 'EKONOMI' AND (s.name ILIKE '%Ekonomi%'))
+                            OR (b.canonical_subject = 'SOSIOLOGI' AND (s.name ILIKE '%Sosiologi%'))
+                            OR (b.canonical_subject = 'SENI_BUDAYA' AND (s.code LIKE '843%' OR s.name ILIKE '%Seni%'))
+                            OR (b.subject_name IS NOT NULL AND (s.name ILIKE '%' || b.subject_name || '%' OR b.subject_name ILIKE '%' || s.name || '%'))
+                          )
+                    )
                 )
+            ))
+            -- 2. Teacher subject scope filter (guru mapel accessing catalog without explicit subject_id)
+            OR (
+                $2::uuid IS NULL AND $8::boolean IS TRUE AND (
+                    ($9::text[] IS NOT NULL AND b.canonical_subject IS NOT NULL AND b.canonical_subject = ANY($9))
+                    OR ($10::uuid[] IS NOT NULL AND b.subject_id IS NOT NULL AND b.subject_id = ANY($10))
+                    OR ($11::text[] IS NOT NULL AND (b.subject_name ILIKE ANY($11) OR b.title ILIKE ANY($11)))
+                )
+            )
+            -- 3. No subject restriction (admin, staff, student, or unassigned teacher)
+            OR (
+                $2::uuid IS NULL AND $8::boolean IS FALSE
             )
           )
           AND (
@@ -358,6 +633,10 @@ async fn list_books(
     .bind(teacher_taught_levels.as_deref())
     .bind(query.search.as_deref().map(|s| s.trim()))
     .bind(is_recommendations)
+    .bind(is_teacher_subject_filter_active)
+    .bind(teacher_canonical_subjects.as_deref())
+    .bind(teacher_subject_ids.as_deref())
+    .bind(teacher_subject_patterns.as_deref())
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| {
