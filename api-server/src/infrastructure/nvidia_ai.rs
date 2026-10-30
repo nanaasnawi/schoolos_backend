@@ -534,8 +534,137 @@ pub fn get_safe_curated_educational_image(subject: &str, query: &str) -> String 
         .to_string()
 }
 
+fn url_encode_wiki(input: &str) -> String {
+    let mut encoded = String::new();
+    for byte in input.bytes() {
+        match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            b' ' => encoded.push_str("%20"),
+            _ => {
+                encoded.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    encoded
+}
+
+async fn fetch_wikipedia_educational_image(query: &str) -> Option<String> {
+    let clean_query = query.trim();
+    if clean_query.is_empty() {
+        return None;
+    }
+
+    let client = get_ai_client();
+    let langs = ["id", "en"];
+
+    for lang in langs {
+        // Step 1: Search Wikipedia for closest educational article title
+        let search_url = format!(
+            "https://{lang}.wikipedia.org/w/api.php?action=query&list=search&srsearch={}&format=json&utf8=1&srlimit=1",
+            url_encode_wiki(clean_query)
+        );
+
+        let search_resp = match client
+            .get(&search_url)
+            .header("User-Agent", "SchoolOS-EducationPlatform/1.0 (admin@akselerasi.edu; child-safe-pedagogy)")
+            .timeout(Duration::from_millis(2500))
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => r,
+            _ => continue,
+        };
+
+        let search_json: serde_json::Value = match search_resp.json().await {
+            Ok(j) => j,
+            _ => continue,
+        };
+
+        let title = match search_json
+            .get("query")
+            .and_then(|q| q.get("search"))
+            .and_then(|s| s.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|item| item.get("title"))
+            .and_then(|t| t.as_str())
+        {
+            Some(t) if !t.trim().is_empty() => t,
+            _ => continue,
+        };
+
+        // Step 2: Fetch page summary with image thumbnail/originalimage
+        let summary_url = format!(
+            "https://{lang}.wikipedia.org/api/rest_v1/page/summary/{}",
+            url_encode_wiki(title)
+        );
+
+        let summary_resp = match client
+            .get(&summary_url)
+            .header("User-Agent", "SchoolOS-EducationPlatform/1.0 (admin@akselerasi.edu; child-safe-pedagogy)")
+            .timeout(Duration::from_millis(2500))
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => r,
+            _ => continue,
+        };
+
+        let summary_json: serde_json::Value = match summary_resp.json().await {
+            Ok(j) => j,
+            _ => continue,
+        };
+
+        let image_url = summary_json
+            .get("thumbnail")
+            .and_then(|img| img.get("source"))
+            .and_then(|s| s.as_str())
+            .or_else(|| {
+                summary_json
+                    .get("originalimage")
+                    .and_then(|img| img.get("source"))
+                    .and_then(|s| s.as_str())
+            });
+
+        if let Some(url) = image_url {
+            let lower = url.to_lowercase();
+            if lower.starts_with("http")
+                && (lower.contains(".jpg")
+                    || lower.contains(".jpeg")
+                    || lower.contains(".png")
+                    || lower.contains(".svg")
+                    || lower.contains(".webp"))
+            {
+                tracing::info!(
+                    "Found Wikipedia educational image for '{}' on [{}]: {}",
+                    clean_query,
+                    lang,
+                    url
+                );
+                return Some(url.to_string());
+            }
+        }
+    }
+
+    None
+}
+
 pub async fn search_real_educational_image(query: &str, subject_name: &str) -> String {
-    // Strictly curated child-safe engine to ensure zero inappropriate/adult material can enter
+    // 1. Query Wikipedia (Indonesian, then English) for actual encyclopedia diagram/photo
+    if let Some(wiki_url) = fetch_wikipedia_educational_image(query).await {
+        return wiki_url;
+    }
+
+    // 2. Query combined subject and topic if query was very concise
+    if !query.trim().is_empty() && query.trim() != subject_name.trim() {
+        let combined = format!("{} {}", subject_name, query);
+        if let Some(wiki_url) = fetch_wikipedia_educational_image(&combined).await {
+            return wiki_url;
+        }
+    }
+
+    // 3. Fallback to child-safe curated educational catalog
     get_safe_curated_educational_image(subject_name, query)
 }
 
