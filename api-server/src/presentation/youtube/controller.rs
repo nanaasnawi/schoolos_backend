@@ -289,3 +289,4 @@ pub async fn search_youtube_handler(
     )
         .into_response()
 }
+
