@@ -188,6 +188,7 @@ use crate::presentation::{
     school::controller::school_routes, tenant::controller::tenant_routes,
     gamification::controller::gamification_routes,
     reports::controller::report_routes,
+    youtube::controller::youtube_routes,
 };
 use crate::ApiDoc;
 
@@ -1293,6 +1294,7 @@ impl Bootstrap {
                     )),
             )
             .nest("/api/v1/system", system_routes(context.clone()))
+            .nest("/api/v1/youtube", youtube_routes())
             .nest("/health", health_routes())
             .nest_service("/uploads", ServeDir::new("uploads"))
             .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))

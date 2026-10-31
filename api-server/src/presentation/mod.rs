@@ -13,3 +13,4 @@ pub mod system;
 pub mod tenant;
 pub mod gamification;
 pub mod reports;
+pub mod youtube;
