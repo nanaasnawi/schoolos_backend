@@ -845,7 +845,7 @@ async fn get_by_id(
         .map(|a| {
             a.roles.iter().any(|r| {
                 let n = r.name.to_lowercase();
-                n.contains("admin") || n.contains("kepala sekolah") || n.contains("operator")
+                n.contains("admin") || n.contains("kepala sekolah") || n.contains("kepala") || n.contains("operator") || n.contains("staff") || n.contains("staf")
             })
         })
         .unwrap_or(false);
@@ -1628,7 +1628,7 @@ async fn update(
         .map(|a| {
             a.roles.iter().any(|r| {
                 let n = r.name.to_lowercase();
-                n.contains("admin") || n.contains("kepala sekolah") || n.contains("operator")
+                n.contains("admin") || n.contains("kepala sekolah") || n.contains("kepala") || n.contains("operator") || n.contains("staff") || n.contains("staf")
             })
         })
         .unwrap_or(false);
@@ -1705,7 +1705,7 @@ async fn update(
         description: payload.description,
         storage_key: payload.storage_key,
         external_url: payload.external_url,
-        visibility: payload.visibility,
+        visibility: payload.visibility.clone(),
     };
 
     let material = ctx
@@ -1719,6 +1719,7 @@ async fn update(
         || payload.release_at.is_some()
         || payload.class_id.is_some()
         || payload.subject_id.is_some()
+        || payload.visibility.is_some()
     {
         let is_sched = payload.release_at.map(|r| r > chrono::Utc::now());
         let _ = sqlx::query(
@@ -1731,9 +1732,14 @@ async fn update(
                    visibility = CASE 
                        WHEN $6 = true THEN 'draft' 
                        WHEN $6 = false THEN 'published' 
-                       ELSE visibility 
+                       ELSE COALESCE($7, visibility) 
+                   END,
+                   notification_dispatched = CASE 
+                       WHEN $6 = true THEN false 
+                       WHEN $6 = false THEN true 
+                       ELSE notification_dispatched 
                    END
-               WHERE id = $7"#
+               WHERE id = $8"#
         )
         .bind(payload.start_page)
         .bind(payload.end_page)
@@ -1741,6 +1747,7 @@ async fn update(
         .bind(payload.class_id)
         .bind(payload.subject_id)
         .bind(is_sched)
+        .bind(payload.visibility.as_ref())
         .bind(id)
         .execute(&ctx.pool)
         .await;
@@ -1790,7 +1797,7 @@ async fn delete(
         .map(|a| {
             a.roles.iter().any(|r| {
                 let n = r.name.to_lowercase();
-                n.contains("admin") || n.contains("kepala sekolah") || n.contains("operator")
+                n.contains("admin") || n.contains("kepala sekolah") || n.contains("kepala") || n.contains("operator") || n.contains("staff") || n.contains("staf")
             })
         })
         .unwrap_or(false);
