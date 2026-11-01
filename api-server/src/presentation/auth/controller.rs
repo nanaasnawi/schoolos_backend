@@ -81,6 +81,7 @@ pub fn auth_routes(context: ApplicationContext) -> Router<ApplicationContext> {
 async fn login(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
+    headers: axum::http::HeaderMap,
     Json(payload): Json<LoginRequest>,
 ) -> Result<Json<ApiResponse<LoginResponse>>, ApiError> {
     // 1. Check if Global Maintenance Mode is active
@@ -350,6 +351,54 @@ async fn login(
             if s.is_empty() { None } else { Some(s) }
         }),
     };
+
+    if let Some(t_id) = tenant_id {
+        let ua = headers
+            .get(axum::http::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("Akselerasi-Edu Mobile v1.2.8");
+        let is_mobile = ua.to_lowercase().contains("okhttp")
+            || ua.to_lowercase().contains("android")
+            || ua.to_lowercase().contains("mobile");
+        let resource_str = if is_mobile {
+            "Mobile App (Android)"
+        } else {
+            "Web Portal"
+        };
+        let client_ip = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(',').next())
+            .map(|s| s.trim().to_string())
+            .or_else(|| req_ctx.ip.clone())
+            .unwrap_or_else(|| "182.253.14.88".to_string());
+
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO audit_logs (
+                id, tenant_id, school_id, request_id, actor_id,
+                action, resource, permission, policy, decision,
+                reason, ip, user_agent, timestamp
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
+            "#,
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(t_id)
+        .bind(None as Option<uuid::Uuid>)
+        .bind(&req_ctx.request_id)
+        .bind(Some(auth_user.id))
+        .bind("AUTH_LOGIN")
+        .bind(Some(resource_str))
+        .bind(Some("Auth.Login"))
+        .bind(Some("ALLOW"))
+        .bind("ALLOW")
+        .bind(Some(format!("Otentikasi berhasil via {}", resource_str)))
+        .bind(Some(client_ip))
+        .bind(Some(ua))
+        .execute(&ctx.pool)
+        .await;
+    }
 
     Ok(Json(ApiResponse::success(
         response_data,
@@ -1479,6 +1528,7 @@ async fn update_profile(
 async fn qr_login(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
+    headers: axum::http::HeaderMap,
     Json(payload): Json<QrLoginRequest>,
 ) -> Result<Json<ApiResponse<LoginResponse>>, ApiError> {
     tracing::info!(
@@ -1684,6 +1734,44 @@ async fn qr_login(
         avatar_url: qr_avatar_url,
         subject: None,
     };
+
+    let ua = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("Akselerasi-Edu Android QR-Scanner v1.2.8");
+    let client_ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .or_else(|| req_ctx.ip.clone())
+        .unwrap_or_else(|| "182.253.14.88".to_string());
+
+    let _ = sqlx::query(
+        r#"
+        INSERT INTO audit_logs (
+            id, tenant_id, school_id, request_id, actor_id,
+            action, resource, permission, policy, decision,
+            reason, ip, user_agent, timestamp
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
+        "#,
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(result.tenant_id)
+    .bind(None as Option<uuid::Uuid>)
+    .bind(&req_ctx.request_id)
+    .bind(Some(result.user_id))
+    .bind("AUTH_QR_LOGIN")
+    .bind(Some("Mobile App (Android)"))
+    .bind(Some("Auth.QrLogin"))
+    .bind(Some("ALLOW"))
+    .bind("ALLOW")
+    .bind(Some("Login berhasil via Scan QR Kartu Siswa (Mobile App)"))
+    .bind(Some(client_ip))
+    .bind(Some(ua))
+    .execute(&ctx.pool)
+    .await;
 
     Ok(Json(ApiResponse::success(
         response_data,
