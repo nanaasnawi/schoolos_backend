@@ -5,7 +5,7 @@ const m = envText.match(/^DATABASE_URL=(.+)$/m);
 const dbUrl = m ? m[1].trim() : process.env.DATABASE_URL;
 const { Client } = require('pg');
 
-const SAFE_ENGLISH_IMAGE = 'https://images.unsplash.com/photo-1456513080510-7bf3a84b82f8?auto=format&fit=crop&w=1200&q=80';
+const SAFE_ENGLISH_IMAGE = '';
 
 (async () => {
   const client = new Client({ connectionString: dbUrl });
