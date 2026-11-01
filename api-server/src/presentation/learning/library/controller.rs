@@ -52,6 +52,8 @@ pub struct AssignReadingMaterialRequest {
     pub teacher_id: Option<Uuid>,
     pub start_page: i32,
     pub end_page: i32,
+    pub release_at: Option<DateTime<Utc>>,
+    pub visibility: Option<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -891,14 +893,22 @@ async fn assign_reading_material(
         payload.instructions.as_deref().unwrap_or("")
     );
 
+    let is_scheduled = payload.release_at.is_some_and(|r| r > chrono::Utc::now());
+    let initial_visibility = if is_scheduled {
+        "draft".to_string()
+    } else {
+        payload.visibility.clone().unwrap_or_else(|| "published".to_string())
+    };
+
     sqlx::query(
         r#"
         INSERT INTO learning_materials (
             id, tenant_id, class_id, subject_id, teacher_id, created_by,
             material_type, title, description, external_url, is_active, source_type,
-            library_book_id, start_page, end_page, created_at, updated_at
+            library_book_id, start_page, end_page, release_at, visibility,
+            notification_dispatched, created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, 'document', $7, $8, $9, true, 'LIBRARY', $10, $11, $12, NOW(), NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, 'document', $7, $8, $9, true, 'LIBRARY', $10, $11, $12, COALESCE($13, NOW()), $14, $15, NOW(), NOW())
         "#
     )
     .bind(material_id)
@@ -913,6 +923,9 @@ async fn assign_reading_material(
     .bind(payload.book_id)
     .bind(payload.start_page)
     .bind(payload.end_page)
+    .bind(payload.release_at)
+    .bind(&initial_visibility)
+    .bind(!is_scheduled)
     .execute(&ctx.pool)
     .await
     .map_err(|e| {
@@ -924,81 +937,83 @@ async fn assign_reading_material(
         )
     })?;
 
-    // Fetch teacher & class names for notifications
-    let teacher_name = if let Some(tid) = teacher_id {
-        sqlx::query_scalar::<_, String>(
-            "SELECT u.full_name FROM teachers t JOIN users u ON u.id = t.user_id WHERE t.id = $1",
-        )
-        .bind(tid)
-        .fetch_optional(&ctx.pool)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "Guru Pengampu".to_string())
-    } else if let Some(aid) = actor_id {
-        sqlx::query_scalar::<_, String>("SELECT full_name FROM users WHERE id = $1")
-            .bind(aid)
+    // Fetch teacher & class names and dispatch notifications only if published immediately (not scheduled)
+    if !is_scheduled {
+        let teacher_name = if let Some(tid) = teacher_id {
+            sqlx::query_scalar::<_, String>(
+                "SELECT u.full_name FROM teachers t JOIN users u ON u.id = t.user_id WHERE t.id = $1",
+            )
+            .bind(tid)
             .fetch_optional(&ctx.pool)
             .await
             .ok()
             .flatten()
             .unwrap_or_else(|| "Guru Pengampu".to_string())
-    } else {
-        "Guru Pengampu".to_string()
-    };
+        } else if let Some(aid) = actor_id {
+            sqlx::query_scalar::<_, String>("SELECT full_name FROM users WHERE id = $1")
+                .bind(aid)
+                .fetch_optional(&ctx.pool)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "Guru Pengampu".to_string())
+        } else {
+            "Guru Pengampu".to_string()
+        };
 
-    let class_name = sqlx::query_scalar::<_, String>(
-        "SELECT name FROM classes WHERE id = $1 AND tenant_id = $2",
-    )
-    .bind(payload.class_id)
-    .bind(req_ctx.tenant_id)
-    .fetch_optional(&ctx.pool)
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or_else(|| "Kelas".to_string());
+        let class_name = sqlx::query_scalar::<_, String>(
+            "SELECT name FROM classes WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(payload.class_id)
+        .bind(req_ctx.tenant_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "Kelas".to_string());
 
-    let notif_title = format!("📚 Materi Baru: {}", payload.title);
-    let notif_body = format!(
-        "{} telah menugaskan materi bacaan baru untuk kelas {}. Buka dan pelajari sekarang!",
-        teacher_name, class_name
-    );
+        let notif_title = format!("📚 Materi Baru: {}", payload.title);
+        let notif_body = format!(
+            "{} telah menugaskan materi bacaan baru untuk kelas {}. Buka dan pelajari sekarang!",
+            teacher_name, class_name
+        );
 
-    // Insert in-app notifications for all active enrolled students in this class
-    let _ = sqlx::query(
-        r#"
-        INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, reference_type, reference_id, is_read, created_at)
-        SELECT 
-            gen_random_uuid(),
-            s.tenant_id,
-            s.user_id,
-            $1,
-            $2,
-            'LEARNING_MATERIAL',
-            'in_app',
-            'material',
-            $3,
-            FALSE,
-            NOW()
-        FROM students s
-        JOIN enrollments en ON en.student_id = s.id
-        WHERE en.class_id = $4 AND (en.status = 'Active' OR en.status = 'ACTIVE')
-        "#
-    )
-    .bind(&notif_title)
-    .bind(&notif_body)
-    .bind(material_id)
-    .bind(payload.class_id)
-    .execute(&ctx.pool)
-    .await;
+        // Insert in-app notifications for all active enrolled students in this class
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, reference_type, reference_id, is_read, created_at)
+            SELECT 
+                gen_random_uuid(),
+                s.tenant_id,
+                s.user_id,
+                $1,
+                $2,
+                'LEARNING_MATERIAL',
+                'in_app',
+                'material',
+                $3,
+                FALSE,
+                NOW()
+            FROM students s
+            JOIN enrollments en ON en.student_id = s.id
+            WHERE en.class_id = $4 AND (en.status = 'Active' OR en.status = 'ACTIVE')
+            "#
+        )
+        .bind(&notif_title)
+        .bind(&notif_body)
+        .bind(material_id)
+        .bind(payload.class_id)
+        .execute(&ctx.pool)
+        .await;
 
-    // Trigger high-priority FCM push notification (wakes up lockscreen & alerts students)
-    crate::infrastructure::fcm::trigger_fcm_push_notification(
-        notif_title,
-        notif_body,
-        "Materi Pembelajaran".to_string(),
-        material_id,
-    );
+        // Trigger high-priority FCM push notification (wakes up lockscreen & alerts students)
+        crate::infrastructure::fcm::trigger_fcm_push_notification(
+            notif_title,
+            notif_body,
+            "Materi Pembelajaran".to_string(),
+            material_id,
+        );
+    }
 
     Ok(Json(ApiResponse::success(material_id, req_ctx.request_id)))
 }

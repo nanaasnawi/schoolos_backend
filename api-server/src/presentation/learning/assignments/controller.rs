@@ -198,8 +198,10 @@ async fn create(
         }
     };
 
-    // Resolve subject_id from description first part (e.g. "Ilmu Pengetahuan Alam dan Sosial (IPAS) • ...")
-    let subject_id: Option<Uuid> = if let Some(ref desc) = payload.description {
+    // Resolve subject_id: priority payload.subject_id, fallback to first part of description
+    let subject_id: Option<Uuid> = if let Some(sid) = payload.subject_id {
+        Some(sid)
+    } else if let Some(ref desc) = payload.description {
         let first_part = desc.split('•').next().map(|s| s.trim()).unwrap_or("");
         if !first_part.is_empty() {
             sqlx::query_scalar::<_, Uuid>(
@@ -218,21 +220,46 @@ async fn create(
         None
     };
 
-    let final_teacher_id: Option<Uuid> = if teacher_id.is_some() {
+    let final_teacher_id: Option<Uuid> = if let Some(tid) = payload.teacher_id {
+        Some(tid)
+    } else if teacher_id.is_some() {
         teacher_id
-    } else {
-        sqlx::query_scalar::<_, Option<Uuid>>(
+    } else if let Some(aid) = actor_id {
+        let t_id = sqlx::query_scalar::<_, Option<Uuid>>(
             r#"
             SELECT (SELECT t.id FROM teachers t WHERE (t.user_id = $1 OR t.id = $1) AND t.tenant_id = $2 LIMIT 1) as "teacher_id"
             "#,
         )
-        .bind(actor_id)
+        .bind(aid)
         .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await
         .ok()
         .flatten()
-        .flatten()
+        .flatten();
+
+        if t_id.is_some() {
+            t_id
+        } else if let Some(ref desc) = payload.description {
+            let third_part = desc.split('•').nth(2).map(|s| s.trim()).unwrap_or("");
+            if !third_part.is_empty() {
+                sqlx::query_scalar::<_, Uuid>(
+                    r#"SELECT id FROM teachers WHERE tenant_id = $1 AND (full_name ILIKE $2 OR full_name = $2) LIMIT 1"#,
+                )
+                .bind(req_ctx.tenant_id)
+                .bind(third_part)
+                .fetch_optional(&ctx.pool)
+                .await
+                .ok()
+                .flatten()
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
     };
 
     let is_scheduled = payload.release_at.is_some_and(|r| r > chrono::Utc::now());
@@ -242,7 +269,7 @@ async fn create(
         "published".to_string()
     };
 
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         r#"UPDATE assignments 
            SET class_id = $1, subject_id = $2, teacher_id = $3, created_by = $4, 
                status = $5, release_at = COALESCE($6, NOW()), notification_dispatched = $7, is_active = true 
@@ -257,7 +284,9 @@ async fn create(
     .bind(!is_scheduled)
     .bind(assignment.id)
     .execute(&ctx.pool)
-    .await;
+    .await {
+        tracing::error!("Failed to update assignment metadata: {:?}", e);
+    }
 
     let (class_name, subject_name, teacher_name) = tokio::join!(
         async {
@@ -530,6 +559,15 @@ async fn list(
                   a.created_by = $2 
                   OR a.teacher_id IN (SELECT id FROM teachers WHERE (user_id = $2 OR id = $2) AND tenant_id = $1)
                   OR a.teacher_id = $2
+                  OR a.class_id IN (
+                      SELECT cs.class_id FROM class_schedules cs 
+                      WHERE cs.teacher_id IN (SELECT id FROM teachers WHERE (user_id = $2 OR id = $2) AND tenant_id = $1)
+                        AND cs.tenant_id = $1 AND cs.deleted_at IS NULL
+                      UNION
+                      SELECT cl.id FROM classes cl 
+                      WHERE cl.homeroom_teacher_id IN (SELECT id FROM teachers WHERE (user_id = $2 OR id = $2) AND tenant_id = $1)
+                        AND cl.tenant_id = $1 AND cl.deleted_at IS NULL
+                  )
               )
             ORDER BY a.created_at DESC
             "#,
