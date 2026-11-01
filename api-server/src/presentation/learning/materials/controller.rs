@@ -543,7 +543,7 @@ async fn list(
                 m.id, m.tenant_id, m.lesson_id, m.material_type, m.title, m.description, 
                 m.storage_key, COALESCE(m.external_url, lb.file_url) as external_url,
                 m.order_index, 
-                CASE WHEN m.release_at > NOW() THEN 'draft' ELSE COALESCE(m.visibility, 'published') END as visibility, 
+                CASE WHEN m.release_at > NOW() THEN 'draft' WHEN m.release_at <= NOW() AND (m.visibility = 'draft' OR m.visibility IS NULL) THEN 'published' ELSE COALESCE(m.visibility, 'published') END as visibility, 
                 m.is_active, 
                 m.created_at, m.updated_at,
                 m.class_id, c.name as class_name,
@@ -636,7 +636,7 @@ async fn list(
                 m.id, m.tenant_id, m.lesson_id, m.material_type, m.title, m.description, 
                 m.storage_key, COALESCE(m.external_url, lb.file_url) as external_url,
                 m.order_index, 
-                CASE WHEN m.release_at > NOW() THEN 'draft' ELSE COALESCE(m.visibility, 'published') END as visibility, 
+                CASE WHEN m.release_at > NOW() THEN 'draft' WHEN m.release_at <= NOW() AND (m.visibility = 'draft' OR m.visibility IS NULL) THEN 'published' ELSE COALESCE(m.visibility, 'published') END as visibility, 
                 m.is_active, 
                 m.created_at, m.updated_at,
                 m.class_id, c.name as class_name,
@@ -739,7 +739,7 @@ async fn list(
                 m.id, m.tenant_id, m.lesson_id, m.material_type, m.title, m.description, 
                 m.storage_key, COALESCE(m.external_url, lb.file_url) as external_url,
                 m.order_index, 
-                CASE WHEN m.release_at > NOW() THEN 'draft' ELSE COALESCE(m.visibility, 'published') END as visibility, 
+                CASE WHEN m.release_at > NOW() THEN 'draft' WHEN m.release_at <= NOW() AND (m.visibility = 'draft' OR m.visibility IS NULL) THEN 'published' ELSE COALESCE(m.visibility, 'published') END as visibility, 
                 m.is_active, 
                 m.created_at, m.updated_at,
                 m.class_id, c.name as class_name,
@@ -1712,12 +1712,33 @@ async fn update(
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
-    if payload.start_page.is_some() || payload.end_page.is_some() {
+    if payload.start_page.is_some()
+        || payload.end_page.is_some()
+        || payload.release_at.is_some()
+        || payload.class_id.is_some()
+        || payload.subject_id.is_some()
+    {
+        let is_sched = payload.release_at.map(|r| r > chrono::Utc::now());
         let _ = sqlx::query(
-            r#"UPDATE learning_materials SET start_page = COALESCE($1, start_page), end_page = COALESCE($2, end_page) WHERE id = $3"#
+            r#"UPDATE learning_materials 
+               SET start_page = COALESCE($1, start_page), 
+                   end_page = COALESCE($2, end_page),
+                   release_at = COALESCE($3, release_at),
+                   class_id = COALESCE($4, class_id),
+                   subject_id = COALESCE($5, subject_id),
+                   visibility = CASE 
+                       WHEN $6 = true THEN 'draft' 
+                       WHEN $6 = false THEN 'published' 
+                       ELSE visibility 
+                   END
+               WHERE id = $7"#
         )
         .bind(payload.start_page)
         .bind(payload.end_page)
+        .bind(payload.release_at)
+        .bind(payload.class_id)
+        .bind(payload.subject_id)
+        .bind(is_sched)
         .bind(id)
         .execute(&ctx.pool)
         .await;
@@ -1729,6 +1750,12 @@ async fn update(
     }
     if payload.end_page.is_some() {
         resp.end_page = payload.end_page;
+    }
+    if payload.release_at.is_some() {
+        resp.release_at = payload.release_at;
+    }
+    if payload.class_id.is_some() {
+        resp.class_id = payload.class_id;
     }
 
     Ok(Json(ApiResponse::success(

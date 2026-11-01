@@ -508,7 +508,7 @@ async fn list(
             SELECT 
                 a.id, a.tenant_id, a.lesson_id, a.title, a.description, a.instructions,
                 a.max_score, a.due_at, a.assignment_type,
-                CASE WHEN a.release_at > NOW() THEN 'draft' ELSE a.status END as status,
+                CASE WHEN a.release_at > NOW() THEN 'draft' WHEN a.release_at <= NOW() AND a.status = 'draft' THEN 'published' ELSE a.status END as status,
                 a.is_active,
                 a.created_at, a.updated_at,
                 a.class_id, a.session_id, a.release_at, a.allow_late_submission,
@@ -594,7 +594,7 @@ async fn list(
                         ORDER BY sub.submitted_at DESC NULLS LAST
                         LIMIT 1
                     ),
-                    CASE WHEN a.release_at > NOW() THEN 'draft' ELSE a.status END
+                    CASE WHEN a.release_at > NOW() THEN 'draft' WHEN a.release_at <= NOW() AND a.status = 'draft' THEN 'published' ELSE a.status END
                 ) as status,
                 a.is_active,
                 a.created_at, a.updated_at,
@@ -687,7 +687,7 @@ async fn list(
             SELECT 
                 a.id, a.tenant_id, a.lesson_id, a.title, a.description, a.instructions,
                 a.max_score, a.due_at, a.assignment_type,
-                CASE WHEN a.release_at > NOW() THEN 'draft' ELSE a.status END as status,
+                CASE WHEN a.release_at > NOW() THEN 'draft' WHEN a.release_at <= NOW() AND a.status = 'draft' THEN 'published' ELSE a.status END as status,
                 a.is_active,
                 a.created_at, a.updated_at,
                 a.class_id, a.session_id, a.release_at, a.allow_late_submission,
