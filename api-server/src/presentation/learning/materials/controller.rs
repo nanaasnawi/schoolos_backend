@@ -225,7 +225,7 @@ async fn create(
         resolved_sub
     };
 
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         r#"
         UPDATE learning_materials 
         SET class_id = $1, 
@@ -249,7 +249,9 @@ async fn create(
     .bind(!is_scheduled)
     .bind(material.id)
     .execute(&ctx.pool)
-    .await;
+    .await {
+        tracing::error!("Failed to update learning_materials on create: {:?}", e);
+    }
 
     // Trigger in-app and FCM push notifications to enrolled students only if published immediately
     if !is_scheduled {

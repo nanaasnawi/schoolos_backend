@@ -15,6 +15,8 @@ pub struct CreateAssignmentRequest {
     #[serde(default = "default_assignment_type")]
     pub assignment_type: String,
     pub class_id: Option<String>,
+    pub teacher_id: Option<Uuid>,
+    pub subject_id: Option<Uuid>,
     pub session_id: Option<Uuid>,
     pub release_at: Option<DateTime<Utc>>,
     #[serde(default = "default_allow_late")]
