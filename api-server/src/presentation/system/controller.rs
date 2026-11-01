@@ -1225,16 +1225,28 @@ async fn send_system_broadcast(
     let broadcast_title = format!("{} {}", prefix_icon, title_trimmed);
 
     let mut broadcast_body = content_trimmed.clone();
+    let wib_offset = chrono::FixedOffset::east_opt(7 * 3600).unwrap();
     if let (Some(st), Some(et)) = (payload.scheduled_start, payload.scheduled_end) {
-        broadcast_body.push_str(&format!(
-            "\n\n⏰ Jadwal Waktu: {} s/d {} WIB",
-            st.format("%d %b %Y, %H:%M"),
-            et.format("%H:%M")
-        ));
+        let st_wib = st.with_timezone(&wib_offset);
+        let et_wib = et.with_timezone(&wib_offset);
+        if st_wib.date_naive() == et_wib.date_naive() {
+            broadcast_body.push_str(&format!(
+                "\n\n⏰ Jadwal Waktu: {} s/d {} WIB",
+                st_wib.format("%d %b %Y, %H:%M"),
+                et_wib.format("%H:%M")
+            ));
+        } else {
+            broadcast_body.push_str(&format!(
+                "\n\n⏰ Jadwal Waktu: {} s/d {} WIB",
+                st_wib.format("%d %b %Y, %H:%M"),
+                et_wib.format("%d %b %Y, %H:%M")
+            ));
+        }
     } else if let Some(st) = payload.scheduled_start {
+        let st_wib = st.with_timezone(&wib_offset);
         broadcast_body.push_str(&format!(
             "\n\n⏰ Waktu Pelaksanaan: {} WIB",
-            st.format("%d %b %Y, %H:%M")
+            st_wib.format("%d %b %Y, %H:%M")
         ));
     }
 
@@ -1425,7 +1437,7 @@ async fn send_system_broadcast(
         push_status: send_push,
         recipients_count,
         created_at: now,
-        date_formatted: now.format("%d %b %Y · %H:%M WIB").to_string(),
+        date_formatted: now.with_timezone(&wib_offset).format("%d %b %Y · %H:%M WIB").to_string(),
     };
 
     Ok(Json(ApiResponse::success(item, req_ctx.request_id)))
@@ -1464,6 +1476,7 @@ async fn list_system_broadcasts(
     .unwrap_or_default();
 
     let mut items = Vec::new();
+    let wib_offset = chrono::FixedOffset::east_opt(7 * 3600).unwrap();
     for r in rows {
         let id: Uuid = r.get("id");
         let title: String = r.get("title");
@@ -1505,7 +1518,7 @@ async fn list_system_broadcasts(
             push_status,
             recipients_count: count,
             created_at,
-            date_formatted: created_at.format("%d %b %Y · %H:%M WIB").to_string(),
+            date_formatted: created_at.with_timezone(&wib_offset).format("%d %b %Y · %H:%M WIB").to_string(),
         });
     }
 

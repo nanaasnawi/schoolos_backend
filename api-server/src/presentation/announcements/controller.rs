@@ -176,7 +176,8 @@ async fn get_announcement_by_id(
     let row_push_status: bool = row.get("push_status");
     let row_created_at: DateTime<Utc> = row.get("created_at");
 
-    let date_str = row_created_at.format("%d %b %Y · %H:%M WIB").to_string();
+    let wib_offset = chrono::FixedOffset::east_opt(7 * 3600).unwrap();
+    let date_str = row_created_at.with_timezone(&wib_offset).format("%d %b %Y · %H:%M WIB").to_string();
     let item = AnnouncementResponse {
         id: row_id,
         title: row_title,
@@ -239,10 +240,11 @@ async fn list(
         )
     })?;
 
+    let wib_offset = chrono::FixedOffset::east_opt(7 * 3600).unwrap();
     let items: Vec<AnnouncementResponse> = rows
         .into_iter()
         .map(|r| {
-            let date_str = r.created_at.format("%d %b %Y · %H:%M WIB").to_string();
+            let date_str = r.created_at.with_timezone(&wib_offset).format("%d %b %Y · %H:%M WIB").to_string();
             AnnouncementResponse {
                 id: r.id,
                 title: r.title,
@@ -386,7 +388,8 @@ async fn create(
         }
     }
 
-    let date_str = row.created_at.format("%d %b %Y · %H:%M WIB").to_string();
+    let wib_offset = chrono::FixedOffset::east_opt(7 * 3600).unwrap();
+    let date_str = row.created_at.with_timezone(&wib_offset).format("%d %b %Y · %H:%M WIB").to_string();
 
     // ── TRIGGER REAL-TIME SSE BROADCAST EVENT ────────────────────────────────
     let broadcast_event = AnnouncementBroadcastEvent {
