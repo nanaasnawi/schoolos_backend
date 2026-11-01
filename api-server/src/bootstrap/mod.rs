@@ -951,6 +951,10 @@ impl Bootstrap {
                         axum::routing::post(crate::presentation::people::teacher::remind::remind_students)
                             .get(crate::presentation::people::teacher::remind::get_reminders),
                     )
+                    .route(
+                        "/at-risk-students",
+                        axum::routing::get(crate::presentation::people::teacher::remind::get_at_risk_students),
+                    )
                     .layer(axum::middleware::from_fn_with_state(
                         context.clone(),
                         auth_middleware,

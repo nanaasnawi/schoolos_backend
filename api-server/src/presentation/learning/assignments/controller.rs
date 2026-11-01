@@ -559,15 +559,6 @@ async fn list(
                   a.created_by = $2 
                   OR a.teacher_id IN (SELECT id FROM teachers WHERE (user_id = $2 OR id = $2) AND tenant_id = $1)
                   OR a.teacher_id = $2
-                  OR a.class_id IN (
-                      SELECT cs.class_id FROM class_schedules cs 
-                      WHERE cs.teacher_id IN (SELECT id FROM teachers WHERE (user_id = $2 OR id = $2) AND tenant_id = $1)
-                        AND cs.tenant_id = $1 AND cs.deleted_at IS NULL
-                      UNION
-                      SELECT cl.id FROM classes cl 
-                      WHERE cl.homeroom_teacher_id IN (SELECT id FROM teachers WHERE (user_id = $2 OR id = $2) AND tenant_id = $1)
-                        AND cl.tenant_id = $1 AND cl.deleted_at IS NULL
-                  )
               )
             ORDER BY a.updated_at DESC, a.created_at DESC
             "#,

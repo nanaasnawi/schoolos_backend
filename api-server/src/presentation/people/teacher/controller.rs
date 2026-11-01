@@ -36,6 +36,7 @@ pub fn teacher_routes() -> Router<ApplicationContext> {
         .route("/me/official-profile", get(get_my_teacher_profile))
         .route("/me", get(get_my_teacher_profile))
         .route("/remind", post(super::remind::remind_students).get(super::remind::get_reminders))
+        .route("/at-risk-students", get(super::remind::get_at_risk_students))
         .route("/{id}", get(get_by_id).patch(update).put(update))
 }
 
