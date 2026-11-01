@@ -103,7 +103,7 @@ async fn create(
         tenant_id: req_ctx.tenant_id,
         lesson_id: payload.lesson_id,
         material_type: payload.material_type,
-        title: payload.title,
+        title: payload.title.clone(),
         description: payload.description.clone(),
         storage_key: clean_storage_key,
         external_url: payload.external_url,
@@ -216,7 +216,7 @@ async fn create(
                    ORDER BY length(name) DESC LIMIT 1"#
             )
             .bind(req_ctx.tenant_id)
-            .bind(&payload.title)
+            .bind(&material.title)
             .fetch_optional(&ctx.pool)
             .await
             .ok()
