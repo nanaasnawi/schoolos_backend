@@ -1928,6 +1928,8 @@ async fn list_users_qr_status(
             COALESCE(
                 (SELECT s.nisn FROM students s WHERE s.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),
                 (SELECT t.nip FROM teachers t WHERE t.user_id = u.id ORDER BY t.updated_at DESC LIMIT 1),
+                (SELECT st.nip FROM staff st WHERE st.user_id = u.id AND st.nip IS NOT NULL AND st.nip != '' ORDER BY st.updated_at DESC LIMIT 1),
+                (SELECT st.nuptk FROM staff st WHERE st.user_id = u.id AND st.nuptk IS NOT NULL AND st.nuptk != '' ORDER BY st.updated_at DESC LIMIT 1),
                 (SELECT NULLIF(g.phone_number, '') FROM guardians g WHERE g.user_id = u.id ORDER BY g.updated_at DESC LIMIT 1),
                 (SELECT CONCAT('WALI-', s.nisn) FROM guardians g JOIN students s ON s.guardian_id = g.id WHERE g.user_id = u.id ORDER BY s.updated_at DESC LIMIT 1),
                 ''
