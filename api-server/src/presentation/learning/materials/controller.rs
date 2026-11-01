@@ -77,6 +77,13 @@ async fn create(
         })?;
     }
 
+    let is_scheduled = payload.release_at.is_some_and(|r| r > chrono::Utc::now());
+    let initial_visibility = if is_scheduled {
+        "draft".to_string()
+    } else {
+        payload.visibility.clone()
+    };
+
     let command = CreateLearningMaterialCommand {
         tenant_id: req_ctx.tenant_id,
         lesson_id: payload.lesson_id,
@@ -86,7 +93,7 @@ async fn create(
         storage_key: payload.storage_key,
         external_url: payload.external_url,
         order_index: payload.order_index,
-        visibility: payload.visibility,
+        visibility: initial_visibility,
     };
 
     let material = ctx
@@ -182,8 +189,10 @@ async fn create(
             teacher_id = $3, 
             created_by = $4,
             session_id = $5,
-            release_at = COALESCE($6, NOW())
-        WHERE id = $7
+            release_at = COALESCE($6, NOW()),
+            visibility = $7,
+            notification_dispatched = $8
+        WHERE id = $9
         "#
     )
     .bind(target_class_id)
@@ -192,32 +201,35 @@ async fn create(
     .bind(actor_id)
     .bind(payload.session_id)
     .bind(payload.release_at)
+    .bind(if is_scheduled { "draft" } else { "published" })
+    .bind(!is_scheduled)
     .bind(material.id)
     .execute(&ctx.pool)
     .await;
 
-    // Trigger in-app and FCM push notifications to enrolled students
-    let teacher_name = if let Some(tid) = teacher_id {
-        sqlx::query_scalar::<_, String>(
-            "SELECT u.full_name FROM teachers t JOIN users u ON u.id = t.user_id WHERE t.id = $1",
-        )
-        .bind(tid)
-        .fetch_optional(&ctx.pool)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "Guru Pengampu".to_string())
-    } else if let Some(aid) = actor_id {
-        sqlx::query_scalar::<_, String>("SELECT full_name FROM users WHERE id = $1")
-            .bind(aid)
+    // Trigger in-app and FCM push notifications to enrolled students only if published immediately
+    if !is_scheduled {
+        let teacher_name = if let Some(tid) = teacher_id {
+            sqlx::query_scalar::<_, String>(
+                "SELECT u.full_name FROM teachers t JOIN users u ON u.id = t.user_id WHERE t.id = $1",
+            )
+            .bind(tid)
             .fetch_optional(&ctx.pool)
             .await
             .ok()
             .flatten()
             .unwrap_or_else(|| "Guru Pengampu".to_string())
-    } else {
-        "Guru Pengampu".to_string()
-    };
+        } else if let Some(aid) = actor_id {
+            sqlx::query_scalar::<_, String>("SELECT full_name FROM users WHERE id = $1")
+                .bind(aid)
+                .fetch_optional(&ctx.pool)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "Guru Pengampu".to_string())
+        } else {
+            "Guru Pengampu".to_string()
+        };
 
     let notif_title = format!("📚 Materi Baru: {}", material.title);
 
@@ -327,6 +339,7 @@ async fn create(
             material.id,
             crate::infrastructure::fcm::FcmTarget::Roles(vec!["student".to_string()]),
         );
+    }
     }
 
     let full_created = sqlx::query(
@@ -477,7 +490,9 @@ async fn list(
             SELECT 
                 m.id, m.tenant_id, m.lesson_id, m.material_type, m.title, m.description, 
                 m.storage_key, COALESCE(m.external_url, lb.file_url) as external_url,
-                m.order_index, m.visibility, m.is_active, 
+                m.order_index, 
+                CASE WHEN m.release_at > NOW() THEN 'draft' ELSE COALESCE(m.visibility, 'published') END as visibility, 
+                m.is_active, 
                 m.created_at, m.updated_at,
                 m.class_id, c.name as class_name,
                 m.teacher_id,
@@ -560,7 +575,9 @@ async fn list(
             SELECT 
                 m.id, m.tenant_id, m.lesson_id, m.material_type, m.title, m.description, 
                 m.storage_key, COALESCE(m.external_url, lb.file_url) as external_url,
-                m.order_index, m.visibility, m.is_active, 
+                m.order_index, 
+                CASE WHEN m.release_at > NOW() THEN 'draft' ELSE COALESCE(m.visibility, 'published') END as visibility, 
+                m.is_active, 
                 m.created_at, m.updated_at,
                 m.class_id, c.name as class_name,
                 m.teacher_id,
@@ -582,6 +599,8 @@ async fn list(
             WHERE m.tenant_id = $1 
               AND m.deleted_at IS NULL
               AND m.is_active = true
+              AND (m.release_at IS NULL OR m.release_at <= NOW())
+              AND (m.visibility = 'published' OR m.visibility = 'active')
               AND (
                   m.class_id IS NULL
                   OR m.class_id IN (
@@ -651,7 +670,9 @@ async fn list(
             SELECT 
                 m.id, m.tenant_id, m.lesson_id, m.material_type, m.title, m.description, 
                 m.storage_key, COALESCE(m.external_url, lb.file_url) as external_url,
-                m.order_index, m.visibility, m.is_active, 
+                m.order_index, 
+                CASE WHEN m.release_at > NOW() THEN 'draft' ELSE COALESCE(m.visibility, 'published') END as visibility, 
+                m.is_active, 
                 m.created_at, m.updated_at,
                 m.class_id, c.name as class_name,
                 m.teacher_id,

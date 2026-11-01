@@ -475,6 +475,32 @@ impl Bootstrap {
             }
         });
 
+        // ── Scheduled Publish & Notification Worker (ADR-0011, ADR-0013) ────
+        // Otomasi rilis & push notifikasi FCM saat tanggal tayang materi/tugas/kuis tercapai.
+        let publish_worker_pool = pool.clone();
+        tokio::spawn(async move {
+            tracing::info!(
+                component = "scheduled_publish_worker",
+                "Starting scheduled publish worker background service"
+            );
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                if let Err(e) =
+                    crate::infrastructure::scheduled_publish_worker::ScheduledPublishWorker::run_publish_cycle(
+                        &publish_worker_pool,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        component = "scheduled_publish_worker",
+                        "Scheduled publish cycle warning: {:?}",
+                        e
+                    );
+                }
+            }
+        });
+
         // ── Outbox Cleanup Worker ───────────────────────────────────────────
         // Menghapus event outbox yang berstatus 'succeeded' lebih dari 7 hari
         // untuk mencegah table bloat pada database PostgreSQL.

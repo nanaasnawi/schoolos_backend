@@ -21,6 +21,8 @@ pub struct CreateQuizRequest {
     pub shuffle_choices: bool,
     pub start_at: Option<DateTime<Utc>>,
     pub end_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub release_at: Option<DateTime<Utc>>,
     pub class_id: Option<String>,
     #[serde(default)]
     pub session_id: Option<Uuid>,
