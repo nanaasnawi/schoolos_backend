@@ -23,7 +23,7 @@ CROSS JOIN (
         'Pusat Kurikulum dan Perbukuan Kemendikbudristek',
         '%Matematika%',
         280,
-        'https://images.unsplash.com/photo-1509228468518-180dd4864904?w=400&q=80',
+        NULL,
         'https://buku.kemdikbud.go.id/katalog/buku-matematika-kelas-x'
     ),
     (
@@ -32,7 +32,7 @@ CROSS JOIN (
         'Pusat Kurikulum dan Perbukuan Kemendikbudristek',
         '%Bahasa Indonesia%',
         252,
-        'https://images.unsplash.com/photo-1456513080510-7bf3a84b82f8?w=400&q=80',
+        NULL,
         'https://buku.kemdikbud.go.id/katalog/buku-bahasa-indonesia-kelas-x'
     ),
     (
@@ -41,7 +41,7 @@ CROSS JOIN (
         'Pusat Kurikulum dan Perbukuan Kemendikbudristek',
         '%IPA%',
         236,
-        'https://images.unsplash.com/photo-1636466497217-26a8cbeaf0aa?w=400&q=80',
+        NULL,
         'https://buku.kemdikbud.go.id/katalog/buku-fisika-kelas-xi'
     ),
     (
@@ -50,7 +50,7 @@ CROSS JOIN (
         'Pusat Kurikulum dan Perbukuan Kemendikbudristek',
         '%IPA%',
         268,
-        'https://images.unsplash.com/photo-1532094349884-543bc11b234d?w=400&q=80',
+        NULL,
         'https://buku.kemdikbud.go.id/katalog/buku-biologi-kelas-xi'
     ),
     (
@@ -59,7 +59,7 @@ CROSS JOIN (
         'Pusat Kurikulum dan Perbukuan Kemendikbudristek',
         '%IPA%',
         248,
-        'https://images.unsplash.com/photo-1603126857599-f6e157fa2fe6?w=400&q=80',
+        NULL,
         'https://buku.kemdikbud.go.id/katalog/buku-kimia-kelas-xi'
     ),
     (
@@ -68,7 +68,7 @@ CROSS JOIN (
         'Pusat Kurikulum dan Perbukuan Kemendikbudristek',
         '%Bahasa Inggris%',
         184,
-        'https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?w=400&q=80',
+        NULL,
         'https://buku.kemdikbud.go.id/katalog/buku-bahasa-inggris-kelas-x'
     ),
     (
@@ -77,7 +77,7 @@ CROSS JOIN (
         'Pusat Kurikulum dan Perbukuan Kemendikbudristek',
         '%Komputer%',
         276,
-        'https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?w=400&q=80',
+        NULL,
         'https://buku.kemdikbud.go.id/katalog/buku-informatika-kelas-x'
     ),
     (
@@ -86,7 +86,7 @@ CROSS JOIN (
         'Pusat Kurikulum dan Perbukuan Kemendikbudristek',
         '%Pancasila%',
         208,
-        'https://images.unsplash.com/photo-1541829070764-84a7d30dd3f3?w=400&q=80',
+        NULL,
         'https://buku.kemdikbud.go.id/katalog/buku-pendidikan-pancasila-kelas-x'
     )
 ) AS v(title, author, publisher, subject_pattern, total_pages, cover_url, file_url)
