@@ -579,7 +579,7 @@ async fn list(
               AND ($4::uuid IS NULL OR m.class_id = $4)
               AND ($5::uuid IS NULL OR m.subject_id = $5)
               AND ($6::uuid IS NULL OR m.lesson_id = $6)
-            ORDER BY m.created_at DESC
+            ORDER BY m.updated_at DESC, m.created_at DESC
             "#
         )
         .bind(req_ctx.tenant_id)
@@ -678,7 +678,7 @@ async fn list(
               AND ($3::uuid IS NULL OR m.class_id = $3)
               AND ($4::uuid IS NULL OR m.subject_id = $4)
               AND ($5::uuid IS NULL OR m.lesson_id = $5)
-            ORDER BY m.created_at DESC
+            ORDER BY m.updated_at DESC, m.created_at DESC
             "#,
         )
         .bind(req_ctx.tenant_id)
@@ -764,7 +764,7 @@ async fn list(
               AND ($3::uuid IS NULL OR m.class_id = $3)
               AND ($4::uuid IS NULL OR m.subject_id = $4)
               AND ($5::uuid IS NULL OR m.lesson_id = $5)
-            ORDER BY m.created_at DESC
+            ORDER BY m.updated_at DESC, m.created_at DESC
             "#
         )
         .bind(req_ctx.tenant_id)
@@ -1762,6 +1762,13 @@ async fn update(
     }
     if payload.release_at.is_some() {
         resp.release_at = payload.release_at;
+        if let Some(is_s) = payload.release_at.map(|r| r > chrono::Utc::now()) {
+            if is_s {
+                resp.visibility = "draft".to_string();
+            } else if payload.visibility.is_none() {
+                resp.visibility = "published".to_string();
+            }
+        }
     }
     if payload.class_id.is_some() {
         resp.class_id = payload.class_id;

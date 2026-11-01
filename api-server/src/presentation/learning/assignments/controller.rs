@@ -569,7 +569,7 @@ async fn list(
                         AND cl.tenant_id = $1 AND cl.deleted_at IS NULL
                   )
               )
-            ORDER BY a.created_at DESC
+            ORDER BY a.updated_at DESC, a.created_at DESC
             "#,
         )
         .bind(req_ctx.tenant_id)
@@ -678,7 +678,7 @@ async fn list(
                       WHERE g.user_id = $2 AND (en.status = 'Active' OR en.status = 'ACTIVE')
                   )
               )
-            ORDER BY a.created_at DESC
+            ORDER BY a.updated_at DESC, a.created_at DESC
             "#,
         )
         .bind(req_ctx.tenant_id)
@@ -745,7 +745,7 @@ async fn list(
             LEFT JOIN subjects sub ON sub.id = a.subject_id
             LEFT JOIN teachers t ON t.id = a.teacher_id
             WHERE a.tenant_id = $1 AND a.deleted_at IS NULL
-            ORDER BY a.created_at DESC
+            ORDER BY a.updated_at DESC, a.created_at DESC
             "#,
         )
         .bind(req_ctx.tenant_id)
