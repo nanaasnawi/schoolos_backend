@@ -35,6 +35,8 @@ pub struct QuizResponse {
     pub teacher_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_at: Option<DateTime<Utc>>,
     #[serde(default = "default_exam_mode")]
     pub exam_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,6 +92,7 @@ impl From<Quiz> for QuizResponse {
             subject_name: None,
             teacher_name: None,
             session_id: None,
+            release_at: None,
             exam_mode: Some("HOMEWORK_QUIZ".to_string()),
             exam_token: None,
             token_expires_at: None,

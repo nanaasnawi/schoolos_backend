@@ -235,13 +235,26 @@ async fn create(
         .flatten()
     };
 
+    let is_scheduled = payload.release_at.is_some_and(|r| r > chrono::Utc::now());
+    let initial_status = if is_scheduled {
+        "draft".to_string()
+    } else {
+        "published".to_string()
+    };
+
     let _ = sqlx::query(
-        r#"UPDATE assignments SET class_id = $1, subject_id = $2, teacher_id = $3, created_by = $4, status = 'published', is_active = true WHERE id = $5"#,
+        r#"UPDATE assignments 
+           SET class_id = $1, subject_id = $2, teacher_id = $3, created_by = $4, 
+               status = $5, release_at = COALESCE($6, NOW()), notification_dispatched = $7, is_active = true 
+           WHERE id = $8"#,
     )
     .bind(target_class_id)
     .bind(subject_id)
     .bind(final_teacher_id)
     .bind(actor_id)
+    .bind(&initial_status)
+    .bind(payload.release_at)
+    .bind(!is_scheduled)
     .bind(assignment.id)
     .execute(&ctx.pool)
     .await;
@@ -349,15 +362,17 @@ async fn create(
     };
 
     let mut resp = AssignmentResponse::from(assignment);
-    resp.status = "published".to_string();
+    resp.status = initial_status;
+    resp.release_at = payload.release_at.or_else(|| Some(chrono::Utc::now()));
     resp.class_id = target_class_id;
     resp.class_name = class_name;
     resp.subject_name = subject_name;
     resp.teacher_name = teacher_name;
     resp.questions = questions_to_return;
 
-    // Kirim push TUGAS baru ke siswa rombel target (atau semua siswa bila tanpa kelas).
-    {
+    // Kirim push TUGAS baru ke siswa rombel target (atau semua siswa bila tanpa kelas)
+    // HANYA JIKA rilis sekarang (bukan dijadwalkan ke tanggal masa depan).
+    if !is_scheduled {
         let t = format!("📝 Tugas Baru: {}", assignment_title_for_notif);
         let b = match (&resp.class_name, &resp.teacher_name) {
             (Some(c), Some(g)) => format!(
@@ -493,7 +508,7 @@ async fn list(
             SELECT 
                 a.id, a.tenant_id, a.lesson_id, a.title, a.description, a.instructions,
                 a.max_score, a.due_at, a.assignment_type,
-                CASE WHEN a.status = 'draft' AND a.class_id IS NOT NULL THEN 'published' ELSE a.status END as status,
+                CASE WHEN a.release_at > NOW() THEN 'draft' ELSE a.status END as status,
                 a.is_active,
                 a.created_at, a.updated_at,
                 a.class_id, a.session_id, a.release_at, a.allow_late_submission,
@@ -579,7 +594,7 @@ async fn list(
                         ORDER BY sub.submitted_at DESC NULLS LAST
                         LIMIT 1
                     ),
-                    CASE WHEN a.status = 'draft' AND a.class_id IS NOT NULL THEN 'published' ELSE a.status END
+                    CASE WHEN a.release_at > NOW() THEN 'draft' ELSE a.status END
                 ) as status,
                 a.is_active,
                 a.created_at, a.updated_at,
@@ -601,6 +616,9 @@ async fn list(
             LEFT JOIN teachers t ON t.id = a.teacher_id
             WHERE a.tenant_id = $1 
               AND a.deleted_at IS NULL
+              AND a.is_active = true
+              AND (a.release_at IS NULL OR a.release_at <= NOW())
+              AND (a.status = 'published' OR a.status = 'active')
               AND (
                   a.class_id IS NULL
                   OR a.class_id IN (
@@ -669,7 +687,7 @@ async fn list(
             SELECT 
                 a.id, a.tenant_id, a.lesson_id, a.title, a.description, a.instructions,
                 a.max_score, a.due_at, a.assignment_type,
-                CASE WHEN a.status = 'draft' AND a.class_id IS NOT NULL THEN 'published' ELSE a.status END as status,
+                CASE WHEN a.release_at > NOW() THEN 'draft' ELSE a.status END as status,
                 a.is_active,
                 a.created_at, a.updated_at,
                 a.class_id, a.session_id, a.release_at, a.allow_late_submission,

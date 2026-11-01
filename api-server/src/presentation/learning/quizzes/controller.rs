@@ -159,11 +159,20 @@ async fn create(
     let max_token_attempts = payload.max_token_attempts.unwrap_or(5);
     let session_id = payload.session_id;
 
+    let release_date = payload.release_at.or(payload.start_at);
+    let is_scheduled = release_date.is_some_and(|r| r > chrono::Utc::now());
+    let initial_status = if is_scheduled {
+        "draft".to_string()
+    } else {
+        "published".to_string()
+    };
+
     let _ = sqlx::query(
         r#"UPDATE quizzes 
            SET class_id = $1, subject_id = $2, teacher_id = $3, created_by = $4,
-               exam_mode = $5, exam_token = $6, max_token_attempts = $7, session_id = $8, token_expires_at = $9
-           WHERE id = $10"#,
+               exam_mode = $5, exam_token = $6, max_token_attempts = $7, session_id = $8, token_expires_at = $9,
+               status = $10, release_at = COALESCE($11, start_at, NOW()), notification_dispatched = $12
+           WHERE id = $13"#,
     )
     .bind(target_class_id)
     .bind(subject_id)
@@ -174,11 +183,16 @@ async fn create(
     .bind(max_token_attempts)
     .bind(session_id)
     .bind(payload.token_expires_at)
+    .bind(&initial_status)
+    .bind(release_date)
+    .bind(!is_scheduled)
     .bind(quiz.id)
     .execute(&ctx.pool)
     .await;
 
     let mut resp = QuizResponse::from(quiz);
+    resp.status = initial_status;
+    resp.release_at = release_date.or_else(|| Some(chrono::Utc::now()));
     resp.class_id = target_class_id;
     resp.session_id = session_id;
     resp.exam_mode = Some(exam_mode);
@@ -266,6 +280,69 @@ async fn create(
 
         resp.questions_count = q_count;
         resp.max_score = total_pts;
+    }
+
+    // Kirim notifikasi kuis baru ke siswa rombel target HANYA jika rilis saat ini
+    if !is_scheduled {
+        let notif_title = format!("🎯 Kuis & Asesmen Baru: {}", resp.title);
+        let teacher_display = resp.teacher_name.as_deref().unwrap_or("Guru Pengampu");
+        let notif_body = if let Some(ref c_name) = resp.class_name {
+            format!("{} telah membuka kuis/asesmen baru untuk kelas {}. Kerjakan sekarang!", teacher_display, c_name)
+        } else {
+            format!("{} telah membuka kuis baru: {}. Buka aplikasi untuk memulai ujian!", teacher_display, resp.title)
+        };
+
+        if let Some(cid) = target_class_id {
+            let _ = sqlx::query(
+                r#"
+                INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, reference_type, reference_id, is_read, created_at)
+                SELECT 
+                    gen_random_uuid(), s.tenant_id, s.user_id, $1, $2,
+                    'QUIZ', 'in_app', 'quiz', $3, FALSE, NOW()
+                FROM students s
+                JOIN enrollments en ON en.student_id = s.id
+                JOIN classes en_c ON en_c.id = en.class_id
+                JOIN classes target_c ON target_c.id = $4
+                     AND (en_c.id = target_c.id OR (en_c.tingkat IS NOT NULL AND en_c.tingkat != '' AND en_c.tingkat = target_c.tingkat))
+                WHERE en_c.tenant_id = target_c.tenant_id AND (en.status ILIKE 'active')
+                "#
+            )
+            .bind(&notif_title)
+            .bind(&notif_body)
+            .bind(resp.id)
+            .bind(cid)
+            .execute(&ctx.pool)
+            .await;
+
+            let sibling_cids = sqlx::query_scalar::<_, Uuid>(
+                r#"
+                SELECT sib.id FROM classes c
+                JOIN classes sib ON sib.tenant_id = c.tenant_id
+                     AND (sib.id = c.id OR (sib.tingkat IS NOT NULL AND sib.tingkat != '' AND sib.tingkat = c.tingkat))
+                WHERE c.id = $1
+                "#
+            )
+            .bind(cid)
+            .fetch_all(&ctx.pool)
+            .await
+            .unwrap_or_else(|_| vec![cid]);
+
+            crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                notif_title,
+                notif_body,
+                crate::infrastructure::fcm::FcmCategory::Quiz,
+                resp.id,
+                crate::infrastructure::fcm::FcmTarget::Classes(sibling_cids),
+            );
+        } else {
+            crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                notif_title,
+                notif_body,
+                crate::infrastructure::fcm::FcmCategory::Quiz,
+                resp.id,
+                crate::infrastructure::fcm::FcmTarget::Roles(vec!["student".to_string()]),
+            );
+        }
     }
 
     Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
@@ -367,10 +444,13 @@ async fn list(
             SELECT 
                 q.id, q.tenant_id, q.lesson_id, q.title, q.description, q.time_limit_minutes,
                 q.passing_score, q.max_score, q.max_attempts, q.shuffle_questions, q.shuffle_choices,
-                q.start_at, q.end_at, q.status, q.questions_count, q.is_active,
+                q.start_at, q.end_at, 
+                CASE WHEN COALESCE(q.release_at, q.start_at) > NOW() THEN 'draft' ELSE q.status END as status, 
+                q.questions_count, q.is_active,
                 q.created_at, q.updated_at,
                 q.class_id,
                 q.session_id, q.exam_mode, q.exam_token, q.token_expires_at, q.max_token_attempts,
+                q.release_at,
                 c.name as class_name,
                 sub.name as subject_name,
                 t.full_name as teacher_name
@@ -424,6 +504,7 @@ async fn list(
                     subject_name: r.get("subject_name"),
                     teacher_name: r.get("teacher_name"),
                     session_id: r.get("session_id"),
+                    release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
                     exam_mode: r.get::<Option<String>, _>("exam_mode").or_else(|| Some("HOMEWORK_QUIZ".to_string())),
                     exam_token: r.get("exam_token"),
                     token_expires_at: r.get("token_expires_at"),
@@ -446,6 +527,7 @@ async fn list(
                 q.created_at, q.updated_at,
                 q.class_id,
                 q.session_id, q.exam_mode, q.exam_token, q.token_expires_at, q.max_token_attempts,
+                q.release_at,
                 c.name as class_name,
                 sub.name as subject_name,
                 t.full_name as teacher_name,
@@ -494,7 +576,9 @@ async fn list(
             LEFT JOIN teachers t ON t.id = q.teacher_id
             WHERE q.tenant_id = $1 
               AND q.deleted_at IS NULL
-              AND q.status != 'draft'
+              AND q.is_active = true
+              AND (COALESCE(q.release_at, q.start_at) IS NULL OR COALESCE(q.release_at, q.start_at) <= NOW())
+              AND (q.status = 'published' OR q.status = 'active')
               AND (
                   q.class_id IN (
                       SELECT sibling_c.id 
@@ -597,6 +681,7 @@ async fn list(
                     subject_name: r.get("subject_name"),
                     teacher_name: r.get("teacher_name"),
                     session_id: r.get("session_id"),
+                    release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
                     exam_mode: r.get::<Option<String>, _>("exam_mode").or_else(|| Some("HOMEWORK_QUIZ".to_string())),
                     exam_token: None,
                     token_expires_at: r.get("token_expires_at"),
@@ -615,10 +700,13 @@ async fn list(
             SELECT 
                 q.id, q.tenant_id, q.lesson_id, q.title, q.description, q.time_limit_minutes,
                 q.passing_score, q.max_score, q.max_attempts, q.shuffle_questions, q.shuffle_choices,
-                q.start_at, q.end_at, q.status, q.questions_count, q.is_active,
+                q.start_at, q.end_at, 
+                CASE WHEN COALESCE(q.release_at, q.start_at) > NOW() THEN 'draft' ELSE q.status END as status, 
+                q.questions_count, q.is_active,
                 q.created_at, q.updated_at,
                 q.class_id,
                 q.session_id, q.exam_mode, q.exam_token, q.token_expires_at, q.max_token_attempts,
+                q.release_at,
                 c.name as class_name,
                 sub.name as subject_name,
                 t.full_name as teacher_name
@@ -665,6 +753,7 @@ async fn list(
                     subject_name: r.get("subject_name"),
                     teacher_name: r.get("teacher_name"),
                     session_id: r.get("session_id"),
+                    release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
                     exam_mode: r.get::<Option<String>, _>("exam_mode").or_else(|| Some("HOMEWORK_QUIZ".to_string())),
                     exam_token: r.get("exam_token"),
                     token_expires_at: r.get("token_expires_at"),
