@@ -955,6 +955,18 @@ async fn update(
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
+    if let Some(release_at) = payload.release_at {
+        let is_scheduled = release_at > chrono::Utc::now();
+        let new_status = if is_scheduled { "draft" } else { "published" };
+        let _ = sqlx::query("UPDATE assignments SET release_at = $1, status = $2, notification_dispatched = $3 WHERE id = $4")
+            .bind(release_at)
+            .bind(new_status)
+            .bind(!is_scheduled)
+            .bind(id)
+            .execute(&ctx.pool)
+            .await;
+    }
+
     if let Some(questions) = payload.questions {
         let _ = sqlx::query("DELETE FROM assignment_questions WHERE assignment_id = $1")
             .bind(id)
