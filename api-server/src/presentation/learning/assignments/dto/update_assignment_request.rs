@@ -12,5 +12,7 @@ pub struct UpdateAssignmentRequest {
     pub max_score: Option<i32>,
     pub due_at: Option<DateTime<Utc>>,
     #[serde(default)]
+    pub release_at: Option<DateTime<Utc>>,
+    #[serde(default)]
     pub questions: Option<Vec<AssignmentQuestionDto>>,
 }
