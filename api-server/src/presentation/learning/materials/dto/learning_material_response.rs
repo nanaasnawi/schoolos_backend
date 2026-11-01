@@ -4,12 +4,16 @@ use serde::Serialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, ToSchema, Default)]
 pub struct LearningMaterialResponse {
     pub id: Uuid,
     pub tenant_id: Uuid,
     pub lesson_id: Option<Uuid>,
     pub material_type: String,
+    #[serde(default)]
+    pub format: String,
+    #[serde(default)]
+    pub content_type: String,
     pub title: String,
     pub description: Option<String>,
     pub storage_key: Option<String>,
@@ -43,13 +47,66 @@ pub struct LearningMaterialResponse {
     pub release_at: Option<DateTime<Utc>>,
 }
 
+pub fn determine_material_format(
+    material_type: &str,
+    external_url: Option<&str>,
+    description: Option<&str>,
+    source_type: Option<&str>,
+    library_book_id: Option<Uuid>,
+) -> String {
+    let m_type = material_type.trim().to_lowercase();
+    let ext_url = external_url.unwrap_or("").trim().to_lowercase();
+
+    // 1. YouTube / Educational Video
+    if m_type == "video" || ext_url.contains("youtube.com") || ext_url.contains("youtu.be") {
+        return "VIDEO".to_string();
+    }
+
+    // 2. Official SIBI Book or Uploaded PDF document
+    if m_type == "document" || m_type == "pdf" || source_type == Some("LIBRARY") || library_book_id.is_some() {
+        return "PDF".to_string();
+    }
+    if ext_url.ends_with(".pdf") && m_type != "article" && m_type != "image" {
+        return "PDF".to_string();
+    }
+
+    // 3. Infographic (interactive magazine / image concepts)
+    if m_type == "image" || m_type == "infographic" {
+        return "INFOGRAPHIC".to_string();
+    }
+
+    if let Some(desc) = description {
+        let trimmed = desc.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if trimmed.contains(r#""type":"IMAGE""#)
+                || trimmed.contains(r#""type":"image""#)
+                || trimmed.contains(r#""block_type":"IMAGE""#)
+            {
+                return "INFOGRAPHIC".to_string();
+            }
+        }
+    }
+
+    // 4. Default: Text Article & Reading
+    "ARTICLE".to_string()
+}
+
 impl From<LearningMaterial> for LearningMaterialResponse {
     fn from(m: LearningMaterial) -> Self {
+        let fmt = determine_material_format(
+            &m.material_type,
+            m.external_url.as_deref(),
+            m.description.as_deref(),
+            None,
+            None,
+        );
         Self {
             id: m.id,
             tenant_id: m.tenant_id,
             lesson_id: m.lesson_id,
             material_type: m.material_type,
+            format: fmt.clone(),
+            content_type: fmt,
             title: m.title,
             description: m.description,
             storage_key: m.storage_key,

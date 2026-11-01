@@ -18,7 +18,7 @@ pub struct MaterialFilterQuery {
 
 use super::dto::{
     create_learning_material_request::CreateLearningMaterialRequest,
-    learning_material_response::LearningMaterialResponse,
+    learning_material_response::{determine_material_format, LearningMaterialResponse},
     update_learning_material_request::UpdateLearningMaterialRequest,
 };
 use crate::{
@@ -84,13 +84,28 @@ async fn create(
         payload.visibility.clone()
     };
 
+    let clean_storage_key = payload.storage_key.and_then(|k| {
+        let trimmed = k.trim();
+        if trimmed == "Modul Digital"
+            || trimmed == "Infografis Interaktif"
+            || trimmed == "Artikel Teks"
+            || trimmed == "YouTube"
+            || trimmed == "-"
+            || trimmed.is_empty()
+        {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+
     let command = CreateLearningMaterialCommand {
         tenant_id: req_ctx.tenant_id,
         lesson_id: payload.lesson_id,
         material_type: payload.material_type,
         title: payload.title,
         description: payload.description.clone(),
-        storage_key: payload.storage_key,
+        storage_key: clean_storage_key,
         external_url: payload.external_url,
         order_index: payload.order_index,
         visibility: initial_visibility,
@@ -158,27 +173,56 @@ async fn create(
         }
     };
 
-    // Fallback: Resolve subject_id from description if not provided
+    // Fallback: Resolve subject_id from description, teacher profile, or title if not provided
     let target_subject_id: Option<Uuid> = if payload.subject_id.is_some() {
         payload.subject_id
-    } else if let Some(ref desc) = payload.description {
-        let parts: Vec<&str> = desc.split(" • ").collect();
-        if !parts.is_empty() {
-            let subj_name = parts[0].trim();
-            sqlx::query_scalar::<_, Uuid>(
-                r#"SELECT id FROM subjects WHERE tenant_id = $1 AND (name ILIKE $2) LIMIT 1"#
+    } else {
+        let mut resolved_sub: Option<Uuid> = None;
+        if let Some(ref desc) = payload.description {
+            let parts: Vec<&str> = desc.split(" • ").collect();
+            if !parts.is_empty() && !parts[0].trim().starts_with('[') && !parts[0].trim().starts_with('{') {
+                let subj_name = parts[0].trim();
+                resolved_sub = sqlx::query_scalar::<_, Uuid>(
+                    r#"SELECT id FROM subjects WHERE tenant_id = $1 AND (name ILIKE $2) LIMIT 1"#
+                )
+                .bind(req_ctx.tenant_id)
+                .bind(subj_name)
+                .fetch_optional(&ctx.pool)
+                .await
+                .ok()
+                .flatten();
+            }
+        }
+        if resolved_sub.is_none() {
+            if let Some(tid) = teacher_id {
+                resolved_sub = sqlx::query_scalar::<_, Uuid>(
+                    r#"SELECT s.id FROM subjects s 
+                       JOIN teachers t ON lower(trim(t.subject)) = lower(trim(s.name)) 
+                       WHERE t.id = $1 AND s.tenant_id = $2 AND s.deleted_at IS NULL LIMIT 1"#
+                )
+                .bind(tid)
+                .bind(req_ctx.tenant_id)
+                .fetch_optional(&ctx.pool)
+                .await
+                .ok()
+                .flatten();
+            }
+        }
+        if resolved_sub.is_none() {
+            resolved_sub = sqlx::query_scalar::<_, Uuid>(
+                r#"SELECT id FROM subjects 
+                   WHERE tenant_id = $1 AND deleted_at IS NULL 
+                     AND ($2 ILIKE '%' || name || '%' OR name ILIKE '%' || $2 || '%') 
+                   ORDER BY length(name) DESC LIMIT 1"#
             )
             .bind(req_ctx.tenant_id)
-            .bind(subj_name)
+            .bind(&payload.title)
             .fetch_optional(&ctx.pool)
             .await
             .ok()
-            .flatten()
-        } else {
-            None
+            .flatten();
         }
-    } else {
-        None
+        resolved_sub
     };
 
     let _ = sqlx::query(
@@ -352,7 +396,7 @@ async fn create(
             m.class_id, c.name as class_name,
             m.teacher_id,
             COALESCE(ut.full_name, uc.full_name, 'Guru Pengampu') as teacher_name,
-            COALESCE(s.name, lb.subject_name, 'Umum') as subject_name,
+            COALESCE(s.name, lb.subject_name, t.subject, 'Umum') as subject_name,
             m.start_page, m.end_page,
             m.session_id, m.release_at
         FROM learning_materials m
@@ -373,32 +417,40 @@ async fn create(
     .flatten();
 
     let resp = match full_created {
-        Some(r) => LearningMaterialResponse {
-            id: r.get("id"),
-            tenant_id: r.get("tenant_id"),
-            lesson_id: r.get("lesson_id"),
-            material_type: r.get("material_type"),
-            title: r.get("title"),
-            description: r.get("description"),
-            storage_key: r.get("storage_key"),
-            external_url: r.get("external_url"),
-            order_index: r.get("order_index"),
-            visibility: r.get("visibility"),
-            is_active: r.get("is_active"),
-            created_at: r.get("created_at"),
-            updated_at: r.get("updated_at"),
-            is_completed: None,
-            completed_count: Some(0),
-            teacher_name: r.get("teacher_name"),
-            teacher_id: r.get("teacher_id"),
-            class_name: r.get("class_name"),
-            class_id: r.get("class_id"),
-            subject_name: r.get("subject_name"),
-            start_page: r.get("start_page"),
-            end_page: r.get("end_page"),
-            session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
-            release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
-        },
+        Some(r) => {
+            let m_type: String = r.get("material_type");
+            let ext_url: Option<String> = r.get("external_url");
+            let desc: Option<String> = r.get("description");
+            let fmt = determine_material_format(&m_type, ext_url.as_deref(), desc.as_deref(), None, None);
+            LearningMaterialResponse {
+                id: r.get("id"),
+                tenant_id: r.get("tenant_id"),
+                lesson_id: r.get("lesson_id"),
+                material_type: m_type,
+                format: fmt.clone(),
+                content_type: fmt,
+                title: r.get("title"),
+                description: desc,
+                storage_key: r.get("storage_key"),
+                external_url: ext_url,
+                order_index: r.get("order_index"),
+                visibility: r.get("visibility"),
+                is_active: r.get("is_active"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+                is_completed: None,
+                completed_count: Some(0),
+                teacher_name: r.get("teacher_name"),
+                teacher_id: r.get("teacher_id"),
+                class_name: r.get("class_name"),
+                class_id: r.get("class_id"),
+                subject_name: r.get("subject_name"),
+                start_page: r.get("start_page"),
+                end_page: r.get("end_page"),
+                session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
+                release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
+            }
+        }
         None => LearningMaterialResponse::from(material),
     };
 
@@ -497,7 +549,7 @@ async fn list(
                 m.class_id, c.name as class_name,
                 m.teacher_id,
                 COALESCE(ut.full_name, uc.full_name, 'Guru Pengampu') as teacher_name,
-                COALESCE(s.name, lb.subject_name, 'Umum') as subject_name,
+                COALESCE(s.name, lb.subject_name, t.subject, 'Umum') as subject_name,
                 m.start_page, m.end_page,
                 m.session_id, m.release_at,
                 (SELECT COUNT(*)::bigint FROM student_material_completions smc WHERE smc.material_id = m.id) as completed_count
@@ -541,31 +593,39 @@ async fn list(
         ), &req_ctx.request_id))?;
 
         rows.into_iter()
-            .map(|r| LearningMaterialResponse {
-                id: r.get("id"),
-                tenant_id: r.get("tenant_id"),
-                lesson_id: r.get("lesson_id"),
-                material_type: r.get("material_type"),
-                title: r.get("title"),
-                description: r.get("description"),
-                storage_key: r.get("storage_key"),
-                external_url: r.get("external_url"),
-                order_index: r.get("order_index"),
-                visibility: r.get("visibility"),
-                is_active: r.get("is_active"),
-                created_at: r.get("created_at"),
-                updated_at: r.get("updated_at"),
-                is_completed: None,
-                completed_count: r.get("completed_count"),
-                teacher_name: r.get("teacher_name"),
-                teacher_id: r.get("teacher_id"),
-                class_name: r.get("class_name"),
-                class_id: r.get("class_id"),
-                subject_name: r.get("subject_name"),
-                start_page: r.get("start_page"),
-                end_page: r.get("end_page"),
-                session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
-                release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
+            .map(|r| {
+                let m_type: String = r.get("material_type");
+                let ext_url: Option<String> = r.get("external_url");
+                let desc: Option<String> = r.get("description");
+                let fmt = determine_material_format(&m_type, ext_url.as_deref(), desc.as_deref(), None, None);
+                LearningMaterialResponse {
+                    id: r.get("id"),
+                    tenant_id: r.get("tenant_id"),
+                    lesson_id: r.get("lesson_id"),
+                    material_type: m_type,
+                    format: fmt.clone(),
+                    content_type: fmt,
+                    title: r.get("title"),
+                    description: desc,
+                    storage_key: r.get("storage_key"),
+                    external_url: ext_url,
+                    order_index: r.get("order_index"),
+                    visibility: r.get("visibility"),
+                    is_active: r.get("is_active"),
+                    created_at: r.get("created_at"),
+                    updated_at: r.get("updated_at"),
+                    is_completed: None,
+                    completed_count: r.get("completed_count"),
+                    teacher_name: r.get("teacher_name"),
+                    teacher_id: r.get("teacher_id"),
+                    class_name: r.get("class_name"),
+                    class_id: r.get("class_id"),
+                    subject_name: r.get("subject_name"),
+                    start_page: r.get("start_page"),
+                    end_page: r.get("end_page"),
+                    session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
+                    release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
+                }
             })
             .collect()
     } else if is_student && !is_admin {
@@ -582,7 +642,7 @@ async fn list(
                 m.class_id, c.name as class_name,
                 m.teacher_id,
                 COALESCE(ut.full_name, uc.full_name, 'Guru Pengampu') as teacher_name,
-                COALESCE(s.name, lb.subject_name, 'Umum') as subject_name,
+                COALESCE(s.name, lb.subject_name, t.subject, 'Umum') as subject_name,
                 m.start_page, m.end_page,
                 m.session_id, m.release_at,
                 (smc.id IS NOT NULL) as is_completed
@@ -636,31 +696,39 @@ async fn list(
         })?;
 
         rows.into_iter()
-            .map(|r| LearningMaterialResponse {
-                id: r.get("id"),
-                tenant_id: r.get("tenant_id"),
-                lesson_id: r.get("lesson_id"),
-                material_type: r.get("material_type"),
-                title: r.get("title"),
-                description: r.get("description"),
-                storage_key: r.get("storage_key"),
-                external_url: r.get("external_url"),
-                order_index: r.get("order_index"),
-                visibility: r.get("visibility"),
-                is_active: r.get("is_active"),
-                created_at: r.get("created_at"),
-                updated_at: r.get("updated_at"),
-                is_completed: Some(r.get("is_completed")),
-                completed_count: None,
-                teacher_name: r.get("teacher_name"),
-                teacher_id: r.get("teacher_id"),
-                class_name: r.get("class_name"),
-                class_id: r.get("class_id"),
-                subject_name: r.get("subject_name"),
-                start_page: r.get("start_page"),
-                end_page: r.get("end_page"),
-                session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
-                release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
+            .map(|r| {
+                let m_type: String = r.get("material_type");
+                let ext_url: Option<String> = r.get("external_url");
+                let desc: Option<String> = r.get("description");
+                let fmt = determine_material_format(&m_type, ext_url.as_deref(), desc.as_deref(), None, None);
+                LearningMaterialResponse {
+                    id: r.get("id"),
+                    tenant_id: r.get("tenant_id"),
+                    lesson_id: r.get("lesson_id"),
+                    material_type: m_type,
+                    format: fmt.clone(),
+                    content_type: fmt,
+                    title: r.get("title"),
+                    description: desc,
+                    storage_key: r.get("storage_key"),
+                    external_url: ext_url,
+                    order_index: r.get("order_index"),
+                    visibility: r.get("visibility"),
+                    is_active: r.get("is_active"),
+                    created_at: r.get("created_at"),
+                    updated_at: r.get("updated_at"),
+                    is_completed: Some(r.get("is_completed")),
+                    completed_count: None,
+                    teacher_name: r.get("teacher_name"),
+                    teacher_id: r.get("teacher_id"),
+                    class_name: r.get("class_name"),
+                    class_id: r.get("class_id"),
+                    subject_name: r.get("subject_name"),
+                    start_page: r.get("start_page"),
+                    end_page: r.get("end_page"),
+                    session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
+                    release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
+                }
             })
             .collect()
     } else if is_admin {
@@ -677,7 +745,7 @@ async fn list(
                 m.class_id, c.name as class_name,
                 m.teacher_id,
                 COALESCE(ut.full_name, uc.full_name, 'Guru Pengampu') as teacher_name,
-                COALESCE(s.name, lb.subject_name, 'Umum') as subject_name,
+                COALESCE(s.name, lb.subject_name, t.subject, 'Umum') as subject_name,
                 m.start_page, m.end_page,
                 m.session_id, m.release_at,
                 (SELECT COUNT(*)::bigint FROM student_material_completions smc WHERE smc.material_id = m.id) as completed_count
@@ -709,31 +777,39 @@ async fn list(
         ), &req_ctx.request_id))?;
 
         rows.into_iter()
-            .map(|r| LearningMaterialResponse {
-                id: r.get("id"),
-                tenant_id: r.get("tenant_id"),
-                lesson_id: r.get("lesson_id"),
-                material_type: r.get("material_type"),
-                title: r.get("title"),
-                description: r.get("description"),
-                storage_key: r.get("storage_key"),
-                external_url: r.get("external_url"),
-                order_index: r.get("order_index"),
-                visibility: r.get("visibility"),
-                is_active: r.get("is_active"),
-                created_at: r.get("created_at"),
-                updated_at: r.get("updated_at"),
-                is_completed: None,
-                completed_count: r.get("completed_count"),
-                teacher_name: r.get("teacher_name"),
-                teacher_id: r.get("teacher_id"),
-                class_name: r.get("class_name"),
-                class_id: r.get("class_id"),
-                subject_name: r.get("subject_name"),
-                start_page: r.get("start_page"),
-                end_page: r.get("end_page"),
-                session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
-                release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
+            .map(|r| {
+                let m_type: String = r.get("material_type");
+                let ext_url: Option<String> = r.get("external_url");
+                let desc: Option<String> = r.get("description");
+                let fmt = determine_material_format(&m_type, ext_url.as_deref(), desc.as_deref(), None, None);
+                LearningMaterialResponse {
+                    id: r.get("id"),
+                    tenant_id: r.get("tenant_id"),
+                    lesson_id: r.get("lesson_id"),
+                    material_type: m_type,
+                    format: fmt.clone(),
+                    content_type: fmt,
+                    title: r.get("title"),
+                    description: desc,
+                    storage_key: r.get("storage_key"),
+                    external_url: ext_url,
+                    order_index: r.get("order_index"),
+                    visibility: r.get("visibility"),
+                    is_active: r.get("is_active"),
+                    created_at: r.get("created_at"),
+                    updated_at: r.get("updated_at"),
+                    is_completed: None,
+                    completed_count: r.get("completed_count"),
+                    teacher_name: r.get("teacher_name"),
+                    teacher_id: r.get("teacher_id"),
+                    class_name: r.get("class_name"),
+                    class_id: r.get("class_id"),
+                    subject_name: r.get("subject_name"),
+                    start_page: r.get("start_page"),
+                    end_page: r.get("end_page"),
+                    session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
+                    release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
+                }
             })
             .collect()
     } else {
@@ -893,7 +969,7 @@ async fn get_by_id(
             m.class_id, c.name as class_name,
             m.teacher_id,
             COALESCE(ut.full_name, uc.full_name, 'Guru Pengampu') as teacher_name,
-            COALESCE(s.name, lb.subject_name, 'Umum') as subject_name,
+            COALESCE(s.name, lb.subject_name, t.subject, 'Umum') as subject_name,
             m.start_page, m.end_page,
             m.session_id, m.release_at
         FROM learning_materials m
@@ -963,15 +1039,22 @@ async fn get_by_id(
     .await
     .ok();
 
+    let m_type: String = row.get("material_type");
+    let ext_url: Option<String> = row.get("external_url");
+    let desc: Option<String> = row.get("description");
+    let fmt = determine_material_format(&m_type, ext_url.as_deref(), desc.as_deref(), None, None);
+
     let resp = LearningMaterialResponse {
         id: row.get("id"),
         tenant_id: row.get("tenant_id"),
         lesson_id: row.get("lesson_id"),
-        material_type: row.get("material_type"),
+        material_type: m_type,
+        format: fmt.clone(),
+        content_type: fmt,
         title: row.get("title"),
-        description: row.get("description"),
+        description: desc,
         storage_key: row.get("storage_key"),
-        external_url: row.get("external_url"),
+        external_url: ext_url,
         order_index: row.get("order_index"),
         visibility: row.get("visibility"),
         is_active: row.get("is_active"),
