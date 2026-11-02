@@ -107,7 +107,7 @@ impl SubmitAssignmentUseCase {
                 assignment.id.to_string(),
                 None,
                 None,
-                None,
+                Some(command.student_id),
                 1,
                 &*self.clock,
             ),

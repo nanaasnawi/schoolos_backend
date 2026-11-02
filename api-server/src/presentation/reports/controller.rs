@@ -1079,7 +1079,7 @@ pub async fn export_report(
             let sql = r#"
                 SELECT 
                     TO_CHAR(a.timestamp, 'YYYY-MM-DD HH24:MI:SS') as timestamp_wib,
-                    COALESCE(u.full_name, 'Sistem') as nama_pengguna,
+                    COALESCE(s.full_name, u.full_name, 'Sistem') as nama_pengguna,
                     COALESCE(u.email, '-') as email,
                     a.action as aksi_operasi,
                     COALESCE(a.resource, '-') as entitas_resource,
@@ -1087,6 +1087,7 @@ pub async fn export_report(
                     COALESCE(a.user_agent, '-') as user_agent
                 FROM audit_logs a
                 LEFT JOIN users u ON u.id = a.actor_id
+                LEFT JOIN students s ON s.id = a.actor_id OR s.user_id = a.actor_id
                 WHERE a.tenant_id = $1
                 ORDER BY a.timestamp DESC
                 LIMIT 1000
