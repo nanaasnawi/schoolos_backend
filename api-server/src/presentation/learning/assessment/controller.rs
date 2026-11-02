@@ -500,37 +500,36 @@ async fn save_gradebook(
     };
 
     if let Some(t_id) = teacher_id_opt {
-            let allowed_class_ids: Vec<Uuid> = sqlx::query_scalar::<_, Uuid>(
-                r#"
-                SELECT DISTINCT c.id FROM classes c
-                WHERE c.tenant_id = $1 AND c.deleted_at IS NULL
-                  AND (
-                      c.homeroom_teacher_id = $2
-                      OR EXISTS (
-                          SELECT 1 FROM class_schedules cs
-                          WHERE cs.class_id = c.id
-                            AND cs.teacher_id = $2
-                            AND cs.deleted_at IS NULL
-                      )
+        let allowed_class_ids: Vec<Uuid> = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT DISTINCT c.id FROM classes c
+            WHERE c.tenant_id = $1 AND c.deleted_at IS NULL
+              AND (
+                  c.homeroom_teacher_id = $2
+                  OR EXISTS (
+                      SELECT 1 FROM class_schedules cs
+                      WHERE cs.class_id = c.id
+                        AND cs.teacher_id = $2
+                        AND cs.deleted_at IS NULL
                   )
-                "#,
-            )
-            .bind(req_ctx.tenant_id)
-            .bind(t_id)
-            .fetch_all(&ctx.pool)
-            .await
-            .unwrap_or_default();
+              )
+            "#,
+        )
+        .bind(req_ctx.tenant_id)
+        .bind(t_id)
+        .fetch_all(&ctx.pool)
+        .await
+        .unwrap_or_default();
 
-            if let Some(target_cid) = payload.class_id {
-                if !allowed_class_ids.contains(&target_cid) {
-                    return Err(ApiError::new(
-                        school_core::common::error::ApplicationError::Unauthorized(
-                            school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                            "Anda tidak memiliki hak akses untuk menginput nilai pada rombel ini".to_string(),
-                        ),
-                        &req_ctx.request_id,
-                    ));
-                }
+        if let Some(target_cid) = payload.class_id {
+            if !allowed_class_ids.contains(&target_cid) {
+                return Err(ApiError::new(
+                    school_core::common::error::ApplicationError::Unauthorized(
+                        school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                        "Anda tidak memiliki hak akses untuk menginput nilai pada rombel ini".to_string(),
+                    ),
+                    &req_ctx.request_id,
+                ));
             }
         }
     }
