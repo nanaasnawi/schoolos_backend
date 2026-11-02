@@ -14,6 +14,8 @@ pub struct MaterialFilterQuery {
     pub subject_id: Option<Uuid>,
     pub teacher_id: Option<Uuid>,
     pub lesson_id: Option<Uuid>,
+    pub date: Option<chrono::NaiveDate>,
+    pub session_id: Option<Uuid>,
 }
 
 use super::dto::{
@@ -579,6 +581,8 @@ async fn list(
               AND ($4::uuid IS NULL OR m.class_id = $4)
               AND ($5::uuid IS NULL OR m.subject_id = $5)
               AND ($6::uuid IS NULL OR m.lesson_id = $6)
+              AND ($7::date IS NULL OR (COALESCE(m.release_at, m.created_at) AT TIME ZONE 'Asia/Jakarta')::date = $7)
+              AND ($8::uuid IS NULL OR m.session_id = $8)
             ORDER BY m.updated_at DESC, m.created_at DESC
             "#
         )
@@ -588,6 +592,8 @@ async fn list(
         .bind(filter.class_id)
         .bind(filter.subject_id)
         .bind(filter.lesson_id)
+        .bind(filter.date)
+        .bind(filter.session_id)
         .fetch_all(&ctx.pool)
         .await
         .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
@@ -678,6 +684,8 @@ async fn list(
               AND ($3::uuid IS NULL OR m.class_id = $3)
               AND ($4::uuid IS NULL OR m.subject_id = $4)
               AND ($5::uuid IS NULL OR m.lesson_id = $5)
+              AND ($6::date IS NULL OR (COALESCE(m.release_at, m.created_at) AT TIME ZONE 'Asia/Jakarta')::date = $6)
+              AND ($7::uuid IS NULL OR m.session_id = $7)
             ORDER BY m.updated_at DESC, m.created_at DESC
             "#,
         )
@@ -686,6 +694,8 @@ async fn list(
         .bind(filter.class_id)
         .bind(filter.subject_id)
         .bind(filter.lesson_id)
+        .bind(filter.date)
+        .bind(filter.session_id)
         .fetch_all(&ctx.pool)
         .await
         .map_err(|e| {
@@ -764,6 +774,8 @@ async fn list(
               AND ($3::uuid IS NULL OR m.class_id = $3)
               AND ($4::uuid IS NULL OR m.subject_id = $4)
               AND ($5::uuid IS NULL OR m.lesson_id = $5)
+              AND ($6::date IS NULL OR (COALESCE(m.release_at, m.created_at) AT TIME ZONE 'Asia/Jakarta')::date = $6)
+              AND ($7::uuid IS NULL OR m.session_id = $7)
             ORDER BY m.updated_at DESC, m.created_at DESC
             "#
         )
@@ -772,6 +784,8 @@ async fn list(
         .bind(filter.class_id)
         .bind(filter.subject_id)
         .bind(filter.lesson_id)
+        .bind(filter.date)
+        .bind(filter.session_id)
         .fetch_all(&ctx.pool)
         .await
         .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
