@@ -234,7 +234,7 @@ pub struct GeneratedInfographicDto {
 pub fn build_subject_pedagogical_instructions(subject: &str, grade: &str) -> String {
     let lower_subject = subject.trim().to_lowercase();
 
-    if lower_subject.contains("inggris") || lower_subject.contains("english") {
+    let specific_rule = if lower_subject.contains("inggris") || lower_subject.contains("english") {
         format!(
             r#"### ATURAN WAJIB MAPEL (BAHASA INGGRIS / ENGLISH):
 - Seluruh konten: judul, deskripsi, naskah bacaan (reading passage/dialogue), butir soal, penugasan, dan SEMUA opsi jawaban (A, B, C, D) WAJIB DITULIS DALAM BAHASA INGGRIS (Full English Language).
@@ -307,7 +307,11 @@ pub fn build_subject_pedagogical_instructions(subject: &str, grade: &str) -> Str
             r#"### ATURAN MAPEL ({subject}):
 - Sesuaikan materi, kedalaman konsep, dan bahasa pengantar secara ketat dengan karakteristik mata pelajaran {subject} pada jenjang {grade}."#
         )
-    }
+    };
+
+    format!(
+        "{specific_rule}\n\n### ATURAN WAJIB MATA UANG INDONESIA (RUPIAH):\n- DALAM SEMUA SOAL (MATEMATIKA, EKONOMI, IPS, MAUPUN SOAL CERITA LAINNYA), JIKA TERDAPAT NOMINAL UANG, BIAYA, HARGA, ATAU ANGGARAN, WAJIB MENGGUNAKAN RUPIAH INDONESIA (\"Rp \" atau \"Rupiah\").\n- DILARANG KERAS MENGGUNAKAN SIMBOL ATAU MATA UANG DOLLAR ($) UNTUK NOMINAL UANG!\n- Gunakan nominal Rupiah yang realistis dan wajar di Indonesia (misal: \"Rp 10.000\", \"Rp 50.000\", \"Rp 100.000\", \"Rp 150.000\", \"Rp 1.000.000\").\n- Simbol tanda dollar ($) HANYA diizinkan untuk formula matematika LaTeX (misal: $x^2 + y = 10$). Untuk nominal uang, WAJIB tuliskan \"Rp \" bukan \"$\"."
+    )
 }
 
 // ── Educational Visual Engine (Zero Inaccurate Unsplash Stock Photos) ──
@@ -910,8 +914,74 @@ fn json_value_to_string(val: &serde_json::Value) -> String {
     }
 }
 
+pub fn sanitize_currency_to_idr(text: &str) -> String {
+    let mut result = String::with_capacity(text.len() + 32);
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut i = 0;
+
+    while i < n {
+        if chars[i] == '$' {
+            let mut j = i + 1;
+            while j < n && chars[j].is_whitespace() {
+                j += 1;
+            }
+            let digit_start = j;
+            while j < n {
+                if chars[j].is_ascii_digit() {
+                    j += 1;
+                } else if (chars[j] == '.' || chars[j] == ',') && (j + 1 < n && chars[j + 1].is_ascii_digit()) {
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            if j > digit_start {
+                let is_math_var = if j < n {
+                    let next_c = chars[j];
+                    next_c.is_ascii_alphabetic() || next_c == '^' || next_c == '_'
+                } else {
+                    false
+                };
+
+                if !is_math_var {
+                    let num_digits: String = chars[digit_start..j]
+                        .iter()
+                        .filter(|c| c.is_ascii_digit())
+                        .collect();
+                    if let Ok(mut val) = num_digits.parse::<i64>() {
+                        if val < 1000 {
+                            val *= 1000;
+                        } else if val == 1000 {
+                            val = 1_000_000;
+                        }
+                        let s = val.to_string();
+                        let rem = s.len() % 3;
+                        let mut formatted = String::with_capacity(s.len() + 4);
+                        for (idx, ch) in s.chars().enumerate() {
+                            if idx > 0 && (idx % 3 == rem || (rem == 0 && idx % 3 == 0)) {
+                                formatted.push('.');
+                            }
+                            formatted.push(ch);
+                        }
+                        result.push_str("Rp ");
+                        result.push_str(&formatted);
+                        i = j;
+                        continue;
+                    }
+                }
+            }
+        }
+        result.push(chars[i]);
+        i += 1;
+    }
+
+    result
+}
+
 pub fn clean_choice_text(raw: &str) -> String {
-    let trimmed = raw.trim();
+    let sanitized = sanitize_currency_to_idr(raw);
+    let trimmed = sanitized.trim();
     if trimmed.len() >= 2 {
         let first = trimmed.chars().next().unwrap();
         if first.is_ascii_alphabetic() {
@@ -928,9 +998,10 @@ pub fn clean_choice_text(raw: &str) -> String {
 }
 
 pub fn clean_question_stem(raw: &str) -> String {
-    let lines: Vec<&str> = raw.lines().collect();
+    let sanitized = sanitize_currency_to_idr(raw);
+    let lines: Vec<&str> = sanitized.lines().collect();
     if lines.len() <= 1 {
-        return raw.trim().to_string();
+        return sanitized.trim().to_string();
     }
 
     let mut cut_idx = lines.len();
@@ -1007,6 +1078,10 @@ pub async fn generate_assignment(
 Buatkan paket penugasan siswa terstruktur untuk mata pelajaran: "{subject_name}", topik: "{topic}", jenjang: "{grade_level}", tingkat kesulitan: "{difficulty}" (Batch ID: {now_ts}).
 
 {subject_guideline}
+
+ATURAN WAJIB MATA UANG INDONESIA (RUPIAH):
+- Jika soal melibatkan uang, harga, biaya, modal, untung/rugi, atau anggaran, WAJIB menggunakan Rupiah ("Rp " atau "Rupiah", contoh: "Rp 10.000", "Rp 50.000", "Rp 100.000", "Rp 150.000", "Rp 1.000.000").
+- DILARANG KERAS MENGGUNAKAN SIMBOL ATAU MATA UANG DOLLAR ($) UNTUK NOMINAL UANG!
 
 ATURAN STRUKTUR DAN JUMLAH SOAL:
 {slot_instructions}
