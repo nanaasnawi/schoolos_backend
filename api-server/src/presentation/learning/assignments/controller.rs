@@ -1372,9 +1372,9 @@ async fn submit(
         r#"
         SELECT 
             ans.question_id,
-            q.question_text,
-            q.question_type,
-            q.points as max_points,
+            COALESCE(q.question_text, '') as question_text,
+            COALESCE(q.question_type, 'MULTIPLE_CHOICE') as question_type,
+            COALESCE(q.points, 10) as max_points,
             ans.chosen_choice_id,
             c.choice_text as chosen_choice_text,
             c.is_correct as is_correct,
@@ -1382,10 +1382,10 @@ async fn submit(
             ans.points_earned,
             ans.teacher_feedback
         FROM assignment_submission_answers ans
-        JOIN assignment_questions q ON q.id = ans.question_id
+        LEFT JOIN assignment_questions q ON q.id = ans.question_id
         LEFT JOIN assignment_question_choices c ON c.id = ans.chosen_choice_id
         WHERE ans.submission_id = $1
-        ORDER BY q.order_index ASC, ans.created_at ASC
+        ORDER BY COALESCE(q.order_index, 0) ASC, ans.created_at ASC
         "#,
     )
     .bind(resp.id)
@@ -1584,7 +1584,7 @@ async fn get_submissions(
                     LEFT JOIN classes target_c ON target_c.id = $2
                     WHERE ($2::uuid IS NULL OR en_c.id = $2 OR (en_c.tingkat IS NOT NULL AND en_c.tingkat != '' AND target_c.tingkat IS NOT NULL AND en_c.tingkat = target_c.tingkat))
                       AND (en.status = 'Active' OR en.status = 'ACTIVE' OR en.status IS NULL)
-                    ORDER BY s.id, (sub.status IS NOT NULL AND sub.status != 'unsubmitted') DESC
+                    ORDER BY s.id, (sub.status IS NOT NULL AND sub.status != 'unsubmitted') DESC, sub.submitted_at DESC NULLS LAST
                 ) subquery
                 ORDER BY 
                     CASE WHEN status = 'submitted' THEN 1
@@ -1647,49 +1647,48 @@ async fn get_submissions(
         )
     })?;
 
-    let sub_ids: Vec<Uuid> = rows
-        .iter()
-        .filter(|r| r.get::<String, _>("status") != "unsubmitted")
-        .map(|r| r.get::<Uuid, _>("id"))
-        .collect();
-
-    let answer_rows = if !sub_ids.is_empty() {
-        sqlx::query(
-            r#"
-            SELECT 
-                ans.submission_id,
-                ans.question_id,
-                q.question_text,
-                q.question_type,
-                q.points as max_points,
-                ans.chosen_choice_id,
-                c.choice_text as chosen_choice_text,
-                c.is_correct as is_correct,
-                ans.text_answer,
-                ans.points_earned,
-                ans.teacher_feedback
-            FROM assignment_submission_answers ans
-            JOIN assignment_questions q ON q.id = ans.question_id
-            LEFT JOIN assignment_question_choices c ON c.id = ans.chosen_choice_id
-            WHERE ans.submission_id = ANY($1)
-            ORDER BY q.order_index ASC, ans.created_at ASC
-            "#,
-        )
-        .bind(&sub_ids)
-        .fetch_all(&ctx.pool)
-        .await
-        .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    // Comprehensive answer matching: Query all submission answers associated with this assignment
+    let answer_rows = sqlx::query(
+        r#"
+        SELECT 
+            ans.submission_id,
+            sub.student_id,
+            ans.question_id,
+            COALESCE(q.question_text, '') as question_text,
+            COALESCE(q.question_type, 'MULTIPLE_CHOICE') as question_type,
+            COALESCE(q.points, 10) as max_points,
+            ans.chosen_choice_id,
+            c.choice_text as chosen_choice_text,
+            c.is_correct as is_correct,
+            ans.text_answer,
+            ans.points_earned,
+            ans.teacher_feedback
+        FROM assignment_submission_answers ans
+        JOIN assignment_submissions sub ON sub.id = ans.submission_id
+        LEFT JOIN assignment_questions q ON q.id = ans.question_id
+        LEFT JOIN assignment_question_choices c ON c.id = ans.chosen_choice_id
+        WHERE sub.assignment_id = $1
+        ORDER BY COALESCE(q.order_index, 0) ASC, ans.created_at ASC
+        "#,
+    )
+    .bind(id)
+    .fetch_all(&ctx.pool)
+    .await
+    .unwrap_or_default();
 
     let items = rows
         .into_iter()
         .map(|r| {
             let sub_id: Uuid = r.get("id");
+            let student_id: Uuid = r.get("student_id");
+            let student_user_id: Option<Uuid> = r.try_get("student_user_id").ok().flatten();
             let answers = answer_rows
                 .iter()
-                .filter(|a| a.get::<Uuid, _>("submission_id") == sub_id)
+                .filter(|a| {
+                    let a_sub_id: Uuid = a.get("submission_id");
+                    let a_student_id: Uuid = a.get("student_id");
+                    a_sub_id == sub_id || a_student_id == student_id || (student_user_id.is_some() && Some(a_student_id) == student_user_id)
+                })
                 .map(|a| SubmissionAnswerDetailDto {
                     question_id: a.get("question_id"),
                     question_text: a.get("question_text"),
@@ -1803,9 +1802,9 @@ async fn grade(
         r#"
         SELECT 
             ans.question_id,
-            q.question_text,
-            q.question_type,
-            q.points as max_points,
+            COALESCE(q.question_text, '') as question_text,
+            COALESCE(q.question_type, 'MULTIPLE_CHOICE') as question_type,
+            COALESCE(q.points, 10) as max_points,
             ans.chosen_choice_id,
             c.choice_text as chosen_choice_text,
             c.is_correct as is_correct,
@@ -1813,10 +1812,10 @@ async fn grade(
             ans.points_earned,
             ans.teacher_feedback
         FROM assignment_submission_answers ans
-        JOIN assignment_questions q ON q.id = ans.question_id
+        LEFT JOIN assignment_questions q ON q.id = ans.question_id
         LEFT JOIN assignment_question_choices c ON c.id = ans.chosen_choice_id
         WHERE ans.submission_id = $1
-        ORDER BY q.order_index ASC, ans.created_at ASC
+        ORDER BY COALESCE(q.order_index, 0) ASC, ans.created_at ASC
         "#,
     )
     .bind(submission_id)
