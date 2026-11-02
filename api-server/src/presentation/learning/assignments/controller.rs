@@ -6,6 +6,14 @@ use axum::{
 use sqlx::Row;
 use uuid::Uuid;
 
+#[derive(Debug, serde::Deserialize, Default)]
+pub struct AssignmentFilterQuery {
+    pub class_id: Option<Uuid>,
+    pub subject_id: Option<Uuid>,
+    pub date: Option<chrono::NaiveDate>,
+    pub session_id: Option<Uuid>,
+}
+
 use super::dto::{
     assignment_question_dto::{
         AssignmentChoiceDto, AssignmentQuestionDto, SubmissionAnswerDetailDto,
@@ -476,6 +484,7 @@ async fn create(
 
 async fn list(
     State(ctx): State<ApplicationContext>,
+    Query(filter): Query<AssignmentFilterQuery>,
     req_ctx: RequestContext,
 ) -> Result<Json<ApiResponse<Vec<AssignmentResponse>>>, ApiError> {
     use crate::middleware::require_permission;
@@ -560,11 +569,19 @@ async fn list(
                   OR a.teacher_id IN (SELECT id FROM teachers WHERE (user_id = $2 OR id = $2) AND tenant_id = $1)
                   OR a.teacher_id = $2
               )
+              AND ($3::uuid IS NULL OR a.class_id = $3)
+              AND ($4::uuid IS NULL OR a.subject_id = $4)
+              AND ($5::date IS NULL OR (COALESCE(a.release_at, a.created_at) AT TIME ZONE 'Asia/Jakarta')::date = $5)
+              AND ($6::uuid IS NULL OR a.session_id = $6)
             ORDER BY a.updated_at DESC, a.created_at DESC
             "#,
         )
         .bind(req_ctx.tenant_id)
         .bind(actor_id)
+        .bind(filter.class_id)
+        .bind(filter.subject_id)
+        .bind(filter.date)
+        .bind(filter.session_id)
         .fetch_all(&ctx.pool)
         .await
         .map_err(|e| {
@@ -669,11 +686,19 @@ async fn list(
                       WHERE g.user_id = $2 AND (en.status = 'Active' OR en.status = 'ACTIVE')
                   )
               )
+              AND ($3::uuid IS NULL OR a.class_id = $3)
+              AND ($4::uuid IS NULL OR a.subject_id = $4)
+              AND ($5::date IS NULL OR (COALESCE(a.release_at, a.created_at) AT TIME ZONE 'Asia/Jakarta')::date = $5)
+              AND ($6::uuid IS NULL OR a.session_id = $6)
             ORDER BY a.updated_at DESC, a.created_at DESC
             "#,
         )
         .bind(req_ctx.tenant_id)
         .bind(actor_id)
+        .bind(filter.class_id)
+        .bind(filter.subject_id)
+        .bind(filter.date)
+        .bind(filter.session_id)
         .fetch_all(&ctx.pool)
         .await
         .map_err(|e| {
@@ -736,10 +761,18 @@ async fn list(
             LEFT JOIN subjects sub ON sub.id = a.subject_id
             LEFT JOIN teachers t ON t.id = a.teacher_id
             WHERE a.tenant_id = $1 AND a.deleted_at IS NULL
+              AND ($2::uuid IS NULL OR a.class_id = $2)
+              AND ($3::uuid IS NULL OR a.subject_id = $3)
+              AND ($4::date IS NULL OR (COALESCE(a.release_at, a.created_at) AT TIME ZONE 'Asia/Jakarta')::date = $4)
+              AND ($5::uuid IS NULL OR a.session_id = $5)
             ORDER BY a.updated_at DESC, a.created_at DESC
             "#,
         )
         .bind(req_ctx.tenant_id)
+        .bind(filter.class_id)
+        .bind(filter.subject_id)
+        .bind(filter.date)
+        .bind(filter.session_id)
         .fetch_all(&ctx.pool)
         .await
         .map_err(|e| {
