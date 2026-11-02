@@ -14,7 +14,7 @@ pub struct MaterialFilterQuery {
     pub subject_id: Option<Uuid>,
     pub teacher_id: Option<Uuid>,
     pub lesson_id: Option<Uuid>,
-    pub date: Option<chrono::NaiveDate>,
+    pub date: Option<String>,
     pub session_id: Option<Uuid>,
 }
 
@@ -581,7 +581,7 @@ async fn list(
               AND ($4::uuid IS NULL OR m.class_id = $4)
               AND ($5::uuid IS NULL OR m.subject_id = $5)
               AND ($6::uuid IS NULL OR m.lesson_id = $6)
-              AND ($7::date IS NULL OR (COALESCE(m.release_at, m.created_at) AT TIME ZONE 'Asia/Jakarta')::date = $7)
+              AND ($7::text IS NULL OR (COALESCE(m.release_at, m.created_at) AT TIME ZONE 'Asia/Jakarta')::date = $7::date)
               AND ($8::uuid IS NULL OR m.session_id = $8)
             ORDER BY m.updated_at DESC, m.created_at DESC
             "#
@@ -684,7 +684,7 @@ async fn list(
               AND ($3::uuid IS NULL OR m.class_id = $3)
               AND ($4::uuid IS NULL OR m.subject_id = $4)
               AND ($5::uuid IS NULL OR m.lesson_id = $5)
-              AND ($6::date IS NULL OR (COALESCE(m.release_at, m.created_at) AT TIME ZONE 'Asia/Jakarta')::date = $6)
+              AND ($6::text IS NULL OR (COALESCE(m.release_at, m.created_at) AT TIME ZONE 'Asia/Jakarta')::date = $6::date)
               AND ($7::uuid IS NULL OR m.session_id = $7)
             ORDER BY m.updated_at DESC, m.created_at DESC
             "#,
@@ -774,7 +774,7 @@ async fn list(
               AND ($3::uuid IS NULL OR m.class_id = $3)
               AND ($4::uuid IS NULL OR m.subject_id = $4)
               AND ($5::uuid IS NULL OR m.lesson_id = $5)
-              AND ($6::date IS NULL OR (COALESCE(m.release_at, m.created_at) AT TIME ZONE 'Asia/Jakarta')::date = $6)
+              AND ($6::text IS NULL OR (COALESCE(m.release_at, m.created_at) AT TIME ZONE 'Asia/Jakarta')::date = $6::date)
               AND ($7::uuid IS NULL OR m.session_id = $7)
             ORDER BY m.updated_at DESC, m.created_at DESC
             "#

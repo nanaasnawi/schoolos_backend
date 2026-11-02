@@ -46,7 +46,16 @@ impl AuditEventSubscriber {
                     allowed: true,
                     permission: Permission::SystemInternal,
                     policy: Some("DomainEventSubscription".to_string()),
-                    reason: Some(format!("Domain event received from source={}", source)),
+                    reason: Some(match event_name {
+                    "AssignmentSubmitted" => "Pengumpulan lembar jawaban tugas oleh siswa".to_string(),
+                    "AssignmentCreated" => "Penerbitan tugas pembelajaran baru untuk rombel".to_string(),
+                    "LessonPublished" | "MaterialCreated" => "Penerbitan modul atau bahan ajar baru".to_string(),
+                    "QuizAttemptStarted" => "Siswa memulai sesi pengerjaan ujian CBT".to_string(),
+                    "QuizAttemptFinished" | "QuizCompleted" => "Siswa menyelesaikan pengerjaan kuis CBT".to_string(),
+                    "GradeReleased" => "Publikasi nilai hasil penilaian siswa".to_string(),
+                    "StudentEnrolled" => "Pendaftaran dan penempatan rombel siswa baru".to_string(),
+                    _ => format!("Aktivitas sistem: {} tercatat otomatis dari {}", event_name, source),
+                }),
                 };
 
                 let audit_log = AuditLog::new(
