@@ -329,6 +329,7 @@ pub struct AtRiskStudentResponse {
 #[derive(Debug, Deserialize)]
 pub struct AtRiskQuery {
     pub class_id: Option<Uuid>,
+    pub student_id: Option<Uuid>,
 }
 
 /// GET /api/v1/teacher/at-risk-students or /api/v1/teachers/at-risk-students
@@ -420,6 +421,7 @@ pub async fn get_at_risk_students(
               OR ($5::uuid IS NOT NULL AND m.teacher_id = $5)
               OR m.teacher_id = $4
           )
+          AND ($6::uuid IS NULL OR s.id = $6)
           AND smc.id IS NULL
           AND (rp.is_completed IS NULL OR rp.is_completed = false)
           AND COALESCE(rp.current_page, 1) < 3
@@ -432,6 +434,7 @@ pub async fn get_at_risk_students(
     .bind(is_admin)
     .bind(actor_id)
     .bind(teacher_id)
+    .bind(query.student_id)
     .fetch_all(&ctx.pool)
     .await
     .unwrap_or_default();
@@ -500,6 +503,7 @@ pub async fn get_at_risk_students(
               OR ($5::uuid IS NOT NULL AND a.teacher_id = $5)
               OR a.teacher_id = $4
           )
+          AND ($6::uuid IS NULL OR s.id = $6)
           AND (sub.id IS NULL OR sub.status = 'unsubmitted' OR sub.submitted_at IS NULL)
         ORDER BY s.id, a.id, a.created_at DESC
         LIMIT 60
@@ -510,6 +514,7 @@ pub async fn get_at_risk_students(
     .bind(is_admin)
     .bind(actor_id)
     .bind(teacher_id)
+    .bind(query.student_id)
     .fetch_all(&ctx.pool)
     .await
     .unwrap_or_default();
@@ -579,6 +584,7 @@ pub async fn get_at_risk_students(
               OR ($5::uuid IS NOT NULL AND a.teacher_id = $5)
               OR a.teacher_id = $4
           )
+          AND ($6::uuid IS NULL OR s.id = $6)
           AND sub.score IS NOT NULL
           AND sub.score < 70
           AND sub.status != 'unsubmitted'
@@ -591,6 +597,7 @@ pub async fn get_at_risk_students(
     .bind(is_admin)
     .bind(actor_id)
     .bind(teacher_id)
+    .bind(query.student_id)
     .fetch_all(&ctx.pool)
     .await
     .unwrap_or_default();
@@ -662,6 +669,7 @@ pub async fn get_at_risk_students(
               OR ($5::uuid IS NOT NULL AND q.teacher_id = $5)
               OR q.teacher_id = $4
           )
+          AND ($6::uuid IS NULL OR s.id = $6)
           AND (
               qa.id IS NULL 
               OR (qa.score IS NOT NULL AND qa.score < COALESCE(NULLIF(q.passing_score, 0), 70))
@@ -675,6 +683,7 @@ pub async fn get_at_risk_students(
     .bind(is_admin)
     .bind(actor_id)
     .bind(teacher_id)
+    .bind(query.student_id)
     .fetch_all(&ctx.pool)
     .await
     .unwrap_or_default();
