@@ -609,7 +609,7 @@ async fn get_dashboard(
         LEFT JOIN users u ON u.id = COALESCE(a.actor_id, s.user_id)
         WHERE a.tenant_id = $1
         ORDER BY a.timestamp DESC
-        LIMIT 100
+        LIMIT 5
         "#,
     )
     .bind(tid)
