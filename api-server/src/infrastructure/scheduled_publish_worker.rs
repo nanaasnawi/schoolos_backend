@@ -20,6 +20,8 @@ impl ScheduledPublishWorker {
             WHERE m.release_at <= NOW() 
               AND m.notification_dispatched = false 
               AND m.deleted_at IS NULL
+              AND m.is_active = true
+              AND m.visibility = 'scheduled' 
             LIMIT 25
             "#
         )
@@ -127,7 +129,7 @@ impl ScheduledPublishWorker {
         let pending_assignments = sqlx::query(
             r#"
             SELECT 
-                a.id, a.tenant_id, a.title, a.class_id,
+                a.id, a.tenant_id, a.title, a.class_id, a.subject_id,
                 COALESCE(ut.full_name, uc.full_name, 'Guru Pengampu') as teacher_name,
                 c.name as class_name
             FROM assignments a
@@ -138,6 +140,8 @@ impl ScheduledPublishWorker {
             WHERE a.release_at <= NOW() 
               AND a.notification_dispatched = false 
               AND a.deleted_at IS NULL
+              AND a.is_active = true
+              AND a.status = 'scheduled'
             LIMIT 25
             "#
         )
@@ -151,6 +155,7 @@ impl ScheduledPublishWorker {
             let class_id: Option<Uuid> = row.try_get("class_id").ok().flatten();
             let teacher_name: String = row.get("teacher_name");
             let class_name: Option<String> = row.try_get("class_name").ok().flatten();
+            let subject_id: Option<Uuid> = row.try_get("subject_id").ok().flatten();
 
             // Mark as published & dispatched
             let _ = sqlx::query(
@@ -163,6 +168,23 @@ impl ScheduledPublishWorker {
             .bind(a_id)
             .execute(pool)
             .await;
+
+            // Auto-archive any older active assignments for this class & subject
+            if let (Some(cid), Some(sid)) = (class_id, subject_id) {
+                let _ = sqlx::query(
+                    r#"
+                    UPDATE assignments
+                    SET status = 'archived', is_active = false, updated_at = NOW()
+                    WHERE tenant_id = $1 AND class_id = $2 AND subject_id = $3 AND id != $4 AND is_active = true
+                    "#
+                )
+                .bind(tenant_id)
+                .bind(cid)
+                .bind(sid)
+                .bind(a_id)
+                .execute(pool)
+                .await;
+            }
 
             let notif_title = format!("📝 Tugas Baru: {}", title);
             let notif_body = if let Some(ref c_name) = class_name {
@@ -255,6 +277,8 @@ impl ScheduledPublishWorker {
             WHERE q.release_at <= NOW() 
               AND q.notification_dispatched = false 
               AND q.deleted_at IS NULL
+              AND q.is_active = true
+              AND q.status = 'scheduled' 
             LIMIT 25
             "#
         )

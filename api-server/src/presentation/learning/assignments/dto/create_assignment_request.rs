@@ -19,6 +19,8 @@ pub struct CreateAssignmentRequest {
     pub subject_id: Option<Uuid>,
     pub session_id: Option<Uuid>,
     pub release_at: Option<DateTime<Utc>>,
+    pub status: Option<String>,
+    pub replace_previous: Option<bool>,
     #[serde(default = "default_allow_late")]
     pub allow_late_submission: Option<bool>,
     pub questions: Option<Vec<super::assignment_question_dto::AssignmentQuestionDto>>,

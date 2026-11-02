@@ -271,17 +271,22 @@ async fn create(
     };
 
     let is_scheduled = payload.release_at.is_some_and(|r| r > chrono::Utc::now());
-    let initial_status = if is_scheduled {
-        "draft".to_string()
-    } else {
-        "published".to_string()
+    let initial_status = match payload.status.as_deref() {
+        Some("draft") => "draft".to_string(),
+        Some("scheduled") => "scheduled".to_string(),
+        Some("archived") => "archived".to_string(),
+        Some("published") => "published".to_string(),
+        _ => if is_scheduled { "scheduled".to_string() } else { "published".to_string() },
     };
+    let is_live_published = initial_status == "published";
+    let is_archived = initial_status == "archived";
+    let notification_dispatched = is_live_published;
 
     if let Err(e) = sqlx::query(
         r#"UPDATE assignments 
            SET class_id = $1, subject_id = $2, teacher_id = $3, created_by = $4, 
-               status = $5, release_at = COALESCE($6, NOW()), notification_dispatched = $7, is_active = true 
-           WHERE id = $8"#,
+               status = $5, release_at = COALESCE($6, NOW()), notification_dispatched = $7, is_active = $8 
+           WHERE id = $9"#,
     )
     .bind(target_class_id)
     .bind(subject_id)
@@ -289,11 +294,35 @@ async fn create(
     .bind(actor_id)
     .bind(&initial_status)
     .bind(payload.release_at)
-    .bind(!is_scheduled)
+    .bind(notification_dispatched)
+    .bind(!is_archived)
     .bind(assignment.id)
     .execute(&ctx.pool)
     .await {
         tracing::error!("Failed to update assignment metadata: {:?}", e);
+    }
+
+    // Auto-archive previous active assignments for this class & subject if requested or if publishing live
+    if payload.replace_previous.unwrap_or(true) && is_live_published {
+        if let (Some(cid), Some(sid)) = (target_class_id, subject_id) {
+            let _ = sqlx::query(
+                r#"
+                UPDATE assignments 
+                SET status = 'archived', is_active = false, updated_at = NOW() 
+                WHERE tenant_id = $1 
+                  AND class_id = $2 
+                  AND subject_id = $3 
+                  AND id != $4 
+                  AND is_active = true
+                "#
+            )
+            .bind(req_ctx.tenant_id)
+            .bind(cid)
+            .bind(sid)
+            .bind(assignment.id)
+            .execute(&ctx.pool)
+            .await;
+        }
     }
 
     let (class_name, subject_name, teacher_name) = tokio::join!(
@@ -408,8 +437,8 @@ async fn create(
     resp.questions = questions_to_return;
 
     // Kirim push TUGAS baru ke siswa rombel target (atau semua siswa bila tanpa kelas)
-    // HANYA JIKA rilis sekarang (bukan dijadwalkan ke tanggal masa depan).
-    if !is_scheduled {
+    // HANYA JIKA status PUBLISHED (bukan DRAFT, bukan SCHEDULED, bukan ARCHIVED).
+    if is_live_published {
         let t = format!("📝 Tugas Baru: {}", assignment_title_for_notif);
         let b = match (&resp.class_name, &resp.teacher_name) {
             (Some(c), Some(g)) => format!(
