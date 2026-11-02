@@ -268,6 +268,16 @@ async fn list(
                             AND cs.teacher_id = $2
                             AND cs.deleted_at IS NULL
                       )
+                      OR EXISTS (
+                          SELECT 1 FROM learning_sessions ls
+                          WHERE ls.class_id = c.id
+                            AND (ls.teacher_id = $2 OR lower(trim(ls.teacher_name)) = (SELECT lower(trim(full_name)) FROM teachers WHERE id = $2))
+                      )
+                      OR EXISTS (
+                          SELECT 1 FROM assignments asg
+                          WHERE asg.class_id = c.id
+                            AND (asg.teacher_id = $2 OR lower(trim(asg.teacher_name)) = (SELECT lower(trim(full_name)) FROM teachers WHERE id = $2))
+                      )
                   )
                 "#,
             )
@@ -386,6 +396,16 @@ async fn list_class_students(
                   WHERE cs.class_id = c.id
                     AND cs.teacher_id = $5
                     AND cs.deleted_at IS NULL
+              )
+              OR EXISTS (
+                  SELECT 1 FROM learning_sessions ls
+                  WHERE ls.class_id = c.id
+                    AND (ls.teacher_id = $5 OR lower(trim(ls.teacher_name)) = (SELECT lower(trim(full_name)) FROM teachers WHERE id = $5))
+              )
+              OR EXISTS (
+                  SELECT 1 FROM assignments asg
+                  WHERE asg.class_id = c.id
+                    AND (asg.teacher_id = $5 OR lower(trim(asg.teacher_name)) = (SELECT lower(trim(full_name)) FROM teachers WHERE id = $5))
               )
           )
         ORDER BY s.full_name ASC

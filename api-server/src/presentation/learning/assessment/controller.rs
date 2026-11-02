@@ -451,6 +451,88 @@ async fn save_gradebook(
             )
         })?;
 
+    let is_admin_or_staff = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                r.name == "Kepala Sekolah"
+                    || r.name == "Operator/Staff"
+                    || r.name == "Admin"
+                    || r.name == "SuperAdmin"
+                    || r.name == "Bendahara"
+            })
+        })
+        .unwrap_or(false);
+
+    let is_teacher = !is_admin_or_staff
+        && req_ctx
+            .actor
+            .as_ref()
+            .map(|a| {
+                a.roles
+                    .iter()
+                    .any(|r| r.name == "Guru" || r.name == "Teacher")
+            })
+            .unwrap_or(false);
+
+    let mut teacher_id_opt: Option<Uuid> = None;
+    if is_teacher {
+        let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
+        teacher_id_opt = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT id FROM teachers 
+            WHERE (
+                user_id = $1 
+                OR lower(trim(full_name)) = (SELECT lower(trim(full_name)) FROM users WHERE id = $1)
+                OR (email IS NOT NULL AND lower(trim(email)) = (SELECT lower(trim(email)) FROM users WHERE id = $1))
+            )
+            AND tenant_id = $2 AND deleted_at IS NULL
+            LIMIT 1
+            "#,
+        )
+        .bind(user_id)
+        .bind(req_ctx.tenant_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .unwrap_or(None);
+
+        if let Some(t_id) = teacher_id_opt {
+            let allowed_class_ids: Vec<Uuid> = sqlx::query_scalar::<_, Uuid>(
+                r#"
+                SELECT DISTINCT c.id FROM classes c
+                WHERE c.tenant_id = $1 AND c.deleted_at IS NULL
+                  AND (
+                      c.homeroom_teacher_id = $2
+                      OR EXISTS (
+                          SELECT 1 FROM class_schedules cs
+                          WHERE cs.class_id = c.id
+                            AND cs.teacher_id = $2
+                            AND cs.deleted_at IS NULL
+                      )
+                  )
+                "#,
+            )
+            .bind(req_ctx.tenant_id)
+            .bind(t_id)
+            .fetch_all(&ctx.pool)
+            .await
+            .unwrap_or_default();
+
+            if let Some(target_cid) = payload.class_id {
+                if !allowed_class_ids.contains(&target_cid) {
+                    return Err(ApiError::new(
+                        school_core::common::error::ApplicationError::Unauthorized(
+                            school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                            "Anda tidak memiliki hak akses untuk menginput nilai pada rombel ini".to_string(),
+                        ),
+                        &req_ctx.request_id,
+                    ));
+                }
+            }
+        }
+    }
+
     // Resolve subject_id if not directly provided
     let resolved_subject_id = match payload.subject_id {
         Some(sid) => Some(sid),
@@ -815,6 +897,53 @@ async fn get_gradebook_summary(
             )
         })?;
 
+    let is_admin_or_staff = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                r.name == "Kepala Sekolah"
+                    || r.name == "Operator/Staff"
+                    || r.name == "Admin"
+                    || r.name == "SuperAdmin"
+                    || r.name == "Bendahara"
+            })
+        })
+        .unwrap_or(false);
+
+    let is_teacher = !is_admin_or_staff
+        && req_ctx
+            .actor
+            .as_ref()
+            .map(|a| {
+                a.roles
+                    .iter()
+                    .any(|r| r.name == "Guru" || r.name == "Teacher")
+            })
+            .unwrap_or(false);
+
+    let mut teacher_id_opt: Option<Uuid> = None;
+    if is_teacher {
+        let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
+        teacher_id_opt = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT id FROM teachers 
+            WHERE (
+                user_id = $1 
+                OR lower(trim(full_name)) = (SELECT lower(trim(full_name)) FROM users WHERE id = $1)
+                OR (email IS NOT NULL AND lower(trim(email)) = (SELECT lower(trim(email)) FROM users WHERE id = $1))
+            )
+            AND tenant_id = $2 AND deleted_at IS NULL
+            LIMIT 1
+            "#,
+        )
+        .bind(user_id)
+        .bind(req_ctx.tenant_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .unwrap_or(None);
+    }
+
     let rows = sqlx::query(
         r#"
         SELECT gb.student_id, gb.class_id, gb.subject_id, sub.name as subject_name,
@@ -834,12 +963,29 @@ async fn get_gradebook_summary(
           AND ($2::uuid IS NULL OR gb.class_id = $2)
           AND ($3::uuid IS NULL OR gb.subject_id = $3)
           AND ($4::uuid IS NULL OR gb.student_id = $4)
+          AND (
+              $5::uuid IS NULL OR
+              EXISTS (
+                  SELECT 1 FROM classes c
+                  WHERE c.id = gb.class_id
+                    AND (
+                        c.homeroom_teacher_id = $5
+                        OR EXISTS (
+                            SELECT 1 FROM class_schedules cs
+                            WHERE cs.class_id = c.id
+                              AND cs.teacher_id = $5
+                              AND cs.deleted_at IS NULL
+                        )
+                    )
+              )
+          )
         "#,
     )
     .bind(req_ctx.tenant_id)
     .bind(params.class_id)
     .bind(params.subject_id)
     .bind(params.student_id)
+    .bind(teacher_id_opt)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| {
@@ -859,11 +1005,28 @@ async fn get_gradebook_summary(
         WHERE tenant_id = $1
           AND ($2::uuid IS NULL OR class_id = $2)
           AND ($3::uuid IS NULL OR subject_id = $3)
+          AND (
+              $4::uuid IS NULL OR
+              EXISTS (
+                  SELECT 1 FROM classes c
+                  WHERE c.id = class_id
+                    AND (
+                        c.homeroom_teacher_id = $4
+                        OR EXISTS (
+                            SELECT 1 FROM class_schedules cs
+                            WHERE cs.class_id = c.id
+                              AND cs.teacher_id = $4
+                              AND cs.deleted_at IS NULL
+                        )
+                    )
+              )
+          )
         "#,
     )
     .bind(req_ctx.tenant_id)
     .bind(params.class_id)
     .bind(params.subject_id)
+    .bind(teacher_id_opt)
     .fetch_all(&ctx.pool)
     .await
     .unwrap_or_default();
@@ -986,6 +1149,53 @@ async fn get_gradebook(
         }
     };
 
+    let is_admin_or_staff = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                r.name == "Kepala Sekolah"
+                    || r.name == "Operator/Staff"
+                    || r.name == "Admin"
+                    || r.name == "SuperAdmin"
+                    || r.name == "Bendahara"
+            })
+        })
+        .unwrap_or(false);
+
+    let is_teacher = !is_admin_or_staff
+        && req_ctx
+            .actor
+            .as_ref()
+            .map(|a| {
+                a.roles
+                    .iter()
+                    .any(|r| r.name == "Guru" || r.name == "Teacher")
+            })
+            .unwrap_or(false);
+
+    let mut teacher_id_opt: Option<Uuid> = None;
+    if is_teacher {
+        let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
+        teacher_id_opt = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT id FROM teachers 
+            WHERE (
+                user_id = $1 
+                OR lower(trim(full_name)) = (SELECT lower(trim(full_name)) FROM users WHERE id = $1)
+                OR (email IS NOT NULL AND lower(trim(email)) = (SELECT lower(trim(email)) FROM users WHERE id = $1))
+            )
+            AND tenant_id = $2 AND deleted_at IS NULL
+            LIMIT 1
+            "#,
+        )
+        .bind(user_id)
+        .bind(req_ctx.tenant_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .unwrap_or(None);
+    }
+
     let entries = sqlx::query!(
         r#"
         SELECT ge.id, ge.student_id, ge.class_id, ge.subject_id, ge.component_name, ge.source_type,
@@ -1001,12 +1211,29 @@ async fn get_gradebook(
           AND ($2::uuid IS NULL OR ge.student_id = $2)
           AND ($3::uuid IS NULL OR ge.class_id = $3)
           AND ($4::uuid IS NULL OR ge.subject_id = $4)
+          AND (
+              $5::uuid IS NULL OR
+              EXISTS (
+                  SELECT 1 FROM classes c
+                  WHERE c.id = ge.class_id
+                    AND (
+                        c.homeroom_teacher_id = $5
+                        OR EXISTS (
+                            SELECT 1 FROM class_schedules cs
+                            WHERE cs.class_id = c.id
+                              AND cs.teacher_id = $5
+                              AND cs.deleted_at IS NULL
+                        )
+                    )
+              )
+          )
         ORDER BY ge.calculated_at DESC
         "#,
         req_ctx.tenant_id,
         target_student_id,
         params.class_id,
-        params.subject_id
+        params.subject_id,
+        teacher_id_opt
     )
     .fetch_all(&ctx.pool)
     .await

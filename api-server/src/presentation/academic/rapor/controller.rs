@@ -436,7 +436,54 @@ pub async fn get_report_cards(
         .and_then(|s| s.try_get::<Option<String>, _>("headmaster_nip").unwrap_or(None))
         .unwrap_or_else(|| "-".to_string());
 
-    // 3. Query Students with Class, Teacher, and Guardian
+    let is_admin_or_staff = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                r.name == "Kepala Sekolah"
+                    || r.name == "Operator/Staff"
+                    || r.name == "Admin"
+                    || r.name == "SuperAdmin"
+                    || r.name == "Bendahara"
+            })
+        })
+        .unwrap_or(false);
+
+    let is_teacher = !is_admin_or_staff
+        && req_ctx
+            .actor
+            .as_ref()
+            .map(|a| {
+                a.roles
+                    .iter()
+                    .any(|r| r.name == "Guru" || r.name == "Teacher")
+            })
+            .unwrap_or(false);
+
+    let mut teacher_id_opt: Option<Uuid> = None;
+    if is_teacher {
+        let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
+        teacher_id_opt = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT id FROM teachers 
+            WHERE (
+                user_id = $1 
+                OR lower(trim(full_name)) = (SELECT lower(trim(full_name)) FROM users WHERE id = $1)
+                OR (email IS NOT NULL AND lower(trim(email)) = (SELECT lower(trim(email)) FROM users WHERE id = $1))
+            )
+            AND tenant_id = $2 AND deleted_at IS NULL
+            LIMIT 1
+            "#,
+        )
+        .bind(user_id)
+        .bind(req_ctx.tenant_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .unwrap_or(None);
+    }
+
+    // 3. Query Students with Class, Teacher, and Guardian (Strictly Scoped for Teachers)
     let student_rows = sqlx::query(
         r#"
         WITH active_student_roster AS (
@@ -464,6 +511,26 @@ pub async fn get_report_cards(
               AND s.deleted_at IS NULL
               AND (s.status = 'active' OR (s.status IS NULL AND s.is_active = true))
               AND ($2::uuid IS NULL OR c.id = $2)
+              AND (
+                  $3::uuid IS NULL OR
+                  c.homeroom_teacher_id = $3 OR
+                  EXISTS (
+                      SELECT 1 FROM class_schedules cs
+                      WHERE cs.class_id = c.id
+                        AND cs.teacher_id = $3
+                        AND cs.deleted_at IS NULL
+                  )
+                  OR EXISTS (
+                      SELECT 1 FROM learning_sessions ls
+                      WHERE ls.class_id = c.id
+                        AND (ls.teacher_id = $3 OR lower(trim(ls.teacher_name)) = (SELECT lower(trim(full_name)) FROM teachers WHERE id = $3))
+                  )
+                  OR EXISTS (
+                      SELECT 1 FROM assignments asg
+                      WHERE asg.class_id = c.id
+                        AND (asg.teacher_id = $3 OR lower(trim(asg.teacher_name)) = (SELECT lower(trim(full_name)) FROM teachers WHERE id = $3))
+                  )
+              )
             ORDER BY s.id, e.enrolled_at DESC NULLS LAST
         )
         SELECT * FROM active_student_roster
@@ -472,6 +539,7 @@ pub async fn get_report_cards(
     )
     .bind(req_ctx.tenant_id)
     .bind(params.class_id)
+    .bind(teacher_id_opt)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
