@@ -2,7 +2,7 @@ use axum::{
     extract::{Request, State},
     http::{header, StatusCode},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use jsonwebtoken::{decode, DecodingKey, Validation};
 use school_core::authorization::domain::actor::Actor;
@@ -120,7 +120,7 @@ pub async fn auth_middleware(
     if let Some(auth_header) = req.headers().get(header::AUTHORIZATION) {
         if let Ok(auth_str) = auth_header.to_str() {
             if let Some(token) = auth_str.strip_prefix("Bearer ") {
-                token_opt = Some(token.to_string());
+                token_opt = Some(token.trim().to_string());
             }
         }
     } else if let Some(query) = req.uri().query() {
@@ -128,103 +128,242 @@ pub async fn auth_middleware(
             let mut parts = pair.splitn(2, '=');
             if parts.next() == Some("token") {
                 if let Some(val) = parts.next() {
-                    token_opt = Some(val.to_string());
+                    token_opt = Some(val.trim().to_string());
                     break;
                 }
             }
         }
     }
 
-    let mut actor_opt = None;
-
-    if let Some(token) = token_opt {
-        let token_data = decode::<Claims>(
-            &token,
-            &DecodingKey::from_secret(ctx.jwt_secret.as_bytes()),
-            &Validation::default(),
-        );
-
-        if let Ok(token_data) = token_data {
-            if let Ok(user_id) = Uuid::parse_str(&token_data.claims.sub) {
-                if let Ok(tenant_id) = Uuid::parse_str(&token_data.claims.tenant_id) {
-                    // 1. In-memory Cache lookup for roles & permissions
-                    let (roles, permissions) = if let Some(cached) = ctx
-                        .auth_cache
-                        .get_actor_roles_and_permissions(&user_id)
-                        .await
-                    {
-                        cached
-                    } else {
-                        let r = ctx
-                            .role_repo
-                            .find_roles_by_user_id(user_id)
-                            .await
-                            .unwrap_or_default();
-                        let p = ctx
-                            .role_repo
-                            .find_permissions_by_user_id(user_id)
-                            .await
-                            .unwrap_or_default();
-                        ctx.auth_cache
-                            .set_actor_roles_and_permissions(user_id, r.clone(), p.clone())
-                            .await;
-                        (r, p)
-                    };
-
-                    actor_opt = Some(Actor {
-                        id: user_id,
-                        tenant_id,
-                        roles,
-                        permissions,
-                    });
-                } else {
-                    tracing::error!(
-                        "Failed to parse tenant_id: {}",
-                        token_data.claims.tenant_id
-                    );
+    // Fail-fast #1: If no token provided on protected route, return 401 JSON immediately
+    let token = match token_opt {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            let res_body = serde_json::json!({
+                "success": false,
+                "error": {
+                    "code": "AUTH_UNAUTHORIZED",
+                    "message": "Header otorisasi atau token tidak ditemukan. Silakan login kembali."
                 }
-            } else {
-                tracing::error!("Failed to parse user_id: {}", token_data.claims.sub);
-            }
-        } else {
-            tracing::error!("Failed to decode JWT token: {:?}", token_data.err());
+            });
+            return Ok(Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_string(&res_body).unwrap_or_default(),
+                ))
+                .unwrap_or_else(|_| StatusCode::UNAUTHORIZED.into_response()));
         }
-    }
+    };
 
-    if let Some(actor) = actor_opt {
-        // If not Super Admin, check if Global Maintenance Mode is active (using in-memory cache)
-        if !actor.id.is_nil() {
-            let is_maintenance = if let Some(cached) = ctx.auth_cache.get_maintenance_mode().await {
-                cached
-            } else {
-                let row =
-                    sqlx::query!("SELECT value FROM system_settings WHERE key = 'maintenance'")
-                        .fetch_optional(&ctx.pool)
-                        .await
-                        .ok()
-                        .flatten();
+    // Fail-fast #2: Decode and validate JWT token signature and expiration
+    // Reject immediately at the outer layer before touching Postgres connection pool
+    let mut validation = Validation::default();
+    validation.validate_exp = true;
+    validation.leeway = 5;
 
-                let active = row
-                    .and_then(|rec| rec.value.get("maintenance_mode").and_then(|v| v.as_bool()))
-                    .unwrap_or(false);
-                ctx.auth_cache.set_maintenance_mode(active).await;
-                active
+    let token_data = decode::<Claims>(
+        &token,
+        &DecodingKey::from_secret(ctx.jwt_secret.as_bytes()),
+        &validation,
+    );
+
+    let claims = match token_data {
+        Err(err) => {
+            let (code, msg) = match err.kind() {
+                jsonwebtoken::errors::ErrorKind::ExpiredSignature => (
+                    "AUTH_EXPIRED_TOKEN",
+                    "Sesi Anda telah berakhir (expired). Silakan login kembali.",
+                ),
+                _ => (
+                    "AUTH_INVALID_TOKEN",
+                    "Token autentikasi tidak valid. Silakan login kembali.",
+                ),
             };
-
-            if is_maintenance {
-                tracing::warn!(
-                    "Rejecting request due to active Maintenance Mode for actor {}",
-                    actor.id
-                );
-                return Err(StatusCode::SERVICE_UNAVAILABLE);
-            }
+            tracing::warn!(
+                "Fail-fast JWT rejection at gateway: {} (err: {:?})",
+                msg,
+                err.kind()
+            );
+            let res_body = serde_json::json!({
+                "success": false,
+                "error": {
+                    "code": code,
+                    "message": msg
+                }
+            });
+            return Ok(Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_string(&res_body).unwrap_or_default(),
+                ))
+                .unwrap_or_else(|_| StatusCode::UNAUTHORIZED.into_response()));
         }
+        Ok(td) => {
+            // Additional wall-clock timestamp check against claims.exp
+            let now_ts = chrono::Utc::now().timestamp() as usize;
+            if td.claims.exp <= now_ts {
+                tracing::warn!(
+                    "Fail-fast JWT rejection: token expired (exp: {}, now: {})",
+                    td.claims.exp,
+                    now_ts
+                );
+                let res_body = serde_json::json!({
+                    "success": false,
+                    "error": {
+                        "code": "AUTH_EXPIRED_TOKEN",
+                        "message": "Sesi Anda telah berakhir (expired). Silakan login kembali."
+                    }
+                });
+                return Ok(Response::builder()
+                    .status(StatusCode::UNAUTHORIZED)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_string(&res_body).unwrap_or_default(),
+                    ))
+                    .unwrap_or_else(|_| StatusCode::UNAUTHORIZED.into_response()));
+            }
+            td.claims
+        }
+    };
 
-        req.extensions_mut().insert(actor);
-        Ok(next.run(req).await)
+    // Fail-fast #3: Validate subject and tenant_id UUIDs
+    let user_id = match Uuid::parse_str(&claims.sub) {
+        Ok(id) => id,
+        Err(_) => {
+            tracing::error!("Fail-fast: Invalid user_id in JWT subject: {}", claims.sub);
+            let res_body = serde_json::json!({
+                "success": false,
+                "error": {
+                    "code": "AUTH_INVALID_TOKEN",
+                    "message": "Token sub tidak valid."
+                }
+            });
+            return Ok(Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_string(&res_body).unwrap_or_default(),
+                ))
+                .unwrap_or_else(|_| StatusCode::UNAUTHORIZED.into_response()));
+        }
+    };
+
+    let tenant_id = match Uuid::parse_str(&claims.tenant_id) {
+        Ok(id) => id,
+        Err(_) => {
+            tracing::error!(
+                "Fail-fast: Invalid tenant_id in JWT claims: {}",
+                claims.tenant_id
+            );
+            let res_body = serde_json::json!({
+                "success": false,
+                "error": {
+                    "code": "AUTH_INVALID_TOKEN",
+                    "message": "Token tenant_id tidak valid."
+                }
+            });
+            return Ok(Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_string(&res_body).unwrap_or_default(),
+                ))
+                .unwrap_or_else(|_| StatusCode::UNAUTHORIZED.into_response()));
+        }
+    };
+
+    // 1. In-memory Cache lookup for roles & permissions
+    let (roles, permissions) = if user_id.is_nil() {
+        (
+            vec![Role {
+                id: Uuid::nil(),
+                name: "SuperAdmin".to_string(),
+                description: Some("System Super Admin".to_string()),
+            }],
+            vec![
+                Permission::AcademicManage,
+                Permission::StudentRead,
+                Permission::StudentUpdate,
+                Permission::TeacherRead,
+                Permission::TeacherUpdate,
+                Permission::LearningCurriculumRead,
+                Permission::LearningCurriculumUpdate,
+            ],
+        )
+    } else if let Some(cached) = ctx
+        .auth_cache
+        .get_actor_roles_and_permissions(&user_id)
+        .await
+    {
+        cached
     } else {
-        Err(StatusCode::UNAUTHORIZED)
+        let r = ctx
+            .role_repo
+            .find_roles_by_user_id(user_id)
+            .await
+            .unwrap_or_default();
+        let p = ctx
+            .role_repo
+            .find_permissions_by_user_id(user_id)
+            .await
+            .unwrap_or_default();
+        ctx.auth_cache
+            .set_actor_roles_and_permissions(user_id, r.clone(), p.clone())
+            .await;
+        (r, p)
+    };
+
+    let actor = Actor {
+        id: user_id,
+        tenant_id,
+        roles,
+        permissions,
+    };
+
+    // 2. Global Maintenance Mode check using fast in-memory cache
+    if !actor.id.is_nil() {
+        let is_maintenance = if let Some(cached) = ctx.auth_cache.get_maintenance_mode().await {
+            cached
+        } else {
+            let row = sqlx::query!("SELECT value FROM system_settings WHERE key = 'maintenance'")
+                .fetch_optional(&ctx.pool)
+                .await
+                .ok()
+                .flatten();
+
+            let active = row
+                .and_then(|rec| rec.value.get("maintenance_mode").and_then(|v| v.as_bool()))
+                .unwrap_or(false);
+            ctx.auth_cache.set_maintenance_mode(active).await;
+            active
+        };
+
+        if is_maintenance {
+            tracing::warn!(
+                "Rejecting request due to active Maintenance Mode for actor {}",
+                actor.id
+            );
+            let res_body = serde_json::json!({
+                "success": false,
+                "error": {
+                    "code": "MAINTENANCE_MODE_ACTIVE",
+                    "message": "Sistem sedang dalam mode pemeliharaan (maintenance)."
+                }
+            });
+            return Ok(Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_string(&res_body).unwrap_or_default(),
+                ))
+                .unwrap_or_else(|_| StatusCode::SERVICE_UNAVAILABLE.into_response()));
+        }
     }
+
+    req.extensions_mut().insert(actor);
+    Ok(next.run(req).await)
 }
 
 /// Check whether the requesting actor has a required permission.
