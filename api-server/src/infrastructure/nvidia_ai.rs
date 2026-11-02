@@ -977,7 +977,7 @@ pub async fn generate_assignment(
     num_mcq: usize,
     num_essay: usize,
     difficulty: &str,
-    include_images: bool,
+    _include_images: bool,
 ) -> Result<GeneratedAssignmentDto, ApplicationError> {
     let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
     let is_homework = assignment_format
@@ -1683,7 +1683,7 @@ pub fn fallback_generate_assignment(
     num_mcq: usize,
     num_essay: usize,
     difficulty: &str,
-    include_images: bool,
+    _include_images: bool,
 ) -> GeneratedAssignmentDto {
     let now_ts = chrono::Utc::now().timestamp_millis();
     let is_homework = assignment_format
