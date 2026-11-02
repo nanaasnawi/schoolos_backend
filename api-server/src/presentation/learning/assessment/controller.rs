@@ -476,10 +476,9 @@ async fn save_gradebook(
             })
             .unwrap_or(false);
 
-    let mut teacher_id_opt: Option<Uuid> = None;
-    if is_teacher {
+    let teacher_id_opt: Option<Uuid> = if is_teacher {
         let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
-        teacher_id_opt = sqlx::query_scalar::<_, Uuid>(
+        sqlx::query_scalar::<_, Uuid>(
             r#"
             SELECT id FROM teachers 
             WHERE (
@@ -495,9 +494,12 @@ async fn save_gradebook(
         .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await
-        .unwrap_or(None);
+        .unwrap_or(None)
+    } else {
+        None
+    };
 
-        if let Some(t_id) = teacher_id_opt {
+    if let Some(t_id) = teacher_id_opt {
             let allowed_class_ids: Vec<Uuid> = sqlx::query_scalar::<_, Uuid>(
                 r#"
                 SELECT DISTINCT c.id FROM classes c
@@ -922,10 +924,9 @@ async fn get_gradebook_summary(
             })
             .unwrap_or(false);
 
-    let mut teacher_id_opt: Option<Uuid> = None;
-    if is_teacher {
+    let teacher_id_opt: Option<Uuid> = if is_teacher {
         let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
-        teacher_id_opt = sqlx::query_scalar::<_, Uuid>(
+        sqlx::query_scalar::<_, Uuid>(
             r#"
             SELECT id FROM teachers 
             WHERE (
@@ -941,8 +942,10 @@ async fn get_gradebook_summary(
         .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await
-        .unwrap_or(None);
-    }
+        .unwrap_or(None)
+    } else {
+        None
+    };
 
     let rows = sqlx::query(
         r#"
@@ -1174,10 +1177,9 @@ async fn get_gradebook(
             })
             .unwrap_or(false);
 
-    let mut teacher_id_opt: Option<Uuid> = None;
-    if is_teacher {
+    let teacher_id_opt: Option<Uuid> = if is_teacher {
         let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
-        teacher_id_opt = sqlx::query_scalar::<_, Uuid>(
+        sqlx::query_scalar::<_, Uuid>(
             r#"
             SELECT id FROM teachers 
             WHERE (
@@ -1193,10 +1195,12 @@ async fn get_gradebook(
         .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await
-        .unwrap_or(None);
-    }
+        .unwrap_or(None)
+    } else {
+        None
+    };
 
-    let entries = sqlx::query!(
+    let entries = sqlx::query(
         r#"
         SELECT ge.id, ge.student_id, ge.class_id, ge.subject_id, ge.component_name, ge.source_type,
                ge.raw_score::TEXT as raw_score_text,
@@ -1229,12 +1233,12 @@ async fn get_gradebook(
           )
         ORDER BY ge.calculated_at DESC
         "#,
-        req_ctx.tenant_id,
-        target_student_id,
-        params.class_id,
-        params.subject_id,
-        teacher_id_opt
     )
+    .bind(req_ctx.tenant_id)
+    .bind(target_student_id)
+    .bind(params.class_id)
+    .bind(params.subject_id)
+    .bind(teacher_id_opt)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| {
@@ -1248,19 +1252,27 @@ async fn get_gradebook(
 
     let items = entries
         .into_iter()
-        .map(|e| GradebookEntryResponse {
-            id: e.id,
-            student_id: e.student_id,
-            class_id: e.class_id,
-            subject_id: e.subject_id,
-            subject_name: Some(e.subject_name),
-            component_name: e.component_name,
-            source_type: e.source_type,
-            raw_score: e.raw_score_text.and_then(|s| s.parse::<f64>().ok()),
-            max_raw_score: e.max_raw_score_text.and_then(|s| s.parse::<f64>().ok()),
-            weighted_score: e.weighted_score_text.and_then(|s| s.parse::<f64>().ok()),
-            weight_percentage: e.weight_percentage_text.and_then(|s| s.parse::<f64>().ok()),
-            calculated_at: e.calculated_at,
+        .map(|e| {
+            let raw_score_text: Option<String> = e.try_get("raw_score_text").ok();
+            let max_raw_score_text: Option<String> = e.try_get("max_raw_score_text").ok();
+            let weighted_score_text: Option<String> = e.try_get("weighted_score_text").ok();
+            let weight_percentage_text: Option<String> = e.try_get("weight_percentage_text").ok();
+            let sub_name: Option<String> = e.try_get("subject_name").ok();
+
+            GradebookEntryResponse {
+                id: e.get("id"),
+                student_id: e.get("student_id"),
+                class_id: e.get("class_id"),
+                subject_id: e.get("subject_id"),
+                subject_name: sub_name,
+                component_name: e.get("component_name"),
+                source_type: e.get("source_type"),
+                raw_score: raw_score_text.and_then(|s| s.parse::<f64>().ok()),
+                max_raw_score: max_raw_score_text.and_then(|s| s.parse::<f64>().ok()),
+                weighted_score: weighted_score_text.and_then(|s| s.parse::<f64>().ok()),
+                weight_percentage: weight_percentage_text.and_then(|s| s.parse::<f64>().ok()),
+                calculated_at: e.try_get::<chrono::DateTime<chrono::Utc>, _>("calculated_at").unwrap_or_else(|_| chrono::Utc::now()),
+            }
         })
         .collect();
 
