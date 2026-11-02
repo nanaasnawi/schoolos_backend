@@ -108,6 +108,12 @@ pub struct DashboardRecentActivityDto {
     pub decision: String,
     pub reason: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    pub actor: Option<String>,
+    #[serde(default)]
+    pub ip: Option<String>,
+    #[serde(default)]
+    pub user_agent: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, utoipa::ToSchema, Clone, Debug)]
@@ -578,11 +584,14 @@ async fn get_dashboard(
     let audit_rows = sqlx::query(
         r#"
         SELECT 
-            id, action, resource, decision, reason, timestamp AS created_at
-        FROM audit_logs
-        WHERE tenant_id = $1
-        ORDER BY timestamp DESC
-        LIMIT 6
+            a.id, a.action, a.resource, a.decision, a.reason, a.timestamp AS created_at,
+            COALESCE(u.full_name, 'Sistem PKBM') AS actor,
+            a.ip, a.user_agent
+        FROM audit_logs a
+        LEFT JOIN users u ON u.id = a.actor_id
+        WHERE a.tenant_id = $1
+        ORDER BY a.timestamp DESC
+        LIMIT 100
         "#,
     )
     .bind(tid)
@@ -599,6 +608,9 @@ async fn get_dashboard(
             decision: r.get("decision"),
             reason: r.get("reason"),
             created_at: r.get("created_at"),
+            actor: r.try_get("actor").ok(),
+            ip: r.try_get("ip").ok(),
+            user_agent: r.try_get("user_agent").ok(),
         })
         .collect();
 

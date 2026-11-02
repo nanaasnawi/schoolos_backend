@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     routing::{get, post},
     Json, Router,
 };
@@ -10,7 +10,7 @@ use uuid::Uuid;
 pub struct AssignmentFilterQuery {
     pub class_id: Option<Uuid>,
     pub subject_id: Option<Uuid>,
-    pub date: Option<chrono::NaiveDate>,
+    pub date: Option<String>,
     pub session_id: Option<Uuid>,
 }
 
@@ -571,7 +571,7 @@ async fn list(
               )
               AND ($3::uuid IS NULL OR a.class_id = $3)
               AND ($4::uuid IS NULL OR a.subject_id = $4)
-              AND ($5::date IS NULL OR (COALESCE(a.release_at, a.created_at) AT TIME ZONE 'Asia/Jakarta')::date = $5)
+              AND ($5::text IS NULL OR (COALESCE(a.release_at, a.created_at) AT TIME ZONE 'Asia/Jakarta')::date = $5::date)
               AND ($6::uuid IS NULL OR a.session_id = $6)
             ORDER BY a.updated_at DESC, a.created_at DESC
             "#,
@@ -688,7 +688,7 @@ async fn list(
               )
               AND ($3::uuid IS NULL OR a.class_id = $3)
               AND ($4::uuid IS NULL OR a.subject_id = $4)
-              AND ($5::date IS NULL OR (COALESCE(a.release_at, a.created_at) AT TIME ZONE 'Asia/Jakarta')::date = $5)
+              AND ($5::text IS NULL OR (COALESCE(a.release_at, a.created_at) AT TIME ZONE 'Asia/Jakarta')::date = $5::date)
               AND ($6::uuid IS NULL OR a.session_id = $6)
             ORDER BY a.updated_at DESC, a.created_at DESC
             "#,
@@ -763,7 +763,7 @@ async fn list(
             WHERE a.tenant_id = $1 AND a.deleted_at IS NULL
               AND ($2::uuid IS NULL OR a.class_id = $2)
               AND ($3::uuid IS NULL OR a.subject_id = $3)
-              AND ($4::date IS NULL OR (COALESCE(a.release_at, a.created_at) AT TIME ZONE 'Asia/Jakarta')::date = $4)
+              AND ($4::text IS NULL OR (COALESCE(a.release_at, a.created_at) AT TIME ZONE 'Asia/Jakarta')::date = $4::date)
               AND ($5::uuid IS NULL OR a.session_id = $5)
             ORDER BY a.updated_at DESC, a.created_at DESC
             "#,
