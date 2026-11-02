@@ -584,11 +584,29 @@ async fn get_dashboard(
     let audit_rows = sqlx::query(
         r#"
         SELECT 
-            a.id, a.action, a.resource, a.decision, a.reason, a.timestamp AS created_at,
-            COALESCE(u.full_name, 'Sistem PKBM') AS actor,
+            a.id, a.action, a.resource, a.decision, 
+            CASE 
+                WHEN a.action = 'AssignmentSubmitted' AND (a.reason IS NULL OR a.reason = 'Pengumpulan lembar jawaban tugas oleh siswa') AND asg.title IS NOT NULL AND s.full_name IS NOT NULL
+                THEN 'Pengumpulan lembar jawaban tugas "' || asg.title || '" oleh siswa: ' || s.full_name
+                WHEN a.action = 'AssignmentSubmitted' AND (a.reason IS NULL OR a.reason = 'Pengumpulan lembar jawaban tugas oleh siswa') AND s.full_name IS NOT NULL
+                THEN 'Pengumpulan lembar jawaban tugas oleh siswa: ' || s.full_name
+                ELSE a.reason
+            END AS reason,
+            a.timestamp AS created_at,
+            COALESCE(s.full_name, u.full_name, 'Sistem PKBM') AS actor,
             a.ip, a.user_agent
         FROM audit_logs a
-        LEFT JOIN users u ON u.id = a.actor_id
+        LEFT JOIN LATERAL (
+            SELECT sub.student_id, sub.assignment_id
+            FROM assignment_submissions sub
+            WHERE (a.action = 'AssignmentSubmitted' OR a.action ILIKE '%submission%')
+              AND ABS(EXTRACT(EPOCH FROM (sub.submitted_at - a.timestamp))) < 10
+            ORDER BY ABS(EXTRACT(EPOCH FROM (sub.submitted_at - a.timestamp))) ASC
+            LIMIT 1
+        ) matched_sub ON true
+        LEFT JOIN students s ON s.id = COALESCE(a.actor_id, matched_sub.student_id) OR s.user_id = a.actor_id
+        LEFT JOIN assignments asg ON asg.id = matched_sub.assignment_id
+        LEFT JOIN users u ON u.id = COALESCE(a.actor_id, s.user_id)
         WHERE a.tenant_id = $1
         ORDER BY a.timestamp DESC
         LIMIT 100
