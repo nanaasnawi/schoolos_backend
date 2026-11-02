@@ -1048,7 +1048,7 @@ pub async fn generate_assignment(
     num_mcq: usize,
     num_essay: usize,
     difficulty: &str,
-    _include_images: bool,
+    include_images: bool,
 ) -> Result<GeneratedAssignmentDto, ApplicationError> {
     let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
     let is_homework = assignment_format
@@ -1758,7 +1758,7 @@ pub fn fallback_generate_assignment(
     num_mcq: usize,
     num_essay: usize,
     difficulty: &str,
-    _include_images: bool,
+    include_images: bool,
 ) -> GeneratedAssignmentDto {
     let now_ts = chrono::Utc::now().timestamp_millis();
     let is_homework = assignment_format
@@ -1869,7 +1869,7 @@ pub async fn generate_cbt_quiz(
     num_mcq: usize,
     num_essay: usize,
     difficulty: &str,
-    _include_images: bool,
+    include_images: bool,
 ) -> Result<GeneratedCbtQuizDto, ApplicationError> {
     let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
     let now_ts = chrono::Utc::now().timestamp_millis();
@@ -1984,7 +1984,7 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#,
                 num_mcq,
                 num_essay,
                 difficulty,
-                _include_images,
+                include_images,
             ));
         }
     };
@@ -2011,7 +2011,7 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#,
                 num_mcq,
                 num_essay,
                 difficulty,
-                _include_images,
+                include_images,
             ));
         }
     };
@@ -2269,7 +2269,7 @@ pub fn fallback_generate_cbt_quiz(
     num_mcq: usize,
     num_essay: usize,
     difficulty: &str,
-    _include_images: bool,
+    include_images: bool,
 ) -> GeneratedCbtQuizDto {
     let now_ts = chrono::Utc::now().timestamp_millis();
     let is_mixed = num_essay > 0

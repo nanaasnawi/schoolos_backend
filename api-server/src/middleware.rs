@@ -279,8 +279,11 @@ pub async fn auth_middleware(
         (
             vec![Role {
                 id: Uuid::nil(),
+                tenant_id: Uuid::nil(),
                 name: "SuperAdmin".to_string(),
-                description: Some("System Super Admin".to_string()),
+                is_system_default: true,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
             }],
             vec![
                 Permission::AcademicManage,
