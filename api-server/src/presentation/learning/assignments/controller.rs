@@ -282,10 +282,16 @@ async fn create(
     let is_archived = initial_status == "archived";
     let notification_dispatched = is_live_published;
 
+    let final_release_at = if is_live_published {
+        payload.release_at.or_else(|| Some(chrono::Utc::now()))
+    } else {
+        payload.release_at
+    };
+
     if let Err(e) = sqlx::query(
         r#"UPDATE assignments 
            SET class_id = $1, subject_id = $2, teacher_id = $3, created_by = $4, 
-               status = $5, release_at = COALESCE($6, NOW()), notification_dispatched = $7, is_active = $8 
+               status = $5, release_at = $6, notification_dispatched = $7, is_active = $8 
            WHERE id = $9"#,
     )
     .bind(target_class_id)
@@ -293,7 +299,7 @@ async fn create(
     .bind(final_teacher_id)
     .bind(actor_id)
     .bind(&initial_status)
-    .bind(payload.release_at)
+    .bind(final_release_at)
     .bind(notification_dispatched)
     .bind(!is_archived)
     .bind(assignment.id)
@@ -854,15 +860,14 @@ async fn get_by_id(
     let _ = sqlx::query(
         r#"
         UPDATE assignments a
-        SET status = 'published',
-            teacher_id = COALESCE(
+        SET teacher_id = COALESCE(
                 a.teacher_id,
                 (SELECT cs.teacher_id FROM class_schedules cs WHERE cs.class_id = a.class_id AND cs.subject_id = a.subject_id AND cs.tenant_id = a.tenant_id LIMIT 1),
                 (SELECT c.homeroom_teacher_id FROM classes c WHERE c.id = a.class_id AND c.tenant_id = a.tenant_id LIMIT 1),
                 (SELECT t.id FROM teachers t WHERE t.user_id = a.created_by AND t.tenant_id = a.tenant_id LIMIT 1),
                 (SELECT t.id FROM teachers t WHERE t.tenant_id = a.tenant_id ORDER BY t.created_at ASC LIMIT 1)
             )
-        WHERE a.id = $1 AND a.tenant_id = $2 AND a.deleted_at IS NULL
+        WHERE a.id = $1 AND a.tenant_id = $2 AND a.deleted_at IS NULL AND a.teacher_id IS NULL
         "#
     )
     .bind(id)
@@ -891,7 +896,7 @@ async fn get_by_id(
                     ORDER BY sub.submitted_at DESC NULLS LAST
                     LIMIT 1
                 ),
-                CASE WHEN a.status = 'draft' AND a.class_id IS NOT NULL THEN 'published' ELSE a.status END
+                CASE WHEN a.release_at IS NOT NULL AND a.release_at > NOW() THEN 'draft' WHEN a.release_at IS NOT NULL AND a.release_at <= NOW() AND a.status = 'draft' THEN 'published' ELSE a.status END
             ) as status,
             a.is_active,
             a.created_at, a.updated_at,
@@ -1037,16 +1042,96 @@ async fn update(
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
-    if let Some(release_at) = payload.release_at {
-        let is_scheduled = release_at > chrono::Utc::now();
-        let new_status = if is_scheduled { "draft" } else { "published" };
-        let _ = sqlx::query("UPDATE assignments SET release_at = $1, status = $2, notification_dispatched = $3 WHERE id = $4")
-            .bind(release_at)
-            .bind(new_status)
-            .bind(!is_scheduled)
+    let target_status = payload.status.as_deref();
+    let is_activating = target_status == Some("published") || target_status == Some("active");
+
+    if payload.release_at.is_some() || target_status.is_some() {
+        let (new_status, new_release_at, mark_dispatched) = if is_activating {
+            ("published", Some(chrono::Utc::now()), true)
+        } else if let Some(release_at) = payload.release_at {
+            let is_sched = release_at > chrono::Utc::now();
+            let s = if is_sched { "draft" } else { "published" };
+            (s, Some(release_at), !is_sched)
+        } else {
+            (target_status.unwrap_or("published"), None, false)
+        };
+
+        let _ = sqlx::query(
+            r#"UPDATE assignments 
+               SET status = $1, 
+                   release_at = COALESCE($2, release_at), 
+                   notification_dispatched = CASE WHEN $3 = true THEN true ELSE notification_dispatched END,
+                   is_active = true,
+                   updated_at = NOW() 
+               WHERE id = $4"#
+        )
+        .bind(new_status)
+        .bind(new_release_at)
+        .bind(mark_dispatched)
+        .bind(id)
+        .execute(&ctx.pool)
+        .await;
+
+        if is_activating {
+            let notif_info = sqlx::query(
+                r#"
+                SELECT a.title, a.class_id, c.name as class_name,
+                       COALESCE(ut.full_name, 'Guru Pengampu') as teacher_name
+                FROM assignments a
+                LEFT JOIN classes c ON c.id = a.class_id
+                LEFT JOIN teachers t ON t.id = a.teacher_id
+                LEFT JOIN users ut ON ut.id = t.user_id
+                WHERE a.id = $1
+                "#
+            )
             .bind(id)
-            .execute(&ctx.pool)
-            .await;
+            .fetch_optional(&ctx.pool)
+            .await
+            .ok()
+            .flatten();
+
+            if let Some(n) = notif_info {
+                use sqlx::Row;
+                let title: String = n.get("title");
+                let class_id: Option<Uuid> = n.try_get("class_id").ok().flatten();
+                let class_name: Option<String> = n.try_get("class_name").ok().flatten();
+                let teacher_name: String = n.get("teacher_name");
+
+                let notif_title = format!("📝 Tugas Baru: {}", title);
+                let notif_body = if let Some(ref c_name) = class_name {
+                    format!("{} telah menerbitkan tugas baru untuk kelas {}. Kerjakan sekarang!", teacher_name, c_name)
+                } else {
+                    format!("{} telah menerbitkan tugas baru: {}. Buka aplikasi untuk mengerjakan!", teacher_name, title)
+                };
+
+                if let Some(cid) = class_id {
+                    let _ = sqlx::query(
+                        r#"
+                        INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, reference_type, reference_id, is_read, created_at)
+                        SELECT 
+                            gen_random_uuid(), s.tenant_id, s.user_id, $1, $2, 'ASSIGNMENT', 'in_app', 'assignment', $3, FALSE, NOW()
+                        FROM students s
+                        JOIN enrollments en ON en.student_id = s.id
+                        WHERE en.class_id = $4 AND (en.status ILIKE 'active' OR en.status IS NULL)
+                        "#
+                    )
+                    .bind(&notif_title)
+                    .bind(&notif_body)
+                    .bind(id)
+                    .bind(cid)
+                    .execute(&ctx.pool)
+                    .await;
+
+                    crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                        notif_title,
+                        notif_body,
+                        crate::infrastructure::fcm::FcmCategory::Assignment,
+                        id,
+                        crate::infrastructure::fcm::FcmTarget::Classes(vec![cid]),
+                    );
+                }
+            }
+        }
     }
 
     if let Some(questions) = payload.questions {

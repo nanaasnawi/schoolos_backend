@@ -229,6 +229,12 @@ async fn create(
         resolved_sub
     };
 
+    let final_release_at = if !is_scheduled {
+        payload.release_at.or_else(|| Some(chrono::Utc::now()))
+    } else {
+        payload.release_at
+    };
+
     if let Err(e) = sqlx::query(
         r#"
         UPDATE learning_materials 
@@ -237,7 +243,7 @@ async fn create(
             teacher_id = $3, 
             created_by = $4,
             session_id = $5,
-            release_at = COALESCE($6, NOW()),
+            release_at = $6,
             visibility = $7,
             notification_dispatched = $8
         WHERE id = $9
@@ -248,7 +254,7 @@ async fn create(
     .bind(teacher_id)
     .bind(actor_id)
     .bind(payload.session_id)
-    .bind(payload.release_at)
+    .bind(final_release_at)
     .bind(&initial_visibility)
     .bind(!is_scheduled)
     .bind(material.id)
@@ -1734,6 +1740,9 @@ async fn update(
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
+    let target_vis = payload.visibility.as_deref();
+    let is_activating = target_vis == Some("published") || target_vis == Some("active");
+
     if payload.start_page.is_some()
         || payload.end_page.is_some()
         || payload.release_at.is_some()
@@ -1746,19 +1755,26 @@ async fn update(
             r#"UPDATE learning_materials 
                SET start_page = COALESCE($1, start_page), 
                    end_page = COALESCE($2, end_page),
-                   release_at = COALESCE($3, release_at),
+                   release_at = CASE 
+                       WHEN $9 = true THEN LEAST(COALESCE($3, release_at, NOW()), NOW())
+                       ELSE COALESCE($3, release_at)
+                   END,
                    class_id = COALESCE($4, class_id),
                    subject_id = COALESCE($5, subject_id),
                    visibility = CASE 
+                       WHEN $9 = true THEN 'published'
                        WHEN $6 = true THEN 'draft' 
                        WHEN $6 = false THEN 'published' 
                        ELSE COALESCE($7, visibility) 
                    END,
                    notification_dispatched = CASE 
+                       WHEN $9 = true THEN true
                        WHEN $6 = true THEN false 
                        WHEN $6 = false THEN true 
                        ELSE notification_dispatched 
-                   END
+                   END,
+                   is_active = true,
+                   updated_at = NOW()
                WHERE id = $8"#
         )
         .bind(payload.start_page)
@@ -1769,8 +1785,79 @@ async fn update(
         .bind(is_sched)
         .bind(payload.visibility.as_ref())
         .bind(id)
+        .bind(is_activating)
         .execute(&ctx.pool)
         .await;
+
+        if is_activating {
+            let notif_info = sqlx::query(
+                r#"
+                SELECT m.title, m.class_id, c.name as class_name,
+                       COALESCE(ut.full_name, uc.full_name, 'Guru Pengampu') as teacher_name
+                FROM learning_materials m
+                LEFT JOIN classes c ON c.id = m.class_id
+                LEFT JOIN teachers t ON t.id = m.teacher_id
+                LEFT JOIN users ut ON ut.id = t.user_id
+                LEFT JOIN users uc ON uc.id = m.created_by
+                WHERE m.id = $1
+                "#
+            )
+            .bind(id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .ok()
+            .flatten();
+
+            if let Some(n) = notif_info {
+                use sqlx::Row;
+                let title: String = n.get("title");
+                let class_id: Option<Uuid> = n.try_get("class_id").ok().flatten();
+                let class_name: Option<String> = n.try_get("class_name").ok().flatten();
+                let teacher_name: String = n.get("teacher_name");
+
+                let notif_title = format!("📚 Materi Baru: {}", title);
+                let notif_body = if let Some(ref c_name) = class_name {
+                    format!("{} telah menerbitkan modul pembelajaran baru untuk kelas {}. Pelajari sekarang!", teacher_name, c_name)
+                } else {
+                    format!("{} telah menerbitkan modul pembelajaran baru: {}. Buka aplikasi untuk membaca!", teacher_name, title)
+                };
+
+                if let Some(cid) = class_id {
+                    let _ = sqlx::query(
+                        r#"
+                        INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, reference_type, reference_id, is_read, created_at)
+                        SELECT 
+                            gen_random_uuid(), s.tenant_id, s.user_id, $1, $2, 'LEARNING_MATERIAL', 'in_app', 'material', $3, FALSE, NOW()
+                        FROM students s
+                        JOIN enrollments en ON en.student_id = s.id
+                        WHERE en.class_id = $4 AND (en.status ILIKE 'active' OR en.status IS NULL)
+                        "#
+                    )
+                    .bind(&notif_title)
+                    .bind(&notif_body)
+                    .bind(id)
+                    .bind(cid)
+                    .execute(&ctx.pool)
+                    .await;
+
+                    crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                        notif_title,
+                        notif_body,
+                        crate::infrastructure::fcm::FcmCategory::Material,
+                        id,
+                        crate::infrastructure::fcm::FcmTarget::Classes(vec![cid]),
+                    );
+                } else {
+                    crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                        notif_title,
+                        notif_body,
+                        crate::infrastructure::fcm::FcmCategory::Material,
+                        id,
+                        crate::infrastructure::fcm::FcmTarget::Roles(vec!["student".to_string()]),
+                    );
+                }
+            }
+        }
     }
 
     let mut resp = LearningMaterialResponse::from(material);
