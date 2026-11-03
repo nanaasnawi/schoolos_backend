@@ -938,6 +938,27 @@ async fn assign_reading_material(
         )
     })?;
 
+    // Auto-archive previous duplicate reading materials for this class & book
+    if !is_scheduled {
+        let _ = sqlx::query(
+            r#"
+            UPDATE learning_materials 
+            SET visibility = 'archived', is_active = false, updated_at = NOW() 
+            WHERE tenant_id = $1 
+              AND class_id = $2 
+              AND library_book_id = $3 
+              AND id != $4 
+              AND is_active = true
+            "#
+        )
+        .bind(req_ctx.tenant_id)
+        .bind(payload.class_id)
+        .bind(payload.book_id)
+        .bind(material_id)
+        .execute(&ctx.pool)
+        .await;
+    }
+
     // Fetch teacher & class names and dispatch notifications only if published immediately (not scheduled)
     if !is_scheduled {
         let teacher_name = if let Some(tid) = teacher_id {
