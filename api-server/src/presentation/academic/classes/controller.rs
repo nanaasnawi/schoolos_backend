@@ -324,11 +324,13 @@ async fn list_class_students(
         .as_ref()
         .map(|a| {
             a.roles.iter().any(|r| {
-                r.name == "Kepala Sekolah"
-                    || r.name == "Operator/Staff"
-                    || r.name == "Admin"
-                    || r.name == "SuperAdmin"
-                    || r.name == "Bendahara"
+                let name = r.name.to_lowercase();
+                name.contains("kepala")
+                    || name.contains("kepsek")
+                    || name.contains("admin")
+                    || name.contains("operator")
+                    || name.contains("staff")
+                    || name.contains("bendahara")
             })
         })
         .unwrap_or(false);
@@ -340,12 +342,21 @@ async fn list_class_students(
             .map(|a| {
                 a.roles
                     .iter()
-                    .any(|r| r.name == "Guru" || r.name == "Teacher")
+                    .any(|r| {
+                        let name = r.name.to_lowercase();
+                        name.contains("guru") || name.contains("teacher")
+                    })
             })
             .unwrap_or(false);
 
+    // If a specific class_id or class_name is requested (e.g. taking attendance, session detail,
+    // grading, or schedule supervision), allow the teacher/supervisor to view the students of that class.
+    // Teacher filtering is only applied when listing all students broadly without targeting a class.
+    let is_class_targeted = query.class_id.is_some() 
+        || query.class_name.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+
     let mut teacher_filter_id: Option<Uuid> = None;
-    if is_teacher {
+    if is_teacher && !is_class_targeted {
         let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
         let t_id = sqlx::query_scalar::<_, Uuid>(
             r#"
@@ -377,9 +388,9 @@ async fn list_class_students(
         JOIN enrollments en ON en.student_id = s.id
         JOIN classes c ON c.id = en.class_id
         WHERE c.tenant_id = $1
-          AND (en.status = 'Active' OR en.status = 'active')
-          AND s.is_active = true
-          AND (s.status = 'active' OR s.status = 'Active')
+          AND (en.status ILIKE 'active' OR en.status IS NULL)
+          AND (s.is_active = true OR s.is_active IS NULL)
+          AND (s.status ILIKE 'active' OR s.status IS NULL)
           AND s.deleted_at IS NULL
           AND ($2::uuid IS NULL OR c.id = $2)
           AND ($3::text IS NULL OR $3 = '' OR c.name ILIKE '%' || $3 || '%')
@@ -400,12 +411,12 @@ async fn list_class_students(
               OR EXISTS (
                   SELECT 1 FROM learning_sessions ls
                   WHERE ls.class_id = c.id
-                    AND (ls.teacher_id = $5 OR lower(trim(ls.teacher_name)) = (SELECT lower(trim(full_name)) FROM teachers WHERE id = $5))
+                    AND ls.teacher_id = $5
               )
               OR EXISTS (
                   SELECT 1 FROM assignments asg
                   WHERE asg.class_id = c.id
-                    AND (asg.teacher_id = $5 OR lower(trim(asg.teacher_name)) = (SELECT lower(trim(full_name)) FROM teachers WHERE id = $5))
+                    AND asg.teacher_id = $5
               )
           )
         ORDER BY s.full_name ASC
