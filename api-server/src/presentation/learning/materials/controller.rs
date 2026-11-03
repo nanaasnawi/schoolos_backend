@@ -317,7 +317,7 @@ async fn create(
             JOIN enrollments en ON en.student_id = s.id
             JOIN classes en_c ON en_c.id = en.class_id
             JOIN classes target_c ON target_c.id = $4
-                 AND (en_c.id = target_c.id OR (en_c.tingkat IS NOT NULL AND en_c.tingkat != '' AND en_c.tingkat = target_c.tingkat))
+                 AND en_c.id = target_c.id
             WHERE en_c.tenant_id = target_c.tenant_id AND (en.status ILIKE 'active')
             "#
         )
@@ -328,18 +328,7 @@ async fn create(
         .execute(&ctx.pool)
         .await;
 
-        let sibling_cids = sqlx::query_scalar::<_, Uuid>(
-            r#"
-            SELECT sib.id FROM classes c
-            JOIN classes sib ON sib.tenant_id = c.tenant_id
-                 AND (sib.id = c.id OR (sib.tingkat IS NOT NULL AND sib.tingkat != '' AND sib.tingkat = c.tingkat))
-            WHERE c.id = $1
-            "#
-        )
-        .bind(cid)
-        .fetch_all(&ctx.pool)
-        .await
-        .unwrap_or_else(|_| vec![cid]);
+        let sibling_cids = vec![cid];
 
         crate::infrastructure::fcm::trigger_fcm_push_targeted(
             notif_title.clone(),
@@ -672,13 +661,7 @@ async fn list(
               AND (
                   m.class_id IS NULL
                   OR m.class_id IN (
-                      SELECT sibling_c.id 
-                      FROM students s
-                      JOIN enrollments en ON en.student_id = s.id
-                      JOIN classes en_c ON en_c.id = en.class_id
-                      JOIN classes sibling_c ON sibling_c.tenant_id = en_c.tenant_id
-                           AND (sibling_c.id = en_c.id OR (sibling_c.tingkat IS NOT NULL AND sibling_c.tingkat != '' AND sibling_c.tingkat = en_c.tingkat))
-                      WHERE (s.user_id = $2 OR s.id = $2) AND en.status ILIKE 'active'
+                      SELECT en.class_id FROM students s JOIN enrollments en ON en.student_id = s.id WHERE (s.user_id = $2 OR s.id = $2) AND (en.status ILIKE 'active' OR en.status IS NULL)
                   )
               )
               AND ($3::uuid IS NULL OR m.class_id = $3)
@@ -946,13 +929,7 @@ async fn get_by_id(
                   AND (
                       m.class_id IS NULL OR
                       m.class_id IN (
-                          SELECT sibling_c.id 
-                          FROM students s
-                          JOIN enrollments en ON en.student_id = s.id
-                          JOIN classes en_c ON en_c.id = en.class_id
-                          JOIN classes sibling_c ON sibling_c.tenant_id = en_c.tenant_id
-                               AND (sibling_c.id = en_c.id OR (sibling_c.tingkat IS NOT NULL AND sibling_c.tingkat != '' AND sibling_c.tingkat = en_c.tingkat))
-                          WHERE s.user_id = $3 AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                          SELECT en.class_id FROM students s JOIN enrollments en ON en.student_id = s.id WHERE (s.user_id = $3 OR s.id = $3) AND (en.status ILIKE 'active' OR en.status IS NULL)
                       )
                   )
             )"#,

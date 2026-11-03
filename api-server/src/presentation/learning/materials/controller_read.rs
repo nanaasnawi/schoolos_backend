@@ -220,13 +220,7 @@ async fn list(
               AND (
                   m.class_id IS NULL OR
                   m.class_id IN (
-                      SELECT sibling_c.id 
-                      FROM students s
-                      JOIN enrollments en ON en.student_id = s.id
-                      JOIN classes en_c ON en_c.id = en.class_id
-                      JOIN classes sibling_c ON sibling_c.tenant_id = en_c.tenant_id
-                           AND (sibling_c.id = en_c.id OR (sibling_c.tingkat IS NOT NULL AND sibling_c.tingkat != '' AND sibling_c.tingkat = en_c.tingkat))
-                      WHERE s.user_id = $2 AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                      SELECT en.class_id FROM students s JOIN enrollments en ON en.student_id = s.id WHERE (s.user_id = $2 OR s.id = $2) AND (en.status ILIKE 'active' OR en.status IS NULL)
                   )
               )
             ORDER BY m.created_at DESC
