@@ -164,6 +164,7 @@ pub fn analytics_routes() -> Router<ApplicationContext> {
         .route("/dashboard", get(get_dashboard))
         .route("/schedule-compliance", get(get_schedule_compliance))
         .route("/mobile-logins", get(get_mobile_logins))
+        .route("/audit-logs", get(get_tenant_audit_logs))
 }
 
 #[utoipa::path(
@@ -1130,4 +1131,89 @@ async fn get_mobile_logins(
         .collect();
 
     Ok(Json(ApiResponse::success(logs, req_ctx.request_id)))
+}
+
+
+#[utoipa::path(
+    get,
+    operation_id = "getTenantAuditLogs",
+    path = "/api/v1/analytics/audit-logs",
+    responses(
+        (status = 200, description = "Tenant Audit Trail Logs"),
+        (status = 401, description = "Unauthorized")
+    ),
+    security(
+        ("Bearer" = [])
+    ),
+    tag = "Analytics"
+)]
+async fn get_tenant_audit_logs(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+) -> Result<Json<ApiResponse<Vec<serde_json::Value>>>, ApiError> {
+    let pool = &ctx.pool;
+    let tid = req_ctx.tenant_id;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT 
+            a.id,
+            a.action,
+            a.resource,
+            a.decision,
+            a.reason,
+            a.timestamp as created_at,
+            COALESCE(s.full_name, u.full_name, 'Sistem PKBM') as actor,
+            u.email,
+            COALESCE(
+                (SELECT r.name FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = u.id LIMIT 1),
+                'Pengguna Terdaftar'
+            ) as role,
+            a.ip,
+            a.user_agent
+        FROM audit_logs a
+        LEFT JOIN users u ON u.id = a.actor_id
+        LEFT JOIN students s ON s.id = a.actor_id OR s.user_id = a.actor_id
+        WHERE a.tenant_id = $1
+        ORDER BY a.timestamp DESC
+        LIMIT 100
+        "#
+    )
+    .bind(tid)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let list: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|r| {
+            let id: Uuid = r.get("id");
+            let action: String = r.get("action");
+            let resource: Option<String> = r.try_get("resource").ok();
+            let decision: Option<String> = r.try_get("decision").ok();
+            let reason: Option<String> = r.try_get("reason").ok();
+            let created_at: chrono::DateTime<chrono::Utc> = r.get("created_at");
+            let actor: Option<String> = r.try_get("actor").ok();
+            let email: Option<String> = r.try_get("email").ok();
+            let role: Option<String> = r.try_get("role").ok();
+            let ip: Option<String> = r.try_get("ip").ok();
+            let user_agent: Option<String> = r.try_get("user_agent").ok();
+
+            serde_json::json!({
+                "id": id.to_string(),
+                "action": action,
+                "resource": resource,
+                "decision": decision,
+                "reason": reason,
+                "created_at": created_at,
+                "actor": actor,
+                "email": email,
+                "role": role,
+                "ip": ip,
+                "user_agent": user_agent,
+            })
+        })
+        .collect();
+
+    Ok(Json(ApiResponse::success(list, req_ctx.request_id)))
 }
