@@ -14,5 +14,7 @@ pub struct UpdateAssignmentRequest {
     #[serde(default)]
     pub release_at: Option<DateTime<Utc>>,
     #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
     pub questions: Option<Vec<AssignmentQuestionDto>>,
 }

@@ -17,11 +17,12 @@ impl ScheduledPublishWorker {
             LEFT JOIN teachers t ON t.id = m.teacher_id
             LEFT JOIN users ut ON ut.id = t.user_id
             LEFT JOIN users uc ON uc.id = m.created_by
-            WHERE m.release_at <= NOW() 
+            WHERE m.release_at IS NOT NULL
+              AND m.release_at <= NOW() 
               AND m.notification_dispatched = false 
               AND m.deleted_at IS NULL
               AND m.is_active = true
-              AND (m.visibility = 'scheduled' OR m.visibility = 'draft') 
+              AND (m.visibility = 'scheduled' OR m.visibility = 'draft' OR m.visibility = 'published' OR m.visibility = 'active') 
             LIMIT 25
             "#
         )
@@ -126,11 +127,12 @@ impl ScheduledPublishWorker {
             LEFT JOIN teachers t ON t.id = a.teacher_id
             LEFT JOIN users ut ON ut.id = t.user_id
             LEFT JOIN users uc ON uc.id = a.created_by
-            WHERE a.release_at <= NOW() 
+            WHERE a.release_at IS NOT NULL
+              AND a.release_at <= NOW() 
               AND a.notification_dispatched = false 
               AND a.deleted_at IS NULL
               AND a.is_active = true
-              AND (a.status = 'scheduled' OR a.status = 'draft')
+              AND (a.status = 'scheduled' OR a.status = 'draft' OR a.status = 'published' OR a.status = 'active')
             LIMIT 25
             "#
         )
