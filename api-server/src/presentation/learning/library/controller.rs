@@ -893,7 +893,8 @@ async fn assign_reading_material(
         payload.instructions.as_deref().unwrap_or("")
     );
 
-    let is_scheduled = payload.release_at.is_some_and(|r| r > chrono::Utc::now());
+    let is_scheduled = payload.release_at.is_some_and(|r| r > chrono::Utc::now())
+        || payload.visibility.as_deref().is_some_and(|v| v.to_lowercase() == "draft" || v.to_lowercase() == "scheduled");
     let initial_visibility = if is_scheduled {
         "draft".to_string()
     } else {
