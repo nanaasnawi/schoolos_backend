@@ -1,19 +1,26 @@
 # Multi-stage Dockerfile for SchoolOS Rust Backend (api-server)
-# Optimized for Railway & containerized production deployment
+# Optimized for Railway & containerized production deployment with cargo-chef caching
 
-# ── 1. Builder Stage ──────────────────────────────────────────────────────────
-FROM rust:bookworm AS builder
-
+# ── 1. Chef Base Stage ────────────────────────────────────────────────────────
+FROM lukemathwalker/cargo-chef:latest-rust-1-bookworm AS chef
 WORKDIR /usr/src/schoolos
 
-# Install essential build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config \
-    libssl-dev \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# ── 2. Planner Stage ──────────────────────────────────────────────────────────
+FROM chef AS planner
+COPY Cargo.toml Cargo.lock ./
+COPY school-core ./school-core
+COPY api-server ./api-server
+COPY local-bridge ./local-bridge
+RUN cargo chef prepare --recipe-path recipe.json
 
-# Copy workspace files
+# ── 3. Builder Stage (Caches all 400+ third-party crates!) ────────────────────
+FROM chef AS builder
+COPY --from=planner /usr/src/schoolos/recipe.json recipe.json
+
+# Cook dependencies - this heavy layer is 100% cached by Docker unless Cargo.lock changes!
+RUN cargo chef cook --release --recipe-path recipe.json
+
+# Copy application source code and SQL queries
 COPY Cargo.toml Cargo.lock ./
 COPY school-core ./school-core
 COPY api-server ./api-server
@@ -23,14 +30,10 @@ COPY .sqlx ./.sqlx
 
 ENV SQLX_OFFLINE=true
 
-# Build the api-server binary in release mode with BuildKit caching
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/usr/src/schoolos/target \
-    cargo build --release -p api-server --bin api-server && \
-    cp /usr/src/schoolos/target/release/api-server /usr/local/bin/api-server
+# Fast build: compiles only application code in ~15-30s without hitting build timeout
+RUN cargo build --release -p api-server --bin api-server
 
-# ── 2. Runtime Stage ──────────────────────────────────────────────────────────
+# ── 4. Runtime Stage ──────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runner
 
 WORKDIR /app
@@ -46,7 +49,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN groupadd -r schoolos && useradd -r -g schoolos schoolos
 
 # Copy compiled binary from builder
-COPY --from=builder /usr/local/bin/api-server /usr/local/bin/api-server
+COPY --from=builder /usr/src/schoolos/target/release/api-server /usr/local/bin/api-server
 
 # Create directory for uploads if local file storage is used
 RUN mkdir -p /app/uploads && chown -R schoolos:schoolos /app
