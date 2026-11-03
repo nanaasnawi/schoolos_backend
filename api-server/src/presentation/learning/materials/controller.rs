@@ -112,7 +112,7 @@ async fn create(
         storage_key: clean_storage_key,
         external_url: payload.external_url,
         order_index: payload.order_index,
-        visibility: initial_visibility,
+        visibility: initial_visibility.clone(),
     };
 
     let material = ctx
