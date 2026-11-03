@@ -238,6 +238,22 @@ async fn login(
                  )
                ) as child_id,
                COALESCE(
+                 NULLIF((
+                   SELECT STRING_AGG(DISTINCT s_name, ', ')
+                   FROM (
+                     SELECT TRIM(t.subject) AS s_name
+                     FROM teachers t
+                     WHERE (t.user_id = u.id OR LOWER(t.full_name) = LOWER(u.full_name) OR LOWER(t.email) = LOWER(u.email))
+                       AND t.subject IS NOT NULL AND TRIM(t.subject) != ''
+                     UNION
+                     SELECT DISTINCT sub.name AS s_name
+                     FROM class_schedules cs
+                     JOIN teachers t ON t.id = cs.teacher_id
+                     JOIN subjects sub ON sub.id = cs.subject_id
+                     WHERE (t.user_id = u.id OR LOWER(t.full_name) = LOWER(u.full_name) OR LOWER(t.email) = LOWER(u.email))
+                       AND cs.deleted_at IS NULL AND sub.is_active = true
+                   ) all_subj
+                 ), ''),
                  (SELECT t.subject FROM teachers t WHERE t.user_id = u.id ORDER BY t.updated_at DESC LIMIT 1),
                  (SELECT t.subject FROM teachers t WHERE LOWER(t.full_name) = LOWER(u.full_name) ORDER BY t.updated_at DESC LIMIT 1),
                  (SELECT t.subject FROM teachers t WHERE LOWER(t.email) = LOWER(u.email) ORDER BY t.updated_at DESC LIMIT 1),
@@ -912,6 +928,22 @@ async fn get_me(
                  ''
                ) as about,
                COALESCE(
+                 NULLIF((
+                   SELECT STRING_AGG(DISTINCT s_name, ', ')
+                   FROM (
+                     SELECT TRIM(t.subject) AS s_name
+                     FROM teachers t
+                     WHERE (t.user_id = u.id OR LOWER(t.full_name) = LOWER(u.full_name) OR LOWER(t.email) = LOWER(u.email))
+                       AND t.subject IS NOT NULL AND TRIM(t.subject) != ''
+                     UNION
+                     SELECT DISTINCT sub.name AS s_name
+                     FROM class_schedules cs
+                     JOIN teachers t ON t.id = cs.teacher_id
+                     JOIN subjects sub ON sub.id = cs.subject_id
+                     WHERE (t.user_id = u.id OR LOWER(t.full_name) = LOWER(u.full_name) OR LOWER(t.email) = LOWER(u.email))
+                       AND cs.deleted_at IS NULL AND sub.is_active = true
+                   ) all_subj
+                 ), ''),
                  (SELECT t.subject FROM teachers t WHERE t.user_id = u.id ORDER BY t.updated_at DESC LIMIT 1),
                  (SELECT t.subject FROM teachers t WHERE LOWER(t.full_name) = LOWER(u.full_name) ORDER BY t.updated_at DESC LIMIT 1),
                  (SELECT t.subject FROM teachers t WHERE LOWER(t.email) = LOWER(u.email) ORDER BY t.updated_at DESC LIMIT 1),
