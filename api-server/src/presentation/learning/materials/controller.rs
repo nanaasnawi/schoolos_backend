@@ -79,7 +79,9 @@ async fn create(
         })?;
     }
 
-    let is_scheduled = payload.release_at.is_some_and(|r| r > chrono::Utc::now());
+    let is_scheduled = payload.release_at.is_some_and(|r| r > chrono::Utc::now())
+        || payload.visibility.to_lowercase() == "draft"
+        || payload.visibility.to_lowercase() == "scheduled";
     let initial_visibility = if is_scheduled {
         "draft".to_string()
     } else {
@@ -247,7 +249,7 @@ async fn create(
     .bind(actor_id)
     .bind(payload.session_id)
     .bind(payload.release_at)
-    .bind(if is_scheduled { "draft" } else { "published" })
+    .bind(&initial_visibility)
     .bind(!is_scheduled)
     .bind(material.id)
     .execute(&ctx.pool)
