@@ -87,18 +87,7 @@ impl ScheduledPublishWorker {
                 .execute(pool)
                 .await;
 
-                let sibling_cids = sqlx::query_scalar::<_, Uuid>(
-                    r#"
-                    SELECT sib.id FROM classes c
-                    JOIN classes sib ON sib.tenant_id = c.tenant_id
-                         AND (sib.id = c.id OR (sib.tingkat IS NOT NULL AND sib.tingkat != '' AND sib.tingkat = c.tingkat))
-                    WHERE c.id = $1
-                    "#
-                )
-                .bind(cid)
-                .fetch_all(pool)
-                .await
-                .unwrap_or_else(|_| vec![cid]);
+                let sibling_cids = vec![cid];
 
                 crate::infrastructure::fcm::trigger_fcm_push_targeted(
                     notif_title,
@@ -224,18 +213,7 @@ impl ScheduledPublishWorker {
                 .execute(pool)
                 .await;
 
-                let sibling_cids = sqlx::query_scalar::<_, Uuid>(
-                    r#"
-                    SELECT sib.id FROM classes c
-                    JOIN classes sib ON sib.tenant_id = c.tenant_id
-                         AND (sib.id = c.id OR (sib.tingkat IS NOT NULL AND sib.tingkat != '' AND sib.tingkat = c.tingkat))
-                    WHERE c.id = $1
-                    "#
-                )
-                .bind(cid)
-                .fetch_all(pool)
-                .await
-                .unwrap_or_else(|_| vec![cid]);
+                let sibling_cids = vec![cid];
 
                 crate::infrastructure::fcm::trigger_fcm_push_targeted(
                     notif_title,
@@ -343,18 +321,7 @@ impl ScheduledPublishWorker {
                 .execute(pool)
                 .await;
 
-                let sibling_cids = sqlx::query_scalar::<_, Uuid>(
-                    r#"
-                    SELECT sib.id FROM classes c
-                    JOIN classes sib ON sib.tenant_id = c.tenant_id
-                         AND (sib.id = c.id OR (sib.tingkat IS NOT NULL AND sib.tingkat != '' AND sib.tingkat = c.tingkat))
-                    WHERE c.id = $1
-                    "#
-                )
-                .bind(cid)
-                .fetch_all(pool)
-                .await
-                .unwrap_or_else(|_| vec![cid]);
+                let sibling_cids = vec![cid];
 
                 crate::infrastructure::fcm::trigger_fcm_push_targeted(
                     notif_title,

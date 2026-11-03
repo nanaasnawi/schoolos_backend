@@ -697,22 +697,9 @@ async fn list(
               AND (
                   a.class_id IS NULL
                   OR a.class_id IN (
-                      SELECT sibling_c.id 
-                      FROM students s
-                      JOIN enrollments en ON en.student_id = s.id
-                      JOIN classes en_c ON en_c.id = en.class_id
-                      JOIN classes sibling_c ON sibling_c.tenant_id = en_c.tenant_id
-                           AND (sibling_c.id = en_c.id OR (sibling_c.tingkat IS NOT NULL AND sibling_c.tingkat != '' AND sibling_c.tingkat = en_c.tingkat))
-                      WHERE s.user_id = $2 AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                      SELECT en.class_id FROM students s JOIN enrollments en ON en.student_id = s.id WHERE (s.user_id = $2 OR s.id = $2) AND (en.status ILIKE 'active' OR en.status IS NULL)
                       UNION
-                      SELECT sibling_c.id 
-                      FROM guardians g
-                      JOIN students s ON s.guardian_id = g.id
-                      JOIN enrollments en ON en.student_id = s.id
-                      JOIN classes en_c ON en_c.id = en.class_id
-                      JOIN classes sibling_c ON sibling_c.tenant_id = en_c.tenant_id
-                           AND (sibling_c.id = en_c.id OR (sibling_c.tingkat IS NOT NULL AND sibling_c.tingkat != '' AND sibling_c.tingkat = en_c.tingkat))
-                      WHERE g.user_id = $2 AND (en.status = 'Active' OR en.status = 'ACTIVE')
+                      SELECT en.class_id FROM guardians g JOIN students s ON s.guardian_id = g.id JOIN enrollments en ON en.student_id = s.id WHERE g.user_id = $2 AND (en.status ILIKE 'active' OR en.status IS NULL)
                   )
               )
               AND ($3::uuid IS NULL OR a.class_id = $3)
