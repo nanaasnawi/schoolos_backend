@@ -567,7 +567,11 @@ async fn list(
               AND q.deleted_at IS NULL
               AND q.is_active = true
               AND (COALESCE(q.release_at, q.start_at) IS NULL OR COALESCE(q.release_at, q.start_at) <= NOW())
-              AND (q.status = 'published' OR q.status = 'active')
+              AND (
+                  q.status = 'published' 
+                  OR q.status = 'active'
+                  OR (COALESCE(q.release_at, q.start_at) IS NOT NULL AND COALESCE(q.release_at, q.start_at) <= NOW())
+              )
               AND (
                   q.class_id IN (
                       SELECT en.class_id FROM enrollments en JOIN students s ON s.id = en.student_id WHERE (s.user_id = $2 OR s.id = $2) AND (en.status ILIKE 'active' OR en.status IS NULL)

@@ -21,7 +21,7 @@ impl ScheduledPublishWorker {
               AND m.notification_dispatched = false 
               AND m.deleted_at IS NULL
               AND m.is_active = true
-              AND m.visibility = 'scheduled' 
+              AND (m.visibility = 'scheduled' OR m.visibility = 'draft') 
             LIMIT 25
             "#
         )
@@ -130,7 +130,7 @@ impl ScheduledPublishWorker {
               AND a.notification_dispatched = false 
               AND a.deleted_at IS NULL
               AND a.is_active = true
-              AND a.status = 'scheduled'
+              AND (a.status = 'scheduled' OR a.status = 'draft')
             LIMIT 25
             "#
         )
@@ -256,7 +256,7 @@ impl ScheduledPublishWorker {
               AND q.notification_dispatched = false 
               AND q.deleted_at IS NULL
               AND q.is_active = true
-              AND q.status = 'scheduled' 
+              AND (q.status = 'scheduled' OR q.status = 'draft') 
             LIMIT 25
             "#
         )

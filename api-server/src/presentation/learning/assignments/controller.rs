@@ -693,7 +693,11 @@ async fn list(
               AND a.deleted_at IS NULL
               AND a.is_active = true
               AND (a.release_at IS NULL OR a.release_at <= NOW())
-              AND (a.status = 'published' OR a.status = 'active')
+              AND (
+                  a.status = 'published' 
+                  OR a.status = 'active'
+                  OR (a.release_at IS NOT NULL AND a.release_at <= NOW())
+              )
               AND (
                   a.class_id IS NULL
                   OR a.class_id IN (
