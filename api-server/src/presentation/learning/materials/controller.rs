@@ -257,6 +257,29 @@ async fn create(
         tracing::error!("Failed to update learning_materials on create: {:?}", e);
     }
 
+    // Auto-archive previous duplicate materials with identical title for this class to prevent duplicates
+    if !is_scheduled {
+        if let Some(cid) = target_class_id {
+            let _ = sqlx::query(
+                r#"
+                UPDATE learning_materials 
+                SET visibility = 'archived', is_active = false, updated_at = NOW() 
+                WHERE tenant_id = $1 
+                  AND class_id = $2 
+                  AND LOWER(TRIM(title)) = LOWER(TRIM($3))
+                  AND id != $4 
+                  AND is_active = true
+                "#
+            )
+            .bind(req_ctx.tenant_id)
+            .bind(cid)
+            .bind(&material.title)
+            .bind(material.id)
+            .execute(&ctx.pool)
+            .await;
+        }
+    }
+
     // Trigger in-app and FCM push notifications to enrolled students only if published immediately
     if !is_scheduled {
         let teacher_name = if let Some(tid) = teacher_id {

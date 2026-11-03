@@ -22,10 +22,13 @@ COPY migrations ./migrations
 COPY .sqlx ./.sqlx
 
 ENV SQLX_OFFLINE=true
-ENV CARGO_BUILD_JOBS=2
 
-# Build the api-server binary in release mode
-RUN cargo build --release -p api-server --bin api-server
+# Build the api-server binary in release mode with BuildKit caching
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/usr/src/schoolos/target \
+    cargo build --release -p api-server --bin api-server && \
+    cp /usr/src/schoolos/target/release/api-server /usr/local/bin/api-server
 
 # ── 2. Runtime Stage ──────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runner
@@ -43,7 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN groupadd -r schoolos && useradd -r -g schoolos schoolos
 
 # Copy compiled binary from builder
-COPY --from=builder /usr/src/schoolos/target/release/api-server /usr/local/bin/api-server
+COPY --from=builder /usr/local/bin/api-server /usr/local/bin/api-server
 
 # Create directory for uploads if local file storage is used
 RUN mkdir -p /app/uploads && chown -R schoolos:schoolos /app
