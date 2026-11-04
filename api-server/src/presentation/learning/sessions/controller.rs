@@ -555,6 +555,35 @@ async fn list(
         .execute(&ctx.pool)
         .await;
 
+    let update_sync_sql = r#"
+        UPDATE learning_sessions ls
+        SET 
+            teacher_id = cs.teacher_id,
+            subject_id = cs.subject_id,
+            class_id = cs.class_id,
+            start_time = cs.start_time::time,
+            end_time = cs.end_time::time,
+            updated_at = NOW()
+        FROM class_schedules cs
+        WHERE ls.tenant_id = cs.tenant_id
+          AND ls.schedule_id = cs.id
+          AND cs.tenant_id = $1
+          AND cs.deleted_at IS NULL
+          AND ls.deleted_at IS NULL
+          AND (
+              ls.teacher_id IS DISTINCT FROM cs.teacher_id
+              OR ls.subject_id IS DISTINCT FROM cs.subject_id
+              OR ls.class_id IS DISTINCT FROM cs.class_id
+              OR ls.start_time IS DISTINCT FROM cs.start_time::time
+              OR ls.end_time IS DISTINCT FROM cs.end_time::time
+          )
+    "#;
+
+    let _ = sqlx::query(update_sync_sql)
+        .bind(req_ctx.tenant_id)
+        .execute(&ctx.pool)
+        .await;
+
     let rows = sqlx::query(
         r#"
         SELECT 
