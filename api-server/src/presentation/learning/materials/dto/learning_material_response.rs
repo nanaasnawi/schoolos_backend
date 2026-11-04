@@ -38,8 +38,6 @@ pub struct LearningMaterialResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subject_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub subject_id: Option<Uuid>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub start_page: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_page: Option<i32>,
@@ -125,7 +123,6 @@ impl From<LearningMaterial> for LearningMaterialResponse {
             class_name: None,
             class_id: None,
             subject_name: None,
-            subject_id: None,
             start_page: None,
             end_page: None,
             session_id: None,
