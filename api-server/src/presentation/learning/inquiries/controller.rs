@@ -57,12 +57,22 @@ pub struct InquiryMessageDto {
     pub is_read: bool,
     #[serde(default)]
     pub read_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub attachment_url: Option<String>,
+    #[serde(default)]
+    pub attachment_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct InquiryDetailDto {
     pub thread: InquiryThreadDto,
     pub messages: Vec<InquiryMessageDto>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ChatAttachmentUploadResponse {
+    pub url: String,
+    pub filename: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,12 +108,17 @@ pub struct SendInquiryMessageRequest {
     pub sender_name: Option<String>,
     pub sender_role: String, // "TEACHER" or "STUDENT"
     pub content: String,
+    #[serde(default)]
+    pub attachment_url: Option<String>,
+    #[serde(default)]
+    pub attachment_type: Option<String>,
 }
 
 pub fn inquiry_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/", get(list_inquiries).post(create_inquiry))
         .route("/unread-count", get(get_inquiries_unread_count))
+        .route("/upload", post(upload_chat_attachment).layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024)))
         .route("/{id}", get(get_inquiry_detail))
         .route("/{id}/messages", post(send_message))
         .route("/{id}/read", post(mark_inquiry_read))
@@ -611,15 +626,15 @@ async fn get_inquiry_detail(
         }
     };
 
-    let messages = sqlx::query!(
+    let messages_rows = sqlx::query(
         r#"
-        SELECT id, thread_id, sender_id, sender_name, sender_role, content, is_from_teacher, created_at
+        SELECT id, thread_id, sender_id, sender_name, sender_role, content, is_from_teacher, created_at, attachment_url, attachment_type
         FROM inquiry_messages
         WHERE thread_id = $1
         ORDER BY created_at ASC
         "#,
-        id
     )
+    .bind(id)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| {
@@ -630,6 +645,52 @@ async fn get_inquiry_detail(
             &req_ctx.request_id,
         )
     })?;
+
+    let messages: Vec<InquiryMessageDto> = messages_rows
+        .into_iter()
+        .map(|row| {
+            let m_id: Uuid = row.get("id");
+            let m_thread_id: Uuid = row.get("thread_id");
+            let m_sender_id: String = row.get("sender_id");
+            let m_sender_name: String = row.get("sender_name");
+            let m_sender_role: String = row.get("sender_role");
+            let m_content: String = row.get("content");
+            let m_is_from_teacher: bool = row.get("is_from_teacher");
+            let m_created_at: DateTime<Utc> = row.get("created_at");
+            let m_attachment_url: Option<String> = row.try_get("attachment_url").ok().flatten();
+            let m_attachment_type: Option<String> = row.try_get("attachment_type").ok().flatten();
+
+            let is_read = if m_is_from_teacher {
+                student_read_at.map_or(false, |st| st >= m_created_at)
+            } else {
+                teacher_read_at.map_or(false, |tt| tt >= m_created_at)
+            };
+            let read_at = if is_read {
+                if m_is_from_teacher {
+                    student_read_at
+                } else {
+                    teacher_read_at
+                }
+            } else {
+                None
+            };
+
+            InquiryMessageDto {
+                id: m_id,
+                thread_id: m_thread_id,
+                sender_id: m_sender_id,
+                sender_name: m_sender_name,
+                sender_role: m_sender_role,
+                content: m_content,
+                is_from_teacher: m_is_from_teacher,
+                created_at: m_created_at,
+                is_read,
+                read_at,
+                attachment_url: m_attachment_url,
+                attachment_type: m_attachment_type,
+            }
+        })
+        .collect();
 
     let dto = InquiryDetailDto {
         thread: InquiryThreadDto {
@@ -655,38 +716,7 @@ async fn get_inquiry_detail(
             is_read: is_thread_read,
             read_status_label: Some(thread_label.to_string()),
         },
-        messages: messages
-            .into_iter()
-            .map(|m| {
-                let is_read = if m.is_from_teacher {
-                    student_read_at.map_or(false, |st| st >= m.created_at)
-                } else {
-                    teacher_read_at.map_or(false, |tt| tt >= m.created_at)
-                };
-                let read_at = if is_read {
-                    if m.is_from_teacher {
-                        student_read_at
-                    } else {
-                        teacher_read_at
-                    }
-                } else {
-                    None
-                };
-
-                InquiryMessageDto {
-                    id: m.id,
-                    thread_id: m.thread_id,
-                    sender_id: m.sender_id,
-                    sender_name: m.sender_name,
-                    sender_role: m.sender_role,
-                    content: m.content,
-                    is_from_teacher: m.is_from_teacher,
-                    created_at: m.created_at,
-                    is_read,
-                    read_at,
-                }
-            })
-            .collect(),
+        messages,
     };
 
     Ok(Json(ApiResponse::success(dto, req_ctx.request_id)))
@@ -1451,9 +1481,9 @@ async fn send_message(
 
     let msg_row = sqlx::query(
         r#"
-        INSERT INTO inquiry_messages (id, tenant_id, thread_id, sender_id, sender_name, sender_role, content, is_from_teacher, client_message_id, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
-        RETURNING id, thread_id, sender_id, sender_name, sender_role, content, is_from_teacher, created_at
+        INSERT INTO inquiry_messages (id, tenant_id, thread_id, sender_id, sender_name, sender_role, content, is_from_teacher, client_message_id, attachment_url, attachment_type, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+        RETURNING id, thread_id, sender_id, sender_name, sender_role, content, is_from_teacher, attachment_url, attachment_type, created_at
         "#
     )
     .bind(message_id)
@@ -1465,6 +1495,8 @@ async fn send_message(
     .bind(&content)
     .bind(is_from_teacher)
     .bind(client_uuid)
+    .bind(&payload.attachment_url)
+    .bind(&payload.attachment_type)
     .fetch_one(&ctx.pool)
     .await
     .map_err(|e| {
@@ -1488,6 +1520,8 @@ async fn send_message(
         created_at: msg_row.get("created_at"),
         is_read: false,
         read_at: None,
+        attachment_url: msg_row.try_get("attachment_url").ok().flatten(),
+        attachment_type: msg_row.try_get("attachment_type").ok().flatten(),
     };
 
     // Update thread status, message summary, and sender's read timestamp
@@ -1859,6 +1893,123 @@ async fn get_inquiries_unread_count(
 
     Ok(Json(ApiResponse::success(
         InquiryUnreadCountResponse { unread_count },
+        req_ctx.request_id,
+    )))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/learning/inquiries/upload",
+    responses(
+        (status = 200, description = "Uploaded chat attachment image", body = inline(ApiResponse<ChatAttachmentUploadResponse>)),
+        (status = 400, description = "Validation error")
+    ),
+    security(("Bearer" = []))
+)]
+async fn upload_chat_attachment(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Json<ApiResponse<ChatAttachmentUploadResponse>>, ApiError> {
+    let uploads_dir = std::path::PathBuf::from("uploads");
+    tokio::fs::create_dir_all(&uploads_dir).await.map_err(|e| {
+        ApiError::new(
+            ApplicationError::Internal(format!("Failed to create uploads directory: {e}")),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let mut file_url: Option<String> = None;
+    let mut file_name: Option<String> = None;
+
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        ApiError::new(
+            ApplicationError::Internal(format!("Multipart error: {e}")),
+            &req_ctx.request_id,
+        )
+    })? {
+        let field_name = field.name().unwrap_or("").to_string();
+        if field_name == "file" || field_name == "image" || field_name == "attachment" {
+            let original_filename = field.file_name().unwrap_or("image.jpg").to_string();
+            let content_type = field.content_type().unwrap_or("image/jpeg").to_string();
+            let mut ext = std::path::Path::new(&original_filename)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+
+            if ext.is_empty() {
+                ext = match content_type.as_str() {
+                    "image/jpeg" | "image/jpg" => "jpg".to_string(),
+                    "image/png" => "png".to_string(),
+                    "image/webp" => "webp".to_string(),
+                    "image/gif" => "gif".to_string(),
+                    "application/pdf" => "pdf".to_string(),
+                    _ => "jpg".to_string(),
+                };
+            }
+
+            let unique_name = format!("chat_{}_{}.{ext}", Uuid::now_v7(), chrono::Utc::now().timestamp_millis());
+            let file_path = uploads_dir.join(&unique_name);
+
+            let bytes = field.bytes().await.map_err(|e| {
+                ApiError::new(
+                    ApplicationError::Internal(format!("Failed to read file bytes: {e}")),
+                    &req_ctx.request_id,
+                )
+            })?;
+
+            if bytes.is_empty() {
+                return Err(ApiError::new(
+                    ApplicationError::Domain(school_core::common::error::DomainError::Validation(
+                        "File tidak boleh kosong".to_string(),
+                    )),
+                    &req_ctx.request_id,
+                ));
+            }
+
+            tokio::fs::write(&file_path, &bytes).await.map_err(|e| {
+                ApiError::new(
+                    ApplicationError::Internal(format!("Failed to save file: {e}")),
+                    &req_ctx.request_id,
+                )
+            })?;
+
+            let mime = if !content_type.is_empty() {
+                content_type
+            } else {
+                format!("image/{ext}")
+            };
+
+            let _ = sqlx::query(
+                "INSERT INTO uploaded_files (filename, mime_type, file_data) VALUES ($1, $2, $3) ON CONFLICT (filename) DO UPDATE SET file_data = EXCLUDED.file_data"
+            )
+            .bind(&unique_name)
+            .bind(&mime)
+            .bind(bytes.as_ref())
+            .execute(&ctx.pool)
+            .await;
+
+            file_url = Some(format!("/uploads/{unique_name}"));
+            file_name = Some(unique_name);
+            break;
+        }
+    }
+
+    let url = file_url.ok_or_else(|| {
+        ApiError::new(
+            ApplicationError::Domain(school_core::common::error::DomainError::Validation(
+                "Tidak ada file yang diunggah dalam form multipart ('file')".to_string(),
+            )),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    Ok(Json(ApiResponse::success(
+        ChatAttachmentUploadResponse {
+            url,
+            filename: file_name.unwrap_or_default(),
+        },
         req_ctx.request_id,
     )))
 }

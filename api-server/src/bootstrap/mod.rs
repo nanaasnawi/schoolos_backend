@@ -408,6 +408,14 @@ impl Bootstrap {
         {
             tracing::warn!("Notice on uploaded_files table check: {:?}", e);
         }
+        if let Err(e) = sqlx::query(
+            "ALTER TABLE inquiry_messages ADD COLUMN IF NOT EXISTS attachment_url TEXT, ADD COLUMN IF NOT EXISTS attachment_type VARCHAR(50);"
+        )
+        .execute(&pool)
+        .await
+        {
+            tracing::warn!("Notice on inquiry_messages attachment columns check: {:?}", e);
+        }
 
         // Infrastructure
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);

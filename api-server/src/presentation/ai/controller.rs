@@ -56,10 +56,31 @@ pub struct AnalyzeStudentRequest {
     pub student_id: Uuid,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct TanyaAiMessageDto {
+    pub role: String, // "user" | "assistant" | "system"
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct TanyaAiRequest {
+    pub question: String,
+    pub subject_name: Option<String>,
+    pub grade_level: Option<String>,
+    pub history: Option<Vec<TanyaAiMessageDto>>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct TanyaAiResponse {
+    pub reply: String,
+    pub model: String,
+}
+
 pub fn ai_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/generate-content", post(generate_content))
         .route("/analytics/student", post(analyze_student))
+        .route("/tanya-ai", post(tanya_ai))
 }
 
 #[utoipa::path(
@@ -353,4 +374,89 @@ async fn analyze_student(
     .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
     Ok(Json(ApiResponse::success(insights, req_ctx.request_id)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/ai/tanya-ai",
+    request_body = TanyaAiRequest,
+    responses(
+        (status = 200, description = "Tanya AI response generated successfully", body = inline(ApiResponse<TanyaAiResponse>)),
+        (status = 400, description = "Validation error")
+    ),
+    security(("Bearer" = []))
+)]
+async fn tanya_ai(
+    State(_ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Json(payload): Json<TanyaAiRequest>,
+) -> Result<Json<ApiResponse<TanyaAiResponse>>, ApiError> {
+    let question = payload.question.trim();
+    if question.is_empty() {
+        return Err(ApiError::new(
+            ApplicationError::Domain(DomainError::Validation("Pertanyaan untuk AI tidak boleh kosong".to_string())),
+            &req_ctx.request_id,
+        ));
+    }
+
+    let subject = payload.subject_name.as_deref().unwrap_or("Umum");
+    let grade = payload.grade_level.as_deref().unwrap_or("Siswa");
+
+    let system_prompt = format!(
+        "Anda adalah 'Guru AI' (Asisten Belajar Pintar & Interaktif Kurikulum Merdeka) di SchoolOS (Akselerasi Edu). \
+        Mata Pelajaran fokus: {subject}, Jenjang/Kelas: {grade}. \
+        Tugas Anda: Membantu siswa dan guru menjawab pertanyaan, menjelaskan materi pelajaran dengan jelas, ramah, membimbing tahap demi tahap, memberikan rumus dan contoh relevan jika diperlukan, serta memotivasi belajar. \
+        Gunakan Bahasa Indonesia yang baik, komunikatif, dan rapi dalam format Markdown."
+    );
+
+    let mut messages: Vec<nvidia_ai::ChatMessage<'_>> = Vec::new();
+    messages.push(nvidia_ai::ChatMessage {
+        role: "system",
+        content: &system_prompt,
+    });
+
+    let history_slice: Vec<TanyaAiMessageDto> = payload.history.unwrap_or_default();
+    let history_tail = if history_slice.len() > 6 {
+        &history_slice[history_slice.len() - 6..]
+    } else {
+        &history_slice[..]
+    };
+
+    for h in history_tail {
+        messages.push(nvidia_ai::ChatMessage {
+            role: match h.role.as_str() {
+                "assistant" | "model" | "bot" => "assistant",
+                _ => "user",
+            },
+            content: &h.content,
+        });
+    }
+
+    messages.push(nvidia_ai::ChatMessage {
+        role: "user",
+        content: question,
+    });
+
+    let reply = match nvidia_ai::call_nvidia_nim(messages, 0.7, 1500).await {
+        Ok(r) => r,
+        Err(err) => {
+            tracing::warn!("NVIDIA NIM call failed for tanya-ai: {err:?}");
+            format!(
+                "Halo! Terima kasih atas pertanyaannya mengenai **{subject}**.\n\n\
+                Pertanyaan Anda: *\"{question}\"*\n\n\
+                Saat ini jaringan komputasi Guru AI sedang mengalami sinkronisasi model NVIDIA AI. Silakan coba kembali sesaat lagi atau diskusikan pertanyaan ini langsung dengan Guru Pengampu di sesi belajar ya! Tetap semangat belajar! 🚀"
+            )
+        }
+    };
+
+    let model_name = std::env::var("NVIDIA_MODEL")
+        .unwrap_or_else(|_| "nvidia/nemotron-3.5-lightning-30b-a3b".to_string());
+
+    Ok(Json(ApiResponse::success(
+        TanyaAiResponse {
+            reply,
+            model: model_name,
+        },
+        req_ctx.request_id,
+    )))
 }
