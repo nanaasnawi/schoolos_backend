@@ -1,3 +1,4 @@
+use uuid::Uuid;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use utoipa::ToSchema;
