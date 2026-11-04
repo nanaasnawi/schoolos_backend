@@ -1,5 +1,6 @@
 use axum::{
     extract::{DefaultBodyLimit, Multipart, Path, Query, State},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -2395,7 +2396,7 @@ pub async fn get_reading_summary(
 pub async fn serve_uploaded_file(
     axum::extract::State(ctx): axum::extract::State<ApplicationContext>,
     axum::extract::Path(path): axum::extract::Path<String>,
-) -> impl axum::response::IntoResponse {
+) -> Response {
     let clean = std::path::Path::new(&path)
         .file_name()
         .and_then(|f| f.to_str())
