@@ -542,20 +542,14 @@ async fn get_my_teacher_profile(
             t.tempat_lahir, t.tanggal_lahir, t.status_kepegawaian, t.jenis_ptk,
             t.agama, t.alamat_jalan, t.no_hp, t.email,
             COALESCE(
-                NULLIF((
-                    SELECT STRING_AGG(DISTINCT s_name, ', ')
-                    FROM (
-                        SELECT TRIM(t.subject) AS s_name
-                        WHERE t.subject IS NOT NULL AND TRIM(t.subject) != ''
-                        UNION
-                        SELECT DISTINCT sub.name AS s_name
-                        FROM class_schedules cs
-                        JOIN subjects sub ON sub.id = cs.subject_id
-                        WHERE cs.teacher_id = t.id
-                          AND cs.deleted_at IS NULL AND sub.is_active = true
-                    ) s_all
-                ), ''),
-                t.subject,
+                NULLIF(TRIM(t.subject), ''),
+                (
+                    SELECT STRING_AGG(DISTINCT sub.name, ', ')
+                    FROM class_schedules cs
+                    JOIN subjects sub ON sub.id = cs.subject_id
+                    WHERE cs.teacher_id = t.id
+                      AND cs.deleted_at IS NULL AND sub.is_active = true
+                ),
                 ''
             ) AS subject,
             CASE WHEN t.is_active THEN 'Active' ELSE 'Inactive' END as status,
