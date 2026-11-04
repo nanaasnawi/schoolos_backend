@@ -401,6 +401,14 @@ impl Bootstrap {
         {
             tracing::warn!("Notice on schools metadata column check: {:?}", e);
         }
+        if let Err(e) = sqlx::query(
+            "CREATE TABLE IF NOT EXISTS uploaded_files (filename VARCHAR(255) PRIMARY KEY, mime_type VARCHAR(100) NOT NULL, file_data BYTEA NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW());"
+        )
+        .execute(&pool)
+        .await
+        {
+            tracing::warn!("Notice on uploaded_files table check: {:?}", e);
+        }
 
         // Infrastructure
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
@@ -1326,7 +1334,11 @@ impl Bootstrap {
             .nest("/api/v1/system", system_routes(context.clone()))
             .nest("/api/v1/youtube", youtube_routes())
             .nest("/health", health_routes())
-            .route("/uploads/{*path}", get(crate::presentation::learning::materials::controller::serve_uploaded_file))
+            .route(
+                "/uploads/{*path}",
+                get(crate::presentation::learning::materials::controller::serve_uploaded_file)
+                    .with_state(context.clone()),
+            )
             .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
             .route(
                 "/metrics",
