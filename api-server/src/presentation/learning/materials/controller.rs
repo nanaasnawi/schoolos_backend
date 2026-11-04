@@ -2102,6 +2102,29 @@ async fn upload_file(
                 )
             })?;
 
+            // Persist file in database uploaded_files table so container restarts/redeployments never lose user uploads
+            let mime_val = match ext.as_str() {
+                "pdf" => "application/pdf",
+                "jpg" | "jpeg" => "image/jpeg",
+                "png" => "image/png",
+                "webp" => "image/webp",
+                "gif" => "image/gif",
+                _ => "application/octet-stream",
+            };
+            let _ = sqlx::query(
+                r#"
+                INSERT INTO uploaded_files (filename, mime_type, file_data)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (filename) DO UPDATE
+                SET file_data = EXCLUDED.file_data, mime_type = EXCLUDED.mime_type, created_at = NOW()
+                "#,
+            )
+            .bind(&unique_name)
+            .bind(mime_val)
+            .bind(&bytes)
+            .execute(&ctx.pool)
+            .await;
+
             // Construct URL (served by backend static file handler or Nginx)
             file_url = Some(format!("/uploads/{unique_name}"));
         }
@@ -2366,4 +2389,71 @@ pub async fn get_reading_summary(
     };
 
     Ok(Json(ApiResponse::success(response, req_ctx.request_id)))
+}
+
+
+pub async fn serve_uploaded_file(
+    axum::extract::State(ctx): axum::extract::State<ApplicationContext>,
+    axum::extract::Path(filename): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    let clean = std::path::Path::new(&filename)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(&filename)
+        .to_string();
+
+    let disk_path = std::path::PathBuf::from("uploads").join(&clean);
+    if disk_path.is_file() {
+        if let Ok(bytes) = tokio::fs::read(&disk_path).await {
+            let mime = guess_upload_mime(&clean);
+            return axum::response::Response::builder()
+                .header(axum::http::header::CONTENT_TYPE, mime)
+                .header(axum::http::header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+                .body(axum::body::Body::from(bytes))
+                .unwrap_or_else(|_| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Error building response").into_response());
+        }
+    }
+
+    // Fallback to PostgreSQL uploaded_files table
+    let row = sqlx::query("SELECT mime_type, file_data FROM uploaded_files WHERE filename = $1")
+        .bind(&clean)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten();
+
+    if let Some(r) = row {
+        let mime: String = r.get("mime_type");
+        let bytes: Vec<u8> = r.get("file_data");
+
+        // Write to local disk cache
+        let _ = tokio::fs::create_dir_all("uploads").await;
+        let _ = tokio::fs::write(&disk_path, &bytes).await;
+
+        return axum::response::Response::builder()
+            .header(axum::http::header::CONTENT_TYPE, mime)
+            .header(axum::http::header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+            .body(axum::body::Body::from(bytes))
+            .unwrap_or_else(|_| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Error building response").into_response());
+    }
+
+    (axum::http::StatusCode::NOT_FOUND, "File not found").into_response()
+}
+
+fn guess_upload_mime(filename: &str) -> &'static str {
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "pdf" => "application/pdf",
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "mp4" => "video/mp4",
+        _ => "application/octet-stream",
+    }
 }
