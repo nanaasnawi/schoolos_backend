@@ -331,7 +331,7 @@ async fn login(
         email: Some(auth_user.email.clone()),
         full_name: Some(auth_user.full_name.clone()),
         role: role.clone(),
-        exp: (chrono::Utc::now() + chrono::Duration::days(30)).timestamp() as usize,
+        exp: (chrono::Utc::now() + chrono::Duration::days(365)).timestamp() as usize,
     };
     let refresh_token = jsonwebtoken::encode(
         &jsonwebtoken::Header::default(),
@@ -343,7 +343,7 @@ async fn login(
     let response_data = LoginResponse {
         access_token: token,
         token_type: "Bearer".to_string(),
-        expires_in: 86400,
+        expires_in: 2592000,
         refresh_token,
         user_id,
         tenant_id: tenant_id.map(|t| t.to_string()),
@@ -1730,7 +1730,7 @@ async fn qr_login(
         email: Some(result.email.clone()),
         full_name: Some(result.full_name.clone()),
         role: Some(result.role.clone()),
-        exp: (chrono::Utc::now() + chrono::Duration::days(30)).timestamp() as usize,
+        exp: (chrono::Utc::now() + chrono::Duration::days(365)).timestamp() as usize,
     };
     let refresh_token = jsonwebtoken::encode(
         &jsonwebtoken::Header::default(),
@@ -2263,7 +2263,7 @@ async fn refresh(
         email: token_data.claims.email.clone(),
         full_name: token_data.claims.full_name.clone(),
         role: token_data.claims.role.clone(),
-        exp: (chrono::Utc::now() + chrono::Duration::hours(24)).timestamp() as usize,
+        exp: (chrono::Utc::now() + chrono::Duration::days(30)).timestamp() as usize,
     };
     let new_access_token = jsonwebtoken::encode(
         &jsonwebtoken::Header::default(),
@@ -2283,7 +2283,7 @@ async fn refresh(
         email: token_data.claims.email,
         full_name: token_data.claims.full_name,
         role: token_data.claims.role,
-        exp: (chrono::Utc::now() + chrono::Duration::days(30)).timestamp() as usize,
+        exp: (chrono::Utc::now() + chrono::Duration::days(365)).timestamp() as usize,
     };
     let new_refresh_token = jsonwebtoken::encode(
         &jsonwebtoken::Header::default(),
