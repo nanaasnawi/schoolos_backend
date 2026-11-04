@@ -1326,6 +1326,7 @@ impl Bootstrap {
             .nest("/api/v1/system", system_routes(context.clone()))
             .nest("/api/v1/youtube", youtube_routes())
             .nest("/health", health_routes())
+            .route("/uploads/{filename}", get(crate::presentation::learning::materials::controller::serve_uploaded_file))
             .nest_service("/uploads", ServeDir::new("uploads"))
             .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
             .route(

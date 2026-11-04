@@ -55,6 +55,7 @@ COPY --from=builder /usr/src/schoolos/target/release/api-server /usr/local/bin/a
 RUN mkdir -p /app/uploads && chown -R schoolos:schoolos /app
 
 USER schoolos
+WORKDIR /app
 
 # Default port for Railway (Railway will override PORT at runtime)
 ENV PORT=8080
