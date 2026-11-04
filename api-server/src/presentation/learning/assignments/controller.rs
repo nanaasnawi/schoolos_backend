@@ -1045,22 +1045,27 @@ async fn update(
     let target_status = payload.status.as_deref();
     let is_activating = target_status == Some("published") || target_status == Some("active");
 
-    if payload.release_at.is_some() || target_status.is_some() {
+    if payload.release_at.is_some() || target_status.is_some() || payload.subject_id.is_some() || payload.teacher_id.is_some() || payload.class_id.is_some() {
         let (new_status, new_release_at, mark_dispatched) = if is_activating {
-            ("published", Some(chrono::Utc::now()), true)
+            (Some("published"), Some(chrono::Utc::now()), true)
         } else if let Some(release_at) = payload.release_at {
             let is_sched = release_at > chrono::Utc::now();
             let s = if is_sched { "draft" } else { "published" };
-            (s, Some(release_at), !is_sched)
+            (Some(s), Some(release_at), !is_sched)
+        } else if let Some(ts) = target_status {
+            (Some(ts), None, false)
         } else {
-            (target_status.unwrap_or("published"), None, false)
+            (None, None, false)
         };
 
         let _ = sqlx::query(
             r#"UPDATE assignments 
-               SET status = $1, 
+               SET status = COALESCE($1, status), 
                    release_at = COALESCE($2, release_at), 
                    notification_dispatched = CASE WHEN $3 = true THEN true ELSE notification_dispatched END,
+                   subject_id = COALESCE($5, subject_id),
+                   teacher_id = COALESCE($6, teacher_id),
+                   class_id = COALESCE($7, class_id),
                    is_active = true,
                    updated_at = NOW() 
                WHERE id = $4"#
@@ -1069,6 +1074,9 @@ async fn update(
         .bind(new_release_at)
         .bind(mark_dispatched)
         .bind(id)
+        .bind(payload.subject_id)
+        .bind(payload.teacher_id)
+        .bind(payload.class_id)
         .execute(&ctx.pool)
         .await;
 

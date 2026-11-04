@@ -1748,6 +1748,7 @@ async fn update(
         || payload.release_at.is_some()
         || payload.class_id.is_some()
         || payload.subject_id.is_some()
+        || payload.teacher_id.is_some()
         || payload.visibility.is_some()
     {
         let is_sched = payload.release_at.map(|r| r > chrono::Utc::now());
@@ -1761,6 +1762,7 @@ async fn update(
                    END,
                    class_id = COALESCE($4, class_id),
                    subject_id = COALESCE($5, subject_id),
+                   teacher_id = COALESCE($10, teacher_id),
                    visibility = CASE 
                        WHEN $9 = true THEN 'published'
                        WHEN $6 = true THEN 'draft' 
@@ -1786,6 +1788,7 @@ async fn update(
         .bind(payload.visibility.as_ref())
         .bind(id)
         .bind(is_activating)
+        .bind(payload.teacher_id)
         .execute(&ctx.pool)
         .await;
 
@@ -1879,6 +1882,12 @@ async fn update(
     }
     if payload.class_id.is_some() {
         resp.class_id = payload.class_id;
+    }
+    if payload.subject_id.is_some() {
+        resp.subject_id = payload.subject_id;
+    }
+    if payload.teacher_id.is_some() {
+        resp.teacher_id = payload.teacher_id;
     }
 
     Ok(Json(ApiResponse::success(
