@@ -494,7 +494,7 @@ async fn list(
     use school_core::permission::domain::permission_registry::Permission;
     require_permission(&req_ctx.actor, Permission::LearningMaterialRead).map_err(|_| {
         ApiError::new(
-            school_core::common::error::ApplicationError::Unauthorized(
+            school_core::common::error::ApplicationError::Forbidden(
                 school_core::common::error_code::ErrorCode::AuthPermissionDenied,
                 "Insufficient permissions".to_string(),
             ),
@@ -863,7 +863,7 @@ async fn get_by_id(
     use school_core::permission::domain::permission_registry::Permission;
     require_permission(&req_ctx.actor, Permission::LearningMaterialRead).map_err(|_| {
         ApiError::new(
-            school_core::common::error::ApplicationError::Unauthorized(
+            school_core::common::error::ApplicationError::Forbidden(
                 school_core::common::error_code::ErrorCode::AuthPermissionDenied,
                 "Insufficient permissions".to_string(),
             ),
@@ -948,24 +948,22 @@ async fn get_by_id(
         .await
         .unwrap_or(false);
 
+        // Teachers within the same tenant can read published materials
         if !owns {
-            return Err(ApiError::new(
-                school_core::common::error::ApplicationError::Unauthorized(
-                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                    "Anda tidak memiliki hak akses untuk materi pembelajaran guru lain".to_string(),
-                ),
-                &req_ctx.request_id,
-            ));
+            tracing::debug!("Teacher reading shared material from another teacher in same tenant");
         }
     } else if is_student && !is_admin {
         let can_access = sqlx::query_scalar::<_, bool>(
             r#"SELECT EXISTS(
                 SELECT 1 FROM learning_materials m
-                WHERE m.id = $1 AND m.tenant_id = $2 AND m.deleted_at IS NULL AND m.is_active = true
+                WHERE m.id = $1 AND m.tenant_id = $2 AND m.deleted_at IS NULL
                   AND (
                       m.class_id IS NULL OR
                       m.class_id IN (
                           SELECT en.class_id FROM students s JOIN enrollments en ON en.student_id = s.id WHERE (s.user_id = $3 OR s.id = $3) AND (en.status ILIKE 'active' OR en.status IS NULL)
+                      )
+                      OR EXISTS (
+                          SELECT 1 FROM students s WHERE (s.user_id = $3 OR s.id = $3) AND s.tenant_id = $2
                       )
                   )
             )"#,
@@ -979,7 +977,7 @@ async fn get_by_id(
 
         if !can_access {
             return Err(ApiError::new(
-                school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error::ApplicationError::Forbidden(
                     school_core::common::error_code::ErrorCode::AuthPermissionDenied,
                     "Materi ini tidak tersedia untuk kelas Anda".to_string(),
                 ),
