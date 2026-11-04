@@ -1883,9 +1883,6 @@ async fn update(
     if payload.class_id.is_some() {
         resp.class_id = payload.class_id;
     }
-    if payload.subject_id.is_some() {
-        resp.subject_id = payload.subject_id;
-    }
     if payload.teacher_id.is_some() {
         resp.teacher_id = payload.teacher_id;
     }
