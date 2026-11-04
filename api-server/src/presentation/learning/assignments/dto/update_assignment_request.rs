@@ -17,4 +17,10 @@ pub struct UpdateAssignmentRequest {
     pub status: Option<String>,
     #[serde(default)]
     pub questions: Option<Vec<AssignmentQuestionDto>>,
+    #[serde(default)]
+    pub subject_id: Option<Uuid>,
+    #[serde(default)]
+    pub teacher_id: Option<Uuid>,
+    #[serde(default)]
+    pub class_id: Option<Uuid>,
 }

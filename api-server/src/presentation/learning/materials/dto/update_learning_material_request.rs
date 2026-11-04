@@ -14,4 +14,5 @@ pub struct UpdateLearningMaterialRequest {
     pub release_at: Option<DateTime<Utc>>,
     pub class_id: Option<Uuid>,
     pub subject_id: Option<Uuid>,
+    pub teacher_id: Option<Uuid>,
 }
