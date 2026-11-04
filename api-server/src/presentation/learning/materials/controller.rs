@@ -2122,7 +2122,7 @@ async fn upload_file(
             )
             .bind(&unique_name)
             .bind(mime_val)
-            .bind(&bytes)
+            .bind(bytes.as_ref())
             .execute(&ctx.pool)
             .await;
 

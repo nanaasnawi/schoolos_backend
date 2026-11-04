@@ -10,7 +10,6 @@ use sqlx::postgres::PgPoolOptions;
 use tower_http::{
     cors::CorsLayer,
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
-    services::ServeDir,
     trace::TraceLayer,
 };
 use utoipa::OpenApi;
