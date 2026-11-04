@@ -2000,7 +2000,7 @@ async fn delete(
 /// Upload a PDF or image file for use as learning material.
 /// Returns a JSON with `url` field pointing to the uploaded file.
 async fn upload_file(
-    State(_ctx): State<ApplicationContext>,
+    State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
     mut multipart: Multipart,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
@@ -2394,12 +2394,12 @@ pub async fn get_reading_summary(
 
 pub async fn serve_uploaded_file(
     axum::extract::State(ctx): axum::extract::State<ApplicationContext>,
-    axum::extract::Path(filename): axum::extract::Path<String>,
+    axum::extract::Path(path): axum::extract::Path<String>,
 ) -> impl axum::response::IntoResponse {
-    let clean = std::path::Path::new(&filename)
+    let clean = std::path::Path::new(&path)
         .file_name()
         .and_then(|f| f.to_str())
-        .unwrap_or(&filename)
+        .unwrap_or(&path)
         .to_string();
 
     let disk_path = std::path::PathBuf::from("uploads").join(&clean);
