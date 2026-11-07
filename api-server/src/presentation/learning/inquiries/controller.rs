@@ -1066,6 +1066,17 @@ async fn create_inquiry(
         || resolved_subject_name.contains("Pengaduan")
         || payload.reference_title.contains("Pengaduan");
 
+    let is_pkbm = if let Ok(Some(t_name)) = sqlx::query_scalar::<_, String>("SELECT name FROM tenants WHERE id = $1")
+        .bind(resolved_tenant_id)
+        .fetch_optional(&ctx.pool)
+        .await
+    {
+        let lower = t_name.to_lowercase();
+        lower.contains("pkbm") || lower.contains("pusat kegiatan belajar") || lower.contains("kesetaraan")
+    } else {
+        false
+    };
+
     if is_principal_target {
         if let Ok(Some(p_row)) = sqlx::query(
             r#"
@@ -1085,10 +1096,14 @@ async fn create_inquiry(
             resolved_teacher_id = Some(p_row.get::<Uuid, _>("id"));
             resolved_teacher_name = p_row.get::<String, _>("full_name");
         } else {
-            resolved_teacher_name = "Kepala Sekolah PKBM".to_string();
+            resolved_teacher_name = "Kepala Sekolah".to_string();
         }
         if resolved_subject_name == "Umum" {
-            resolved_subject_name = "Konsultasi Kebijakan, Akademik & Pengaduan Warga Belajar".to_string();
+            resolved_subject_name = if is_pkbm {
+                "Konsultasi Kebijakan, Akademik & Pengaduan Warga Belajar".to_string()
+            } else {
+                "Konsultasi Kebijakan, Akademik & Pengaduan Siswa".to_string()
+            };
         }
     }
 
