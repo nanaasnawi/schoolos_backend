@@ -1005,7 +1005,7 @@ async fn get_schedule_compliance(
     let compliance_rate = if effective_denominator > 0 {
         ((completed_count + substituted_count) as f64 / effective_denominator as f64) * 100.0
     } else {
-        100.0
+        0.0
     };
 
     Ok(Json(ApiResponse::success(
