@@ -1059,7 +1059,14 @@ async fn create_inquiry(
     let mut resolved_subject_name = payload.subject_name.unwrap_or_else(|| "Umum".to_string());
     let mut resolved_class_name = student_class.clone();
 
-    if resolved_teacher_name.contains("Kepala Sekolah") || raw_tname.contains("Kepala Sekolah") {
+    let is_principal_target = resolved_teacher_name.contains("Kepala")
+        || raw_tname.contains("Kepala")
+        || resolved_subject_name.contains("Konsultasi Kebijakan")
+        || payload.reference_title.contains("Konsultasi Kebijakan")
+        || resolved_subject_name.contains("Pengaduan")
+        || payload.reference_title.contains("Pengaduan");
+
+    if is_principal_target {
         if let Ok(Some(p_row)) = sqlx::query(
             r#"
             SELECT u.id, u.full_name
@@ -1079,6 +1086,9 @@ async fn create_inquiry(
             resolved_teacher_name = p_row.get::<String, _>("full_name");
         } else {
             resolved_teacher_name = "Kepala Sekolah PKBM".to_string();
+        }
+        if resolved_subject_name == "Umum" {
+            resolved_subject_name = "Konsultasi Kebijakan, Akademik & Pengaduan Warga Belajar".to_string();
         }
     }
 
@@ -1311,26 +1321,52 @@ async fn create_inquiry(
 
     // WhatsApp-style: one conversation per student-teacher pair.
     // If one already exists, append to it instead of creating a new thread.
-    let existing_thread: Option<(Uuid, String)> = sqlx::query_as::<_, (Uuid, String)>(
-        r#"
-        SELECT id, reference_title FROM inquiry_threads
-        WHERE tenant_id = $1 AND student_id = $2
-          AND (
-              ($3::uuid IS NOT NULL AND teacher_id = $3) OR
-              ($3::uuid IS NULL AND teacher_name = $4)
-          )
-        ORDER BY last_message_at DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(resolved_tenant_id)
-    .bind(student_id)
-    .bind(resolved_teacher_id)
-    .bind(&resolved_teacher_name)
-    .fetch_optional(&ctx.pool)
-    .await
-    .ok()
-    .flatten();
+    let existing_thread: Option<(Uuid, String)> = if is_principal_target {
+        sqlx::query_as::<_, (Uuid, String)>(
+            r#"
+            SELECT id, reference_title FROM inquiry_threads
+            WHERE tenant_id = $1 AND student_id = $2
+              AND (
+                  ($3::uuid IS NOT NULL AND teacher_id = $3) OR
+                  teacher_name ILIKE '%kepala%' OR
+                  subject_name ILIKE '%kebijakan%' OR
+                  reference_title ILIKE '%kebijakan%'
+              )
+            ORDER BY last_message_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(resolved_tenant_id)
+        .bind(student_id)
+        .bind(resolved_teacher_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten()
+    } else {
+        sqlx::query_as::<_, (Uuid, String)>(
+            r#"
+            SELECT id, reference_title FROM inquiry_threads
+            WHERE tenant_id = $1 AND student_id = $2
+              AND (
+                  ($3::uuid IS NOT NULL AND teacher_id = $3) OR
+                  ($3::uuid IS NULL AND teacher_name = $4)
+              )
+              AND teacher_name NOT ILIKE '%kepala%'
+              AND subject_name NOT ILIKE '%kebijakan%'
+            ORDER BY last_message_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(resolved_tenant_id)
+        .bind(student_id)
+        .bind(resolved_teacher_id)
+        .bind(&resolved_teacher_name)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten()
+    };
 
     let initial_msg = match &existing_thread {
         Some((_, prev_title)) if !prev_title.eq_ignore_ascii_case(&ref_title) => {
