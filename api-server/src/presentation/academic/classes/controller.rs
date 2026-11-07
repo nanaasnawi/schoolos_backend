@@ -273,11 +273,6 @@ async fn list(
                           WHERE ls.class_id = c.id
                             AND ls.teacher_id = $2
                       )
-                      OR EXISTS (
-                          SELECT 1 FROM assignments asg
-                          WHERE asg.class_id = c.id
-                            AND asg.teacher_id = $2
-                      )
                   )
                 "#,
             )
@@ -289,6 +284,8 @@ async fn list(
 
             if !allowed_class_ids.is_empty() {
                 items.retain(|c| allowed_class_ids.contains(&c.id));
+            } else {
+                items.clear();
             }
         }
     }
@@ -412,11 +409,6 @@ async fn list_class_students(
                   SELECT 1 FROM learning_sessions ls
                   WHERE ls.class_id = c.id
                     AND ls.teacher_id = $5
-              )
-              OR EXISTS (
-                  SELECT 1 FROM assignments asg
-                  WHERE asg.class_id = c.id
-                    AND asg.teacher_id = $5
               )
           )
         ORDER BY s.full_name ASC

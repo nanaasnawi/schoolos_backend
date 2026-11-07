@@ -694,11 +694,8 @@ async fn list(
                   OR m.visibility = 'active'
                   OR (m.release_at IS NOT NULL AND m.release_at <= NOW())
               )
-              AND (
-                  m.class_id IS NULL
-                  OR m.class_id IN (
-                      SELECT en.class_id FROM students s JOIN enrollments en ON en.student_id = s.id WHERE (s.user_id = $2 OR s.id = $2) AND (en.status ILIKE 'active' OR en.status IS NULL)
-                  )
+              AND m.class_id IN (
+                  SELECT en.class_id FROM students s JOIN enrollments en ON en.student_id = s.id WHERE (s.user_id = $2 OR s.id = $2) AND (en.status ILIKE 'active' OR en.status IS NULL)
               )
               AND ($3::uuid IS NULL OR m.class_id = $3)
               AND ($4::uuid IS NULL OR m.subject_id = $4)

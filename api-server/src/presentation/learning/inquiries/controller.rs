@@ -119,6 +119,7 @@ pub fn inquiry_routes() -> Router<ApplicationContext> {
         .route("/", get(list_inquiries).post(create_inquiry))
         .route("/unread-count", get(get_inquiries_unread_count))
         .route("/upload", post(upload_chat_attachment).layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024)))
+        .route("/upload-attachment", post(upload_chat_attachment).layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024)))
         .route("/{id}", get(get_inquiry_detail))
         .route("/{id}/messages", post(send_message))
         .route("/{id}/read", post(mark_inquiry_read))
@@ -285,7 +286,139 @@ async fn list_inquiries(
         return Ok(Json(ApiResponse::success(items, req_ctx.request_id)));
     }
 
-    // Teacher or Admin caller
+    // Teacher caller: STRICT ISOLATION UNDER ADR-0011
+    if is_teacher {
+        let actor_uid = actor.map(|a| a.id);
+        let teacher_db_info = if let Some(a) = actor {
+            sqlx::query(
+                "SELECT id, user_id, full_name FROM teachers WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 AND deleted_at IS NULL LIMIT 1",
+            )
+            .bind(a.id)
+            .bind(tenant_id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .ok()
+            .flatten()
+        } else {
+            None
+        };
+
+        let teacher_db_id = teacher_db_info.as_ref().map(|t| t.get::<Uuid, _>("id"));
+        let teacher_db_user_id = teacher_db_info.as_ref().and_then(|t| t.try_get::<Option<Uuid>, _>("user_id").ok().flatten());
+        let teacher_db_name = teacher_db_info.as_ref().map(|t| t.get::<String, _>("full_name"));
+
+        if teacher_db_id.is_none() && actor_uid.is_none() {
+            return Ok(Json(ApiResponse::success(vec![], req_ctx.request_id)));
+        }
+
+        let rows = sqlx::query(
+            r#"
+            SELECT 
+                t.id, t.student_id, t.student_name, t.student_class,
+                t.teacher_id, t.teacher_name, t.subject_name, t.inquiry_type,
+                t.reference_title, t.reference_id, t.status,
+                t.last_message_content, t.last_message_at, t.created_at,
+                t.student_last_read_at, t.teacher_last_read_at,
+                (SELECT COUNT(*)::bigint FROM inquiry_messages m WHERE m.thread_id = t.id) as message_count,
+                (SELECT u.avatar_url FROM users u WHERE u.id = t.student_id OR u.id IN (SELECT s.user_id FROM students s WHERE s.id = t.student_id) LIMIT 1) as student_avatar_url,
+                (SELECT u.avatar_url FROM users u WHERE u.id = t.teacher_id OR u.id IN (SELECT tch.user_id FROM teachers tch WHERE tch.id = t.teacher_id) LIMIT 1) as teacher_avatar_url
+            FROM inquiry_threads t
+            WHERE t.tenant_id = $1
+              AND ($2::text IS NULL OR t.status = $2)
+              AND ($3::text IS NULL OR t.inquiry_type = $3)
+              AND (
+                  $4::uuid IS NULL OR 
+                  t.student_id = $4 OR 
+                  t.student_id IN (SELECT s.id FROM students s WHERE s.user_id = $4) OR
+                  t.student_id IN (SELECT s.user_id FROM students s WHERE s.id = $4)
+              )
+              AND (
+                  ($5::uuid IS NOT NULL AND t.teacher_id = $5) OR
+                  ($6::uuid IS NOT NULL AND t.teacher_id = $6) OR
+                  ($7::uuid IS NOT NULL AND t.teacher_id = $7) OR
+                  ($8::text IS NOT NULL AND LOWER(TRIM(t.teacher_name)) = LOWER(TRIM($8)))
+              )
+              AND (
+                  $9::text IS NULL OR $9 = '' OR 
+                  t.student_name ILIKE '%' || $9 || '%' OR 
+                  t.reference_title ILIKE '%' || $9 || '%' OR 
+                  t.student_class ILIKE '%' || $9 || '%' OR
+                  t.subject_name ILIKE '%' || $9 || '%' OR
+                  t.last_message_content ILIKE '%' || $9 || '%'
+              )
+            ORDER BY t.last_message_at DESC
+            "#
+        )
+        .bind(tenant_id)
+        .bind(&query.status)
+        .bind(&query.inquiry_type)
+        .bind(query.student_id)
+        .bind(teacher_db_id)
+        .bind(teacher_db_user_id)
+        .bind(actor_uid)
+        .bind(teacher_db_name)
+        .bind(query.search.as_deref().map(|s| s.trim()))
+        .fetch_all(&ctx.pool)
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+
+        let items = rows
+            .into_iter()
+            .map(|r| {
+                let student_read_at: Option<DateTime<Utc>> = r.try_get("student_last_read_at").ok().flatten();
+                let teacher_read_at: Option<DateTime<Utc>> = r.try_get("teacher_last_read_at").ok().flatten();
+                let last_message_at: DateTime<Utc> = r.get("last_message_at");
+                let status: String = r.get("status");
+                let is_read = teacher_read_at.map_or(false, |tt| tt >= last_message_at);
+                let label = if status == "ANSWERED" {
+                    if student_read_at.map_or(false, |st| st >= last_message_at) {
+                        "✓ Jawaban Dibaca Siswa"
+                    } else {
+                        "✓ Terkirim ke Siswa (Belum Dibaca)"
+                    }
+                } else if is_read {
+                    "✓ Sedang Ditinjau Guru"
+                } else {
+                    "Pertanyaan Baru dari Siswa"
+                };
+
+                InquiryThreadDto {
+                    id: r.get("id"),
+                    student_id: r.get("student_id"),
+                    student_name: r.get("student_name"),
+                    student_class: r.get("student_class"),
+                    teacher_id: r.get("teacher_id"),
+                    teacher_name: r.get("teacher_name"),
+                    subject_name: r.get("subject_name"),
+                    inquiry_type: r.get("inquiry_type"),
+                    reference_title: r.get("reference_title"),
+                    reference_id: r.get("reference_id"),
+                    status,
+                    last_message_content: r.get("last_message_content"),
+                    last_message_at,
+                    created_at: r.get("created_at"),
+                    message_count: r.get("message_count"),
+                    student_avatar_url: r.try_get("student_avatar_url").ok().flatten(),
+                    teacher_avatar_url: r.try_get("teacher_avatar_url").ok().flatten(),
+                    student_last_read_at: student_read_at,
+                    teacher_last_read_at: teacher_read_at,
+                    is_read,
+                    read_status_label: Some(label.to_string()),
+                }
+            })
+            .collect();
+
+        return Ok(Json(ApiResponse::success(items, req_ctx.request_id)));
+    }
+
+    // Admin / Principal / Staff caller
     let actor_teacher = if let Some(a) = actor {
         sqlx::query(
             "SELECT id, full_name FROM teachers WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 LIMIT 1",
@@ -310,8 +443,6 @@ async fn list_inquiries(
     let effective_teacher_name = if is_admin {
         query.teacher_name
     } else {
-        // Prefer the authoritative DB name over the client-sent name so the
-        // list stays identical across logout/login sessions.
         actor_teacher
             .as_ref()
             .map(|t| t.get::<String, _>("full_name"))
@@ -492,71 +623,136 @@ async fn get_inquiry_detail(
     })?;
 
     let thread_student_id: Uuid = thread_row.get("student_id");
+    let thread_teacher_id: Option<Uuid> = thread_row.get("teacher_id");
+    let thread_teacher_name: String = thread_row.get("teacher_name");
 
-    // Cross-user access control check and role detection
+    let actor = req_ctx.actor.as_ref().ok_or_else(|| {
+        ApiError::new(
+            ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Autentikasi diperlukan".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let is_super_admin = actor.roles.iter().any(|r| {
+        let n = r.name.to_lowercase();
+        n.contains("super") || n.contains("operator") || n == "admin" || n == "administrator"
+    });
+
+    let is_principal = !is_super_admin && actor.roles.iter().any(|r| {
+        let n = r.name.to_lowercase();
+        n.contains("kepala")
+    });
+
+    let is_teacher = !is_super_admin && !is_principal && (
+        actor.roles.iter().any(|r| {
+            let n = r.name.to_lowercase();
+            n.contains("guru") || n.contains("teacher") || n.contains("pendidik")
+        }) || sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM teachers WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 AND deleted_at IS NULL)",
+        )
+        .bind(actor.id)
+        .bind(req_ctx.tenant_id)
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap_or(false)
+    );
+
     let mut caller_is_teacher = false;
     let mut caller_is_student = false;
 
-    if let Some(ref actor) = req_ctx.actor {
-        let is_admin = actor.roles.iter().any(|r| {
-            let n = r.name.to_lowercase();
-            n.contains("admin")
-                || n.contains("kepala")
-                || n.contains("operator")
-                || n.contains("staf")
-        });
-
-        if !is_admin {
-            let is_teacher = actor.roles.iter().any(|r| {
-                let n = r.name.to_lowercase();
-                n.contains("guru") || n.contains("teacher") || n.contains("pendidik")
-            }) || sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM teachers WHERE (user_id = $1 OR id = $1) AND tenant_id = $2)",
-            )
+    if is_super_admin {
+        caller_is_teacher = true;
+    } else if is_principal {
+        let my_name = sqlx::query_scalar::<_, String>("SELECT full_name FROM users WHERE id = $1")
             .bind(actor.id)
-            .bind(req_ctx.tenant_id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+
+        let is_principal_participant = thread_teacher_id == Some(actor.id)
+            || thread_student_id == actor.id
+            || (!my_name.is_empty() && (
+                thread_teacher_name.trim().eq_ignore_ascii_case(my_name.trim())
+                || thread_row.get::<String, _>("student_name").trim().eq_ignore_ascii_case(my_name.trim())
+            ));
+
+        if !is_principal_participant {
+            return Err(ApiError::new(
+                ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Percakapan ini bukan milik Anda. Pesan konsultasi guru dan murid bersifat privat.".to_string(),
+                ),
+                &req_ctx.request_id,
+            ));
+        }
+        caller_is_teacher = thread_teacher_id == Some(actor.id) || (!my_name.is_empty() && thread_teacher_name.trim().eq_ignore_ascii_case(my_name.trim()));
+        caller_is_student = !caller_is_teacher;
+    } else if is_teacher {
+        let my_teacher = sqlx::query(
+            "SELECT id, user_id, full_name FROM teachers WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 AND deleted_at IS NULL LIMIT 1"
+        )
+        .bind(actor.id)
+        .bind(req_ctx.tenant_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten();
+
+        let my_tid: Option<Uuid> = my_teacher.as_ref().map(|t| t.get("id"));
+        let my_tuid: Option<Uuid> = my_teacher.as_ref().and_then(|t| t.try_get("user_id").ok().flatten());
+        let my_name: Option<String> = my_teacher.as_ref().map(|t| t.get("full_name"));
+
+        let is_my_thread = (my_tid.is_some() && thread_teacher_id == my_tid)
+            || (my_tuid.is_some() && thread_teacher_id == my_tuid)
+            || thread_teacher_id == Some(actor.id)
+            || (my_name.is_some() && thread_teacher_name.trim().eq_ignore_ascii_case(my_name.as_deref().unwrap().trim()));
+
+        if !is_my_thread {
+            return Err(ApiError::new(
+                ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Percakapan ini bukan milik Anda. Anda tidak memiliki izin untuk mengakses percakapan guru lain.".to_string(),
+                ),
+                &req_ctx.request_id,
+            ));
+        }
+        caller_is_teacher = true;
+    } else {
+        let student_id = crate::authorization_helpers::AuthorizationScope::resolve_student_id(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            actor.id,
+        )
+        .await
+        .ok()
+        .flatten();
+
+        let is_owner = student_id == Some(thread_student_id)
+            || actor.id == thread_student_id
+            || sqlx::query_scalar::<_, bool>(
+                r#"SELECT EXISTS(SELECT 1 FROM students WHERE (id = $1 OR user_id = $1) AND (user_id = $2 OR id = $2))"#,
+            )
+            .bind(thread_student_id)
+            .bind(actor.id)
             .fetch_one(&ctx.pool)
             .await
             .unwrap_or(false);
 
-            if is_teacher {
-                caller_is_teacher = true;
-            } else {
-                let student_id =
-                    crate::authorization_helpers::AuthorizationScope::resolve_student_id(
-                        &ctx.pool,
-                        req_ctx.tenant_id,
-                        actor.id,
-                    )
-                    .await
-                    .ok()
-                    .flatten();
-
-                let is_owner = student_id == Some(thread_student_id)
-                    || actor.id == thread_student_id
-                    || sqlx::query_scalar::<_, bool>(
-                        r#"SELECT EXISTS(SELECT 1 FROM students WHERE (id = $1 OR user_id = $1) AND (user_id = $2 OR id = $2))"#,
-                    )
-                    .bind(thread_student_id)
-                    .bind(actor.id)
-                    .fetch_one(&ctx.pool)
-                    .await
-                    .unwrap_or(false);
-
-                if !is_owner {
-                    return Err(ApiError::new(
-                        ApplicationError::Unauthorized(
-                            school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                            "Percakapan ini bukan milik Anda".to_string(),
-                        ),
-                        &req_ctx.request_id,
-                    ));
-                }
-                caller_is_student = true;
-            }
-        } else {
-            caller_is_teacher = true;
+        if !is_owner {
+            return Err(ApiError::new(
+                ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Percakapan ini bukan milik Anda".to_string(),
+                ),
+                &req_ctx.request_id,
+            ));
         }
+        caller_is_student = true;
     }
 
     // Auto mark-as-read when opening detail
@@ -1284,7 +1480,12 @@ async fn send_message(
     Path(id): Path<Uuid>,
     Json(payload): Json<SendInquiryMessageRequest>,
 ) -> Result<Json<ApiResponse<InquiryMessageDto>>, ApiError> {
-    if payload.content.trim().is_empty() {
+    let has_attachment = payload
+        .attachment_url
+        .as_ref()
+        .map_or(false, |u| !u.trim().is_empty());
+
+    if payload.content.trim().is_empty() && !has_attachment {
         return Err(ApiError::new(
             ApplicationError::Domain(school_core::common::error::DomainError::Validation(
                 "Pesan tidak boleh kosong".to_string(),
@@ -1391,6 +1592,40 @@ async fn send_message(
         }
     }
 
+    if is_teacher {
+        // CALLER IS A TEACHER: STRICT OWNERSHIP ENFORCEMENT UNDER ADR-0011
+        let my_teacher = sqlx::query(
+            "SELECT id, user_id, full_name FROM teachers WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 AND deleted_at IS NULL LIMIT 1"
+        )
+        .bind(actor.id)
+        .bind(req_ctx.tenant_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten();
+
+        let my_tid: Option<Uuid> = my_teacher.as_ref().map(|t| t.get("id"));
+        let my_tuid: Option<Uuid> = my_teacher.as_ref().and_then(|t| t.try_get("user_id").ok().flatten());
+        let my_name: Option<String> = my_teacher.as_ref().map(|t| t.get("full_name"));
+
+        let thread_teacher_id: Option<Uuid> = thread.get("teacher_id");
+
+        let is_my_thread = (my_tid.is_some() && thread_teacher_id == my_tid)
+            || (my_tuid.is_some() && thread_teacher_id == my_tuid)
+            || thread_teacher_id == Some(actor.id)
+            || (my_name.is_some() && thread_teacher_name.trim().eq_ignore_ascii_case(my_name.as_deref().unwrap().trim()));
+
+        if !is_my_thread {
+            return Err(ApiError::new(
+                ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Anda tidak memiliki hak untuk membalas percakapan siswa dengan guru lain.".to_string(),
+                ),
+                &req_ctx.request_id,
+            ));
+        }
+    }
+
     // Idempotent retry check: if client_message_id exists, return previously saved message
     let client_uuid = payload.client_message_id.as_deref().and_then(|s| {
         let clean = s.strip_prefix("temp-").unwrap_or(s);
@@ -1399,7 +1634,7 @@ async fn send_message(
 
     if let Some(cid) = client_uuid {
         let existing = sqlx::query(
-            "SELECT id, thread_id, sender_id, sender_name, sender_role, content, is_from_teacher, created_at FROM inquiry_messages WHERE client_message_id = $1 AND tenant_id = $2 LIMIT 1"
+            "SELECT id, thread_id, sender_id, sender_name, sender_role, content, is_from_teacher, created_at, attachment_url, attachment_type FROM inquiry_messages WHERE client_message_id = $1 AND tenant_id = $2 LIMIT 1"
         )
         .bind(cid)
         .bind(effective_tenant_id)
@@ -1422,6 +1657,8 @@ async fn send_message(
                     created_at: row.get("created_at"),
                     is_read: false,
                     read_at: None,
+                    attachment_url: row.try_get("attachment_url").ok().flatten(),
+                    attachment_type: row.try_get("attachment_type").ok().flatten(),
                 },
                 req_ctx.request_id,
             )));
@@ -1477,7 +1714,11 @@ async fn send_message(
     };
 
     let message_id = client_uuid.unwrap_or_else(Uuid::now_v7);
-    let content = payload.content.trim().to_string();
+    let content = if payload.content.trim().is_empty() && has_attachment {
+        "📷 [Foto Lampiran]".to_string()
+    } else {
+        payload.content.trim().to_string()
+    };
 
     let msg_row = sqlx::query(
         r#"
@@ -1676,20 +1917,7 @@ async fn send_message(
         }
     }
 
-    let dto = InquiryMessageDto {
-        id: msg.id,
-        thread_id: msg.thread_id,
-        sender_id: msg.sender_id,
-        sender_name: msg.sender_name,
-        sender_role: msg.sender_role,
-        content: msg.content,
-        is_from_teacher: msg.is_from_teacher,
-        created_at: msg.created_at,
-        is_read: false,
-        read_at: None,
-    };
-
-    Ok(Json(ApiResponse::success(dto, req_ctx.request_id)))
+    Ok(Json(ApiResponse::success(msg, req_ctx.request_id)))
 }
 
 async fn resolve_inquiry(
@@ -1697,6 +1925,82 @@ async fn resolve_inquiry(
     req_ctx: RequestContext,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<bool>>, ApiError> {
+    let actor = req_ctx.actor.as_ref().ok_or_else(|| {
+        ApiError::new(
+            ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Autentikasi diperlukan".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let is_admin = actor.roles.iter().any(|r| {
+        let n = r.name.to_lowercase();
+        n.contains("admin")
+            || n.contains("kepala")
+            || n.contains("operator")
+            || n.contains("staf")
+            || n.contains("super")
+    });
+
+    if !is_admin {
+        let my_teacher = sqlx::query(
+            "SELECT id, user_id, full_name FROM teachers WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 AND deleted_at IS NULL LIMIT 1"
+        )
+        .bind(actor.id)
+        .bind(req_ctx.tenant_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten();
+
+        let my_tid: Option<Uuid> = my_teacher.as_ref().map(|t| t.get("id"));
+        let my_tuid: Option<Uuid> = my_teacher.as_ref().and_then(|t| t.try_get("user_id").ok().flatten());
+        let my_name: Option<String> = my_teacher.as_ref().map(|t| t.get("full_name"));
+
+        let updated = sqlx::query(
+            r#"
+            UPDATE inquiry_threads
+            SET status = 'ANSWERED', updated_at = NOW()
+            WHERE id = $1 AND tenant_id = $2 AND (
+                teacher_id = $3 OR 
+                teacher_id = $4 OR 
+                teacher_id = $5 OR 
+                ($6::text IS NOT NULL AND lower(trim(teacher_name)) = lower(trim($6)))
+            )
+            "#,
+        )
+        .bind(id)
+        .bind(req_ctx.tenant_id)
+        .bind(my_tid)
+        .bind(my_tuid)
+        .bind(actor.id)
+        .bind(my_name)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+
+        if updated.rows_affected() == 0 {
+            return Err(ApiError::new(
+                ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Anda tidak memiliki hak untuk menyelesaikan percakapan ini".to_string(),
+                ),
+                &req_ctx.request_id,
+            ));
+        }
+
+        return Ok(Json(ApiResponse::success(true, req_ctx.request_id)));
+    }
+
     sqlx::query(
         r#"
         UPDATE inquiry_threads
@@ -1753,11 +2057,38 @@ async fn mark_inquiry_read(
     .unwrap_or(false);
 
     if is_teacher {
+        let my_teacher = sqlx::query(
+            "SELECT id, user_id, full_name FROM teachers WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 AND deleted_at IS NULL LIMIT 1"
+        )
+        .bind(actor.id)
+        .bind(req_ctx.tenant_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten();
+
+        let my_tid: Option<Uuid> = my_teacher.as_ref().map(|t| t.get("id"));
+        let my_tuid: Option<Uuid> = my_teacher.as_ref().and_then(|t| t.try_get("user_id").ok().flatten());
+        let my_name: Option<String> = my_teacher.as_ref().map(|t| t.get("full_name"));
+
         let _ = sqlx::query(
-            "UPDATE inquiry_threads SET teacher_last_read_at = NOW() WHERE id = $1 AND tenant_id = $2"
+            r#"
+            UPDATE inquiry_threads 
+            SET teacher_last_read_at = NOW() 
+            WHERE id = $1 AND tenant_id = $2 AND (
+                teacher_id = $3 OR 
+                teacher_id = $4 OR 
+                teacher_id = $5 OR 
+                ($6::text IS NOT NULL AND lower(trim(teacher_name)) = lower(trim($6)))
+            )
+            "#
         )
         .bind(id)
         .bind(req_ctx.tenant_id)
+        .bind(my_tid)
+        .bind(my_tuid)
+        .bind(actor.id)
+        .bind(my_name)
         .execute(&ctx.pool)
         .await;
     } else {
