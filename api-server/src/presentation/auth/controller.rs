@@ -32,6 +32,7 @@ pub fn auth_routes(context: ApplicationContext) -> Router<ApplicationContext> {
         .route("/login", post(login))
         .route("/qr-login", post(qr_login))
         .route("/refresh", post(refresh))
+        .route("/logout", post(logout))
         .route("/register", post(register))
         .route("/avatar/{id}", axum::routing::get(get_user_avatar))
         .route(
@@ -2313,4 +2314,10 @@ async fn refresh(
         refresh_token_camel: new_refresh_token,
         request_id: req_ctx.request_id,
     }))
+}
+
+async fn logout() -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "message": "Sesi berhasil diakhiri"
+    }))))
 }

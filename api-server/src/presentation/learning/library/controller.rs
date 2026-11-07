@@ -873,15 +873,7 @@ async fn assign_reading_material(
             .await
             .unwrap_or(false);
 
-            if !is_homeroom && !is_scheduled {
-                return Err(ApiError::new(
-                    ApplicationError::Unauthorized(
-                        ErrorCode::AuthPermissionDenied,
-                        format!("Anda tidak mengampu kelas \"{}\". Penugasan materi buku SIBI hanya dapat dilakukan pada kelas yang diampu.", class_name),
-                    ),
-                    &req_ctx.request_id,
-                ));
-            }
+            // Akses penugasan buku dibuka penuh ke seluruh kelas
         }
     }
 
