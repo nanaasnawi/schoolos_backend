@@ -336,7 +336,11 @@ async fn list_inquiries(
                   ($5::uuid IS NOT NULL AND t.teacher_id = $5) OR
                   ($6::uuid IS NOT NULL AND t.teacher_id = $6) OR
                   ($7::uuid IS NOT NULL AND t.teacher_id = $7) OR
-                  ($8::text IS NOT NULL AND LOWER(TRIM(t.teacher_name)) = LOWER(TRIM($8)))
+                  ($8::text IS NOT NULL AND (
+                      LOWER(TRIM(t.teacher_name)) = LOWER(TRIM($8)) OR
+                      t.teacher_name ILIKE '%' || $8 || '%' OR
+                      $8 ILIKE '%' || t.teacher_name || '%'
+                  ))
               )
               AND (
                   $9::text IS NULL OR $9 = '' OR 
@@ -676,10 +680,15 @@ async fn get_inquiry_detail(
 
         let is_principal_participant = thread_teacher_id == Some(actor.id)
             || thread_student_id == actor.id
+            || thread_row.get::<String, _>("student_class").eq_ignore_ascii_case("Kepala Sekolah")
             || (!my_name.is_empty() && (
                 thread_teacher_name.trim().eq_ignore_ascii_case(my_name.trim())
                 || thread_row.get::<String, _>("student_name").trim().eq_ignore_ascii_case(my_name.trim())
-            ));
+                || thread_teacher_name.to_lowercase().contains(&my_name.to_lowercase())
+                || thread_row.get::<String, _>("student_name").to_lowercase().contains(&my_name.to_lowercase())
+            ))
+            || thread_teacher_name.contains("Kepala Sekolah")
+            || thread_row.get::<String, _>("student_name").contains("Kepala Sekolah");
 
         if !is_principal_participant {
             return Err(ApiError::new(
@@ -710,7 +719,11 @@ async fn get_inquiry_detail(
         let is_my_thread = (my_tid.is_some() && thread_teacher_id == my_tid)
             || (my_tuid.is_some() && thread_teacher_id == my_tuid)
             || thread_teacher_id == Some(actor.id)
-            || (my_name.is_some() && thread_teacher_name.trim().eq_ignore_ascii_case(my_name.as_deref().unwrap().trim()));
+            || (my_name.is_some() && (
+                thread_teacher_name.trim().eq_ignore_ascii_case(my_name.as_deref().unwrap().trim())
+                || thread_teacher_name.to_lowercase().contains(&my_name.as_deref().unwrap().to_lowercase())
+                || my_name.as_deref().unwrap().to_lowercase().contains(&thread_teacher_name.to_lowercase())
+            ));
 
         if !is_my_thread {
             return Err(ApiError::new(
@@ -1046,6 +1059,29 @@ async fn create_inquiry(
     let mut resolved_subject_name = payload.subject_name.unwrap_or_else(|| "Umum".to_string());
     let mut resolved_class_name = student_class.clone();
 
+    if resolved_teacher_name.contains("Kepala Sekolah") || raw_tname.contains("Kepala Sekolah") {
+        if let Ok(Some(p_row)) = sqlx::query(
+            r#"
+            SELECT u.id, u.full_name
+            FROM users u
+            JOIN user_roles ur ON ur.user_id = u.id
+            JOIN roles r ON r.id = ur.role_id
+            WHERE u.tenant_id = $1 AND (r.name ILIKE '%kepala%' OR r.name ILIKE '%principal%')
+            ORDER BY u.created_at ASC
+            LIMIT 1
+            "#,
+        )
+        .bind(resolved_tenant_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        {
+            resolved_teacher_id = Some(p_row.get::<Uuid, _>("id"));
+            resolved_teacher_name = p_row.get::<String, _>("full_name");
+        } else {
+            resolved_teacher_name = "Kepala Sekolah PKBM".to_string();
+        }
+    }
+
     // Authority lookup: If reference_id is provided, resolve from authoritative learning_materials or assignments
     if let Some(ref ref_id_str) = payload.reference_id {
         if let Ok(ref_uuid) = Uuid::parse_str(ref_id_str) {
@@ -1249,17 +1285,19 @@ async fn create_inquiry(
         {
             resolved_teacher_id = Some(tch.get::<Uuid, _>("id"));
             resolved_teacher_name = tch.get::<String, _>("full_name");
-        } else if let Ok(Some(any_tch)) = sqlx::query(
-            r#"
-            SELECT id, full_name FROM teachers WHERE tenant_id = $1 ORDER BY created_at ASC LIMIT 1
-            "#,
-        )
-        .bind(resolved_tenant_id)
-        .fetch_optional(&ctx.pool)
-        .await
-        {
-            resolved_teacher_id = Some(any_tch.get::<Uuid, _>("id"));
-            resolved_teacher_name = any_tch.get::<String, _>("full_name");
+        } else if !resolved_teacher_name.contains("Kepala Sekolah") && !raw_tname.contains("Kepala Sekolah") {
+            if let Ok(Some(any_tch)) = sqlx::query(
+                r#"
+                SELECT id, full_name FROM teachers WHERE tenant_id = $1 ORDER BY created_at ASC LIMIT 1
+                "#,
+            )
+            .bind(resolved_tenant_id)
+            .fetch_optional(&ctx.pool)
+            .await
+            {
+                resolved_teacher_id = Some(any_tch.get::<Uuid, _>("id"));
+                resolved_teacher_name = any_tch.get::<String, _>("full_name");
+            }
         }
     }
 
@@ -1385,10 +1423,18 @@ async fn create_inquiry(
         .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
     let msg_uuid = Uuid::parse_str(&msg_id).unwrap_or_else(|_| Uuid::now_v7());
 
+    let initial_sender_role = if is_admin {
+        "PRINCIPAL"
+    } else if is_teacher {
+        "TEACHER"
+    } else {
+        "STUDENT"
+    };
+
     let _ = sqlx::query(
         r#"
         INSERT INTO inquiry_messages (id, tenant_id, thread_id, sender_id, sender_name, sender_role, content, is_from_teacher, client_message_id, created_at)
-        VALUES ($1, $2, $3, $4, $5, 'STUDENT', $6, false, $1, NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $1, NOW())
         ON CONFLICT (id) DO NOTHING
         "#,
     )
@@ -1397,7 +1443,9 @@ async fn create_inquiry(
     .bind(thread_id)
     .bind(student_id.to_string())
     .bind(&student_name)
+    .bind(initial_sender_role)
     .bind(&initial_msg)
+    .bind(is_teacher)
     .execute(&ctx.pool)
     .await;
 
@@ -1613,7 +1661,11 @@ async fn send_message(
         let is_my_thread = (my_tid.is_some() && thread_teacher_id == my_tid)
             || (my_tuid.is_some() && thread_teacher_id == my_tuid)
             || thread_teacher_id == Some(actor.id)
-            || (my_name.is_some() && thread_teacher_name.trim().eq_ignore_ascii_case(my_name.as_deref().unwrap().trim()));
+            || (my_name.is_some() && (
+                thread_teacher_name.trim().eq_ignore_ascii_case(my_name.as_deref().unwrap().trim())
+                || thread_teacher_name.to_lowercase().contains(&my_name.as_deref().unwrap().to_lowercase())
+                || my_name.as_deref().unwrap().to_lowercase().contains(&thread_teacher_name.to_lowercase())
+            ));
 
         if !is_my_thread {
             return Err(ApiError::new(
@@ -1666,13 +1718,27 @@ async fn send_message(
     }
 
     let is_from_teacher = is_teacher;
-    let sender_role = if is_from_teacher {
+    let sender_role = if is_admin {
+        "PRINCIPAL"
+    } else if is_from_teacher {
         "TEACHER"
     } else {
         "STUDENT"
     };
     let sender_id = actor.id.to_string();
-    let sender_name = if is_from_teacher {
+    let sender_name = if is_admin {
+        let user_full_name: Option<String> = sqlx::query_scalar("SELECT full_name FROM users WHERE id = $1 LIMIT 1")
+            .bind(actor.id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .ok()
+            .flatten();
+        payload
+            .sender_name
+            .filter(|s| !s.trim().is_empty())
+            .or(user_full_name)
+            .unwrap_or_else(|| "Kepala Sekolah".to_string())
+    } else if is_from_teacher {
         let teacher_db_name: Option<String> = sqlx::query_scalar(
             "SELECT full_name FROM teachers WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 LIMIT 1",
         )
