@@ -1,90 +1,77 @@
-const { Pool } = require('pg');
+const https = require('https');
 
-const connectionString = process.env.DATABASE_URL;
-if (!connectionString) {
-  console.error("FATAL: DATABASE_URL environment variable is required.");
-  process.exit(1);
-}
+const base = 'https://akselerasi-edu-default-rtdb.asia-southeast1.firebasedatabase.app';
+const threadId = '08ddca48-6427-4b51-8e5b-cb9225b6a033';
 
-const pool = new Pool({
-  connectionString
-});
-
-async function syncFirebaseToDb() {
-  console.log('Fetching inquiries from Firebase RTDB...');
-  const res = await fetch('https://akselerasi-edu-default-rtdb.asia-southeast1.firebasedatabase.app/inquiries.json');
-  const data = await res.json();
-  if (!data) {
-    console.log('No data found in Firebase RTDB');
-    return;
-  }
-
-  for (const [threadId, threadData] of Object.entries(data)) {
-    console.log(`Processing thread: ${threadId}`);
-    
-    // Check if thread exists in DB
-    const threadRes = await pool.query('SELECT id, tenant_id FROM inquiry_threads WHERE id = $1', [threadId]);
-    if (threadRes.rows.length === 0) {
-      console.log(`Thread ${threadId} not found in DB, skipping`);
-      continue;
-    }
-    const tenantId = threadRes.rows[0].tenant_id;
-
-    const messages = threadData.messages || {};
-    const sortedMsgs = Object.values(messages).sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-
-    for (const msg of sortedMsgs) {
-      // Check if message already exists by content and thread_id
-      const exists = await pool.query(
-        'SELECT id FROM inquiry_messages WHERE thread_id = $1 AND content = $2 LIMIT 1',
-        [threadId, msg.content]
-      );
-      if (exists.rows.length > 0) {
-        continue;
+function put(path, data) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(path, base);
+    const body = JSON.stringify(data);
+    const req = https.request(url, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body)
       }
-
-      const clientUuidStr = msg.id.replace(/^temp-/, '');
-      const clientUuid = clientUuidStr.length === 36 ? clientUuidStr : null;
-      const createdAt = msg.timestamp ? new Date(msg.timestamp) : new Date();
-
-      await pool.query(
-        `INSERT INTO inquiry_messages 
-         (id, tenant_id, thread_id, sender_id, sender_name, sender_role, content, is_from_teacher, client_message_id, created_at)
-         VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-        [
-          tenantId,
-          threadId,
-          msg.senderId || 'sender',
-          msg.senderName || 'User',
-          msg.senderRole || (msg.isFromTeacher ? 'TEACHER' : 'STUDENT'),
-          msg.content,
-          !!msg.isFromTeacher,
-          clientUuid,
-          createdAt
-        ]
-      );
-      console.log(`Inserted message: [${msg.senderRole}] ${msg.senderName}: "${msg.content}"`);
-    }
-
-    // Determine latest message & status
-    const lastMsg = sortedMsgs[sortedMsgs.length - 1];
-    if (lastMsg) {
-      const isAnswered = !!lastMsg.isFromTeacher;
-      const newStatus = isAnswered ? 'ANSWERED' : 'WAITING_REPLY';
-      const lastMsgDate = lastMsg.timestamp ? new Date(lastMsg.timestamp) : new Date();
-
-      await pool.query(
-        `UPDATE inquiry_threads
-         SET status = $1, last_message_content = $2, last_message_at = $3, updated_at = NOW()
-         WHERE id = $4`,
-        [newStatus, lastMsg.content, lastMsgDate, threadId]
-      );
-      console.log(`Updated thread ${threadId} status to: ${newStatus}, last message: "${lastMsg.content}"`);
-    }
-  }
-
-  await pool.end();
-  console.log('Sync complete!');
+    }, res => {
+      let d = '';
+      res.on('data', chunk => d += chunk);
+      res.on('end', () => resolve(JSON.parse(d || '{}')));
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
 }
 
-syncFirebaseToDb().catch(console.error);
+async function sync() {
+  const metadata = {
+    id: threadId,
+    studentId: '01a096e3-d808-7650-918d-66c4d7aed825',
+    studentName: 'RENALDI',
+    studentClass: 'PAKET C 12B',
+    teacherId: '01a092fc-af59-76b2-85f2-cca8b8d8d515',
+    teacherName: 'Kepala Sekolah PKBM',
+    subjectName: 'Konsultasi Kebijakan, Akademik & Pengaduan Warga Belajar',
+    inquiryType: 'GENERAL',
+    referenceTitle: 'Konsultasi Kebijakan, Akademik & Pengaduan Warga Belajar',
+    referenceId: null,
+    lastUpdated: 1794034054646,
+    status: 'WAITING_REPLY'
+  };
+
+  const summary = {
+    lastMessageContent: 'test',
+    lastMessageAt: 1794034054646,
+    lastSenderName: 'RENALDI',
+    status: 'WAITING_REPLY',
+    readStatusLabel: 'Menunggu Tanggapan Kepala Sekolah',
+    teacherLastReadAt: 0,
+    studentId: '01a096e3-d808-7650-918d-66c4d7aed825',
+    studentName: 'RENALDI',
+    teacherId: '01a092fc-af59-76b2-85f2-cca8b8d8d515',
+    teacherName: 'Kepala Sekolah PKBM'
+  };
+
+  const message = {
+    id: 'c1814382-3d5f-49de-8d30-1532bcb3f70e',
+    threadId: threadId,
+    senderId: '01a096e3-d808-7650-918d-66c4d7aed825',
+    senderName: 'RENALDI',
+    senderRole: 'STUDENT',
+    content: 'test',
+    timestamp: 1794034054646,
+    isFromTeacher: false,
+    isRead: false
+  };
+
+  console.log('Writing metadata to Firebase RTDB...');
+  await put(`/inquiries/${threadId}/metadata.json`, metadata);
+  console.log('Writing summary to Firebase RTDB...');
+  await put(`/inquiries/${threadId}/summary.json`, summary);
+  console.log('Writing message to Firebase RTDB...');
+  await put(`/inquiries/${threadId}/messages/c1814382-3d5f-49de-8d30-1532bcb3f70e.json`, message);
+  console.log('Done syncing to Firebase RTDB!');
+}
+
+sync().catch(console.error);
