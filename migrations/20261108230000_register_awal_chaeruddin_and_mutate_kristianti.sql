@@ -108,3 +108,4 @@ BEGIN
     SET is_active = false, updated_at = NOW()
     WHERE user_id = v_kristianti_user_id;
 END $$;
+
