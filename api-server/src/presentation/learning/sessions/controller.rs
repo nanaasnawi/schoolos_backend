@@ -117,7 +117,7 @@ async fn start(
         let schedule_row = sqlx::query(
             r#"
             SELECT cs.id, cs.tenant_id, cs.class_id, cs.subject_id, cs.teacher_id,
-                   cs.start_time, cs.end_time, COALESCE(cs.room, 'Ruang Kelas') as room,
+                   cs.start_time, cs.end_time, cs.day_of_week, COALESCE(cs.room, 'Ruang Kelas') as room,
                    c.name as class_name, s.name as subject_name, t.full_name as teacher_name
             FROM class_schedules cs
             JOIN classes c ON c.id = cs.class_id
@@ -153,8 +153,32 @@ async fn start(
         let sched_teacher_id: Uuid = schedule_row.try_get("teacher_id").unwrap_or_default();
         let sched_start_time: String = schedule_row.try_get("start_time").unwrap_or_default();
         let sched_end_time: String = schedule_row.try_get("end_time").unwrap_or_default();
+        let sched_day_of_week: String = schedule_row.try_get("day_of_week").unwrap_or_default();
         let sched_class_name: String = schedule_row.try_get("class_name").unwrap_or_else(|_| "Kelas".to_string());
         let sched_subject_name: String = schedule_row.try_get("subject_name").unwrap_or_else(|_| "Pelajaran".to_string());
+
+        let session_dow = match session_date.weekday() {
+            chrono::Weekday::Mon => "Senin",
+            chrono::Weekday::Tue => "Selasa",
+            chrono::Weekday::Wed => "Rabu",
+            chrono::Weekday::Thu => "Kamis",
+            chrono::Weekday::Fri => "Jumat",
+            chrono::Weekday::Sat => "Sabtu",
+            chrono::Weekday::Sun => "Minggu",
+        };
+
+        if !sched_day_of_week.is_empty() && !sched_day_of_week.eq_ignore_ascii_case(session_dow) {
+            return Err(ApiError::new(
+                school_core::common::error::ApplicationError::Validation(
+                    school_core::common::error_code::ErrorCode::ValidationFailed,
+                    format!(
+                        "Jadwal {} ({}) terdaftar untuk hari {}, tidak dapat dimulai pada hari {} ({})",
+                        sched_subject_name, sched_class_name, sched_day_of_week, session_dow, session_date
+                    ),
+                ),
+                &req_ctx.request_id,
+            ));
+        }
 
         let class_id = payload.class_id.unwrap_or(sched_class_id);
         let subject_id = payload.subject_id.or(Some(sched_subject_id));
@@ -635,6 +659,19 @@ async fn list(
           AND ($6::date IS NULL OR ls.session_date >= $6)
           AND ($7::date IS NULL OR ls.session_date <= $7)
           AND ($8::text IS NULL OR ls.status = $8)
+          AND (
+              -- Ensure scheduled session strictly matches the template day_of_week
+              cs.id IS NULL
+              OR cs.day_of_week = CASE EXTRACT(DOW FROM ls.session_date)::integer
+                  WHEN 0 THEN 'Minggu'
+                  WHEN 1 THEN 'Senin'
+                  WHEN 2 THEN 'Selasa'
+                  WHEN 3 THEN 'Rabu'
+                  WHEN 4 THEN 'Kamis'
+                  WHEN 5 THEN 'Jumat'
+                  WHEN 6 THEN 'Sabtu'
+              END
+          )
           AND (
               -- Student filter: only enrolled class
               CASE WHEN $9::boolean THEN ls.class_id = $10::uuid ELSE TRUE END
