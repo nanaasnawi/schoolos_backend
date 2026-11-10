@@ -388,7 +388,7 @@ async fn analyze_student(
     security(("Bearer" = []))
 )]
 async fn tanya_ai(
-    State(_ctx): State<ApplicationContext>,
+    State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
     Json(payload): Json<TanyaAiRequest>,
 ) -> Result<Json<ApiResponse<TanyaAiResponse>>, ApiError> {
@@ -399,6 +399,46 @@ async fn tanya_ai(
             &req_ctx.request_id,
         ));
     }
+
+    // Directly query database for authoritative active academic year & school info
+    let db_academic_year = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM academic_years WHERE tenant_id = $1 AND is_active = true AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 1"
+    )
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| "2026/2027".to_string());
+
+    let db_semester = sqlx::query_scalar::<_, i32>(
+        "SELECT current_semester FROM academic_years WHERE tenant_id = $1 AND is_active = true AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 1"
+    )
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(1);
+
+    let sem_label = if db_semester == 2 { "Genap" } else { "Ganjil" };
+
+    let db_school_name = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM schools WHERE tenant_id = $1 LIMIT 1"
+    )
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| "PKBM AS-SALAFIYAH".to_string());
+
+    let authoritative_db_directive = format!(
+        "[KONTEKS OTORITATIF DATABASE REALTIME]\n\
+        - Satuan Pendidikan: {db_school_name}\n\
+        - Tahun Ajaran Aktif Resmi di Database: T.A {db_academic_year} (Semester {sem_label})\n\
+        - INSTRUKSI KETAT: Seluruh analisis, rekomendasi, dan Kesimpulan Eksekutif WAJIB merujuk ke Tahun Ajaran resmi aktif di database yaitu T.A {db_academic_year} (Semester {sem_label}). DILARANG MENGGUNAKAN tahun kadaluarsa seperti 2024/2025."
+    );
 
     let subject = payload.subject_name.as_deref().unwrap_or("Umum");
     let grade = payload.grade_level.as_deref().unwrap_or("Siswa");
@@ -449,12 +489,16 @@ async fn tanya_ai(
         role: "system",
         content: &system_prompt,
     });
+    messages.push(nvidia_ai::ChatMessage {
+        role: "system",
+        content: &authoritative_db_directive,
+    });
 
-    if let Some(ref ctx) = payload.context {
-        if !ctx.trim().is_empty() {
+    if let Some(ref ctx_str) = payload.context {
+        if !ctx_str.trim().is_empty() {
             messages.push(nvidia_ai::ChatMessage {
                 role: "system",
-                content: ctx,
+                content: ctx_str,
             });
         }
     }
@@ -466,13 +510,22 @@ async fn tanya_ai(
         &history_slice[..]
     };
 
-    for h in history_tail {
-        messages.push(nvidia_ai::ChatMessage {
-            role: match h.role.as_str() {
+    let sanitized_history: Vec<(&str, String)> = history_tail
+        .iter()
+        .map(|h| {
+            let role = match h.role.as_str() {
                 "assistant" | "model" | "bot" => "assistant",
                 _ => "user",
-            },
-            content: &h.content,
+            };
+            let content = h.content.replace("2024/2025", &db_academic_year);
+            (role, content)
+        })
+        .collect();
+
+    for (role, content) in &sanitized_history {
+        messages.push(nvidia_ai::ChatMessage {
+            role,
+            content,
         });
     }
 
