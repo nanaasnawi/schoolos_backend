@@ -1110,11 +1110,11 @@ async fn calculate_student_study_tracker(
     history_items.sort_by(|a, b| b.date_iso.cmp(&a.date_iso));
 
     // ─────────────────────────────────────────────────────────────────────────────
-    // 2. TERLEWAT (Materi/tugas sebelum hari ini yang belum dibuka/dikerjakan)
+    // 2. TERLEWAT / PERLU DIKEJAR (Menampilkan semua materi, tugas, dan kuis yang belum tuntas, baik yang lalu maupun yang sekarang)
     // ─────────────────────────────────────────────────────────────────────────────
     let mut missed_items: Vec<TrackerItem> = Vec::new();
 
-    // A. Unopened Materials published BEFORE today
+    // A. Unopened Materials (semua yang lalu dan yang sekarang)
     let unread_mat_rows = sqlx::query(
         r#"
         SELECT 
@@ -1130,22 +1130,20 @@ async fn calculate_student_study_tracker(
           AND lm.deleted_at IS NULL 
           AND lm.is_active = true
           AND (lm.class_id IS NULL OR lm.class_id = $2)
-          AND (lm.created_at AT TIME ZONE 'Asia/Jakarta')::date < $3::date
           AND NOT EXISTS (
               SELECT 1 FROM student_material_completions smc 
-              WHERE smc.material_id = lm.id AND smc.student_id = $4
+              WHERE smc.material_id = lm.id AND smc.student_id = $3
           )
           AND NOT EXISTS (
               SELECT 1 FROM reading_progress rp 
-              WHERE rp.material_id = lm.id AND rp.student_id = $4
+              WHERE rp.material_id = lm.id AND rp.student_id = $3
           )
         ORDER BY lm.created_at DESC
-        LIMIT 15
+        LIMIT 20
         "#,
     )
     .bind(tenant_id)
     .bind(class_id)
-    .bind(&today_date_str)
     .bind(student_id)
     .fetch_all(&ctx.pool)
     .await?;
@@ -1166,11 +1164,11 @@ async fn calculate_student_study_tracker(
             date_iso: Some(r.get("date_iso")),
             status_badge: "Belum Dibuka".to_string(),
             badge_variant: "warning".to_string(),
-            reason_note: Some("Materi telah dibagikan sebelum hari ini tapi belum pernah kamu buka.".to_string()),
+            reason_note: Some("Materi pembelajaran mandiri belum pernah kamu buka.".to_string()),
         });
     }
 
-    // B. Overdue or unsubmitted assignments from before today
+    // B. Overdue or unsubmitted assignments (semua yang lalu dan yang sekarang)
     let overdue_assign_rows = sqlx::query(
         r#"
         SELECT 
@@ -1187,18 +1185,16 @@ async fn calculate_student_study_tracker(
           AND a.deleted_at IS NULL 
           AND a.is_active = true
           AND (a.class_id IS NULL OR a.class_id = $2)
-          AND ((a.created_at AT TIME ZONE 'Asia/Jakarta')::date < $3::date OR (a.due_at IS NOT NULL AND a.due_at < NOW()))
           AND NOT EXISTS (
               SELECT 1 FROM assignment_submissions asb 
-              WHERE asb.assignment_id = a.id AND asb.student_id = $4 AND asb.status IN ('submitted', 'graded', 'returned')
+              WHERE asb.assignment_id = a.id AND asb.student_id = $3 AND asb.status IN ('submitted', 'graded', 'returned')
           )
-        ORDER BY a.due_at ASC NULLS LAST
-        LIMIT 15
+        ORDER BY (a.due_at IS NOT NULL AND a.due_at < NOW()) DESC, a.due_at ASC NULLS LAST, a.created_at DESC
+        LIMIT 25
         "#,
     )
     .bind(tenant_id)
     .bind(class_id)
-    .bind(&today_date_str)
     .bind(student_id)
     .fetch_all(&ctx.pool)
     .await?;
@@ -1222,11 +1218,11 @@ async fn calculate_student_study_tracker(
             date_iso: Some(r.get("date_iso")),
             status_badge: badge.to_string(),
             badge_variant: variant.to_string(),
-            reason_note: Some("Tugas diberikan sebelum hari ini dan belum dikumpulkan.".to_string()),
+            reason_note: Some("Tugas belum dikumpulkan. Segera selesaikan dan serahkan lembar jawaban.".to_string()),
         });
     }
 
-    // C. Missed Quizzes (published before today, not attempted)
+    // C. Missed / Unattempted Quizzes (semua yang lalu dan yang sekarang)
     let missed_quiz_rows = sqlx::query(
         r#"
         SELECT 
@@ -1242,18 +1238,16 @@ async fn calculate_student_study_tracker(
           AND q.deleted_at IS NULL 
           AND q.is_active = true
           AND (q.class_id IS NULL OR q.class_id = $2)
-          AND (q.created_at AT TIME ZONE 'Asia/Jakarta')::date < $3::date
           AND NOT EXISTS (
               SELECT 1 FROM quiz_attempts qa 
-              WHERE qa.quiz_id = q.id AND qa.student_id = $4
+              WHERE qa.quiz_id = q.id AND qa.student_id = $3
           )
         ORDER BY q.created_at DESC
-        LIMIT 15
+        LIMIT 20
         "#,
     )
     .bind(tenant_id)
     .bind(class_id)
-    .bind(&today_date_str)
     .bind(student_id)
     .fetch_all(&ctx.pool)
     .await?;
