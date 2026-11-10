@@ -169,11 +169,12 @@ async fn start(
 
         if !sched_day_of_week.is_empty() && !sched_day_of_week.eq_ignore_ascii_case(session_dow) {
             return Err(ApiError::new(
-                school_core::common::error::ApplicationError::Validation(
-                    school_core::common::error_code::ErrorCode::ValidationFailed,
-                    format!(
-                        "Jadwal {} ({}) terdaftar untuk hari {}, tidak dapat dimulai pada hari {} ({})",
-                        sched_subject_name, sched_class_name, sched_day_of_week, session_dow, session_date
+                school_core::common::error::ApplicationError::Domain(
+                    school_core::common::error::DomainError::Validation(
+                        format!(
+                            "Jadwal {} ({}) terdaftar untuk hari {}, tidak dapat dimulai pada hari {} ({})",
+                            sched_subject_name, sched_class_name, sched_day_of_week, session_dow, session_date
+                        ),
                     ),
                 ),
                 &req_ctx.request_id,

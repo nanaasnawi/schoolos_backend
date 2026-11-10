@@ -2316,8 +2316,13 @@ async fn refresh(
     }))
 }
 
-async fn logout() -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    Ok(Json(ApiResponse::success(serde_json::json!({
-        "message": "Sesi berhasil diakhiri"
-    }))))
+async fn logout(
+    req_ctx: RequestContext,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({
+            "message": "Sesi berhasil diakhiri"
+        }),
+        req_ctx.request_id,
+    )))
 }

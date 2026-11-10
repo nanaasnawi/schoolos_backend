@@ -522,7 +522,7 @@ impl Bootstrap {
             END LOOP;
         END $$;
         "#;
-        if let Err(e) = sqlx::raw_sql(dedup_husnul_sql).execute(&pool).await {
+        if let Err(e) = sqlx::query(dedup_husnul_sql).execute(&pool).await {
             tracing::warn!("Notice on Husnul Chatim deduplication: {:?}", e);
         }
 
