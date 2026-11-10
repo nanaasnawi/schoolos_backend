@@ -68,6 +68,7 @@ pub struct TanyaAiRequest {
     pub subject_name: Option<String>,
     pub grade_level: Option<String>,
     pub history: Option<Vec<TanyaAiMessageDto>>,
+    pub context: Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -406,15 +407,33 @@ async fn tanya_ai(
         || grade.to_uppercase().contains("PRINCIPAL")
         || subject.to_uppercase().contains("SUPERVISI");
 
+    let is_teacher = grade.to_uppercase().contains("GURU")
+        || grade.to_uppercase().contains("TEACHER")
+        || subject.to_uppercase().contains("WORKSTATION")
+        || subject.to_uppercase().contains("PEDAGOGIK");
+
     let system_prompt = if is_principal {
         format!(
             "Anda adalah 'AI Analitik Kepala Sekolah' (Executive Academic & Operational Intelligence Advisor) di SchoolOS (Akselerasi Edu). \
-            Peran Anda adalah Asisten Eksekutif Kepala Sekolah / Pimpinan PKBM. \
+            Peran Anda adalah Asisten Eksekutif Kepala Sekolah / Pimpinan PKBM berstandar Kurikulum Merdeka. \
             Fokus & Kemampuan Utama: \
             1. Menganalisis data akademik real-time, ketercapaian target KKTP, dan evaluasi hasil belajar warga belajar. \
             2. Memantau keaktifan guru/tutor dalam pengunggahan materi/modul pembelajaran, pembuatan tugas mandiri, serta penyelenggaraan kuis dan asesmen CBT. \
             3. Memberikan evaluasi teknis supervisi manajerial, deteksi dini siswa butuh intervensi (Early Warning System), serta rekomendasi taktis peningkatan mutu dan stabilitas PKBM. \
-            Gunakan Bahasa Indonesia formal-profesional yang lugas, analitis, taktis, berbasis data riil yang disertakan, dan terstruktur rapi dengan Markdown."
+            4. Menyelaraskan seluruh analisis dengan regulasi Permendikbudristek dan prinsip Kurikulum Merdeka. \
+            Gunakan Bahasa Indonesia formal-profesional yang lugas, analitis, taktis, berbasis data riil yang disertakan dalam konteks, dan terstruktur rapi dengan Markdown."
+        )
+    } else if is_teacher {
+        format!(
+            "Anda adalah 'AI Pedagogik & Workstation Guru' (Teacher Pedagogical & Instructional Co-Pilot) di SchoolOS (Akselerasi Edu). \
+            Mata Pelajaran fokus: {subject}, Jenjang/Kelas: {grade}. \
+            Anda patuh penuh pada regulasi Kurikulum Merdeka (Kepmendikbudristek & BSKAP No. 032/H/KR/2024 & BSKAP No. 033/H/KR/2024). \
+            Fokus & Kemampuan Utama: \
+            1. Membantu penyusunan Draf Modul Ajar Kurikulum Merdeka yang komprehensif (Tujuan Pembelajaran/TP dari CP & ATP, Pemahaman Bermakna, Pertanyaan Pemantik, Rencana Pembelajaran Berdiferensiasi Konten-Proses-Produk, LKPD, serta Asesmen Formatif & Sumatif). \
+            2. Merancang kisi-kisi dan butir soal HOTS (Higher Order Thinking Skills) untuk kuis dan asesmen CBT (Pilihan Ganda, Pilihan Ganda Kompleks, Menjodohkan, Esai) beserta kunci dan rubrik penilaian. \
+            3. Membantu merumuskan Kriteria Ketercapaian Tujuan Pembelajaran (KKTP) berbasis interval nilai atau rubrik deskriptif untuk tugas siswa. \
+            4. Memberikan saran diferensiasi pembelajaran dan rencana tindak lanjut remidial/pengayaan berdasarkan kondisi siswa nyata di kelas. \
+            Gunakan Bahasa Indonesia edukatif yang profesional, ramah, membimbing tahap demi tahap, solutif, dan terstruktur rapi dengan Markdown."
         )
     } else {
         format!(
@@ -430,6 +449,15 @@ async fn tanya_ai(
         role: "system",
         content: &system_prompt,
     });
+
+    if let Some(ref ctx) = payload.context {
+        if !ctx.trim().is_empty() {
+            messages.push(nvidia_ai::ChatMessage {
+                role: "system",
+                content: ctx,
+            });
+        }
+    }
 
     let history_slice: Vec<TanyaAiMessageDto> = payload.history.unwrap_or_default();
     let history_tail = if history_slice.len() > 6 {
