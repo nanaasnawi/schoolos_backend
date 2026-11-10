@@ -854,28 +854,7 @@ async fn assign_reading_material(
         })
     }).unwrap_or(false);
 
-    if !is_admin {
-        if let Some(tid) = teacher_id {
-            let homeroom_id: Option<Uuid> = target_class.get("homeroom_teacher_id");
-            let is_homeroom = homeroom_id == Some(tid);
-            let is_scheduled = sqlx::query_scalar::<_, bool>(
-                r#"
-                SELECT EXISTS(
-                    SELECT 1 FROM class_schedules 
-                    WHERE class_id = $1 AND teacher_id = $2 AND tenant_id = $3
-                )
-                "#
-            )
-            .bind(payload.class_id)
-            .bind(tid)
-            .bind(req_ctx.tenant_id)
-            .fetch_one(&ctx.pool)
-            .await
-            .unwrap_or(false);
-
-            // Akses penugasan buku dibuka penuh ke seluruh kelas
-        }
-    }
+    // Akses penugasan buku dibuka penuh ke seluruh kelas bagi guru dan admin
 
     let material_id = Uuid::new_v4();
     let description = format!(

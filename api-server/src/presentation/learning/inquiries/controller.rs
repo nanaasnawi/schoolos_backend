@@ -1054,7 +1054,7 @@ async fn create_inquiry(
         if raw_tname.trim().is_empty() || raw_tname.eq_ignore_ascii_case("Guru Pengampu") {
             String::new()
         } else {
-            raw_tname
+            raw_tname.clone()
         };
     let mut resolved_subject_name = payload.subject_name.unwrap_or_else(|| "Umum".to_string());
     let mut resolved_class_name = student_class.clone();
