@@ -16,3 +16,4 @@ FROM (
 ) s_agg
 WHERE t.id = s_agg.teacher_id
   AND (t.subject IS NULL OR t.subject != s_agg.combined_subjects);
+
