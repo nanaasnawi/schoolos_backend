@@ -579,7 +579,27 @@ async fn list(
                     (SELECT t3.full_name FROM teachers t3 WHERE (t3.user_id = a.created_by OR t3.id = a.created_by) LIMIT 1),
                     (SELECT u.full_name FROM users u WHERE u.id = a.created_by LIMIT 1),
                     'Guru Pengampu'
-                ) as teacher_name
+                ) as teacher_name,
+                COALESCE(
+                    (
+                        SELECT COUNT(DISTINCT en.student_id)
+                        FROM enrollments en
+                        JOIN students s ON s.id = en.student_id
+                        WHERE en.class_id = a.class_id
+                          AND (en.status ILIKE 'active' OR en.status IS NULL)
+                          AND (s.is_active = true OR s.is_active IS NULL)
+                          AND (s.status ILIKE 'active' OR s.status IS NULL)
+                          AND s.deleted_at IS NULL
+                    ), 0
+                )::bigint as total_students,
+                COALESCE(
+                    (
+                        SELECT COUNT(DISTINCT sub.student_id)
+                        FROM assignment_submissions sub
+                        WHERE sub.assignment_id = a.id
+                          AND sub.status != 'unsubmitted'
+                    ), 0
+                )::bigint as submitted_count
             FROM assignments a
             LEFT JOIN classes c ON c.id = a.class_id
             LEFT JOIN subjects sub ON sub.id = a.subject_id
@@ -637,6 +657,9 @@ async fn list(
                 session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
                 release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
                 allow_late_submission: r.try_get::<Option<bool>, _>("allow_late_submission").ok().flatten(),
+                total_students: r.try_get::<Option<i64>, _>("total_students").ok().flatten(),
+                submitted_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
+                submission_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
                 questions: Vec::new(),
             })
             .collect()
@@ -677,7 +700,27 @@ async fn list(
                     (SELECT t5.full_name FROM classes cl JOIN teachers t5 ON t5.id = cl.homeroom_teacher_id WHERE cl.id = a.class_id LIMIT 1),
                     (SELECT u.full_name FROM users u WHERE u.id = a.created_by LIMIT 1),
                     (SELECT t6.full_name FROM teachers t6 WHERE t6.tenant_id = a.tenant_id ORDER BY t6.created_at ASC LIMIT 1)
-                ) as teacher_name
+                ) as teacher_name,
+                COALESCE(
+                    (
+                        SELECT COUNT(DISTINCT en.student_id)
+                        FROM enrollments en
+                        JOIN students s ON s.id = en.student_id
+                        WHERE en.class_id = a.class_id
+                          AND (en.status ILIKE 'active' OR en.status IS NULL)
+                          AND (s.is_active = true OR s.is_active IS NULL)
+                          AND (s.status ILIKE 'active' OR s.status IS NULL)
+                          AND s.deleted_at IS NULL
+                    ), 0
+                )::bigint as total_students,
+                COALESCE(
+                    (
+                        SELECT COUNT(DISTINCT sub.student_id)
+                        FROM assignment_submissions sub
+                        WHERE sub.assignment_id = a.id
+                          AND sub.status != 'unsubmitted'
+                    ), 0
+                )::bigint as submitted_count
             FROM assignments a
             LEFT JOIN classes c ON c.id = a.class_id
             LEFT JOIN subjects sub ON sub.id = a.subject_id
@@ -745,6 +788,9 @@ async fn list(
                 session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
                 release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
                 allow_late_submission: r.try_get::<Option<bool>, _>("allow_late_submission").ok().flatten(),
+                total_students: r.try_get::<Option<i64>, _>("total_students").ok().flatten(),
+                submitted_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
+                submission_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
                 questions: Vec::new(),
             })
             .collect()
@@ -768,7 +814,27 @@ async fn list(
                     (SELECT t5.full_name FROM classes cl JOIN teachers t5 ON t5.id = cl.homeroom_teacher_id WHERE cl.id = a.class_id LIMIT 1),
                     (SELECT u.full_name FROM users u WHERE u.id = a.created_by LIMIT 1),
                     (SELECT t6.full_name FROM teachers t6 WHERE t6.tenant_id = a.tenant_id ORDER BY t6.created_at ASC LIMIT 1)
-                ) as teacher_name
+                ) as teacher_name,
+                COALESCE(
+                    (
+                        SELECT COUNT(DISTINCT en.student_id)
+                        FROM enrollments en
+                        JOIN students s ON s.id = en.student_id
+                        WHERE en.class_id = a.class_id
+                          AND (en.status ILIKE 'active' OR en.status IS NULL)
+                          AND (s.is_active = true OR s.is_active IS NULL)
+                          AND (s.status ILIKE 'active' OR s.status IS NULL)
+                          AND s.deleted_at IS NULL
+                    ), 0
+                )::bigint as total_students,
+                COALESCE(
+                    (
+                        SELECT COUNT(DISTINCT sub.student_id)
+                        FROM assignment_submissions sub
+                        WHERE sub.assignment_id = a.id
+                          AND sub.status != 'unsubmitted'
+                    ), 0
+                )::bigint as submitted_count
             FROM assignments a
             LEFT JOIN classes c ON c.id = a.class_id
             LEFT JOIN subjects sub ON sub.id = a.subject_id
@@ -819,6 +885,9 @@ async fn list(
                 session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
                 release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
                 allow_late_submission: r.try_get::<Option<bool>, _>("allow_late_submission").ok().flatten(),
+                total_students: r.try_get::<Option<i64>, _>("total_students").ok().flatten(),
+                submitted_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
+                submission_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
                 questions: Vec::new(),
             })
             .collect()
@@ -898,7 +967,27 @@ async fn get_by_id(
                 (SELECT t5.full_name FROM classes cl JOIN teachers t5 ON t5.id = cl.homeroom_teacher_id WHERE cl.id = a.class_id LIMIT 1),
                 (SELECT u.full_name FROM users u WHERE u.id = a.created_by LIMIT 1),
                 (SELECT t6.full_name FROM teachers t6 WHERE t6.tenant_id = a.tenant_id ORDER BY t6.created_at ASC LIMIT 1)
-            ) as teacher_name
+            ) as teacher_name,
+            COALESCE(
+                (
+                    SELECT COUNT(DISTINCT en.student_id)
+                    FROM enrollments en
+                    JOIN students s ON s.id = en.student_id
+                    WHERE en.class_id = a.class_id
+                      AND (en.status ILIKE 'active' OR en.status IS NULL)
+                      AND (s.is_active = true OR s.is_active IS NULL)
+                      AND (s.status ILIKE 'active' OR s.status IS NULL)
+                      AND s.deleted_at IS NULL
+                ), 0
+            )::bigint as total_students,
+            COALESCE(
+                (
+                    SELECT COUNT(DISTINCT sub.student_id)
+                    FROM assignment_submissions sub
+                    WHERE sub.assignment_id = a.id
+                      AND sub.status != 'unsubmitted'
+                ), 0
+            )::bigint as submitted_count
         FROM assignments a
         LEFT JOIN classes c ON c.id = a.class_id
         LEFT JOIN subjects sub ON sub.id = a.subject_id
@@ -981,6 +1070,9 @@ async fn get_by_id(
                 session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
                 release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
                 allow_late_submission: r.try_get::<Option<bool>, _>("allow_late_submission").ok().flatten(),
+                total_students: r.try_get::<Option<i64>, _>("total_students").ok().flatten(),
+                submitted_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
+                submission_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
                 questions,
             };
             Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
