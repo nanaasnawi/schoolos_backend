@@ -51,7 +51,7 @@ impl AuthorizationScope {
         Ok(row.and_then(|r| r.try_get("id").ok()))
     }
 
-    /// Check if a student is actively enrolled in a class (supports parallel classes of same tingkat)
+    /// Check if a student is actively enrolled in a class
     pub async fn is_student_enrolled_in_class(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -63,19 +63,10 @@ impl AuthorizationScope {
             SELECT EXISTS(
                 SELECT 1 FROM enrollments en
                 JOIN students s ON s.id = en.student_id
-                JOIN classes en_c ON en_c.id = en.class_id
-                JOIN classes target_c ON target_c.id = $3
                 WHERE en.tenant_id = $1 
                   AND en.student_id = $2 
-                  AND (
-                      en_c.id = target_c.id 
-                      OR (
-                          target_c.tingkat IS NOT NULL 
-                          AND target_c.tingkat != '' 
-                          AND target_c.tingkat = en_c.tingkat
-                      )
-                  )
-                  AND (en.status ILIKE 'active')
+                  AND en.class_id = $3
+                  AND (en.status ILIKE 'active' OR en.status IS NULL)
                   AND s.deleted_at IS NULL
             ) as is_enrolled
             "#,
@@ -89,7 +80,7 @@ impl AuthorizationScope {
         Ok(row.try_get("is_enrolled").unwrap_or(false))
     }
 
-    /// Check if a parent/guardian has an actively enrolled child in a class (supports parallel classes of same tingkat)
+    /// Check if a parent/guardian has an actively enrolled child in a class
     pub async fn is_parent_of_enrolled_student(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -103,19 +94,10 @@ impl AuthorizationScope {
                 FROM guardians g
                 JOIN students s ON s.guardian_id = g.id
                 JOIN enrollments en ON en.student_id = s.id
-                JOIN classes en_c ON en_c.id = en.class_id
-                JOIN classes target_c ON target_c.id = $3
                 WHERE g.user_id = $1 
                   AND g.tenant_id = $2
-                  AND (
-                      en_c.id = target_c.id
-                      OR (
-                          target_c.tingkat IS NOT NULL 
-                          AND target_c.tingkat != '' 
-                          AND target_c.tingkat = en_c.tingkat
-                      )
-                  )
-                  AND (en.status ILIKE 'active')
+                  AND en.class_id = $3
+                  AND (en.status ILIKE 'active' OR en.status IS NULL)
                   AND s.deleted_at IS NULL
             ) as is_parent
             "#,

@@ -344,7 +344,7 @@ async fn login(
     let response_data = LoginResponse {
         access_token: token,
         token_type: "Bearer".to_string(),
-        expires_in: 2592000,
+        expires_in: 315360000,
         refresh_token,
         user_id,
         tenant_id: tenant_id.map(|t| t.to_string()),
@@ -2258,13 +2258,16 @@ async fn refresh(
         }
     }
 
+    let is_student = token_data.claims.role.as_deref() == Some("Siswa") || token_data.claims.role.as_deref() == Some("Student");
+    let access_days = if is_student { 3650 } else { 365 };
+
     let new_access_claims = Claims {
         sub: token_data.claims.sub.clone(),
         tenant_id: token_data.claims.tenant_id.clone(),
         email: token_data.claims.email.clone(),
         full_name: token_data.claims.full_name.clone(),
         role: token_data.claims.role.clone(),
-        exp: (chrono::Utc::now() + chrono::Duration::days(30)).timestamp() as usize,
+        exp: (chrono::Utc::now() + chrono::Duration::days(access_days)).timestamp() as usize,
     };
     let new_access_token = jsonwebtoken::encode(
         &jsonwebtoken::Header::default(),
@@ -2284,7 +2287,7 @@ async fn refresh(
         email: token_data.claims.email,
         full_name: token_data.claims.full_name,
         role: token_data.claims.role,
-        exp: (chrono::Utc::now() + chrono::Duration::days(365)).timestamp() as usize,
+        exp: (chrono::Utc::now() + chrono::Duration::days(3650)).timestamp() as usize,
     };
     let new_refresh_token = jsonwebtoken::encode(
         &jsonwebtoken::Header::default(),

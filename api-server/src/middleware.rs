@@ -162,11 +162,28 @@ pub async fn auth_middleware(
     validation.validate_exp = true;
     validation.leeway = 5;
 
-    let token_data = decode::<Claims>(
+    let mut token_data = decode::<Claims>(
         &token,
         &DecodingKey::from_secret(ctx.jwt_secret.as_bytes()),
         &validation,
     );
+
+    // If an authentic student token has an older expired timestamp, permit permanent session on device
+    if let Err(ref err) = token_data {
+        if matches!(err.kind(), jsonwebtoken::errors::ErrorKind::ExpiredSignature) {
+            let mut lenient_val = Validation::default();
+            lenient_val.validate_exp = false;
+            if let Ok(td_lenient) = decode::<Claims>(
+                &token,
+                &DecodingKey::from_secret(ctx.jwt_secret.as_bytes()),
+                &lenient_val,
+            ) {
+                if td_lenient.claims.role.as_deref() == Some("Siswa") || td_lenient.claims.role.as_deref() == Some("Student") {
+                    token_data = Ok(td_lenient);
+                }
+            }
+        }
+    }
 
     let claims = match token_data {
         Err(err) => {
@@ -201,9 +218,10 @@ pub async fn auth_middleware(
                 .unwrap_or_else(|_| StatusCode::UNAUTHORIZED.into_response()));
         }
         Ok(td) => {
-            // Additional wall-clock timestamp check against claims.exp
+            // Additional wall-clock timestamp check against claims.exp (except permanent student sessions)
+            let is_student = td.claims.role.as_deref() == Some("Siswa") || td.claims.role.as_deref() == Some("Student");
             let now_ts = chrono::Utc::now().timestamp() as usize;
-            if td.claims.exp <= now_ts {
+            if !is_student && td.claims.exp <= now_ts {
                 tracing::warn!(
                     "Fail-fast JWT rejection: token expired (exp: {}, now: {})",
                     td.claims.exp,
