@@ -1133,6 +1133,18 @@ impl Bootstrap {
                     )),
             )
             .nest(
+                "/api/v1/academic/academic-years",
+                academic_year_routes()
+                    .layer(axum::middleware::from_fn_with_state(
+                        context.clone(),
+                        idempotency::idempotency_middleware,
+                    ))
+                    .layer(axum::middleware::from_fn_with_state(
+                        context.clone(),
+                        auth_middleware,
+                    )),
+            )
+            .nest(
                 "/api/v1/academic/context",
                 academic_context_routes()
                     .layer(axum::middleware::from_fn_with_state(
