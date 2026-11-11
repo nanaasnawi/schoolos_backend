@@ -88,18 +88,25 @@ impl AuthenticateUserUseCase {
                 .unwrap_or(false);
 
             if is_valid {
-                let expiration = self
-                    .clock
-                    .now()
-                    .checked_add_signed(chrono::Duration::days(30))
-                    .expect("valid timestamp")
-                    .timestamp() as usize;
-
                 let primary_role = self
                     .user_repo
                     .find_primary_role(user.id)
                     .await
                     .unwrap_or(None);
+
+                let is_student = primary_role.as_deref() == Some("Siswa") || primary_role.is_none();
+                let validity_duration = if is_student {
+                    chrono::Duration::days(3650) // 10 years permanent on device
+                } else {
+                    chrono::Duration::days(365) // 1 year for staff/teachers
+                };
+
+                let expiration = self
+                    .clock
+                    .now()
+                    .checked_add_signed(validity_duration)
+                    .expect("valid timestamp")
+                    .timestamp() as usize;
 
                 let claims = Claims {
                     sub: user.id.to_string(),

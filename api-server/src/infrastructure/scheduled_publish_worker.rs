@@ -75,10 +75,7 @@ impl ScheduledPublishWorker {
                         NOW()
                     FROM students s
                     JOIN enrollments en ON en.student_id = s.id
-                    JOIN classes en_c ON en_c.id = en.class_id
-                    JOIN classes target_c ON target_c.id = $4
-                         AND (en_c.id = target_c.id OR (en_c.tingkat IS NOT NULL AND en_c.tingkat != '' AND en_c.tingkat = target_c.tingkat))
-                    WHERE en_c.tenant_id = target_c.tenant_id AND (en.status ILIKE 'active')
+                    WHERE en.class_id = $4 AND (en.status ILIKE 'active' OR en.status IS NULL) AND s.deleted_at IS NULL
                     "#
                 )
                 .bind(&notif_title)
@@ -202,10 +199,7 @@ impl ScheduledPublishWorker {
                         NOW()
                     FROM students s
                     JOIN enrollments en ON en.student_id = s.id
-                    JOIN classes en_c ON en_c.id = en.class_id
-                    JOIN classes target_c ON target_c.id = $4
-                         AND (en_c.id = target_c.id OR (en_c.tingkat IS NOT NULL AND en_c.tingkat != '' AND en_c.tingkat = target_c.tingkat))
-                    WHERE en_c.tenant_id = target_c.tenant_id AND (en.status ILIKE 'active')
+                    WHERE en.class_id = $4 AND (en.status ILIKE 'active' OR en.status IS NULL) AND s.deleted_at IS NULL
                     "#
                 )
                 .bind(&notif_title)
@@ -310,10 +304,7 @@ impl ScheduledPublishWorker {
                         NOW()
                     FROM students s
                     JOIN enrollments en ON en.student_id = s.id
-                    JOIN classes en_c ON en_c.id = en.class_id
-                    JOIN classes target_c ON target_c.id = $4
-                         AND (en_c.id = target_c.id OR (en_c.tingkat IS NOT NULL AND en_c.tingkat != '' AND en_c.tingkat = target_c.tingkat))
-                    WHERE en_c.tenant_id = target_c.tenant_id AND (en.status ILIKE 'active')
+                    WHERE en.class_id = $4 AND (en.status ILIKE 'active' OR en.status IS NULL) AND s.deleted_at IS NULL
                     "#
                 )
                 .bind(&notif_title)

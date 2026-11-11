@@ -473,10 +473,10 @@ async fn create(
             FROM students s
             JOIN enrollments en ON en.student_id = s.id
             JOIN classes en_c ON en_c.id = en.class_id
-            LEFT JOIN classes target_c ON target_c.id = $5
             WHERE s.tenant_id = $3
-              AND ($5::uuid IS NULL OR en_c.id = $5 OR (en_c.tingkat IS NOT NULL AND en_c.tingkat != '' AND target_c.tingkat IS NOT NULL AND en_c.tingkat = target_c.tingkat))
-              AND (en.status = 'Active' OR en.status = 'ACTIVE')
+              AND ($5::uuid IS NULL OR en_c.id = $5)
+              AND (en.status ILIKE 'active' OR en.status IS NULL)
+              AND s.deleted_at IS NULL
             "#,
         )
         .bind(&title_c)
@@ -488,20 +488,7 @@ async fn create(
         .await;
 
         let fcm_target = if let Some(class_uuid) = cid {
-            let sibling_cids = sqlx::query_scalar::<_, Uuid>(
-                r#"
-                SELECT sib.id FROM classes c
-                JOIN classes sib ON sib.tenant_id = c.tenant_id
-                     AND (sib.id = c.id OR (sib.tingkat IS NOT NULL AND sib.tingkat != '' AND sib.tingkat = c.tingkat))
-                WHERE c.id = $1
-                "#
-            )
-            .bind(class_uuid)
-            .fetch_all(&ctx.pool)
-            .await
-            .unwrap_or_else(|_| vec![class_uuid]);
-
-            crate::infrastructure::fcm::FcmTarget::Classes(sibling_cids)
+            crate::infrastructure::fcm::FcmTarget::Classes(vec![class_uuid])
         } else {
             crate::infrastructure::fcm::FcmTarget::Roles(vec!["student".to_string()])
         };
@@ -1694,9 +1681,9 @@ async fn get_submissions(
                     LEFT JOIN users u ON u.id = s.user_id
                     LEFT JOIN assignment_submissions sub ON sub.assignment_id = $1 AND (sub.student_id = s.id OR (s.user_id IS NOT NULL AND sub.student_id = s.user_id))
                     JOIN classes en_c ON en_c.id = en.class_id
-                    LEFT JOIN classes target_c ON target_c.id = $2
-                    WHERE ($2::uuid IS NULL OR en_c.id = $2 OR (en_c.tingkat IS NOT NULL AND en_c.tingkat != '' AND target_c.tingkat IS NOT NULL AND en_c.tingkat = target_c.tingkat))
-                      AND (en.status = 'Active' OR en.status = 'ACTIVE' OR en.status IS NULL)
+                    WHERE (en_c.id = $2 OR sub.id IS NOT NULL)
+                      AND (en.status ILIKE 'active' OR en.status IS NULL OR sub.id IS NOT NULL)
+                      AND s.deleted_at IS NULL
                     ORDER BY s.id, (sub.status IS NOT NULL AND sub.status != 'unsubmitted') DESC, sub.submitted_at DESC NULLS LAST
                 ) subquery
                 ORDER BY 

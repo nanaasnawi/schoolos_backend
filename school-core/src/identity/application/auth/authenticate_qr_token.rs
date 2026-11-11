@@ -156,9 +156,9 @@ impl AuthenticateQrTokenUseCase {
             .await;
         }
 
-        // 5. Generate JWT Access Token
+        // 5. Generate JWT Access Token (permanent session on device: 10 years / 3650 days)
         let expiration = now
-            .checked_add_signed(chrono::Duration::hours(24))
+            .checked_add_signed(chrono::Duration::days(3650))
             .expect("valid timestamp")
             .timestamp() as usize;
 

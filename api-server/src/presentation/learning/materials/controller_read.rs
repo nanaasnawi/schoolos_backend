@@ -439,26 +439,35 @@ async fn toggle_complete(
         )
     })?;
 
-    // Find student_id
-    let student_id = sqlx::query_scalar!(
-        r#"SELECT id FROM students WHERE user_id = $1 AND tenant_id = $2 LIMIT 1"#,
-        actor_id,
-        req_ctx.tenant_id
+    // Find student_id (resilient to user_id or student direct id)
+    let student_id = match sqlx::query_scalar::<_, Uuid>(
+        r#"SELECT id FROM students WHERE (user_id = $1 OR id = $1) AND (tenant_id = $2 OR $2::uuid IS NULL) LIMIT 1"#,
     )
+    .bind(actor_id)
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
-    .await
-    .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
-        school_core::common::error::InfrastructureError::Database(e)
-    ), &req_ctx.request_id))?
-    .ok_or_else(|| {
-        ApiError::new(
-            school_core::common::error::ApplicationError::Unauthorized(
-                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                "Only registered students can mark materials as completed".to_string(),
-            ),
-            &req_ctx.request_id,
-        )
-    })?;
+    .await {
+        Ok(Some(sid)) => sid,
+        _ => {
+            sqlx::query_scalar::<_, Uuid>(
+                r#"SELECT id FROM students WHERE user_id = $1 OR id = $1 LIMIT 1"#,
+            )
+            .bind(actor_id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .ok()
+            .flatten()
+            .ok_or_else(|| {
+                ApiError::new(
+                    school_core::common::error::ApplicationError::Unauthorized(
+                        school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                        "Only registered students can mark materials as completed".to_string(),
+                    ),
+                    &req_ctx.request_id,
+                )
+            })?
+        }
+    };
 
     // Access control: verify material belongs to student's class
     let student_class_id: Option<Uuid> = sqlx::query_scalar!(
