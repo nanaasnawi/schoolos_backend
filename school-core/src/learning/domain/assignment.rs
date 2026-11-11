@@ -363,7 +363,7 @@ impl Assignment {
             }
         }
         if let Some(due) = due_at {
-            if due <= clock.now() {
+            if self.due_at != Some(due) && due <= clock.now() {
                 return Err(DomainError::Validation(
                     "due_date must be in the future".to_string(),
                 ));
