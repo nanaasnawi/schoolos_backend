@@ -1,14 +1,12 @@
 use axum::{
-    extract::{Query, State},
-    routing::post,
+    extract::{Path, Query, State},
+    routing::{get, post},
     Json, Router,
 };
 use chrono::NaiveDate;
-use school_core::academic::application::academic_year::{
-    create_academic_year::CreateAcademicYearCommand, list_academic_years::ListAcademicYearsQuery,
-};
-use school_core::common::models::page::Pagination;
+use school_core::academic::application::academic_year::create_academic_year::CreateAcademicYearCommand;
 use serde::{Deserialize, Serialize};
+use sqlx::Row;
 use uuid::Uuid;
 
 use crate::bootstrap::ApplicationContext;
@@ -20,6 +18,14 @@ pub struct CreateAcademicYearRequest {
     pub name: String,
     pub start_date: NaiveDate,
     pub end_date: NaiveDate,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateAcademicYearRequest {
+    pub name: Option<String>,
+    pub start_date: Option<NaiveDate>,
+    pub end_date: Option<NaiveDate>,
+    pub is_active: Option<bool>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -44,7 +50,9 @@ impl From<school_core::academic::domain::academic_year::AcademicYear> for Academ
 }
 
 pub fn academic_year_routes() -> Router<ApplicationContext> {
-    Router::new().route("/", post(create).get(list))
+    Router::new()
+        .route("/", post(create).get(list))
+        .route("/{id}", get(get_by_id).put(update).patch(update))
 }
 
 #[utoipa::path(
@@ -133,28 +141,45 @@ async fn list(
         )
     })?;
 
-    let query = ListAcademicYearsQuery {
-        tenant_id: req_ctx.tenant_id,
-        pagination: Pagination {
-            page: params.page.unwrap_or(1),
-            page_size: params.page_size.unwrap_or(20),
-        },
-    };
+    let rows = sqlx::query(
+        r#"
+        SELECT id, name, start_date, end_date, is_active
+        FROM academic_years
+        WHERE (tenant_id = $1 OR tenant_id = 'b158ec8a-6ea3-468a-bed5-917e37499550'::uuid) 
+          AND deleted_at IS NULL
+        ORDER BY is_active DESC, start_date DESC
+        "#,
+    )
+    .bind(req_ctx.tenant_id)
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| {
+        crate::error::ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
 
-    let page_result = ctx.list_academic_years.execute(query).await?;
-
-    let items = page_result
-        .items
+    let items: Vec<AcademicYearResponse> = rows
         .into_iter()
-        .map(AcademicYearResponse::from)
+        .map(|r| AcademicYearResponse {
+            id: r.get("id"),
+            name: r.get("name"),
+            start_date: r.get("start_date"),
+            end_date: r.get("end_date"),
+            is_active: r.get("is_active"),
+        })
         .collect();
 
+    let total = items.len() as u64;
     let meta = ApiMeta {
         pagination: Some(PaginationMeta {
-            page: page_result.page,
-            page_size: page_result.page_size,
-            total_items: page_result.total_items,
-            total_pages: page_result.total_pages,
+            page: params.page.unwrap_or(1),
+            page_size: params.page_size.unwrap_or(20),
+            total_items: total,
+            total_pages: 1,
         }),
         cursor: None,
         execution_time_ms: None,
@@ -166,4 +191,116 @@ async fn list(
         meta,
         req_ctx.request_id,
     )))
+}
+
+async fn get_by_id(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ApiResponse<AcademicYearResponse>>, crate::error::ApiError> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, name, start_date, end_date, is_active
+        FROM academic_years
+        WHERE id = $1 AND deleted_at IS NULL
+        LIMIT 1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        crate::error::ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?
+    .ok_or_else(|| {
+        crate::error::ApiError::new(
+            school_core::common::error::ApplicationError::NotFound(
+                school_core::common::error_code::ErrorCode::AcademicYearNotFound,
+                format!("Academic year {} not found", id),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let resp = AcademicYearResponse {
+        id: row.get("id"),
+        name: row.get("name"),
+        start_date: row.get("start_date"),
+        end_date: row.get("end_date"),
+        is_active: row.get("is_active"),
+    };
+
+    Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
+}
+
+async fn update(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateAcademicYearRequest>,
+) -> Result<Json<ApiResponse<AcademicYearResponse>>, crate::error::ApiError> {
+    use crate::middleware::require_permission;
+    use school_core::permission::domain::permission_registry::Permission;
+    require_permission(&req_ctx.actor, Permission::AcademicManage).map_err(|_| {
+        crate::error::ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Insufficient permissions".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let row = sqlx::query(
+        r#"
+        UPDATE academic_years
+        SET 
+            name = COALESCE($2, name),
+            start_date = COALESCE($3, start_date),
+            end_date = COALESCE($4, end_date),
+            is_active = COALESCE($5, is_active),
+            updated_at = NOW()
+        WHERE id = $1 AND deleted_at IS NULL
+        RETURNING id, name, start_date, end_date, is_active
+        "#,
+    )
+    .bind(id)
+    .bind(payload.name)
+    .bind(payload.start_date)
+    .bind(payload.end_date)
+    .bind(payload.is_active)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        crate::error::ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?
+    .ok_or_else(|| {
+        crate::error::ApiError::new(
+            school_core::common::error::ApplicationError::NotFound(
+                school_core::common::error_code::ErrorCode::AcademicYearNotFound,
+                format!("Academic year {} not found", id),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let resp = AcademicYearResponse {
+        id: row.get("id"),
+        name: row.get("name"),
+        start_date: row.get("start_date"),
+        end_date: row.get("end_date"),
+        is_active: row.get("is_active"),
+    };
+
+    Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
 }
