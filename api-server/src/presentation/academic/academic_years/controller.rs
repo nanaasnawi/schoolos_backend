@@ -13,18 +13,27 @@ use crate::bootstrap::ApplicationContext;
 use crate::extractors::RequestContext;
 use crate::response::{ApiMeta, ApiResponse, PaginationMeta};
 
+fn parse_flexible_date(s: &str) -> Option<NaiveDate> {
+    let clean = s.trim();
+    if clean.len() >= 10 {
+        NaiveDate::parse_from_str(&clean[..10], "%Y-%m-%d").ok()
+    } else {
+        None
+    }
+}
+
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct CreateAcademicYearRequest {
     pub name: String,
-    pub start_date: NaiveDate,
-    pub end_date: NaiveDate,
+    pub start_date: String,
+    pub end_date: String,
 }
 
 #[derive(Deserialize)]
 pub struct UpdateAcademicYearRequest {
     pub name: Option<String>,
-    pub start_date: Option<NaiveDate>,
-    pub end_date: Option<NaiveDate>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
     pub is_active: Option<bool>,
 }
 
@@ -82,11 +91,31 @@ async fn create(
         )
     })?;
 
+    let start_date = parse_flexible_date(&payload.start_date).ok_or_else(|| {
+        crate::error::ApiError::new(
+            school_core::common::error::ApplicationError::Validation(
+                school_core::common::error_code::ErrorCode::ValidationFormatInvalid,
+                "Format tanggal mulai tidak valid, gunakan format YYYY-MM-DD".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let end_date = parse_flexible_date(&payload.end_date).ok_or_else(|| {
+        crate::error::ApiError::new(
+            school_core::common::error::ApplicationError::Validation(
+                school_core::common::error_code::ErrorCode::ValidationFormatInvalid,
+                "Format tanggal selesai tidak valid, gunakan format YYYY-MM-DD".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
     let command = CreateAcademicYearCommand {
         tenant_id: req_ctx.tenant_id,
         name: payload.name,
-        start_date: payload.start_date,
-        end_date: payload.end_date,
+        start_date,
+        end_date,
     };
 
     let year = ctx.create_academic_year.execute(command).await?;
@@ -256,6 +285,9 @@ async fn update(
         )
     })?;
 
+    let start_date = payload.start_date.as_deref().and_then(parse_flexible_date);
+    let end_date = payload.end_date.as_deref().and_then(parse_flexible_date);
+
     let row = sqlx::query(
         r#"
         UPDATE academic_years
@@ -271,8 +303,8 @@ async fn update(
     )
     .bind(id)
     .bind(payload.name)
-    .bind(payload.start_date)
-    .bind(payload.end_date)
+    .bind(start_date)
+    .bind(end_date)
     .bind(payload.is_active)
     .fetch_optional(&ctx.pool)
     .await
