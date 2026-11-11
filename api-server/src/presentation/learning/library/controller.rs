@@ -847,7 +847,7 @@ async fn assign_reading_material(
     }
 
     // 4. Verify teacher is authorized to teach this class (homeroom or scheduled)
-    let is_admin = req_ctx.actor.as_ref().map(|a| {
+    let _is_admin = req_ctx.actor.as_ref().map(|a| {
         a.roles.iter().any(|r| {
             let n = r.name.to_lowercase();
             n.contains("admin") || n.contains("staff") || n.contains("operator") || n.contains("kepala")
