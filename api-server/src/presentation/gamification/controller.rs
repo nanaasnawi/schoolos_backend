@@ -1,6 +1,6 @@
 use axum::{
     extract::{Query, State},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
@@ -66,9 +66,11 @@ pub struct AwardXpResponse {
 pub fn gamification_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/", get(get_student_gamification).post(award_student_xp))
+        .route("/daily-quest", get(super::daily_quest::get_daily_quest))
+        .route("/daily-quest/submit", post(super::daily_quest::submit_daily_quest))
 }
 
-fn calculate_level(total_xp: i64) -> i32 {
+pub(crate) fn calculate_level(total_xp: i64) -> i32 {
     let mut lvl = 1;
     while total_xp >= ((lvl as f64).powi(2) * 50.0) as i64 {
         lvl += 1;
