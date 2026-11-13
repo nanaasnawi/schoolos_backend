@@ -134,15 +134,18 @@ fn indonesian_day_label(date: NaiveDate) -> String {
 
 fn featured_mode_for_date(date: NaiveDate) -> &'static str {
     match date.weekday().num_days_from_monday() {
-        0 | 3 => "FACT_OR_MYTH",
-        1 | 4 => "CASE_DETECTIVE",
-        2 | 5 => "SEQUENCE_ORDER",
-        _ => "CONCEPT_GUESS",
+        0 | 4 => "MAP_PIN_HUNT",
+        1 => "FACT_OR_MYTH",
+        2 => "SEQUENCE_ORDER",
+        3 => "CASE_DETECTIVE",
+        5 => "CONCEPT_GUESS",
+        _ => "MAP_PIN_HUNT",
     }
 }
 
 fn normalize_mode(raw: Option<&str>, fallback: &str) -> String {
     match raw.map(|s| s.trim().to_uppercase()).as_deref() {
+        Some("MAP_PIN_HUNT") => "MAP_PIN_HUNT".to_string(),
         Some("FACT_OR_MYTH") => "FACT_OR_MYTH".to_string(),
         Some("CASE_DETECTIVE") => "CASE_DETECTIVE".to_string(),
         Some("SEQUENCE_ORDER") => "SEQUENCE_ORDER".to_string(),
@@ -153,9 +156,10 @@ fn normalize_mode(raw: Option<&str>, fallback: &str) -> String {
 
 fn mode_display_label(code: &str) -> &'static str {
     match code {
-        "FACT_OR_MYTH" => "Fakta atau Mitos?",
-        "CASE_DETECTIVE" => "Detektif Kasus",
-        "SEQUENCE_ORDER" => "Rangkai Logika",
+        "MAP_PIN_HUNT" => "Peta & Lokasi",
+        "FACT_OR_MYTH" => "Geser Fakta/Mitos",
+        "CASE_DETECTIVE" => "Komik Kasus",
+        "SEQUENCE_ORDER" => "Susun Langkah",
         "CONCEPT_GUESS" => "Tebak Istilah",
         _ => "Misi Harian",
     }
@@ -543,6 +547,18 @@ fn build_curated_quest(
         "SEQUENCE_ORDER" => {
             let pool = vec![
                 json!({
+                    "id": "s_math_1",
+                    "prompt": "Susun langkah-langkah penyelesaian persamaan berikut: 2x + 5 = 11",
+                    "steps": [
+                        "2x + 5 = 11",
+                        "2x = 11 - 5",
+                        "2x = 6",
+                        "x = 3"
+                    ],
+                    "explanation": "Untuk mencari x, pindahkan konstanta +5 ke ruas kanan menjadi -5, hitung 11 - 5 = 6, lalu bagi 2 sehingga x = 3.",
+                    "topic_tag": "Matematika Aljabar"
+                }),
+                json!({
                     "id": "s1",
                     "prompt": "Urutkan langkah mengelola keuangan pribadi/keluarga bulanan yang sehat dari awal hingga akhir:",
                     "steps": [
@@ -599,6 +615,72 @@ fn build_curated_quest(
                 "Rangkai Logika: Susun Urutan yang Tepat".to_string(),
                 "Atur setiap blok langkah dari posisi 1 sampai 4 agar alurnya logis!".to_string(),
                 "Logika & Literasi".to_string(),
+                Value::Array(items),
+            )
+        }
+        "MAP_PIN_HUNT" => {
+            let items = vec![
+                json!({
+                    "id": "mp_cirebon",
+                    "scene_id": "cirebon_keraton_map",
+                    "interaction_type": "MAP_TAGS",
+                    "prompt": "Sematkan tag ke lokasi yang tepat pada peta untuk menandai wilayah Kesultanan Cirebon dan keraton-keratonnya!",
+                    "pins": [
+                        {"id": "p1", "label": "Kesultanan Cirebon (Pusat)", "step_label": "Tag Cirebon Pusat", "x": 0.56, "y": 0.44},
+                        {"id": "p2", "label": "Kasepuhan (Keraton)", "step_label": "Tag Kasepuhan", "x": 0.51, "y": 0.36},
+                        {"id": "p3", "label": "Kanoman (Keraton)", "step_label": "Tag Kanoman", "x": 0.50, "y": 0.58},
+                        {"id": "p4", "label": "Kacirebonan (Keraton)", "step_label": "Tag Kacirebonan", "x": 0.63, "y": 0.55}
+                    ],
+                    "explanation": "Keraton Kasepuhan, Kanoman, dan Kacirebonan merupakan pusat sejarah Kesultanan Cirebon di pesisir utara Jawa Barat.",
+                    "topic_tag": "Geografi & Sejarah"
+                }),
+                json!({
+                    "id": "mp_proklamasi",
+                    "scene_id": "proklamasi_1945",
+                    "interaction_type": "SCENE_HOTSPOT",
+                    "prompt": "TEBAK LOKASI: Klik titik pembacaan Teks Proklamasi oleh Soekarno-Hatta di Jalan Pegangsaan Timur 56, Jakarta!",
+                    "pins": [
+                        {"id": "h1", "label": "Tiang Bendera Merah Putih", "step_label": "Tiang Bendera", "x": 0.28, "y": 0.52, "is_target": false},
+                        {"id": "h2", "label": "Mikrofon Halaman Depan", "step_label": "Area Mikrofon", "x": 0.38, "y": 0.62, "is_target": false},
+                        {"id": "h3", "label": "Podium Pembacaan Teks Proklamasi", "step_label": "Pembaca Teks", "x": 0.50, "y": 0.56, "is_target": true},
+                        {"id": "h4", "label": "Barisan Pemuda & Tamu Undangan", "step_label": "Barisan Tamu", "x": 0.78, "y": 0.60, "is_target": false}
+                    ],
+                    "explanation": "Ir. Soekarno didampingi Drs. Moh. Hatta membacakan Teks Proklamasi di depan teras rumah Jalan Pegangsaan Timur 56 pada 17 Agustus 1945.",
+                    "topic_tag": "Sejarah Nasional"
+                }),
+                json!({
+                    "id": "mp_routine",
+                    "scene_id": "morning_routine_room",
+                    "interaction_type": "SCENE_HOTSPOT",
+                    "prompt": "HUNT: Click the digital clock showing 05:00 when Andi wakes up!",
+                    "pins": [
+                        {"id": "r1", "label": "Jam Digital 05:00", "step_label": "Jam 05:00", "x": 0.29, "y": 0.62, "is_target": true},
+                        {"id": "r2", "label": "Andi Bangun Tidur", "step_label": "Kasur Andi", "x": 0.48, "y": 0.54, "is_target": false},
+                        {"id": "r3", "label": "Seragam Sekolah", "step_label": "Seragam", "x": 0.72, "y": 0.42, "is_target": false},
+                        {"id": "r4", "label": "Bola Sepak", "step_label": "Bola Sepak", "x": 0.80, "y": 0.82, "is_target": false}
+                    ],
+                    "explanation": "Pukul 05:00 pagi ditunjukkan oleh jam weker digital di sebelah tempat tidur sebelum bersiap memakai seragam sekolah.",
+                    "topic_tag": "Bahasa Inggris & Rutinitas"
+                }),
+                json!({
+                    "id": "mp_fotosintesis",
+                    "scene_id": "photosynthesis_scene",
+                    "interaction_type": "MAP_TAGS",
+                    "prompt": "Sematkan tag komponen Fotosintesis ke titik yang tepat pada diagram daun dan tanaman!",
+                    "pins": [
+                        {"id": "f1", "label": "Energi Cahaya Matahari", "step_label": "Tag Matahari", "x": 0.24, "y": 0.25},
+                        {"id": "f2", "label": "Kloroplas pada Daun Hijau", "step_label": "Tag Kloroplas", "x": 0.54, "y": 0.45},
+                        {"id": "f3", "label": "Penyerapan Air & Mineral Akar", "step_label": "Tag Akar Air", "x": 0.48, "y": 0.82},
+                        {"id": "f4", "label": "Pelepasan Gas Oksigen (O₂)", "step_label": "Tag Oksigen", "x": 0.78, "y": 0.34}
+                    ],
+                    "explanation": "Tumbuhan menyerap air lewat akar dan CO₂ lewat stomata, lalu mengolahnya di kloroplas dengan cahaya matahari menghasilkan energi & O₂.",
+                    "topic_tag": "IPA Biologi"
+                }),
+            ];
+            (
+                "Eksplorasi Peta & Lokasi Interaktif".to_string(),
+                "Sematkan tag lokasi pada peta dan temukan titik penting di gambar!".to_string(),
+                "Geografi, Sejarah & Sains".to_string(),
                 Value::Array(items),
             )
         }
@@ -787,11 +869,16 @@ pub async fn get_daily_quest(
         ),
         None => {
             let (gen_title, gen_subtitle, gen_subject, gen_challenges, gen_source) =
-                match try_generate_ai_quest(&grade_band, &requested_mode, &topic_hint, &subject_hint, today).await {
-                    Some((t, sub, subj, ch)) => (t, sub, subj, ch, "AI_CURRICULUM".to_string()),
-                    None => {
-                        let (t, sub, subj, ch) = build_curated_quest(&grade_band, &requested_mode, today, &subject_hint);
-                        (t, sub, subj, ch, "DAILY_BANK".to_string())
+                if requested_mode == "MAP_PIN_HUNT" {
+                    let (t, sub, subj, ch) = build_curated_quest(&grade_band, &requested_mode, today, &subject_hint);
+                    (t, sub, subj, ch, "VISUAL_MAP_BANK".to_string())
+                } else {
+                    match try_generate_ai_quest(&grade_band, &requested_mode, &topic_hint, &subject_hint, today).await {
+                        Some((t, sub, subj, ch)) => (t, sub, subj, ch, "AI_CURRICULUM".to_string()),
+                        None => {
+                            let (t, sub, subj, ch) = build_curated_quest(&grade_band, &requested_mode, today, &subject_hint);
+                            (t, sub, subj, ch, "DAILY_BANK".to_string())
+                        }
                     }
                 };
 
@@ -938,7 +1025,7 @@ pub async fn get_daily_quest(
         })
         .collect();
 
-    let all_modes = ["FACT_OR_MYTH", "CASE_DETECTIVE", "SEQUENCE_ORDER", "CONCEPT_GUESS"];
+    let all_modes = ["MAP_PIN_HUNT", "FACT_OR_MYTH", "SEQUENCE_ORDER", "CASE_DETECTIVE", "CONCEPT_GUESS"];
     let available_modes = all_modes
         .iter()
         .map(|code| DailyQuestModeInfo {
