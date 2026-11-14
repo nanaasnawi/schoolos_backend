@@ -2,7 +2,9 @@
 # Optimized for Railway & containerized production deployment with cargo-chef caching
 
 # ── 1. Chef Base Stage ────────────────────────────────────────────────────────
-FROM lukemathwalker/cargo-chef:latest-rust-1-bookworm AS chef
+# Pin Rust 1.99: Rust 1.100+ (latest-rust-1-bookworm since 2026-11-13) enables
+# never-type (!) fallback changes (rust#148922) that break sqlx-postgres 0.7.4.
+FROM lukemathwalker/cargo-chef:latest-rust-1.99-bookworm AS chef
 WORKDIR /usr/src/schoolos
 
 # ── 2. Planner Stage ──────────────────────────────────────────────────────────
