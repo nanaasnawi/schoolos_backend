@@ -68,6 +68,8 @@ pub fn gamification_routes() -> Router<ApplicationContext> {
         .route("/", get(get_student_gamification).post(award_student_xp))
         .route("/daily-quest", get(super::daily_quest::get_daily_quest))
         .route("/daily-quest/submit", post(super::daily_quest::submit_daily_quest))
+        .route("/daily-quest/feed-pet", post(super::daily_quest::feed_shiba_pet))
+        .route("/daily-quest/open-chest", post(super::daily_quest::open_daily_chest))
 }
 
 pub(crate) fn calculate_level(total_xp: i64) -> i32 {
