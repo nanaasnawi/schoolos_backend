@@ -134,12 +134,11 @@ fn indonesian_day_label(date: NaiveDate) -> String {
 
 fn featured_mode_for_date(date: NaiveDate) -> &'static str {
     match date.weekday().num_days_from_monday() {
-        0 | 4 => "MAP_PIN_HUNT",
+        0 | 4 | 5 => "MAP_PIN_HUNT",
         1 => "FACT_OR_MYTH",
         2 => "SEQUENCE_ORDER",
         3 => "CASE_DETECTIVE",
-        5 => "CONCEPT_GUESS",
-        _ => "MAP_PIN_HUNT",
+        _ => "CONCEPT_GUESS",
     }
 }
 
@@ -626,10 +625,10 @@ fn build_curated_quest(
                     "interaction_type": "MAP_TAGS",
                     "prompt": "Sematkan tag ke lokasi yang tepat pada peta untuk menandai wilayah Kesultanan Cirebon dan keraton-keratonnya!",
                     "pins": [
-                        {"id": "p1", "label": "Kesultanan Cirebon (Pusat)", "step_label": "Tag Cirebon Pusat", "x": 0.56, "y": 0.44},
-                        {"id": "p2", "label": "Kasepuhan (Keraton)", "step_label": "Tag Kasepuhan", "x": 0.51, "y": 0.36},
-                        {"id": "p3", "label": "Kanoman (Keraton)", "step_label": "Tag Kanoman", "x": 0.50, "y": 0.58},
-                        {"id": "p4", "label": "Kacirebonan (Keraton)", "step_label": "Tag Kacirebonan", "x": 0.63, "y": 0.55}
+                        {"id": "p1", "label": "Kesultanan Cirebon (Pusat)", "step_label": "Tag Cirebon Pusat", "x": 0.52, "y": 0.49},
+                        {"id": "p2", "label": "Kasepuhan (Keraton)", "step_label": "Tag Kasepuhan", "x": 0.47, "y": 0.40},
+                        {"id": "p3", "label": "Kanoman (Keraton)", "step_label": "Tag Kanoman", "x": 0.43, "y": 0.55},
+                        {"id": "p4", "label": "Kacirebonan (Keraton)", "step_label": "Tag Kacirebonan", "x": 0.53, "y": 0.58}
                     ],
                     "explanation": "Keraton Kasepuhan, Kanoman, dan Kacirebonan merupakan pusat sejarah Kesultanan Cirebon di pesisir utara Jawa Barat.",
                     "topic_tag": "Geografi & Sejarah"
@@ -640,10 +639,10 @@ fn build_curated_quest(
                     "interaction_type": "SCENE_HOTSPOT",
                     "prompt": "TEBAK LOKASI: Klik titik pembacaan Teks Proklamasi oleh Soekarno-Hatta di Jalan Pegangsaan Timur 56, Jakarta!",
                     "pins": [
-                        {"id": "h1", "label": "Tiang Bendera Merah Putih", "step_label": "Tiang Bendera", "x": 0.28, "y": 0.52, "is_target": false},
-                        {"id": "h2", "label": "Mikrofon Halaman Depan", "step_label": "Area Mikrofon", "x": 0.38, "y": 0.62, "is_target": false},
-                        {"id": "h3", "label": "Podium Pembacaan Teks Proklamasi", "step_label": "Pembaca Teks", "x": 0.50, "y": 0.56, "is_target": true},
-                        {"id": "h4", "label": "Barisan Pemuda & Tamu Undangan", "step_label": "Barisan Tamu", "x": 0.78, "y": 0.60, "is_target": false}
+                        {"id": "h1", "label": "Tiang Bendera Merah Putih", "step_label": "Tiang Bendera", "x": 0.26, "y": 0.46, "is_target": false},
+                        {"id": "h2", "label": "Mikrofon Halaman Depan", "step_label": "Area Mikrofon", "x": 0.38, "y": 0.60, "is_target": false},
+                        {"id": "h3", "label": "Podium Pembacaan Teks Proklamasi", "step_label": "Pembaca Teks", "x": 0.50, "y": 0.55, "is_target": true},
+                        {"id": "h4", "label": "Barisan Pemuda & Tamu Undangan", "step_label": "Barisan Tamu", "x": 0.78, "y": 0.58, "is_target": false}
                     ],
                     "explanation": "Ir. Soekarno didampingi Drs. Moh. Hatta membacakan Teks Proklamasi di depan teras rumah Jalan Pegangsaan Timur 56 pada 17 Agustus 1945.",
                     "topic_tag": "Sejarah Nasional"
@@ -654,10 +653,10 @@ fn build_curated_quest(
                     "interaction_type": "SCENE_HOTSPOT",
                     "prompt": "HUNT: Click the digital clock showing 05:00 when Andi wakes up!",
                     "pins": [
-                        {"id": "r1", "label": "Jam Digital 05:00", "step_label": "Jam 05:00", "x": 0.29, "y": 0.62, "is_target": true},
-                        {"id": "r2", "label": "Andi Bangun Tidur", "step_label": "Kasur Andi", "x": 0.48, "y": 0.54, "is_target": false},
-                        {"id": "r3", "label": "Seragam Sekolah", "step_label": "Seragam", "x": 0.72, "y": 0.42, "is_target": false},
-                        {"id": "r4", "label": "Bola Sepak", "step_label": "Bola Sepak", "x": 0.80, "y": 0.82, "is_target": false}
+                        {"id": "r1", "label": "Jam Digital 05:00", "step_label": "Jam 05:00", "x": 0.135, "y": 0.62, "is_target": true},
+                        {"id": "r2", "label": "Andi Bangun Tidur", "step_label": "Kasur Andi", "x": 0.45, "y": 0.46, "is_target": false},
+                        {"id": "r3", "label": "Seragam Sekolah", "step_label": "Seragam", "x": 0.89, "y": 0.42, "is_target": false},
+                        {"id": "r4", "label": "Bola Sepak", "step_label": "Bola Sepak", "x": 0.92, "y": 0.86, "is_target": false}
                     ],
                     "explanation": "Pukul 05:00 pagi ditunjukkan oleh jam weker digital di sebelah tempat tidur sebelum bersiap memakai seragam sekolah.",
                     "topic_tag": "Bahasa Inggris & Rutinitas"
