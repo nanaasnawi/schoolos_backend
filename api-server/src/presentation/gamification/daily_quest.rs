@@ -6,7 +6,6 @@ use chrono::{Datelike, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
-use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use super::controller::calculate_level;
@@ -14,7 +13,6 @@ use crate::{
     bootstrap::ApplicationContext,
     error::ApiError,
     extractors::RequestContext,
-    infrastructure::nvidia_ai::{call_nvidia_nim, ChatMessage},
     response::ApiResponse,
 };
 use school_core::common::error::{ApplicationError, InfrastructureError};
@@ -147,6 +145,13 @@ pub struct SubmitDailyQuestResponse {
     pub message: String,
 }
 
+const ALL_MODES: [&str; 4] = [
+    "CROSSWORD",
+    "SLIDING_PUZZLE",
+    "BLOCK_PUZZLE",
+    "NUMBER_MERGE",
+];
+
 fn wib_today() -> NaiveDate {
     (Utc::now() + Duration::hours(7)).date_naive()
 }
@@ -179,54 +184,54 @@ fn indonesian_day_label(date: NaiveDate) -> String {
 }
 
 fn featured_mode_for_date(date: NaiveDate) -> &'static str {
-    match date.weekday().num_days_from_monday() {
-        0 | 5 => "MAP_PIN_HUNT",
-        1 => "FACT_OR_MYTH",
-        2 | 6 => "SPEED_MATCH",
-        3 => "CASE_DETECTIVE",
-        4 => "SEQUENCE_ORDER",
-        _ => "CONCEPT_GUESS",
+    match date.weekday().num_days_from_monday() % 4 {
+        0 => "CROSSWORD",
+        1 => "SLIDING_PUZZLE",
+        2 => "BLOCK_PUZZLE",
+        _ => "NUMBER_MERGE",
     }
 }
 
 fn normalize_mode(raw: Option<&str>, fallback: &str) -> String {
     match raw.map(|s| s.trim().to_uppercase()).as_deref() {
-        Some("MAP_PIN_HUNT") => "MAP_PIN_HUNT".to_string(),
-        Some("SPEED_MATCH") => "SPEED_MATCH".to_string(),
-        Some("FACT_OR_MYTH") => "FACT_OR_MYTH".to_string(),
-        Some("CASE_DETECTIVE") => "CASE_DETECTIVE".to_string(),
-        Some("SEQUENCE_ORDER") => "SEQUENCE_ORDER".to_string(),
-        Some("CONCEPT_GUESS") => "CONCEPT_GUESS".to_string(),
+        Some("CROSSWORD") => "CROSSWORD".to_string(),
+        Some("SLIDING_PUZZLE") => "SLIDING_PUZZLE".to_string(),
+        Some("BLOCK_PUZZLE") => "BLOCK_PUZZLE".to_string(),
+        Some("NUMBER_MERGE") => "NUMBER_MERGE".to_string(),
         _ => fallback.to_string(),
     }
 }
 
 fn mode_display_label(code: &str) -> &'static str {
     match code {
-        "MAP_PIN_HUNT" => "Peta & Lokasi",
-        "SPEED_MATCH" => "Cocokkan Cepat",
-        "FACT_OR_MYTH" => "Geser Fakta/Mitos",
-        "CASE_DETECTIVE" => "Komik Kasus",
-        "SEQUENCE_ORDER" => "Susun Langkah",
-        "CONCEPT_GUESS" => "Tebak Istilah",
-        _ => "Misi Harian",
+        "CROSSWORD" => "Teka-Teki Silang",
+        "SLIDING_PUZZLE" => "Puzzle Geser",
+        "BLOCK_PUZZLE" => "Block Blast",
+        "NUMBER_MERGE" => "2048 Angka",
+        _ => "Zona Game",
     }
 }
 
 fn shiba_stage_title(stage: i32) -> &'static str {
     match stage {
-        1 => "Anak Shiba Penasaran",
-        2 => "Shiba Pelajar Aktif",
-        3 => "Detektif Shiba Pintar",
-        _ => "Profesor Shiba Emas",
+        1 => "Anak Kucing Penasaran",
+        2 => "Kucing Pelajar Aktif",
+        3 => "Detektif Kucing Pintar",
+        _ => "Profesor Kucing Emas",
     }
 }
 
-fn build_pet_status(pet_stage: i32, food_points: i32, total_fed: i32, biscuits: i32, tokens: i32) -> ShibaPetStatus {
+fn build_pet_status(
+    pet_stage: i32,
+    food_points: i32,
+    total_fed: i32,
+    biscuits: i32,
+    tokens: i32,
+) -> ShibaPetStatus {
     let clamped_stage = pet_stage.max(1);
     let points = food_points.clamp(0, 99);
     ShibaPetStatus {
-        pet_name: "Shiba Pintar".to_string(),
+        pet_name: "Ciko Pintar".to_string(),
         pet_stage: clamped_stage,
         stage_title: shiba_stage_title(clamped_stage).to_string(),
         food_points: points,
@@ -251,7 +256,7 @@ async fn load_or_create_pet(pool: &PgPool, tenant_id: Uuid, student_id: Uuid) ->
     .await;
 
     let row = sqlx::query(
-        "SELECT pet_stage, food_points, total_fed, biscuits, fifty_fifty_tokens FROM student_shiba_pets WHERE student_id = $1 LIMIT 1"
+        "SELECT pet_stage, food_points, total_fed, biscuits, fifty_fifty_tokens FROM student_shiba_pets WHERE student_id = $1 LIMIT 1",
     )
     .bind(student_id)
     .fetch_optional(pool)
@@ -306,14 +311,21 @@ async fn ensure_daily_quest_tables(pool: &PgPool) {
             game_mode VARCHAR(40) NOT NULL,
             title VARCHAR(255) NOT NULL,
             subtitle VARCHAR(255) NOT NULL DEFAULT '',
-            subject_name VARCHAR(120) NOT NULL DEFAULT 'Literasi & Numerasi',
-            source_label VARCHAR(50) NOT NULL DEFAULT 'AI_CURRICULUM',
-            xp_reward INT NOT NULL DEFAULT 60,
+            subject_name VARCHAR(120) NOT NULL DEFAULT 'Zona Game Edukasi',
+            source_label VARCHAR(50) NOT NULL DEFAULT 'PROCEDURAL_ENGINE',
+            xp_reward INT NOT NULL DEFAULT 80,
             challenges_json JSONB NOT NULL DEFAULT '[]'::jsonb,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             CONSTRAINT uq_daily_quests_tenant_date_band_mode UNIQUE (tenant_id, quest_date, grade_band, game_mode)
         )
         "#,
+    )
+    .execute(pool)
+    .await;
+
+    // Clean up legacy hardcoded trivia modes if still cached in daily_quests
+    let _ = sqlx::query(
+        "DELETE FROM daily_quests WHERE game_mode NOT IN ('CROSSWORD', 'SLIDING_PUZZLE', 'BLOCK_PUZZLE', 'NUMBER_MERGE')"
     )
     .execute(pool)
     .await;
@@ -390,20 +402,6 @@ async fn ensure_daily_quest_tables(pool: &PgPool) {
     .await;
 }
 
-fn extract_json_object(raw: &str) -> Option<Value> {
-    let trimmed = raw.trim();
-    if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
-        return Some(v);
-    }
-    let start = trimmed.find('{')?;
-    let end = trimmed.rfind('}')?;
-    if end > start {
-        serde_json::from_str::<Value>(&trimmed[start..=end]).ok()
-    } else {
-        None
-    }
-}
-
 fn next_rand(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let mut z = *state;
@@ -412,8 +410,16 @@ fn next_rand(state: &mut u64) -> u64 {
     z ^ (z >> 31)
 }
 
-fn seed_for_quest(date: NaiveDate, round: i32, actor_id: Uuid, mode: &str, grade_band: &str) -> u64 {
-    let mut s = ((date.year() as u64) << 16) ^ ((date.ordinal() as u64) << 4) ^ ((round.max(0) as u64).wrapping_mul(2654435761));
+fn seed_for_quest(
+    date: NaiveDate,
+    round: i32,
+    actor_id: Uuid,
+    mode: &str,
+    grade_band: &str,
+) -> u64 {
+    let mut s = ((date.year() as u64) << 16)
+        ^ ((date.ordinal() as u64) << 4)
+        ^ ((round.max(0) as u64).wrapping_mul(2654435761));
     if round > 0 {
         s ^= actor_id.as_u128() as u64;
         s ^= (actor_id.as_u128() >> 64) as u64;
@@ -421,1044 +427,581 @@ fn seed_for_quest(date: NaiveDate, round: i32, actor_id: Uuid, mode: &str, grade
     for b in mode.bytes().chain(grade_band.bytes()) {
         s = s.wrapping_mul(16777619) ^ (b as u64);
     }
-    if s == 0 { 0xCAFE_BABE_1234_5678 } else { s }
+    if s == 0 {
+        0xCAFE_BABE_1234_5678
+    } else {
+        s
+    }
 }
 
-fn shuffle_vec<T>(items: &mut Vec<T>, rng: &mut u64) {
+fn shuffle_vec<T>(items: &mut [T], rng: &mut u64) {
     for i in (1..items.len()).rev() {
         let j = (next_rand(rng) as usize) % (i + 1);
         items.swap(i, j);
     }
 }
 
-fn shuffle_case_options(mut item: Value, rng: &mut u64) -> Value {
-    let Some(obj) = item.as_object_mut() else {
-        return item;
-    };
-    let Some(opts_val) = obj.get("options").and_then(|v| v.as_array()).cloned() else {
-        return item;
-    };
-    if opts_val.len() < 2 {
-        return item;
-    }
-    let correct_idx = obj.get("correct_index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-    let mut tagged: Vec<(bool, Value)> = opts_val
-        .into_iter()
-        .enumerate()
-        .map(|(i, v)| (i == correct_idx, v))
-        .collect();
-    shuffle_vec(&mut tagged, rng);
-    let new_correct = tagged.iter().position(|(is_c, _)| *is_c).unwrap_or(0);
-    let new_opts: Vec<Value> = tagged.into_iter().map(|(_, v)| v).collect();
-    obj.insert("options".to_string(), Value::Array(new_opts));
-    obj.insert("correct_index".to_string(), json!(new_correct));
-    item
+// ── 1. PROCEDURAL CROSSWORD GENERATOR (TEKA-TEKI SILANG) ───────────────────
+
+#[derive(Clone, Copy)]
+struct WordEntry {
+    word: &'static str,
+    clue: &'static str,
+    topic: &'static str,
 }
 
-fn format_rp(amount: i64) -> String {
-    let abs_val = amount.abs();
-    let s = abs_val.to_string();
-    let mut out = String::new();
-    for (idx, ch) in s.chars().rev().enumerate() {
-        if idx > 0 && idx % 3 == 0 {
-            out.push('.');
-        }
-        out.push(ch);
+const CROSSWORD_LEXICON: &[WordEntry] = &[
+    // IPA & Sains
+    WordEntry { word: "ATOM", clue: "Partikel terkecil penyusun suatu unsur kimia", topic: "IPA Kimia" },
+    WordEntry { word: "OZON", clue: "Lapisan atmosfer pelindung bumi dari sinar UV matahari", topic: "IPA" },
+    WordEntry { word: "SEL", clue: "Unit struktural dan fungsional terkecil makhluk hidup", topic: "Biologi" },
+    WordEntry { word: "VENA", clue: "Pembuluh darah yang mengalirkan darah kembali ke jantung", topic: "Biologi" },
+    WordEntry { word: "AKAR", clue: "Bagian tumbuhan penyerap air dan mineral dari dalam tanah", topic: "Biologi" },
+    WordEntry { word: "DAUN", clue: "Organ utama tempat berlangsungnya fotosintesis tumbuhan", topic: "Biologi" },
+    WordEntry { word: "MARS", clue: "Planet keempat dari matahari yang dijuluki Planet Merah", topic: "Astronomi" },
+    WordEntry { word: "BUMI", clue: "Planet ketiga dalam tata surya tempat manusia hidup", topic: "Astronomi" },
+    WordEntry { word: "ORBIT", clue: "Lintasan melengkung planet saat mengelilingi matahari", topic: "Astronomi" },
+    WordEntry { word: "KARBON", clue: "Unsur utama penyusun senyawa organik, arang, dan intan", topic: "Kimia" },
+    WordEntry { word: "OKSIGEN", clue: "Gas di udara yang dibutuhkan manusia untuk bernapas", topic: "IPA" },
+    WordEntry { word: "PROTON", clue: "Partikel bermuatan listrik positif di dalam inti atom", topic: "Fisika" },
+    WordEntry { word: "MASSA", clue: "Besaran pokok fisika yang diukur dengan satuan kilogram", topic: "Fisika" },
+    WordEntry { word: "MAGNET", clue: "Benda yang memiliki kutub utara dan selatan serta menarik besi", topic: "Fisika" },
+    WordEntry { word: "ENZYM", clue: "Protein biologis yang mempercepat reaksi kimia di tubuh", topic: "Biologi" },
+    WordEntry { word: "LENSA", clue: "Kaca bening pembias cahaya pada kacamata atau mikroskop", topic: "Fisika" },
+    WordEntry { word: "KLOROFIL", clue: "Zat hijau daun yang menangkap energi cahaya matahari", topic: "Biologi" },
+    WordEntry { word: "STOMATA", clue: "Pori-pori mikroskopis di daun tempat keluar masuknya gas", topic: "Biologi" },
+    WordEntry { word: "NEUTRON", clue: "Partikel inti atom yang tidak memiliki muatan listrik", topic: "Fisika" },
+    // Matematika & Logika
+    WordEntry { word: "PRIMA", clue: "Bilangan bulat lebih dari 1 yang hanya habis dibagi 1 dan dirinya sendiri", topic: "Matematika" },
+    WordEntry { word: "SUDUT", clue: "Daerah yang dibentuk oleh dua garis lurus yang berpotongan di satu titik", topic: "Geometri" },
+    WordEntry { word: "KUBUS", clue: "Bangun ruang dengan enam sisi berbentuk persegi sama luas", topic: "Geometri" },
+    WordEntry { word: "LIMAS", clue: "Bangun ruang bersisi tegak segitiga dan berpuncak lancip", topic: "Geometri" },
+    WordEntry { word: "RADIUS", clue: "Jarak dari titik pusat ke tepi lingkaran (jari-jari)", topic: "Matematika" },
+    WordEntry { word: "MEAN", clue: "Nilai rata-rata dari sekumpulan data angka", topic: "Statistika" },
+    WordEntry { word: "MODUS", clue: "Nilai yang paling sering muncul dalam sebuah data", topic: "Statistika" },
+    WordEntry { word: "PERSEN", clue: "Perbandingan atau pecahan yang dinyatakan per seratus", topic: "Matematika" },
+    WordEntry { word: "GRAFIK", clue: "Penyajian visual data hubungan antar-angka dalam diagram", topic: "Matematika" },
+    // IPS, Geografi & Sejarah
+    WordEntry { word: "PETA", clue: "Gambaran permukaan bumi pada bidang datar dengan skala tertentu", topic: "Geografi" },
+    WordEntry { word: "ATLAS", clue: "Kumpulan peta bumi yang dibukukan beserta indeks wilayahnya", topic: "Geografi" },
+    WordEntry { word: "DELTA", clue: "Endapan tanah berbentuk kipas di muara sungai dekat laut", topic: "Geografi" },
+    WordEntry { word: "BARTER", clue: "Sistem tukar-menukar barang langsung sebelum uang ditemukan", topic: "Ekonomi" },
+    WordEntry { word: "LABA", clue: "Keuntungan bersih selisih antara pendapatan dan biaya modal", topic: "Ekonomi" },
+    WordEntry { word: "INFLASI", clue: "Kenaikan harga barang dan jasa secara umum dan terus menerus", topic: "Ekonomi" },
+    WordEntry { word: "PAJAK", clue: "Iuran wajib warga negara kepada kas negara berdasarkan undang-undang", topic: "Ekonomi" },
+    WordEntry { word: "EQUATOR", clue: "Garis khayal khatulistiwa yang membelah bumi utara dan selatan", topic: "Geografi" },
+    WordEntry { word: "SUMATERA", clue: "Pulau besar di bagian barat Indonesia penghubung Selat Malaka", topic: "Geografi" },
+    WordEntry { word: "CANDI", clue: "Bangunan batu peninggalan masa sejarah kerajaan Hindu-Buddha", topic: "Sejarah" },
+    WordEntry { word: "SUMPAH", clue: "Ikrar Pemuda 28 Oktober 1928: ... Pemuda Indonesia", topic: "Sejarah" },
+    WordEntry { word: "GARUDA", clue: "Burung lambang negara Republik Indonesia", topic: "PPKn" },
+    WordEntry { word: "NORMA", clue: "Aturan atau pedoman perilaku yang berlaku dalam masyarakat", topic: "PPKn" },
+    WordEntry { word: "DEMOKRASI", clue: "Sistem pemerintahan dari rakyat, oleh rakyat, dan untuk rakyat", topic: "PPKn" },
+    // Bahasa Indonesia & Literasi
+    WordEntry { word: "DIKSI", clue: "Pilihan kata yang tepat dan selaras untuk mengungkapkan gagasan", topic: "Bahasa" },
+    WordEntry { word: "MAJAS", clue: "Gaya bahasa kiasan untuk memperindah makna kalimat", topic: "Bahasa" },
+    WordEntry { word: "PANTUN", clue: "Puisi lama empat baris bersajak a-b-a-b dengan sampiran dan isi", topic: "Sastra" },
+    WordEntry { word: "SINONIM", clue: "Dua kata berbeda bentuk namun memiliki arti yang sama atau mirip", topic: "Bahasa" },
+    WordEntry { word: "ANTONIM", clue: "Pasangan kata yang memiliki makna saling berlawanan", topic: "Bahasa" },
+    WordEntry { word: "SAJAK", clue: "Persamaan bunyi huruf atau suku kata pada akhir baris puisi", topic: "Sastra" },
+    WordEntry { word: "DRAMA", clue: "Karya sastra berupa dialog yang dipentaskan di atas panggung", topic: "Sastra" },
+    WordEntry { word: "KALIMAT", clue: "Susunan kata bermakna lengkap yang minimal berpola subjek-predikat", topic: "Bahasa" },
+    // Informatika & Digital
+    WordEntry { word: "DATA", clue: "Fakta mentah berupa angka, teks, atau gambar untuk diolah komputer", topic: "Informatika" },
+    WordEntry { word: "KODE", clue: "Baris instruksi bahasa pemrograman yang dijalankan oleh komputer", topic: "Informatika" },
+    WordEntry { word: "PIXEL", clue: "Titik warna terkecil penyusun gambar digital di layar", topic: "Informatika" },
+    WordEntry { word: "SERVER", clue: "Komputer penyedia layanan data yang diakses klien lewat jaringan", topic: "Informatika" },
+    WordEntry { word: "ROUTER", clue: "Perangkat pengatur lalu lintas paket data di jaringan Wi-Fi/internet", topic: "Informatika" },
+    WordEntry { word: "BINARY", clue: "Sistem bilangan komputer yang hanya memakai angka 0 dan 1", topic: "Informatika" },
+    WordEntry { word: "SANDI", clue: "Kata rahasia atau password untuk menjaga keamanan akun digital", topic: "Literasi Digital" },
+    WordEntry { word: "ROBOT", clue: "Mesin otomatis terprogram yang dapat melakukan tugas fisik atau digital", topic: "Teknologi" },
+];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dir {
+    Across,
+    Down,
+}
+
+#[derive(Clone)]
+struct PlacedWord {
+    entry: WordEntry,
+    row: usize,
+    col: usize,
+    dir: Dir,
+}
+
+fn can_place_word(
+    grid: &[[char; 11]; 11],
+    word: &str,
+    sr: isize,
+    sc: isize,
+    dir: Dir,
+) -> Option<usize> {
+    let chars: Vec<char> = word.chars().collect();
+    let len = chars.len() as isize;
+    let (dr, dc) = if dir == Dir::Across { (0, 1) } else { (1, 0) };
+
+    let er = sr + dr * (len - 1);
+    let ec = sc + dc * (len - 1);
+    if sr < 0 || sc < 0 || er >= 11 || ec >= 11 {
+        return None;
     }
-    let formatted: String = out.chars().rev().collect();
-    if amount < 0 {
-        format!("-Rp{}", formatted)
+
+    // Cell right before word & right after word must be empty
+    let br = sr - dr;
+    let bc = sc - dc;
+    if br >= 0 && bc >= 0 && grid[br as usize][bc as usize] != '\0' {
+        return None;
+    }
+    let ar = er + dr;
+    let ac = ec + dc;
+    if ar < 11 && ac < 11 && grid[ar as usize][ac as usize] != '\0' {
+        return None;
+    }
+
+    let mut intersections = 0usize;
+    for (k, &ch) in chars.iter().enumerate() {
+        let r = (sr + dr * (k as isize)) as usize;
+        let c = (sc + dc * (k as isize)) as usize;
+        let existing = grid[r][c];
+        if existing == '\0' {
+            // Check perpendicular neighbors so parallel words don't smear together
+            let (pr1, pc1) = (r as isize + dc, c as isize + dr);
+            let (pr2, pc2) = (r as isize - dc, c as isize - dr);
+            if pr1 >= 0 && pr1 < 11 && pc1 >= 0 && pc1 < 11 && grid[pr1 as usize][pc1 as usize] != '\0' {
+                return None;
+            }
+            if pr2 >= 0 && pr2 < 11 && pc2 >= 0 && pc2 < 11 && grid[pr2 as usize][pc2 as usize] != '\0' {
+                return None;
+            }
+        } else if existing == ch {
+            // Ensure no collinear continuation on existing letter
+            let prev_collinear = if k == 0 {
+                false
+            } else {
+                let pr = (sr + dr * (k as isize - 1)) as usize;
+                let pc = (sc + dc * (k as isize - 1)) as usize;
+                grid[pr][pc] != '\0'
+            };
+            if prev_collinear {
+                return None;
+            }
+            intersections += 1;
+        } else {
+            return None;
+        }
+    }
+
+    if intersections > 0 {
+        Some(intersections)
     } else {
-        format!("Rp{}", formatted)
+        None
     }
 }
 
-fn gen_procedural_sequence_items(rng: &mut u64, count: usize) -> Vec<Value> {
-    let mut out = Vec::new();
-    for i in 0..count {
-        let variant = (next_rand(rng) % 3) as i32;
-        if variant == 0 {
-            let a = (2 + (next_rand(rng) % 7)) as i32;
-            let x = (2 + (next_rand(rng) % 12)) as i32;
-            let b = (3 + (next_rand(rng) % 18)) as i32;
-            let c = a * x + b;
-            let rhs_sub = a * x;
-            out.push(json!({
-                "id": format!("proc_seq_{}_{}", variant, i),
-                "prompt": format!("Susun langkah-langkah penyelesaian persamaan berikut: {}x + {} = {}", a, b, c),
-                "steps": [
-                    format!("{}x + {} = {}", a, b, c),
-                    format!("{}x = {} - {}", a, c, b),
-                    format!("{}x = {}", a, rhs_sub),
-                    format!("x = {}", x)
-                ],
-                "explanation": format!("Pindahkan +{} ke kanan menjadi -{} agar {}x = {}, lalu bagi {} sehingga x = {}.", b, b, a, rhs_sub, a, x),
-                "topic_tag": "Matematika Aljabar"
-            }));
-        } else if variant == 1 {
-            let a = (2 + (next_rand(rng) % 6)) as i32;
-            let x = (3 + (next_rand(rng) % 10)) as i32;
-            let b = (2 + (next_rand(rng) % 15)) as i32;
-            let c = a * x - b;
-            let rhs_sum = a * x;
-            out.push(json!({
-                "id": format!("proc_seq_{}_{}", variant, i),
-                "prompt": format!("Urutkan penyelesaian persamaan linear berikut: {}x - {} = {}", a, b, c),
-                "steps": [
-                    format!("{}x - {} = {}", a, b, c),
-                    format!("{}x = {} + {}", a, c, b),
-                    format!("{}x = {}", a, rhs_sum),
-                    format!("x = {}", x)
-                ],
-                "explanation": format!("Pindahkan -{} ke kanan menjadi +{} agar {}x = {}, lalu bagi {} sehingga x = {}.", b, b, a, rhs_sum, a, x),
-                "topic_tag": "Aljabar Linear"
-            }));
-        } else {
-            let harga_awal = ((4 + (next_rand(rng) % 6)) * 20_000) as i64;
-            let diskon_pct = ((1 + (next_rand(rng) % 4)) * 10) as i64;
-            let potongan = harga_awal * diskon_pct / 100;
-            let harga_akhir = harga_awal - potongan;
-            out.push(json!({
-                "id": format!("proc_seq_{}_{}", variant, i),
-                "prompt": format!("Urutkan cara menghitung harga bayar tas seharga {} dengan diskon {}%:", format_rp(harga_awal), diskon_pct),
-                "steps": [
-                    format!("Harga awal = {}", format_rp(harga_awal)),
-                    format!("Potongan = {}% x {}", diskon_pct, format_rp(harga_awal)),
-                    format!("Potongan = {}", format_rp(potongan)),
-                    format!("Bayar = {}", format_rp(harga_akhir))
-                ],
-                "explanation": format!("Hitung dulu besar diskon {}% dari {} = {}, lalu kurangkan dari harga awal menjadi {}.", diskon_pct, format_rp(harga_awal), format_rp(potongan), format_rp(harga_akhir)),
-                "topic_tag": "Numerasi Belanja"
-            }));
+fn commit_word(grid: &mut [[char; 11]; 11], word: &str, row: usize, col: usize, dir: Dir) {
+    let (dr, dc) = if dir == Dir::Across { (0, 1) } else { (1, 0) };
+    for (k, ch) in word.chars().enumerate() {
+        grid[row + dr * k][col + dc * k] = ch;
+    }
+}
+
+fn generate_crossword_challenge(rng: &mut u64) -> Value {
+    let mut best_placed: Vec<PlacedWord> = Vec::new();
+    let mut best_grid = [['\0'; 11]; 11];
+
+    for _attempt in 0..8 {
+        let mut pool: Vec<WordEntry> = CROSSWORD_LEXICON.to_vec();
+        shuffle_vec(&mut pool, rng);
+
+        // Pick a strong seed word of 5..8 chars
+        let anchor_idx = pool
+            .iter()
+            .position(|e| (5..=8).contains(&e.word.chars().count()))
+            .unwrap_or(0);
+        let anchor = pool.remove(anchor_idx);
+        let anchor_len = anchor.word.chars().count();
+
+        let mut grid = [['\0'; 11]; 11];
+        let mut placed: Vec<PlacedWord> = Vec::new();
+        let start_col = (11usize.saturating_sub(anchor_len)) / 2;
+        commit_word(&mut grid, anchor.word, 5, start_col, Dir::Across);
+        placed.push(PlacedWord {
+            entry: anchor,
+            row: 5,
+            col: start_col,
+            dir: Dir::Across,
+        });
+
+        let mut used_words: Vec<&'static str> = vec![anchor.word];
+
+        for _pass in 0..2 {
+            for cand in &pool {
+                if placed.len() >= 7 {
+                    break;
+                }
+                if used_words.contains(&cand.word) {
+                    continue;
+                }
+                let cchars: Vec<char> = cand.word.chars().collect();
+                let mut best_fit: Option<(usize, usize, usize, Dir)> = None;
+
+                for pw in &placed {
+                    let target_dir = if pw.dir == Dir::Across { Dir::Down } else { Dir::Across };
+                    let (pdr, pdc) = if pw.dir == Dir::Across { (0, 1) } else { (1, 0) };
+                    for (pk, pch) in pw.entry.word.chars().enumerate() {
+                        let ir = pw.row + pdr * pk;
+                        let ic = pw.col + pdc * pk;
+                        for (ck, &cch) in cchars.iter().enumerate() {
+                            if cch != pch {
+                                continue;
+                            }
+                            let (sr, sc) = if target_dir == Dir::Across {
+                                (ir as isize, ic as isize - ck as isize)
+                            } else {
+                                (ir as isize - ck as isize, ic as isize)
+                            };
+                            if let Some(inter) = can_place_word(&grid, cand.word, sr, sc, target_dir) {
+                                let center_dist =
+                                    ((sr - 5).abs() + (sc - 5).abs()) as usize;
+                                let score = inter * 20 + 20usize.saturating_sub(center_dist);
+                                let replace = match best_fit {
+                                    None => true,
+                                    Some((bscore, _, _, _)) => score > bscore,
+                                };
+                                if replace {
+                                    best_fit = Some((score, sr as usize, sc as usize, target_dir));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Some((_, r, c, dir)) = best_fit {
+                    commit_word(&mut grid, cand.word, r, c, dir);
+                    placed.push(PlacedWord {
+                        entry: *cand,
+                        row: r,
+                        col: c,
+                        dir,
+                    });
+                    used_words.push(cand.word);
+                }
+            }
+        }
+
+        if placed.len() > best_placed.len() {
+            best_placed = placed;
+            best_grid = grid;
+        }
+        if best_placed.len() >= 6 {
+            break;
         }
     }
-    out
-}
 
-fn gen_procedural_case_items(rng: &mut u64, count: usize) -> Vec<Value> {
-    let mut out = Vec::new();
-    let names = ["Riko", "Sari", "Bagas", "Nadia", "Damar", "Laras"];
-    let items = ["kopi susu", "jus mangga", "es cokelat", "teh tarik", "roti bakar"];
-    for i in 0..count {
-        let pick = i % 3;
-        if pick == 0 {
-            let who = names[(next_rand(rng) as usize) % names.len()];
-            let prod = items[(next_rand(rng) as usize) % items.len()];
-            let qty = (20 + ((next_rand(rng) % 7) * 5)) as i64;
-            let sell = (6_000 + ((next_rand(rng) % 5) * 1_000)) as i64;
-            let cost = sell - (2_000 + ((next_rand(rng) % 3) * 1_000)) as i64;
-            let fixed = (25_000 + ((next_rand(rng) % 6) * 5_000)) as i64;
-            let margin_unit = sell - cost;
-            let gross_margin = qty * margin_unit;
-            let net = gross_margin - fixed;
-            let omzet = qty * sell;
-            let d1 = gross_margin;
-            let d2 = omzet;
-            let d3 = net + margin_unit * 5;
-            let ch = json!({
-                "id": format!("proc_case_umkm_{}", i),
-                "scenario": format!("Gerai {} milik {} menjual {} porsi seharga {}/porsi. Biaya bahan {}/porsi, sedangkan biaya listrik & sewa {}/hari.", prod, who, qty, format_rp(sell), format_rp(cost), format_rp(fixed)),
-                "question": format!("Berapa keuntungan bersih {} dalam 1 hari?", who),
-                "options": [format_rp(net), format_rp(d1), format_rp(d2), format_rp(d3)],
-                "correct_index": 0,
-                "explanation": format!("Margin per porsi = {} - {} = {}. Total margin {} porsi = {}. Dikurangi biaya tetap {} = {} bersih!", format_rp(sell), format_rp(cost), format_rp(margin_unit), qty, format_rp(gross_margin), format_rp(fixed), format_rp(net)),
-                "topic_tag": "Numerasi Usaha"
-            });
-            out.push(shuffle_case_options(ch, rng));
-        } else if pick == 1 {
-            let d1 = (20 + (next_rand(rng) % 4) * 10) as i64;
-            let d2 = (10 + (next_rand(rng) % 2) * 10) as i64;
-            let base = 200_000_i64;
-            let after_1 = base - (base * d1 / 100);
-            let final_price = after_1 - (after_1 * d2 / 100);
-            let wrong_sum = base - (base * (d1 + d2) / 100);
-            let wrong_1 = after_1;
-            let wrong_2 = base - (base * d2 / 100);
-            let ch = json!({
-                "id": format!("proc_case_disc_{}", i),
-                "scenario": format!("Sebuah toko memasang label 'Diskon {}% + {}%' untuk jaket seharga {}. Kasir menghitung diskon pertama lebih dulu, lalu diskon kedua dari harga sisa.", d1, d2, format_rp(base)),
-                "question": "Berapa harga akhir yang harus dibayar di kasir?",
-                "options": [format_rp(final_price), format_rp(wrong_sum), format_rp(wrong_1), format_rp(wrong_2)],
-                "correct_index": 0,
-                "explanation": format!("Setelah diskon {}%, harga menjadi {}. Lalu dipotong {}% lagi dari {} = {}!", d1, format_rp(after_1), d2, format_rp(after_1), format_rp(final_price)),
-                "topic_tag": "Numerasi Diskon"
-            });
-            out.push(shuffle_case_options(ch, rng));
-        } else {
-            let speed = (40 + (next_rand(rng) % 4) * 10) as i64;
-            let hours = (2 + (next_rand(rng) % 4)) as i64;
-            let dist = speed * hours;
-            let ch = json!({
-                "id": format!("proc_case_dist_{}", i),
-                "scenario": format!("Bus belajar menempuh perjalanan antarkota dengan kecepatan rata-rata {} km/jam selama {} jam tanpa berhenti.", speed, hours),
-                "question": "Berapa total jarak tempuh bus tersebut?",
-                "options": [
-                    format!("{} km", dist),
-                    format!("{} km", dist + speed),
-                    format!("{} km", dist - 20),
-                    format!("{} km", speed + hours * 10)
-                ],
-                "correct_index": 0,
-                "explanation": format!("Jarak = Kecepatan x Waktu = {} km/jam x {} jam = {} km.", speed, hours, dist),
-                "topic_tag": "Numerasi & Fisika"
-            });
-            out.push(shuffle_case_options(ch, rng));
+    // Trim grid bounding box
+    let mut min_r = 10usize;
+    let mut max_r = 0usize;
+    let mut min_c = 10usize;
+    let mut max_c = 0usize;
+    for r in 0..11 {
+        for c in 0..11 {
+            if best_grid[r][c] != '\0' {
+                min_r = min_r.min(r);
+                max_r = max_r.max(r);
+                min_c = min_c.min(c);
+                max_c = max_c.max(c);
+            }
         }
     }
-    out
-}
 
-fn gen_procedural_speed_match_items(rng: &mut u64, _grade_band: &str) -> Vec<Value> {
-    let mut challenges = Vec::new();
+    let rows = max_r.saturating_sub(min_r) + 1;
+    let cols = max_c.saturating_sub(min_c) + 1;
+    let mut compact_grid: Vec<String> = Vec::with_capacity(rows);
+    for r in min_r..=max_r {
+        let mut row_str = String::with_capacity(cols);
+        for c in min_c..=max_c {
+            let ch = best_grid[r][c];
+            row_str.push(if ch == '\0' { '#' } else { ch });
+        }
+        compact_grid.push(row_str);
+    }
 
-    // Challenge 1: 4 Unique Linear Equations (x values guaranteed distinct!)
-    let mut xs: Vec<i32> = (2..=15).collect();
-    shuffle_vec(&mut xs, rng);
-    let mut eq_pairs = Vec::new();
-    for (idx, x) in xs.into_iter().take(4).enumerate() {
-        let a = (2 + (next_rand(rng) % 5)) as i32;
-        let b = (1 + (next_rand(rng) % 12)) as i32;
-        let use_minus = (next_rand(rng) % 2) == 1 && a * x > b;
-        let eq_str = if use_minus {
-            format!("{}x - {} = {}", a, b, a * x - b)
+    // Assign clue numbers in reading order (row-major)
+    let mut starts: Vec<(usize, usize, usize)> = Vec::new();
+    for (idx, pw) in best_placed.iter().enumerate() {
+        starts.push((pw.row - min_r, pw.col - min_c, idx));
+    }
+    starts.sort_by_key(|&(r, c, _)| (r, c));
+
+    let mut cell_numbers: std::collections::HashMap<(usize, usize), usize> =
+        std::collections::HashMap::new();
+    let mut next_num = 1usize;
+    for &(r, c, _) in &starts {
+        cell_numbers.entry((r, c)).or_insert_with(|| {
+            let n = next_num;
+            next_num += 1;
+            n
+        });
+    }
+
+    let mut clues_json: Vec<Value> = best_placed
+        .iter()
+        .map(|pw| {
+            let r = pw.row - min_r;
+            let c = pw.col - min_c;
+            let num = *cell_numbers.get(&(r, c)).unwrap_or(&1);
+            json!({
+                "number": num,
+                "direction": if pw.dir == Dir::Across { "ACROSS" } else { "DOWN" },
+                "row": r,
+                "col": c,
+                "length": pw.entry.word.chars().count(),
+                "answer": pw.entry.word,
+                "clue": pw.entry.clue,
+                "topic_tag": pw.entry.topic
+            })
+        })
+        .collect();
+
+    clues_json.sort_by_key(|v| {
+        let dir_rank = if v["direction"].as_str() == Some("ACROSS") {
+            0usize
         } else {
-            format!("{}x + {} = {}", a, b, a * x + b)
+            1usize
         };
-        eq_pairs.push(json!({
-            "id": format!("alg_{}", idx),
-            "left": eq_str,
-            "right": format!("x = {}", x),
-        }));
-    }
-    challenges.push(json!({
-        "id": "sm_algebra_dyn",
-        "prompt": "Pasangkan setiap persamaan linear di kiri dengan nilai x yang benar di kanan!",
-        "pairs": eq_pairs,
-        "explanation": "Isolasikan x dengan memindahkan konstanta lalu membagi koefisien x untuk menemukan solusi yang cocok.",
-        "topic_tag": "Cocokkan Aljabar"
-    }));
+        let num = v["number"].as_u64().unwrap_or(0) as usize;
+        (dir_rank, num)
+    });
 
-    // Challenge 2: 4 Unique Percentage / Discount Calculations (unique prices!)
-    let pct_options = [(10_i64, 50_000_i64), (20, 75_000), (25, 80_000), (50, 60_000), (30, 100_000), (40, 90_000)];
-    let mut picked_pct = pct_options.to_vec();
-    shuffle_vec(&mut picked_pct, rng);
-    let mut used_res = HashSet::new();
-    let mut disc_pairs = Vec::new();
-    for (idx, (pct, price)) in picked_pct.into_iter().enumerate() {
-        let cut = price * pct / 100;
-        if used_res.contains(&cut) { continue; }
-        used_res.insert(cut);
-        disc_pairs.push(json!({
-            "id": format!("pct_{}", idx),
-            "left": format!("{}% dari {}", pct, format_rp(price)),
-            "right": format_rp(cut),
-        }));
-        if disc_pairs.len() >= 4 { break; }
-    }
-    challenges.push(json!({
-        "id": "sm_discount_dyn",
-        "prompt": "Cocokkan perhitungan persentase dengan nominal Rupiah yang tepat!",
-        "pairs": disc_pairs,
-        "explanation": "Kalikan persentase (per 100) dengan harga pokok untuk mengetahui nominal potongan atau bagian.",
-        "topic_tag": "Numerasi Belanja"
-    }));
-
-    // Challenge 3 & 4: Rich Cross-Subject Glossary Pairs (Ala Shopee Cocoki!)
-    let glossary_bank = vec![
-        ("Evaporasi", "Air menguap karena panas matahari", "IPA"),
-        ("Kondensasi", "Uap air mendingin menjadi awan", "IPA"),
-        ("Presipitasi", "Turunnya titik air sebagai hujan", "IPA"),
-        ("Infiltrasi", "Air hujan meresap ke dalam tanah", "IPA"),
-        ("Fotosintesis", "Tumbuhan mengolah cahaya jadi energi", "Biologi"),
-        ("Klorofil", "Zat hijau daun penangkap cahaya", "Biologi"),
-        ("Stomata", "Pori daun tempat keluar masuk gas", "Biologi"),
-        ("Hipotesis", "Dugaan ilmiah sementara untuk diuji", "Sains"),
-        ("Inflasi", "Harga barang naik terus secara umum", "Ekonomi"),
-        ("Omzet", "Total uang masuk penjualan kotor", "Ekonomi"),
-        ("Laba Bersih", "Pendapatan dikurangi seluruh biaya", "Ekonomi"),
-        ("Phishing", "Penipuan tautan pencuri OTP & data", "Informatika"),
-        ("Sinonim", "Kata berbeda bentuk bermakna mirip", "Bahasa"),
-        ("Antonim", "Kata yang memiliki makna berlawanan", "Bahasa"),
-        ("Deduktif", "Paragraf dengan gagasan utama di awal", "Bahasa"),
-        ("Induktif", "Paragraf dengan kesimpulan di akhir", "Bahasa"),
-        ("Musyawarah", "Berdiskusi bersama demi mufakat", "PPKn"),
-        ("Gotong Royong", "Kerja bersama membantu kepentingan umum", "PPKn"),
-        ("Bhinneka", "Beragam budaya dalam satu kesatuan", "PPKn"),
-        ("Proklamasi", "Pengumuman resmi kemerdekaan bangsa", "Sejarah"),
-    ];
-    let mut shuffled_gloss = glossary_bank;
-    shuffle_vec(&mut shuffled_gloss, rng);
-
-    let round3: Vec<Value> = shuffled_gloss
-        .iter()
-        .take(4)
-        .enumerate()
-        .map(|(idx, (l, r, _))| json!({"id": format!("gl3_{}", idx), "left": l, "right": r}))
-        .collect();
-    challenges.push(json!({
-        "id": "sm_glossary_a",
-        "prompt": "Pasangkan setiap istilah pelajaran dengan definisi singkat yang tepat!",
-        "pairs": round3,
-        "explanation": "Menguasai definisi inti lintas mapel memudahkan memahami soal cerita dan bacaan.",
-        "topic_tag": "Glosarium Cerdas"
-    }));
-
-    let round4: Vec<Value> = shuffled_gloss
-        .iter()
-        .skip(4)
-        .take(4)
-        .enumerate()
-        .map(|(idx, (l, r, _))| json!({"id": format!("gl4_{}", idx), "left": l, "right": r}))
-        .collect();
-    if round4.len() >= 3 {
-        challenges.push(json!({
-            "id": "sm_glossary_b",
-            "prompt": "Cocokkan konsep Sains, Ekonomi & PPKn berikut dengan artinya!",
-            "pairs": round4,
-            "explanation": "Setiap istilah kunci berpasangan dengan pengertian ilmiah atau sosial yang sesuai.",
-            "topic_tag": "Wawasan Lintas Mapel"
-        }));
-    }
-
-    challenges
+    json!({
+        "id": format!("cw_{}", next_rand(rng) % 100_000),
+        "rows": rows,
+        "cols": cols,
+        "grid": compact_grid,
+        "clues": clues_json,
+        "topic_tag": "Lintas Pelajaran"
+    })
 }
 
-async fn load_quiz_bank_challenges(
-    pool: &PgPool,
-    tenant_id: Uuid,
-    game_mode: &str,
-    rng: &mut u64,
-) -> Vec<Value> {
-    if game_mode != "CASE_DETECTIVE" && game_mode != "FACT_OR_MYTH" {
-        return Vec::new();
-    }
+// ── 2. PROCEDURAL SLIDING PUZZLE GENERATOR (PUZZLE GESER) ────────────────────
 
-    let q_rows = sqlx::query(
-        r#"
-        SELECT qq.id, qq.question_text, qz.title AS quiz_title
-        FROM quiz_questions qq
-        JOIN quizzes qz ON qz.id = qq.quiz_id
-        WHERE qz.tenant_id = $1
-          AND qz.deleted_at IS NULL
-          AND COALESCE(qz.is_active, true) = true
-          AND LENGTH(TRIM(qq.question_text)) BETWEEN 15 AND 220
-        ORDER BY qq.created_at DESC
-        LIMIT 24
-        "#,
-    )
-    .bind(tenant_id)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
+struct PuzzleTheme {
+    id: &'static str,
+    title: &'static str,
+    subtitle: &'static str,
+}
 
-    if q_rows.is_empty() {
-        return Vec::new();
-    }
+const PUZZLE_THEMES: &[PuzzleTheme] = &[
+    PuzzleTheme {
+        id: "TATA_SURYA",
+        title: "Galaksi & Tata Surya",
+        subtitle: "Susun kembali planet dan orbit ruang angkasa",
+    },
+    PuzzleTheme {
+        id: "NUSANTARA",
+        title: "Pesona Nusantara",
+        subtitle: "Rangkai panorama gunung dan kepulauan Indonesia",
+    },
+    PuzzleTheme {
+        id: "LAB_SAINS",
+        title: "Laboratorium Cerdas",
+        subtitle: "Urutkan peralatan eksperimen sains di lab",
+    },
+    PuzzleTheme {
+        id: "SAMUDRA",
+        title: "Eksplorasi Samudra",
+        subtitle: "Susun terumbu karang dan kapal riset laut",
+    },
+    PuzzleTheme {
+        id: "KOTA_HIJAU",
+        title: "Kota Ramah Lingkungan",
+        subtitle: "Satukan menara surya, taman kota & kincir angin",
+    },
+];
 
-    let q_ids: Vec<Uuid> = q_rows.iter().map(|r| r.get("id")).collect();
-    let c_rows = sqlx::query(
-        "SELECT question_id, choice_text, is_correct FROM quiz_choices WHERE question_id = ANY($1) ORDER BY order_index ASC"
-    )
-    .bind(&q_ids)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
+fn generate_sliding_puzzle_challenge(rng: &mut u64, grid_size: usize) -> Value {
+    let total = grid_size * grid_size;
+    let mut tiles: Vec<usize> = (1..total).collect();
+    tiles.push(0); // 0 = empty blank slot
 
-    let mut choices_map: HashMap<Uuid, Vec<(String, bool)>> = HashMap::new();
-    for cr in c_rows {
-        let qid: Uuid = cr.get("question_id");
-        let text: String = cr.try_get("choice_text").unwrap_or_default();
-        let is_c: bool = cr.try_get("is_correct").unwrap_or(false);
-        if !text.trim().is_empty() {
-            choices_map.entry(qid).or_default().push((text.trim().to_string(), is_c));
+    let mut blank = total - 1;
+    let mut prev_blank = blank;
+    let shuffle_steps = total * 14;
+
+    for _ in 0..shuffle_steps {
+        let br = blank / grid_size;
+        let bc = blank % grid_size;
+        let mut neighbors: Vec<usize> = Vec::with_capacity(4);
+        if br > 0 {
+            neighbors.push((br - 1) * grid_size + bc);
+        }
+        if br + 1 < grid_size {
+            neighbors.push((br + 1) * grid_size + bc);
+        }
+        if bc > 0 {
+            neighbors.push(br * grid_size + (bc - 1));
+        }
+        if bc + 1 < grid_size {
+            neighbors.push(br * grid_size + (bc + 1));
+        }
+        neighbors.retain(|&n| n != prev_blank);
+        if !neighbors.is_empty() {
+            let pick = neighbors[(next_rand(rng) as usize) % neighbors.len()];
+            tiles.swap(blank, pick);
+            prev_blank = blank;
+            blank = pick;
         }
     }
 
-    let mut indices: Vec<usize> = (0..q_rows.len()).collect();
-    shuffle_vec(&mut indices, rng);
-
-    let mut out = Vec::new();
-    for idx in indices {
-        if out.len() >= 2 { break; }
-        let qr = &q_rows[idx];
-        let qid: Uuid = qr.get("id");
-        let q_text: String = qr.try_get("question_text").unwrap_or_default();
-        let q_title: String = qr.try_get("quiz_title").unwrap_or_else(|_| "Kuis Kelas".to_string());
-        let Some(choices) = choices_map.get(&qid) else { continue; };
-
-        if game_mode == "CASE_DETECTIVE" && choices.len() >= 3 {
-            let Some(corr_pos) = choices.iter().position(|(_, c)| *c) else { continue; };
-            let opts: Vec<String> = choices.iter().take(4).map(|(t, _)| t.clone()).collect();
-            if corr_pos >= opts.len() { continue; }
-            let ch = json!({
-                "id": format!("qb_{}", qid),
-                "scenario": format!("Dari bank soal kuis '{}', pecahkan pertanyaan berikut:", q_title),
-                "question": q_text,
-                "options": opts,
-                "correct_index": corr_pos,
-                "explanation": format!("Jawaban ini diambil langsung dari materi evaluasi '{}'.", q_title),
-                "topic_tag": "Bank Soal Kelas"
-            });
-            out.push(shuffle_case_options(ch, rng));
-        } else if game_mode == "FACT_OR_MYTH" && choices.len() >= 2 {
-            let pick_true = (next_rand(rng) % 2) == 0;
-            let chosen = if pick_true {
-                choices.iter().find(|(_, c)| *c)
-            } else {
-                choices.iter().find(|(_, c)| !*c)
-            };
-            let Some((choice_text, is_fact)) = chosen else { continue; };
-            let right_ans = choices.iter().find(|(_, c)| *c).map(|(t, _)| t.as_str()).unwrap_or(choice_text);
-            out.push(json!({
-                "id": format!("qbf_{}", qid),
-                "statement": format!("Dalam materi '{}', untuk '{}', jawaban yang tepat adalah: {}.", q_title, q_text, choice_text),
-                "is_fact": *is_fact,
-                "explanation": format!("Berdasarkan kuis '{}', jawaban yang benar adalah '{}'.", q_title, right_ans),
-                "topic_tag": "Bank Soal Kelas"
-            }));
-        }
+    // Ensure not accidentally already solved
+    let already_solved = tiles
+        .iter()
+        .enumerate()
+        .all(|(i, &val)| if i + 1 == total { val == 0 } else { val == i + 1 });
+    if already_solved && total >= 4 {
+        tiles.swap(total - 1, total - 2);
+        tiles.swap(0, 1);
     }
-    out
+
+    let theme = &PUZZLE_THEMES[(next_rand(rng) as usize) % PUZZLE_THEMES.len()];
+    let seed = next_rand(rng) % 9_999_999;
+
+    json!({
+        "id": format!("sp_{}", seed),
+        "grid_size": grid_size,
+        "theme_id": theme.id,
+        "theme_title": theme.title,
+        "theme_subtitle": theme.subtitle,
+        "initial_tiles": tiles,
+        "par_moves": if grid_size == 3 { 35 } else { 85 },
+        "seed": seed
+    })
 }
 
-async fn try_generate_ai_quest(
-    grade_band: &str,
-    game_mode: &str,
-    topic_hint: &str,
-    subject_hint: &str,
-    quest_date: NaiveDate,
+// ── 3. PROCEDURAL BLOCK BLAST CHALLENGE ────────────────────────────────────
+
+fn generate_block_puzzle_challenge(rng: &mut u64, round: i32) -> Value {
+    let seed = (next_rand(rng) % 9_000_000) + 1_000_000;
+    let target_score = 350 + (round.clamp(0, 5) * 120);
+    let target_lines = 4 + round.clamp(0, 4);
+
+    // Optional light starter mosaic on higher rounds to make every board unique
+    let mut prefilled: Vec<[usize; 2]> = Vec::new();
+    if round > 0 {
+        let count = 3 + ((next_rand(rng) as usize) % 4);
+        for _ in 0..count {
+            let r = (next_rand(rng) as usize) % 8;
+            let c = (next_rand(rng) as usize) % 8;
+            let pair = [r, c];
+            if !prefilled.contains(&pair) {
+                prefilled.push(pair);
+            }
+        }
+    }
+
+    json!({
+        "id": format!("bp_{}", seed),
+        "board_size": 8,
+        "target_score": target_score,
+        "target_lines": target_lines,
+        "seed": seed,
+        "prefilled_cells": prefilled,
+        "theme_title": if round > 0 { format!("Misi Balok Level #{}", round + 1) } else { "Arena Block Blast Harian".to_string() }
+    })
+}
+
+// ── 4. PROCEDURAL 2048 ANGKA CHALLENGE ─────────────────────────────────────
+
+fn generate_number_merge_challenge(rng: &mut u64, round: i32) -> Value {
+    let seed = (next_rand(rng) % 9_000_000) + 1_000_000;
+    let target_tile = match round {
+        0 => 256,
+        1 => 512,
+        _ => 1024,
+    };
+    let target_score = target_tile * 6;
+
+    // Seed two distinct initial grid slots [r, c, value]
+    let p1 = (next_rand(rng) as usize) % 16;
+    let mut p2 = (next_rand(rng) as usize) % 16;
+    while p2 == p1 {
+        p2 = (next_rand(rng) as usize) % 16;
+    }
+    let v1 = if next_rand(rng) % 5 == 0 { 4 } else { 2 };
+    let v2 = if next_rand(rng) % 6 == 0 { 4 } else { 2 };
+
+    json!({
+        "id": format!("nm_{}", seed),
+        "board_size": 4,
+        "target_tile": target_tile,
+        "target_score": target_score,
+        "seed": seed,
+        "initial_tiles": [
+            { "row": p1 / 4, "col": p1 % 4, "value": v1 },
+            { "row": p2 / 4, "col": p2 % 4, "value": v2 }
+        ],
+        "theme_title": format!("Gabung Angka Menuju {}", target_tile)
+    })
+}
+
+fn build_game_payload(
+    mode: &str,
     round: i32,
-) -> Option<(String, String, String, Value)> {
-    if game_mode == "MAP_PIN_HUNT" {
-        return None;
-    }
-
-    let level_desc = match grade_band {
-        "PAKET_A" => "Paket A (setara SD Kelas 4-6), bahasa ramah anak dan mudah dipahami",
-        "PAKET_B" => "Paket B (setara SMP Kelas 7-9), kontekstual kehidupan remaja/warga belajar",
-        _ => "Paket C (setara SMA Kelas 10-12), kritis, aplikatif untuk dunia kerja/UMKM/kehidupan dewasa",
-    };
-
-    let schema_instruction = match game_mode {
-        "FACT_OR_MYTH" => r#"Format JSON WAJIB:
-{
-  "title": "judul singkat seru (max 50 karakter)",
-  "subtitle": "subjudul 1 kalimat",
-  "subject_name": "nama mapel",
-  "challenges": [
-    {
-      "id": "c1",
-      "statement": "pernyataan singkat jelas (max 140 karakter)",
-      "is_fact": true,
-      "explanation": "penjelasan ringkas 1-2 kalimat",
-      "topic_tag": "topik singkat"
-    }
-  ]
-}
-Buat TEPAT 5 item di array challenges (campuran is_fact true dan false)."#,
-        "CASE_DETECTIVE" => r#"Format JSON WAJIB:
-{
-  "title": "judul kasus seru (max 50 karakter)",
-  "subtitle": "subjudul 1 kalimat",
-  "subject_name": "nama mapel",
-  "challenges": [
-    {
-      "id": "c1",
-      "scenario": "cerita kasus nyata sehari-hari 2 kalimat",
-      "question": "pertanyaan keputusan terbaik",
-      "options": ["opsi A", "opsi B", "opsi C", "opsi D"],
-      "correct_index": 0,
-      "explanation": "penjelasan kenapa opsi tersebut paling tepat",
-      "topic_tag": "topik singkat"
-    }
-  ]
-}
-Buat TEPAT 4 item di array challenges dengan correct_index bervariasi (0-3)."#,
-        "SEQUENCE_ORDER" => r#"Format JSON WAJIB:
-{
-  "title": "judul misi urut logika (max 50 karakter)",
-  "subtitle": "subjudul 1 kalimat",
-  "subject_name": "nama mapel",
-  "challenges": [
-    {
-      "id": "c1",
-      "prompt": "instruksi menyusun urutan dari awal ke akhir",
-      "steps": ["langkah 1 (benar)", "langkah 2 (benar)", "langkah 3 (benar)", "langkah 4 (benar)"],
-      "explanation": "penjelasan logika urutan yang benar",
-      "topic_tag": "topik singkat"
-    }
-  ]
-}
-Buat TEPAT 3 item di array challenges, masing-masing memiliki TEPAT 4 string langkah berurutan yang benar."#,
-        "SPEED_MATCH" => r#"Format JSON WAJIB:
-{
-  "title": "judul cocokkan cepat (max 50 karakter)",
-  "subtitle": "subjudul 1 kalimat",
-  "subject_name": "nama mapel",
-  "challenges": [
-    {
-      "id": "sm1",
-      "prompt": "Pasangkan istilah di kiri dengan arti/hasil di kanan!",
-      "pairs": [
-        {"id": "p1", "left": "istilah 1", "right": "pasangan unik 1"},
-        {"id": "p2", "left": "istilah 2", "right": "pasangan unik 2"},
-        {"id": "p3", "left": "istilah 3", "right": "pasangan unik 3"},
-        {"id": "p4", "left": "istilah 4", "right": "pasangan unik 4"}
-      ],
-      "explanation": "penjelasan ringkas",
-      "topic_tag": "topik singkat"
-    }
-  ]
-}
-Buat TEPAT 3 item di array challenges, masing-masing memiliki TEPAT 4 pasangan left & right yang singkat dan 100% UNIK (tidak boleh ambigu)."#,
-        _ => r#"Format JSON WAJIB:
-{
-  "title": "judul tebak istilah harian (max 50 karakter)",
-  "subtitle": "subjudul 1 kalimat",
-  "subject_name": "nama mapel",
-  "challenges": [
-    {
-      "id": "c1",
-      "answer": "SATUKATA",
-      "clues": [
-        "petunjuk 1 (umum)",
-        "petunjuk 2 (lebih spesifik)",
-        "petunjuk 3 (sangat membantu)"
-      ],
-      "acceptable_aliases": ["SATUKATA"],
-      "explanation": "definisi singkat istilah tersebut",
-      "topic_tag": "topik singkat"
-    }
-  ]
-}
-Buat TEPAT 4 item di array challenges. Jawaban wajib 1 kata HURUF KAPITAL tanpa spasi (4-13 huruf)."#,
-    };
-
-    let sys_prompt = "Kamu adalah perancang micro-learning game edukatif ala Shopee/GoPay untuk PKBM Indonesia (Kurikulum Merdeka). Buat soal UNIK, segar, kontekstual, dan tidak mengulang contoh klise. Jawab HANYA dengan JSON valid tanpa markdown fence ```json.";
-    let user_prompt = format!(
-        "Buat Misi Harian tanggal {} ronde ke-{} untuk jenjang {}.\nKonteks materi aktif sekolah: {} ({}).\nMode game: {}.\n{}",
-        quest_date, round + 1, level_desc, topic_hint, subject_hint, game_mode, schema_instruction
-    );
-
-    let messages = vec![
-        ChatMessage {
-            role: "system",
-            content: sys_prompt,
-        },
-        ChatMessage {
-            role: "user",
-            content: &user_prompt,
-        },
-    ];
-
-    let raw = match tokio::time::timeout(
-        std::time::Duration::from_secs(16),
-        call_nvidia_nim(messages, 0.85, 1700),
-    )
-    .await
-    {
-        Ok(Ok(text)) => text,
-        _ => return None,
-    };
-
-    let parsed = extract_json_object(&raw)?;
-    let challenges = parsed.get("challenges")?.as_array()?;
-    if challenges.len() < 2 {
-        return None;
-    }
-
-    let valid_schema = match game_mode {
-        "FACT_OR_MYTH" => challenges.iter().all(|c| {
-            c.get("statement").and_then(|v| v.as_str()).is_some()
-                && c.get("is_fact").and_then(|v| v.as_bool()).is_some()
-        }),
-        "CASE_DETECTIVE" => challenges.iter().all(|c| {
-            c.get("scenario").and_then(|v| v.as_str()).is_some()
-                && c.get("question").and_then(|v| v.as_str()).is_some()
-                && c.get("options").and_then(|v| v.as_array()).map(|a| a.len() >= 2).unwrap_or(false)
-                && c.get("correct_index").and_then(|v| v.as_u64()).is_some()
-        }),
-        "SEQUENCE_ORDER" => challenges.iter().all(|c| {
-            c.get("prompt").and_then(|v| v.as_str()).is_some()
-                && c.get("steps").and_then(|v| v.as_array()).map(|a| a.len() >= 3).unwrap_or(false)
-        }),
-        "SPEED_MATCH" => challenges.iter().all(|c| {
-            c.get("prompt").and_then(|v| v.as_str()).is_some()
-                && c.get("pairs").and_then(|v| v.as_array()).map(|a| a.len() >= 3).unwrap_or(false)
-        }),
-        _ => challenges.iter().all(|c| {
-            c.get("answer").and_then(|v| v.as_str()).map(|s| !s.trim().is_empty()).unwrap_or(false)
-                && c.get("clues").and_then(|v| v.as_array()).map(|a| a.len() >= 2).unwrap_or(false)
-        }),
-    };
-    if !valid_schema {
-        return None;
-    }
-
-    let title = parsed
-        .get("title")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Misi Harian Dinamis")
-        .trim()
-        .to_string();
-    let subtitle = parsed
-        .get("subtitle")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Tantangan seru 3 menit untuk mengasah pemahaman hari ini")
-        .trim()
-        .to_string();
-    let subj = parsed
-        .get("subject_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or(subject_hint)
-        .trim()
-        .to_string();
-
-    Some((title, subtitle, subj, Value::Array(challenges.clone())))
-}
-
-fn build_curated_quest(
-    grade_band: &str,
-    game_mode: &str,
-    subject_hint: &str,
     rng: &mut u64,
-    mut extra_bank_items: Vec<Value>,
 ) -> (String, String, String, Value) {
-    match game_mode {
-        "SPEED_MATCH" => {
-            let items = gen_procedural_speed_match_items(rng, grade_band);
+    match mode {
+        "CROSSWORD" => {
+            let cw = generate_crossword_challenge(rng);
             (
-                "Cocokkan Cepat: Arena Pasangan Dinamis".to_string(),
-                "Ketuk pasangan kiri & kanan sebelum waktu habis untuk raih combo!".to_string(),
-                if subject_hint.is_empty() { "Numerasi & Wawasan".to_string() } else { subject_hint.to_string() },
-                Value::Array(items),
+                "Teka-Teki Silang (TTS)".to_string(),
+                "Isi kotak mendatar dan menurun berdasarkan petunjuk wawasan!".to_string(),
+                "Bahasa & Wawasan".to_string(),
+                json!([cw]),
             )
         }
-        "FACT_OR_MYTH" => {
-            let d1 = (20 + (next_rand(rng) % 3) * 10) as i64;
-            let d2 = (10 + (next_rand(rng) % 2) * 10) as i64;
-            let naive_sum = d1 + d2;
-            let actual_disc = d1 + (100 - d1) * d2 / 100;
-            let num_a = (3 + (next_rand(rng) % 5)) as i64;
-            let num_b = (4 + (next_rand(rng) % 6)) as i64;
-            let prod_true = (next_rand(rng) % 2) == 0;
-            let prod_shown = if prod_true { num_a * num_b * 10 } else { num_a * num_b * 10 + 10 };
-
-            let mut all_pool = vec![
-                json!({
-                    "id": format!("pf_{}_{}", d1, d2),
-                    "statement": format!("Diskon {}% lalu diskon tambahan {}% artinya total potongan harga persis {}%.", d1, d2, naive_sum),
-                    "is_fact": false,
-                    "explanation": format!("Mitos! Diskon kedua dihitung dari sisa harga setelah diskon pertama, jadi totalnya {}%.", actual_disc),
-                    "topic_tag": "Numerasi Dinamis"
-                }),
-                json!({
-                    "id": format!("pf_mul_{}_{}", num_a, num_b),
-                    "statement": format!("Hasil dari {} x {} = {}.", num_a * 10, num_b, prod_shown),
-                    "is_fact": prod_true,
-                    "explanation": format!("Hasil perkalian {} x {} yang benar adalah {}.", num_a * 10, num_b, num_a * num_b * 10),
-                    "topic_tag": "Hitung Cepat"
-                }),
-                json!({"id":"f1","statement":"Inflasi berarti nilai uang semakin menguat sehingga harga barang cenderung turun terus.","is_fact":false,"explanation":"Mitos! Inflasi justru terjadi saat harga barang naik secara umum sehingga daya beli uang menurun.","topic_tag":"Ekonomi"}),
-                json!({"id":"f3","statement":"Kalimat utama dalam paragraf deduktif terletak di bagian awal paragraf.","is_fact":true,"explanation":"Fakta! Paragraf deduktif dimulai dari gagasan utama lalu diikuti kalimat penjelas.","topic_tag":"Bahasa Indonesia"}),
-                json!({"id":"f4","statement":"Energi matahari termasuk sumber daya alam yang dapat diperbarui karena tersedia terus secara alami.","is_fact":true,"explanation":"Fakta! Energi surya, angin, dan air adalah energi terbarukan ramah lingkungan.","topic_tag":"IPA"}),
-                json!({"id":"f5","statement":"Gotong royong dan musyawarah mufakat merupakan cerminan nilai sila ke-4 Pancasila dalam masyarakat.","is_fact":true,"explanation":"Fakta! Musyawarah untuk mencapai mufakat berakar langsung pada sila ke-4 Pancasila.","topic_tag":"PPKn"}),
-                json!({"id":"f6","statement":"Semua bakteri di tubuh manusia selalu berbahaya dan harus dimusnahkan seluruhnya.","is_fact":false,"explanation":"Mitos! Ada bakteri baik di usus yang justru membantu mencerna makanan dan menjaga imunitas.","topic_tag":"Biologi"}),
-                json!({"id":"f7","statement":"Dalam usaha kecil, omzet penjualan sama artinya dengan laba bersih yang boleh langsung dihabiskan.","is_fact":false,"explanation":"Mitos! Omzet adalah total uang masuk kotor; laba bersih didapat setelah dikurangi seluruh modal dan biaya.","topic_tag":"Kewirausahaan"}),
-                json!({"id":"g1","statement":"Air mendidih di puncak gunung yang sangat tinggi pada suhu lebih rendah dari 100°C.","is_fact":true,"explanation":"Fakta! Tekanan udara yang lebih rendah di dataran tinggi membuat titik didih air menurun.","topic_tag":"Fisika"}),
-                json!({"id":"g2","statement":"Kata 'di' pada 'di rumah' ditulis terpisah karena menunjukkan kata depan tempat.","is_fact":true,"explanation":"Fakta! 'Di' sebagai preposisi penunjuk tempat ditulis terpisah, berbeda dengan imbuhan pasif seperti 'dimakan'.","topic_tag":"Bahasa Indonesia"}),
-                json!({"id":"g3","statement":"Nilai tukar Rupiah melemah selalu menguntungkan warga yang membeli bahan baku impor.","is_fact":false,"explanation":"Mitos! Saat Rupiah melemah, harga barang impor justru menjadi lebih mahal dalam Rupiah.","topic_tag":"Ekonomi"}),
-                json!({"id":"g4","statement":"Fotosintesis pada tumbuhan hijau melepaskan gas oksigen ke udara.","is_fact":true,"explanation":"Fakta! Tumbuhan menyerap CO2 + air dan melepaskan oksigen dengan bantuan cahaya matahari.","topic_tag":"IPA"}),
-                json!({"id":"g5","statement":"Pajak yang dibayar warga negara hanya digunakan untuk gaji pegawai dan tidak pernah untuk jalan atau sekolah.","is_fact":false,"explanation":"Mitos! APBN dari pajak membiayai infrastruktur publik, subsidi pendidikan, kesehatan, dan fasilitas umum.","topic_tag":"IPS"}),
-                json!({"id":"g6","statement":"Password akun belajar sebaiknya sama persis dengan tanggal lahir agar mudah diingat.","is_fact":false,"explanation":"Mitos! Tanggal lahir mudah ditebak; gunakan kombinasi huruf, angka, dan karakter unik.","topic_tag":"Informatika"}),
-            ];
-            shuffle_vec(&mut all_pool, rng);
-            let mut items = Vec::new();
-            items.append(&mut extra_bank_items);
-            for item in all_pool {
-                if items.len() >= 5 { break; }
-                items.push(item);
-            }
-            shuffle_vec(&mut items, rng);
-            let title = if grade_band == "PAKET_A" {
-                "Fakta atau Mitos Pintar: Tantangan Cepat".to_string()
-            } else {
-                "Fakta atau Mitos: Sains, Numerasi & Wawasan".to_string()
-            };
+        "SLIDING_PUZZLE" => {
+            let sp = generate_sliding_puzzle_challenge(rng, 3);
+            let title = sp["theme_title"]
+                .as_str()
+                .unwrap_or("Puzzle Geser Visual")
+                .to_string();
             (
-                title,
-                "Geser kanan jika Fakta, geser kiri jika Mitos — soal baru tiap ronde!".to_string(),
-                if subject_hint.is_empty() { "Lintas Mapel".to_string() } else { subject_hint.to_string() },
-                Value::Array(items),
+                format!("Puzzle Geser: {}", title),
+                "Geser ubin ke ruang kosong hingga membentuk gambar yang utuh!".to_string(),
+                "Visual & Logika Spasial".to_string(),
+                json!([sp]),
             )
         }
-        "CASE_DETECTIVE" => {
-            let proc_cases = gen_procedural_case_items(rng, 2);
-            let mut curated_pool = vec![
-                json!({
-                    "id": "d2",
-                    "scenario": "Kamu menerima pesan di grup keluarga berisi tautan undian berhadiah resmi pemerintah yang meminta foto KTP dan kode OTP SMS dalam 10 menit.",
-                    "question": "Tindakan detektif digital yang paling tepat adalah...",
-                    "options": [
-                        "Mengabaikan tautan, tidak membagikan KTP/OTP, dan mengedukasi grup bahwa itu penipuan (phishing)",
-                        "Langsung mengisi foto KTP asal belum mengirim kode OTP",
-                        "Meneruskan pesan tersebut ke semua teman agar ikut mencoba keberuntungan",
-                        "Mengklik tautan dulu untuk melihat apakah tampilannya meyakinkan"
-                    ],
-                    "correct_index": 0,
-                    "explanation": "Lembaga resmi tidak pernah meminta OTP lewat tautan grup. Jangan pernah klik tautan mencurigakan atau menyebar data pribadi.",
-                    "topic_tag": "Literasi Digital"
-                }),
-                json!({
-                    "id": "d3",
-                    "scenario": "Dalam rapat warga, terdapat usulan perbaikan saluran air. Separuh warga setuju dikerjakan akhir pekan, separuh lagi ingin menyewa tukang agar cepat selesai.",
-                    "question": "Sikap yang paling sesuai dengan prinsip demokrasi Pancasila untuk menyelesaikan perbedaan ini adalah...",
-                    "options": [
-                        "Memfasilitasi musyawarah untuk mencari titik temu, misalnya warga bekerja bakti dan urunan biaya alat bersama",
-                        "Memaksa kelompok minoritas mengikuti keputusan ketua RT tanpa diskusi",
-                        "Membatalkan rapat dan menunda proyek selamanya",
-                        "Membiarkan kedua kubu bertengkar sampai ada yang mengalah"
-                    ],
-                    "correct_index": 0,
-                    "explanation": "Musyawarah mufakat mengutamakan kepentingan bersama serta mencari solusi kreatif yang bisa diterima seluruh pihak.",
-                    "topic_tag": "PPKn & Sosial"
-                }),
-                json!({
-                    "id": "d4",
-                    "scenario": "Sebuah kalimat iklan berbunyi: 'Gunakan sabun X, dijamin 100% langsung sembuhkan semua penyakit kulit dalam 1 menit tanpa efek samping!'",
-                    "question": "Dilihat dari kaidah teks persuasif & literasi kritis, ciri pernyataan tersebut adalah...",
-                    "options": [
-                        "Klaim berlebihan (hiperbola) tanpa bukti uji klinis sehingga perlu diwaspadai",
-                        "Kalimat fakta ilmiah objektif yang pasti benar",
-                        "Teks deskripsi objektif berdasarkan kamus",
-                        "Kalimat pasif yang sesuai ejaan baku"
-                    ],
-                    "correct_index": 0,
-                    "explanation": "Pernyataan '100% langsung sembuh dalam 1 menit' tanpa rujukan ilmiah merupakan klaim hiperbolis yang tidak realistis.",
-                    "topic_tag": "Bahasa Indonesia"
-                }),
-                json!({
-                    "id": "d5",
-                    "scenario": "Saat musim kemarau, sumur di desa mulai menyusut sementara limbah rumah tangga tetap dialirkan ke selokan yang mengarah ke sungai.",
-                    "question": "Langkah pelestarian air bersih jangka panjang yang paling efektif di lingkungan rumah adalah...",
-                    "options": [
-                        "Membuat lubang biopori resapan air hujan dan memisahkan limbah detergen sebelum dibuang",
-                        "Menyedot air sungai terus-menerus memakai pompa besar",
-                        "Membuang sampah organik ke selokan agar cepat hanyut",
-                        "Menguras bak mandi setiap dua jam sekali"
-                    ],
-                    "correct_index": 0,
-                    "explanation": "Biopori membantu mengembalikan air hujan ke tanah dan menjaga cadangan air tanah tetap bersih.",
-                    "topic_tag": "IPA & Lingkungan"
-                }),
-            ]
-            .into_iter()
-            .map(|c| shuffle_case_options(c, rng))
-            .collect::<Vec<Value>>();
-            shuffle_vec(&mut curated_pool, rng);
-
-            let mut items = Vec::new();
-            items.append(&mut extra_bank_items);
-            for pc in proc_cases {
-                if items.len() < 4 { items.push(pc); }
-            }
-            for cc in curated_pool {
-                if items.len() < 4 { items.push(cc); }
-            }
-            shuffle_vec(&mut items, rng);
+        "BLOCK_PUZZLE" => {
+            let bp = generate_block_puzzle_challenge(rng, round);
             (
-                "Detektif Kasus Nyata: Tantangan Cerdas".to_string(),
-                "Baca kasus kehidupan sehari-hari dan pilih keputusan terbaik!".to_string(),
-                if subject_hint.is_empty() { "Keterampilan Terapan".to_string() } else { subject_hint.to_string() },
-                Value::Array(items),
-            )
-        }
-        "SEQUENCE_ORDER" => {
-            let proc_seq = gen_procedural_sequence_items(rng, 2);
-            let mut logic_pool = vec![
-                json!({
-                    "id": "s1",
-                    "prompt": "Urutkan langkah mengelola keuangan pribadi/keluarga bulanan yang sehat dari awal hingga akhir:",
-                    "steps": [
-                        "Mencatat seluruh sumber pemasukan tetap bulan ini",
-                        "Menyisihkan dana darurat dan kebutuhan pokok wajib",
-                        "Mengalokasikan anggaran untuk kebutuhan pendukung/belajar",
-                        "Mengevaluasi catatan pengeluaran di akhir bulan"
-                    ],
-                    "explanation": "Keuangan sehat dimulai dari mengetahui pemasukan, mengamankan kebutuhan pokok & tabungan, lalu mengevaluasi pengeluaran.",
-                    "topic_tag": "Literasi Finansial"
-                }),
-                json!({
-                    "id": "s2",
-                    "prompt": "Urutkan tahapan metode ilmiah saat melakukan pengamatan sederhana:",
-                    "steps": [
-                        "Merumuskan masalah yang ingin diamati",
-                        "Menyusun dugaan sementara (hipotesis)",
-                        "Melakukan percobaan dan mencatat data pengamatan",
-                        "Menarik kesimpulan berdasarkan hasil data"
-                    ],
-                    "explanation": "Metode ilmiah selalu berawal dari masalah, lalu hipotesis, eksperimen/pengumpulan data, hingga kesimpulan.",
-                    "topic_tag": "IPA"
-                }),
-                json!({
-                    "id": "s3",
-                    "prompt": "Urutkan struktur argumen AREL dalam menulis pendapat yang meyakinkan:",
-                    "steps": [
-                        "Assertion: Menyatakan pendapat atau klaim utama secara tegas",
-                        "Reasoning: Menjelaskan alasan logis mengapa pendapat itu penting",
-                        "Evidence: Menyertakan fakta, data, atau contoh nyata pendukung",
-                        "Link back: Menghubungkan kembali ke kesimpulan utama"
-                    ],
-                    "explanation": "Pola AREL (Assertion → Reasoning → Evidence → Link back) membuat argumen runtut dan kuat secara akademis.",
-                    "topic_tag": "Bahasa & Penalaran"
-                }),
-                json!({
-                    "id": "s4",
-                    "prompt": "Urutkan proses terjadinya siklus air di bumi secara berurutan:",
-                    "steps": [
-                        "Evaporasi: Air laut dan sungai menguap karena panas matahari",
-                        "Kondensasi: Uap air mendingin di udara membentuk gumpalan awan",
-                        "Presipitasi: Awan jenuh menjatuhkan titik-titik air sebagai hujan",
-                        "Infiltrasi: Air hujan meresap ke tanah dan mengalir kembali ke sungai"
-                    ],
-                    "explanation": "Siklus hidrologi berputar dari penguapan (evaporasi), pengembunan (kondensasi), hujan (presipitasi), hingga penyerapan (infiltrasi).",
-                    "topic_tag": "IPA & Geografi"
-                }),
-            ];
-            shuffle_vec(&mut logic_pool, rng);
-            let mut items = proc_seq;
-            if let Some(first_logic) = logic_pool.into_iter().next() {
-                items.push(first_logic);
-            }
-            shuffle_vec(&mut items, rng);
-            (
-                "Rangkai Logika: Susun Urutan yang Tepat".to_string(),
-                "Atur setiap blok langkah dari posisi 1 sampai 4 dengan soal dinamis!".to_string(),
-                "Matematika & Logika".to_string(),
-                Value::Array(items),
-            )
-        }
-        "MAP_PIN_HUNT" => {
-            let routine_idx = (next_rand(rng) % 4) as usize;
-            let routine_prompts = [
-                ("r1", "HUNT: Klik jam weker digital 05:00 tempat Andi bangun pagi!", "Pukul 05:00 pagi ditunjukkan oleh jam digital hijau di atas meja samping kasur."),
-                ("r2", "HUNT: Klik tokoh Andi yang sedang bangun pagi dan meregangkan badan di tempat tidur!", "Andi bangun pukul 05:00 dengan semangat sebelum bersiap ke sekolah."),
-                ("r3", "HUNT: Klik seragam sekolah SMP putih-biru yang sudah disiapkan Andi di gantungan dinding!", "Menyiapkan seragam putih-biru sejak malam membantu berangkat sekolah lebih disiplin."),
-                ("r4", "HUNT: Klik perlengkapan olahraga (bola sepak) di pojok kanan kamar Andi!", "Bola sepak di sudut kamar disiapkan untuk kegiatan olahraga ekstrakurikuler."),
-            ];
-            let (rt_id, rt_prompt, rt_expl) = routine_prompts[routine_idx];
-
-            let prok_idx = (next_rand(rng) % 4) as usize;
-            let prok_prompts = [
-                ("h3", "TEBAK LOKASI: Klik titik pembacaan Teks Proklamasi oleh Soekarno-Hatta!", "Ir. Soekarno didampingi Drs. Moh. Hatta membacakan Teks Proklamasi di depan teras rumah Pegangsaan Timur 56."),
-                ("h1", "TEBAK LOKASI: Klik tiang pengibaran Sang Saka Merah Putih pada upacara Proklamasi!", "Bendera Merah Putih jahitan Ibu Fatmawati dikibarkan di tiang bambu halaman depan setelah pembacaan teks."),
-                ("h2", "TEBAK LOKASI: Klik area mikrofon yang digunakan untuk menyiarkan suara kemerdekaan!", "Mikrofon corong halaman depan membantu suara pembacaan naskah terdengar jelas oleh seluruh hadirin."),
-                ("h4", "TEBAK LOKASI: Klik barisan pemuda dan tokoh tamu undangan yang menyaksikan Proklamasi!", "Para pemuda, pejuang, dan warga menyaksikan langsung momen bersejarah 17 Agustus 1945."),
-            ];
-            let (pk_id, pk_prompt, pk_expl) = prok_prompts[prok_idx];
-
-            let mut items = vec![
-                json!({
-                    "id": "mp_cirebon",
-                    "scene_id": "cirebon_keraton_map",
-                    "interaction_type": "MAP_TAGS",
-                    "prompt": "Sematkan tag ke lokasi yang tepat pada peta untuk menandai wilayah Kesultanan Cirebon dan keraton-keratonnya!",
-                    "pins": [
-                        {"id": "p1", "label": "Kesultanan Cirebon (Pusat)", "step_label": "Tag Cirebon Pusat", "x": 0.52, "y": 0.49},
-                        {"id": "p2", "label": "Kasepuhan (Keraton)", "step_label": "Tag Kasepuhan", "x": 0.47, "y": 0.40},
-                        {"id": "p3", "label": "Kanoman (Keraton)", "step_label": "Tag Kanoman", "x": 0.43, "y": 0.55},
-                        {"id": "p4", "label": "Kacirebonan (Keraton)", "step_label": "Tag Kacirebonan", "x": 0.53, "y": 0.58}
-                    ],
-                    "explanation": "Keraton Kasepuhan, Kanoman, dan Kacirebonan merupakan pusat sejarah Kesultanan Cirebon di pesisir utara Jawa Barat.",
-                    "topic_tag": "Geografi & Sejarah"
-                }),
-                json!({
-                    "id": format!("mp_prok_{}", pk_id),
-                    "scene_id": "proklamasi_1945",
-                    "interaction_type": "SCENE_HOTSPOT",
-                    "prompt": pk_prompt,
-                    "pins": [
-                        {"id": "h1", "label": "Tiang Bendera Merah Putih", "step_label": "Tiang Bendera", "x": 0.26, "y": 0.46, "is_target": pk_id == "h1"},
-                        {"id": "h2", "label": "Mikrofon Halaman Depan", "step_label": "Area Mikrofon", "x": 0.38, "y": 0.60, "is_target": pk_id == "h2"},
-                        {"id": "h3", "label": "Podium Pembacaan Teks Proklamasi", "step_label": "Pembaca Teks", "x": 0.50, "y": 0.55, "is_target": pk_id == "h3"},
-                        {"id": "h4", "label": "Barisan Pemuda & Tamu Undangan", "step_label": "Barisan Tamu", "x": 0.78, "y": 0.58, "is_target": pk_id == "h4"}
-                    ],
-                    "explanation": pk_expl,
-                    "topic_tag": "Sejarah Nasional"
-                }),
-                json!({
-                    "id": format!("mp_routine_{}", rt_id),
-                    "scene_id": "morning_routine_room",
-                    "interaction_type": "SCENE_HOTSPOT",
-                    "prompt": rt_prompt,
-                    "pins": [
-                        {"id": "r1", "label": "Jam Digital 05:00", "step_label": "Jam 05:00", "x": 0.135, "y": 0.62, "is_target": rt_id == "r1"},
-                        {"id": "r2", "label": "Andi Bangun Tidur", "step_label": "Kasur Andi", "x": 0.45, "y": 0.46, "is_target": rt_id == "r2"},
-                        {"id": "r3", "label": "Seragam Sekolah", "step_label": "Seragam", "x": 0.89, "y": 0.42, "is_target": rt_id == "r3"},
-                        {"id": "r4", "label": "Bola Sepak", "step_label": "Bola Sepak", "x": 0.92, "y": 0.86, "is_target": rt_id == "r4"}
-                    ],
-                    "explanation": rt_expl,
-                    "topic_tag": "Bahasa Inggris & Rutinitas"
-                }),
-                json!({
-                    "id": "mp_fotosintesis",
-                    "scene_id": "photosynthesis_scene",
-                    "interaction_type": "MAP_TAGS",
-                    "prompt": "Sematkan tag komponen Fotosintesis ke titik yang tepat pada diagram daun dan tanaman!",
-                    "pins": [
-                        {"id": "f1", "label": "Energi Cahaya Matahari", "step_label": "Tag Matahari", "x": 0.24, "y": 0.25},
-                        {"id": "f2", "label": "Kloroplas pada Daun Hijau", "step_label": "Tag Kloroplas", "x": 0.54, "y": 0.45},
-                        {"id": "f3", "label": "Penyerapan Air & Mineral Akar", "step_label": "Tag Akar Air", "x": 0.48, "y": 0.82},
-                        {"id": "f4", "label": "Pelepasan Gas Oksigen (O₂)", "step_label": "Tag Oksigen", "x": 0.78, "y": 0.34}
-                    ],
-                    "explanation": "Tumbuhan menyerap air lewat akar dan CO₂ lewat stomata, lalu mengolahnya di kloroplas dengan cahaya matahari menghasilkan energi & O₂.",
-                    "topic_tag": "IPA Biologi"
-                }),
-            ];
-            shuffle_vec(&mut items, rng);
-            (
-                "Eksplorasi Peta & Lokasi Interaktif".to_string(),
-                "Sematkan tag lokasi pada peta dan temukan target dinamis di gambar!".to_string(),
-                "Geografi, Sejarah & Sains".to_string(),
-                Value::Array(items),
+                "Block Blast 8×8".to_string(),
+                "Susun 3 balok warna ke papan 8×8, bersihkan baris & kolom penuh!".to_string(),
+                "Strategi Geometri".to_string(),
+                json!([bp]),
             )
         }
         _ => {
-            let mut pool = vec![
-                json!({
-                    "id": "w1",
-                    "answer": "INFLASI",
-                    "clues": [
-                        "Istilah populer dalam ilmu ekonomi makro.",
-                        "Ditandai dengan naiknya harga kebutuhan pokok secara umum dan terus-menerus.",
-                        "Menyebabkan nilai riil uang menjadi turun jika tidak diimbangi kenaikan pendapatan."
-                    ],
-                    "acceptable_aliases": ["INFLASI"],
-                    "explanation": "Inflasi adalah kenaikan harga barang dan jasa secara umum dan terus-menerus dalam periode tertentu.",
-                    "topic_tag": "Ekonomi"
-                }),
-                json!({
-                    "id": "w2",
-                    "answer": "FOTOSINTESIS",
-                    "clues": [
-                        "Proses penting yang menjaga ketersediaan oksigen di bumi.",
-                        "Hanya dapat dilakukan oleh organisme berklorofil dengan cahaya matahari.",
-                        "Mengubah air dan karbon dioksida menjadi glukosa dan oksigen."
-                    ],
-                    "acceptable_aliases": ["FOTOSINTESIS"],
-                    "explanation": "Fotosintesis adalah proses tumbuhan hijau memasak makanan dengan bantuan sinar matahari.",
-                    "topic_tag": "Biologi / IPA"
-                }),
-                json!({
-                    "id": "w3",
-                    "answer": "HIPOTESIS",
-                    "clues": [
-                        "Sering muncul di bab awal penelitian atau percobaan IPA.",
-                        "Berisi jawaban atau dugaan sementara sebelum data dikumpulkan.",
-                        "Kebenarannya masih harus diuji melalui observasi atau eksperimen."
-                    ],
-                    "acceptable_aliases": ["HIPOTESIS", "HIPOTESA"],
-                    "explanation": "Hipotesis adalah dugaan sementara yang bersifat ilmiah dan perlu diuji kebenarannya.",
-                    "topic_tag": "Sains & Riset"
-                }),
-                json!({
-                    "id": "w4",
-                    "answer": "MUSYAWARAH",
-                    "clues": [
-                        "Tradisi luhur bangsa Indonesia saat mengambil keputusan bersama.",
-                        "Menjadi inti dari Sila ke-4 Pancasila.",
-                        "Tujuannya mencapai kesepakatan atau mufakat tanpa paksaan."
-                    ],
-                    "acceptable_aliases": ["MUSYAWARAH"],
-                    "explanation": "Musyawarah adalah pembahasan bersama untuk mencapai keputusan mufakat demi kepentingan bersama.",
-                    "topic_tag": "PPKn"
-                }),
-                json!({
-                    "id": "w5",
-                    "answer": "SINONIM",
-                    "clues": [
-                        "Istilah kebahasaan dalam pelajaran Bahasa Indonesia.",
-                        "Berkaitan dengan hubungan makna antar dua kata berbeda.",
-                        "Contohnya adalah kata 'pandai' dengan 'cerdas', atau 'hemat' dengan 'irit'."
-                    ],
-                    "acceptable_aliases": ["SINONIM"],
-                    "explanation": "Sinonim adalah dua kata atau lebih yang memiliki bentuk berbeda tetapi maknanya sama atau mirip.",
-                    "topic_tag": "Bahasa Indonesia"
-                }),
-                json!({
-                    "id": "w6",
-                    "answer": "KLOROFIL",
-                    "clues": [
-                        "Ditemukan di dalam organel sel tumbuhan yang disebut kloroplas.",
-                        "Memberi warna hijau khas pada daun sehat.",
-                        "Berfungsi menyerap energi cahaya matahari saat fotosintesis."
-                    ],
-                    "acceptable_aliases": ["KLOROFIL"],
-                    "explanation": "Klorofil adalah pigmen hijau pada tumbuhan yang menangkap energi cahaya matahari.",
-                    "topic_tag": "IPA Biologi"
-                }),
-                json!({
-                    "id": "w7",
-                    "answer": "ANTONIM",
-                    "clues": [
-                        "Pasangan kata dalam pelajaran kosakata Bahasa Indonesia.",
-                        "Menunjukkan hubungan arti yang saling bertolak belakang.",
-                        "Contohnya: panas >< dingin, naik >< turun, hemat >< boros."
-                    ],
-                    "acceptable_aliases": ["ANTONIM"],
-                    "explanation": "Antonim adalah dua kata yang maknanya berlawanan satu sama lain.",
-                    "topic_tag": "Bahasa Indonesia"
-                }),
-                json!({
-                    "id": "w8",
-                    "answer": "EVAPORASI",
-                    "clues": [
-                        "Tahap pembuka dalam siklus air (hidrologi) di bumi.",
-                        "Terjadi ketika permukaan laut, sungai, dan danau terkena panas matahari.",
-                        "Mengubah air cair menjadi uap air yang naik ke atmosfer."
-                    ],
-                    "acceptable_aliases": ["EVAPORASI", "PENGUAPAN"],
-                    "explanation": "Evaporasi adalah proses penguapan air permukaan menuju atmosfer akibat panas matahari.",
-                    "topic_tag": "IPA & Geografi"
-                }),
-                json!({
-                    "id": "w9",
-                    "answer": "PHISHING",
-                    "clues": [
-                        "Istilah keamanan siber dalam Literasi Digital modern.",
-                        "Sering berkedok tautan hadiah, surat bank palsu, atau formulir undian.",
-                        "Bertujuan mencuri password, PIN, atau kode OTP korban."
-                    ],
-                    "acceptable_aliases": ["PHISHING", "PISHING"],
-                    "explanation": "Phishing adalah upaya penipuan digital dengan menyamar sebagai pihak resmi untuk mencuri data sensitif.",
-                    "topic_tag": "Informatika"
-                }),
-                json!({
-                    "id": "w10",
-                    "answer": "STOMATA",
-                    "clues": [
-                        "Struktur mikroskopis yang kebanyakan berada di permukaan bawah daun.",
-                        "Bisa membuka dan menutup seperti mulut kecil.",
-                        "Tempat masuknya CO2 dan keluarnya oksigen serta uap air pada tumbuhan."
-                    ],
-                    "acceptable_aliases": ["STOMATA"],
-                    "explanation": "Stomata adalah pori-pori daun yang mengatur pertukaran gas dan transpirasi tumbuhan.",
-                    "topic_tag": "Biologi"
-                }),
-            ];
-            shuffle_vec(&mut pool, rng);
-            pool.truncate(4);
+            let nm = generate_number_merge_challenge(rng, round);
             (
-                "Tebak Istilah Harian: Uji Wawasan".to_string(),
-                "Pecahkan kata kunci materi hanya dengan sedikit petunjuk untuk XP maksimal!".to_string(),
-                "Wawasan Lintas Mapel".to_string(),
-                Value::Array(pool),
+                "2048 Gabung Angka".to_string(),
+                "Geser papan untuk menggabungkan angka kembar hingga target harian!".to_string(),
+                "Logika & Numerasi".to_string(),
+                json!([nm]),
             )
         }
     }
 }
 
-async fn award_extra_xp(pool: &PgPool, tenant_id: Uuid, student_id: Uuid, action_type: &str, xp_amount: i32, desc: &str) -> (i64, i32, i32, bool) {
+async fn award_extra_xp(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    student_id: Uuid,
+    action_type: &str,
+    xp_amount: i32,
+    desc: &str,
+) -> (i64, i32, i32, bool) {
     let today = wib_today();
     let _ = sqlx::query(
         r#"
@@ -1477,7 +1020,7 @@ async fn award_extra_xp(pool: &PgPool, tenant_id: Uuid, student_id: Uuid, action
     .await;
 
     let current_xp_row = sqlx::query(
-        "SELECT total_xp, level, streak_days, last_activity_date FROM student_xp WHERE student_id = $1"
+        "SELECT total_xp, level, streak_days, last_activity_date FROM student_xp WHERE student_id = $1",
     )
     .bind(student_id)
     .fetch_optional(pool)
@@ -1490,7 +1033,9 @@ async fn award_extra_xp(pool: &PgPool, tenant_id: Uuid, student_id: Uuid, action
             r.get::<i64, _>("total_xp"),
             r.get::<i32, _>("level"),
             r.get::<i32, _>("streak_days"),
-            r.try_get::<Option<NaiveDate>, _>("last_activity_date").ok().flatten(),
+            r.try_get::<Option<NaiveDate>, _>("last_activity_date")
+                .ok()
+                .flatten(),
         ),
         None => (0, 1, 0, None),
     };
@@ -1548,12 +1093,10 @@ pub async fn get_daily_quest(
     let round = query.round.max(0);
     let featured_mode = featured_mode_for_date(today);
     let requested_mode = normalize_mode(query.mode.as_deref(), featured_mode);
-    let mut rng = seed_for_quest(today, round, actor.id, &requested_mode, "");
 
-    // 1. Resolve student & active class context
     let student_row = sqlx::query(
         r#"
-        SELECT s.id, s.full_name, COALESCE(c.name, 'Umum') AS class_name, c.id AS class_id
+        SELECT s.id, s.full_name, COALESCE(c.name, 'Umum') AS class_name
         FROM students s
         LEFT JOIN enrollments e ON e.student_id = s.id AND e.tenant_id = s.tenant_id AND UPPER(COALESCE(e.status, 'ACTIVE')) = 'ACTIVE'
         LEFT JOIN classes c ON c.id = e.class_id AND c.tenant_id = s.tenant_id
@@ -1569,49 +1112,18 @@ pub async fn get_daily_quest(
     .ok()
     .flatten();
 
-    let (student_id_opt, class_name, class_id_opt) = match student_row {
+    let (student_id_opt, class_name) = match student_row {
         Some(r) => (
             Some(r.get::<Uuid, _>("id")),
-            r.try_get::<String, _>("class_name").unwrap_or_else(|_| "Umum".to_string()),
-            r.try_get::<Option<Uuid>, _>("class_id").ok().flatten(),
+            r.try_get::<String, _>("class_name")
+                .unwrap_or_else(|_| "Umum".to_string()),
         ),
-        None => (None, "Pratinjau Kelas".to_string(), None),
+        None => (None, "Umum".to_string()),
     };
 
     let grade_band = detect_grade_band(&class_name);
-    rng = seed_for_quest(today, round, actor.id, &requested_mode, &grade_band);
+    let mut rng = seed_for_quest(today, round, actor.id, &requested_mode, &grade_band);
 
-    // 2. Multi-material curriculum rotation (fetch up to 12 materials and rotate by seed!)
-    let topic_rows = sqlx::query(
-        r#"
-        SELECT m.title, COALESCE(sub.name, 'Umum') AS subject_name
-        FROM learning_materials m
-        LEFT JOIN subjects sub ON sub.id = m.subject_id AND sub.tenant_id = m.tenant_id
-        WHERE m.tenant_id = $1
-          AND m.deleted_at IS NULL
-          AND ($2::uuid IS NULL OR m.class_id IS NULL OR m.class_id = $2)
-        ORDER BY m.created_at DESC
-        LIMIT 12
-        "#,
-    )
-    .bind(req_ctx.tenant_id)
-    .bind(class_id_opt)
-    .fetch_all(&ctx.pool)
-    .await
-    .unwrap_or_default();
-
-    let (topic_hint, subject_hint) = if topic_rows.is_empty() {
-        ("Pembelajaran Kontekstual PKBM".to_string(), "Literasi & Numerasi".to_string())
-    } else {
-        let pick_idx = (next_rand(&mut rng) as usize) % topic_rows.len();
-        let r = &topic_rows[pick_idx];
-        (
-            r.try_get::<String, _>("title").unwrap_or_else(|_| "Pembelajaran Kontekstual".to_string()),
-            r.try_get::<String, _>("subject_name").unwrap_or_else(|_| "Literasi & Numerasi".to_string()),
-        )
-    };
-
-    // 3. Round == 0 uses daily cached quest per (tenant, date, grade_band, mode); Round >= 1 generates fresh ephemeral round!
     let existing = if round == 0 {
         sqlx::query(
             r#"
@@ -1627,125 +1139,102 @@ pub async fn get_daily_quest(
         .bind(&requested_mode)
         .fetch_optional(&ctx.pool)
         .await
-        .map_err(|e| ApiError::new(ApplicationError::Infrastructure(InfrastructureError::Database(e)), &req_ctx.request_id))?
+        .map_err(|e| {
+            ApiError::new(
+                ApplicationError::Infrastructure(InfrastructureError::Database(e)),
+                &req_ctx.request_id,
+            )
+        })?
     } else {
         None
     };
 
-    let (quest_id, title, subtitle, subject_name, source_label, xp_reward, challenges) = match existing {
-        Some(r) => (
-            r.get::<Uuid, _>("id"),
-            r.get::<String, _>("title"),
-            r.get::<String, _>("subtitle"),
-            r.get::<String, _>("subject_name"),
-            r.get::<String, _>("source_label"),
-            r.get::<i32, _>("xp_reward"),
-            r.get::<Value, _>("challenges_json"),
-        ),
-        None => {
-            let quiz_bank_items = load_quiz_bank_challenges(&ctx.pool, req_ctx.tenant_id, &requested_mode, &mut rng).await;
-            let (gen_title, gen_subtitle, gen_subject, gen_challenges, gen_source) =
-                if requested_mode == "MAP_PIN_HUNT" {
-                    let (t, sub, subj, ch) = build_curated_quest(&grade_band, &requested_mode, &subject_hint, &mut rng, quiz_bank_items);
-                    (t, sub, subj, ch, "VISUAL_MAP_BANK".to_string())
+    let (quest_id, title, subtitle, subject_name, source_label, xp_reward, challenges) =
+        match existing {
+            Some(r) => (
+                r.get::<Uuid, _>("id"),
+                r.get::<String, _>("title"),
+                r.get::<String, _>("subtitle"),
+                r.get::<String, _>("subject_name"),
+                r.get::<String, _>("source_label"),
+                r.get::<i32, _>("xp_reward"),
+                r.get::<Value, _>("challenges_json"),
+            ),
+            None => {
+                let (gen_title, gen_subtitle, gen_subject, gen_challenges) =
+                    build_game_payload(&requested_mode, round, &mut rng);
+                let base_xp = if round > 0 {
+                    25
+                } else if requested_mode == featured_mode {
+                    80
                 } else {
-                    match try_generate_ai_quest(&grade_band, &requested_mode, &topic_hint, &subject_hint, today, round).await {
-                        Some((t, sub, subj, mut ch)) => {
-                            if requested_mode == "CASE_DETECTIVE" {
-                                if let Some(arr) = ch.as_array_mut() {
-                                    for item in arr.iter_mut() {
-                                        let shuffled = shuffle_case_options(item.clone(), &mut rng);
-                                        *item = shuffled;
-                                    }
-                                }
-                            }
-                            (t, sub, subj, ch, "AI_CURRICULUM".to_string())
-                        }
-                        None => {
-                            let src = if !quiz_bank_items.is_empty() {
-                                "QUIZ_AND_DYNAMIC_ENGINE"
-                            } else {
-                                "DYNAMIC_ENGINE"
-                            };
-                            let (t, sub, subj, ch) = build_curated_quest(&grade_band, &requested_mode, &subject_hint, &mut rng, quiz_bank_items);
-                            (t, sub, subj, ch, src.to_string())
-                        }
-                    }
+                    60
                 };
+                let src = "PROCEDURAL_ENGINE".to_string();
 
-            let base_xp = if round > 0 {
-                20
-            } else if requested_mode == featured_mode {
-                80
-            } else {
-                40
-            };
+                if round == 0 {
+                    let row = sqlx::query(
+                        r#"
+                        INSERT INTO daily_quests (id, tenant_id, quest_date, grade_band, game_mode, title, subtitle, subject_name, source_label, xp_reward, challenges_json)
+                        VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                        ON CONFLICT (tenant_id, quest_date, grade_band, game_mode) DO UPDATE SET
+                            title = daily_quests.title
+                        RETURNING id, title, subtitle, subject_name, source_label, xp_reward, challenges_json
+                        "#,
+                    )
+                    .bind(req_ctx.tenant_id)
+                    .bind(today)
+                    .bind(&grade_band)
+                    .bind(&requested_mode)
+                    .bind(&gen_title)
+                    .bind(&gen_subtitle)
+                    .bind(&gen_subject)
+                    .bind(&src)
+                    .bind(base_xp)
+                    .bind(&gen_challenges)
+                    .fetch_one(&ctx.pool)
+                    .await
+                    .map_err(|e| {
+                        ApiError::new(
+                            ApplicationError::Infrastructure(InfrastructureError::Database(e)),
+                            &req_ctx.request_id,
+                        )
+                    })?;
 
-            if round == 0 {
-                let row = sqlx::query(
-                    r#"
-                    INSERT INTO daily_quests (id, tenant_id, quest_date, grade_band, game_mode, title, subtitle, subject_name, source_label, xp_reward, challenges_json)
-                    VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                    ON CONFLICT (tenant_id, quest_date, grade_band, game_mode) DO UPDATE SET
-                        title = daily_quests.title
-                    RETURNING id, title, subtitle, subject_name, source_label, xp_reward, challenges_json
-                    "#,
-                )
-                .bind(req_ctx.tenant_id)
-                .bind(today)
-                .bind(&grade_band)
-                .bind(&requested_mode)
-                .bind(&gen_title)
-                .bind(&gen_subtitle)
-                .bind(&gen_subject)
-                .bind(&gen_source)
-                .bind(base_xp)
-                .bind(&gen_challenges)
-                .fetch_one(&ctx.pool)
-                .await
-                .map_err(|e| ApiError::new(ApplicationError::Infrastructure(InfrastructureError::Database(e)), &req_ctx.request_id))?;
-
-                (
-                    row.get::<Uuid, _>("id"),
-                    row.get::<String, _>("title"),
-                    row.get::<String, _>("subtitle"),
-                    row.get::<String, _>("subject_name"),
-                    row.get::<String, _>("source_label"),
-                    row.get::<i32, _>("xp_reward"),
-                    row.get::<Value, _>("challenges_json"),
-                )
-            } else {
-                (
-                    Uuid::new_v4(),
-                    format!("{} (Ronde #{})", gen_title, round + 1),
-                    gen_subtitle,
-                    gen_subject,
-                    gen_source,
-                    base_xp,
-                    gen_challenges,
-                )
+                    (
+                        row.get::<Uuid, _>("id"),
+                        row.get::<String, _>("title"),
+                        row.get::<String, _>("subtitle"),
+                        row.get::<String, _>("subject_name"),
+                        row.get::<String, _>("source_label"),
+                        row.get::<i32, _>("xp_reward"),
+                        row.get::<Value, _>("challenges_json"),
+                    )
+                } else {
+                    (
+                        Uuid::new_v4(),
+                        format!("{} (Level #{})", gen_title, round + 1),
+                        gen_subtitle,
+                        gen_subject,
+                        src,
+                        base_xp,
+                        gen_challenges,
+                    )
+                }
             }
-        }
-    };
+        };
 
-    // 4. Student attempt + gamification stats + Shiba Pet + Chest claim state
     let mut my_attempt: Option<DailyQuestAttemptSummary> = None;
     let mut completed_modes_today: Vec<String> = Vec::new();
     let mut total_xp: i64 = 0;
     let mut level: i32 = 1;
-    let mut streak_days: i32 = 0;
-    let mut pet_status: Option<ShibaPetStatus> = None;
+    let mut streak_days: i32 = 1;
     let mut chest_claimed_today = false;
 
-    if let Some(sid) = student_id_opt {
+    let pet_status = if let Some(sid) = student_id_opt {
         if round == 0 {
             if let Ok(Some(att)) = sqlx::query(
-                r#"
-                SELECT score_percent, correct_count, total_count, max_combo, duration_seconds, xp_earned
-                FROM daily_quest_attempts
-                WHERE quest_id = $1 AND student_id = $2
-                LIMIT 1
-                "#,
+                "SELECT score_percent, correct_count, total_count, max_combo, duration_seconds, xp_earned FROM daily_quest_attempts WHERE quest_id = $1 AND student_id = $2 LIMIT 1",
             )
             .bind(quest_id)
             .bind(sid)
@@ -1777,11 +1266,14 @@ pub async fn get_daily_quest(
         .fetch_all(&ctx.pool)
         .await
         {
-            completed_modes_today = rows.into_iter().map(|r| r.get::<String, _>("game_mode")).collect();
+            completed_modes_today = rows
+                .into_iter()
+                .map(|r| r.get::<String, _>("game_mode"))
+                .collect();
         }
 
         if let Ok(Some(xp_row)) = sqlx::query(
-            "SELECT total_xp, level, streak_days FROM student_xp WHERE student_id = $1 AND tenant_id = $2 LIMIT 1"
+            "SELECT total_xp, level, streak_days FROM student_xp WHERE student_id = $1 AND tenant_id = $2 LIMIT 1",
         )
         .bind(sid)
         .bind(req_ctx.tenant_id)
@@ -1793,10 +1285,8 @@ pub async fn get_daily_quest(
             streak_days = xp_row.get("streak_days");
         }
 
-        pet_status = Some(load_or_create_pet(&ctx.pool, req_ctx.tenant_id, sid).await);
-
         chest_claimed_today = sqlx::query(
-            "SELECT 1 FROM daily_quest_chest_claims WHERE student_id = $1 AND claim_date = $2 LIMIT 1"
+            "SELECT 1 FROM daily_quest_chest_claims WHERE student_id = $1 AND claim_date = $2 LIMIT 1",
         )
         .bind(sid)
         .bind(today)
@@ -1805,11 +1295,12 @@ pub async fn get_daily_quest(
         .ok()
         .flatten()
         .is_some();
-    } else {
-        pet_status = Some(build_pet_status(1, 25, 0, 2, 1));
-    }
 
-    // 5. Daily Leaderboard for official daily quest
+        Some(load_or_create_pet(&ctx.pool, req_ctx.tenant_id, sid).await)
+    } else {
+        Some(build_pet_status(1, 25, 0, 2, 1))
+    };
+
     let lb_rows = if round == 0 {
         sqlx::query(
             r#"
@@ -1857,8 +1348,7 @@ pub async fn get_daily_quest(
         })
         .collect();
 
-    let all_modes = ["MAP_PIN_HUNT", "SPEED_MATCH", "FACT_OR_MYTH", "SEQUENCE_ORDER", "CASE_DETECTIVE", "CONCEPT_GUESS"];
-    let available_modes = all_modes
+    let available_modes = ALL_MODES
         .iter()
         .map(|code| DailyQuestModeInfo {
             code: (*code).to_string(),
@@ -1918,35 +1408,40 @@ pub async fn submit_daily_quest(
     let today = wib_today();
 
     let quest_row = sqlx::query(
-        "SELECT id, title, xp_reward, game_mode FROM daily_quests WHERE id = $1 AND tenant_id = $2 LIMIT 1"
+        "SELECT id, title, xp_reward FROM daily_quests WHERE id = $1 AND tenant_id = $2 LIMIT 1",
     )
     .bind(payload.quest_id)
     .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(ApplicationError::Infrastructure(InfrastructureError::Database(e)), &req_ctx.request_id))?;
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(InfrastructureError::Database(e)),
+            &req_ctx.request_id,
+        )
+    })?;
 
     let is_bonus_ephemeral = quest_row.is_none() || payload.round_number > 0;
     let (quest_title, base_reward) = match quest_row {
         Some(r) => (r.get::<String, _>("title"), r.get::<i32, _>("xp_reward")),
-        None => ("Misi Ronde Dinamis".to_string(), 20),
+        None => ("Level Lanjutan Zona Game".to_string(), 25),
     };
 
     let safe_total = payload.total_count.max(1);
     let safe_correct = payload.correct_count.clamp(0, safe_total);
     let score_percent = ((safe_correct as f64 / safe_total as f64) * 100.0).round() as i32;
     let combo_bonus = (payload.max_combo.max(0) * 5).min(25);
-    let completion_bonus = (base_reward / 3).max(15);
-    let accuracy_xp = ((base_reward as f64 * (safe_correct as f64 / safe_total as f64)).round() as i32).max(5);
+    let completion_bonus = (base_reward / 3).max(20);
+    let accuracy_xp =
+        ((base_reward as f64 * (safe_correct as f64 / safe_total as f64)).round() as i32).max(10);
     let computed_xp = if is_bonus_ephemeral {
-        15
+        20
     } else {
-        (completion_bonus + accuracy_xp + combo_bonus).clamp(20, 140)
+        (completion_bonus + accuracy_xp + combo_bonus).clamp(25, 140)
     };
 
-    // Resolve actual student row (FK safe)
     let student_opt = sqlx::query(
-        "SELECT id FROM students WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 AND deleted_at IS NULL LIMIT 1"
+        "SELECT id FROM students WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 AND deleted_at IS NULL LIMIT 1",
     )
     .bind(actor.id)
     .bind(req_ctx.tenant_id)
@@ -1970,7 +1465,7 @@ pub async fn submit_daily_quest(
                 biscuits_earned: if safe_correct > 0 { 2 } else { 0 },
                 pet_status: Some(build_pet_status(1, 25, 0, 2, 1)),
                 message: format!(
-                    "Mode Pratinjau selesai dengan akurasi {}% (simulasi +{} XP).",
+                    "Mode Pratinjau selesai dengan skor {}% (simulasi +{} XP).",
                     score_percent, computed_xp
                 ),
             },
@@ -1981,10 +1476,9 @@ pub async fn submit_daily_quest(
     let student_id: Uuid = st_row.get("id");
     let _ = load_or_create_pet(&ctx.pool, req_ctx.tenant_id, student_id).await;
 
-    // Bonus / ephemeral round reward (Biskuit Shiba + up to 3 bonus XP rounds/day)
     if is_bonus_ephemeral {
         let bonus_row = sqlx::query(
-            "SELECT COUNT(*)::int AS cnt, COALESCE(SUM(biscuits_earned), 0)::int AS bis FROM daily_quest_bonus_logs WHERE student_id = $1 AND bonus_date = $2"
+            "SELECT COUNT(*)::int AS cnt, COALESCE(SUM(biscuits_earned), 0)::int AS bis FROM daily_quest_bonus_logs WHERE student_id = $1 AND bonus_date = $2",
         )
         .bind(student_id)
         .bind(today)
@@ -1996,12 +1490,20 @@ pub async fn submit_daily_quest(
             Err(_) => (0, 0),
         };
 
-        let biscuits_earned = if safe_correct > 0 && bonus_bis_today < 6 { 1 } else { 0 };
-        let xp_bonus = if safe_correct > 0 && bonus_cnt < 3 { 15 } else { 0 };
+        let biscuits_earned = if safe_correct > 0 && bonus_bis_today < 8 {
+            1
+        } else {
+            0
+        };
+        let xp_bonus = if safe_correct > 0 && bonus_cnt < 5 {
+            20
+        } else {
+            0
+        };
 
         if biscuits_earned > 0 || xp_bonus > 0 {
             let _ = sqlx::query(
-                "INSERT INTO daily_quest_bonus_logs (id, tenant_id, student_id, bonus_date, biscuits_earned, created_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, NOW())"
+                "INSERT INTO daily_quest_bonus_logs (id, tenant_id, student_id, bonus_date, biscuits_earned, created_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, NOW())",
             )
             .bind(req_ctx.tenant_id)
             .bind(student_id)
@@ -2012,7 +1514,7 @@ pub async fn submit_daily_quest(
 
             if biscuits_earned > 0 {
                 let _ = sqlx::query(
-                    "UPDATE student_shiba_pets SET biscuits = biscuits + $2, updated_at = NOW() WHERE student_id = $1"
+                    "UPDATE student_shiba_pets SET biscuits = biscuits + $2, updated_at = NOW() WHERE student_id = $1",
                 )
                 .bind(student_id)
                 .bind(biscuits_earned)
@@ -2022,15 +1524,25 @@ pub async fn submit_daily_quest(
         }
 
         let (total_xp, level, streak_days, leveled_up) = if xp_bonus > 0 {
-            award_extra_xp(&ctx.pool, req_ctx.tenant_id, student_id, "DAILY_QUEST_BONUS", xp_bonus, &format!("Ronde Dinamis ({}%)", score_percent)).await
+            award_extra_xp(
+                &ctx.pool,
+                req_ctx.tenant_id,
+                student_id,
+                "DAILY_QUEST_BONUS",
+                xp_bonus,
+                &format!("Level Lanjutan Game ({}%)", score_percent),
+            )
+            .await
         } else {
-            let cur = sqlx::query("SELECT total_xp, level, streak_days FROM student_xp WHERE student_id = $1 AND tenant_id = $2")
-                .bind(student_id)
-                .bind(req_ctx.tenant_id)
-                .fetch_optional(&ctx.pool)
-                .await
-                .ok()
-                .flatten();
+            let cur = sqlx::query(
+                "SELECT total_xp, level, streak_days FROM student_xp WHERE student_id = $1 AND tenant_id = $2",
+            )
+            .bind(student_id)
+            .bind(req_ctx.tenant_id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .ok()
+            .flatten();
             match cur {
                 Some(r) => (r.get("total_xp"), r.get("level"), r.get("streak_days"), false),
                 None => (0, 1, 1, false),
@@ -2039,9 +1551,15 @@ pub async fn submit_daily_quest(
 
         let pet_status = load_or_create_pet(&ctx.pool, req_ctx.tenant_id, student_id).await;
         let msg = if xp_bonus > 0 || biscuits_earned > 0 {
-            format!("Ronde Baru selesai ({}%)! Raih +{} XP & +{} Biskuit Shiba!", score_percent, xp_bonus, biscuits_earned)
+            format!(
+                "Level Baru selesai ({}%)! Raih +{} XP & +{} Koin Energi!",
+                score_percent, xp_bonus, biscuits_earned
+            )
         } else {
-            format!("Ronde Latihan selesai ({}%)! Batas bonus harian tercapai, terus asah kemampuanmu!", score_percent)
+            format!(
+                "Latihan selesai ({}%)! Terus cetak skor terbaikmu!",
+                score_percent
+            )
         };
 
         return Ok(Json(ApiResponse::success(
@@ -2063,9 +1581,8 @@ pub async fn submit_daily_quest(
         )));
     }
 
-    // Check if student already completed official daily quest today
     let existing_attempt = sqlx::query(
-        "SELECT xp_earned, score_percent FROM daily_quest_attempts WHERE quest_id = $1 AND student_id = $2 LIMIT 1"
+        "SELECT xp_earned, score_percent FROM daily_quest_attempts WHERE quest_id = $1 AND student_id = $2 LIMIT 1",
     )
     .bind(payload.quest_id)
     .bind(student_id)
@@ -2095,13 +1612,15 @@ pub async fn submit_daily_quest(
         .execute(&ctx.pool)
         .await;
 
-        let cur = sqlx::query("SELECT total_xp, level, streak_days FROM student_xp WHERE student_id = $1 AND tenant_id = $2")
-            .bind(student_id)
-            .bind(req_ctx.tenant_id)
-            .fetch_optional(&ctx.pool)
-            .await
-            .ok()
-            .flatten();
+        let cur = sqlx::query(
+            "SELECT total_xp, level, streak_days FROM student_xp WHERE student_id = $1 AND tenant_id = $2",
+        )
+        .bind(student_id)
+        .bind(req_ctx.tenant_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten();
 
         let (total_xp, level, streak_days) = match cur {
             Some(r) => (r.get("total_xp"), r.get("level"), r.get("streak_days")),
@@ -2123,7 +1642,7 @@ pub async fn submit_daily_quest(
                 biscuits_earned: 0,
                 pet_status: Some(pet_status),
                 message: format!(
-                    "Latihan ulang tuntas ({}%)! Tekan 'Main Ronde Baru' untuk dapat soal fresh & Biskuit Shiba.",
+                    "Latihan selesai (skor {}%)! Tekan 'Level Baru' untuk papan baru + bonus XP.",
                     score_percent
                 ),
             },
@@ -2131,7 +1650,6 @@ pub async fn submit_daily_quest(
         )));
     }
 
-    // Record first completion & award XP + 2 Biskuit Shiba atomically
     let _ = sqlx::query(
         r#"
         INSERT INTO daily_quest_attempts (id, tenant_id, quest_id, student_id, correct_count, total_count, score_percent, max_combo, duration_seconds, xp_earned, completed_at)
@@ -2153,14 +1671,14 @@ pub async fn submit_daily_quest(
 
     let biscuits_earned = 2;
     let _ = sqlx::query(
-        "UPDATE student_shiba_pets SET biscuits = biscuits + $2, updated_at = NOW() WHERE student_id = $1"
+        "UPDATE student_shiba_pets SET biscuits = biscuits + $2, updated_at = NOW() WHERE student_id = $1",
     )
     .bind(student_id)
     .bind(biscuits_earned)
     .execute(&ctx.pool)
     .await;
 
-    let tx_desc = format!("Misi Harian: {} ({}%)", quest_title, score_percent);
+    let tx_desc = format!("Zona Game: {} ({}%)", quest_title, score_percent);
     let _ = sqlx::query(
         r#"
         INSERT INTO student_xp_transactions (id, tenant_id, student_id, action_type, reference_id, xp_amount, description, created_at)
@@ -2177,7 +1695,7 @@ pub async fn submit_daily_quest(
     .await;
 
     let current_xp_row = sqlx::query(
-        "SELECT total_xp, level, streak_days, last_activity_date FROM student_xp WHERE student_id = $1"
+        "SELECT total_xp, level, streak_days, last_activity_date FROM student_xp WHERE student_id = $1",
     )
     .bind(student_id)
     .fetch_optional(&ctx.pool)
@@ -2190,7 +1708,9 @@ pub async fn submit_daily_quest(
             r.get::<i64, _>("total_xp"),
             r.get::<i32, _>("level"),
             r.get::<i32, _>("streak_days"),
-            r.try_get::<Option<NaiveDate>, _>("last_activity_date").ok().flatten(),
+            r.try_get::<Option<NaiveDate>, _>("last_activity_date")
+                .ok()
+                .flatten(),
         ),
         None => (0, 1, 0, None),
     };
@@ -2227,9 +1747,15 @@ pub async fn submit_daily_quest(
     let pet_status = load_or_create_pet(&ctx.pool, req_ctx.tenant_id, student_id).await;
     let leveled_up = new_level > old_level;
     let msg = if leveled_up {
-        format!("Luar biasa! Naik Level {} & raih +{} XP + 2 Biskuit Shiba!", new_level, computed_xp)
+        format!(
+            "Hebat! Naik Level {} & raih +{} XP + 2 Koin Energi!",
+            new_level, computed_xp
+        )
     } else {
-        format!("Misi Harian tuntas ({}%)! +{} XP & +2 Biskuit Shiba!", score_percent, computed_xp)
+        format!(
+            "Game tuntas ({}%)! +{} XP & +2 Koin Energi!",
+            score_percent, computed_xp
+        )
     };
 
     Ok(Json(ApiResponse::success(
@@ -2268,7 +1794,7 @@ pub async fn feed_shiba_pet(
     ensure_daily_quest_tables(&ctx.pool).await;
 
     let student_opt = sqlx::query(
-        "SELECT id FROM students WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 AND deleted_at IS NULL LIMIT 1"
+        "SELECT id FROM students WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 AND deleted_at IS NULL LIMIT 1",
     )
     .bind(actor.id)
     .bind(req_ctx.tenant_id)
@@ -2286,7 +1812,7 @@ pub async fn feed_shiba_pet(
                 total_xp: 0,
                 level: 1,
                 pet_status: build_pet_status(1, 50, 1, 1, 1),
-                message: "Mode Pratinjau: Shiba senang menerima biskuitmu!".to_string(),
+                message: "Mode Pratinjau: Ciko senang menerima koin energimu!".to_string(),
             },
             req_ctx.request_id,
         )));
@@ -2301,7 +1827,9 @@ pub async fn feed_shiba_pet(
             .await
             .ok()
             .flatten();
-        let (txp, lvl): (i64, i32) = cur.map(|r| (r.get("total_xp"), r.get("level"))).unwrap_or((0, 1));
+        let (txp, lvl): (i64, i32) = cur
+            .map(|r| (r.get("total_xp"), r.get("level")))
+            .unwrap_or((0, 1));
         return Ok(Json(ApiResponse::success(
             FeedPetResponse {
                 fed: false,
@@ -2310,7 +1838,8 @@ pub async fn feed_shiba_pet(
                 total_xp: txp,
                 level: lvl,
                 pet_status: pet,
-                message: "Biskuit habis! Selesaikan Misi Harian atau Ronde Baru untuk dapat Biskuit Shiba.".to_string(),
+                message: "Koin energi habis! Selesaikan salah satu game untuk dapat koin baru."
+                    .to_string(),
             },
             req_ctx.request_id,
         )));
@@ -2318,9 +1847,21 @@ pub async fn feed_shiba_pet(
 
     let next_points = pet.food_points + 25;
     let evolved = next_points >= 100;
-    let final_stage = if evolved { (pet.pet_stage + 1).min(4) } else { pet.pet_stage };
-    let final_points = if evolved { next_points - 100 } else { next_points };
-    let next_tokens = if evolved { pet.fifty_fifty_tokens + 1 } else { pet.fifty_fifty_tokens };
+    let final_stage = if evolved {
+        (pet.pet_stage + 1).min(4)
+    } else {
+        pet.pet_stage
+    };
+    let final_points = if evolved {
+        next_points - 100
+    } else {
+        next_points
+    };
+    let next_tokens = if evolved {
+        pet.fifty_fifty_tokens + 1
+    } else {
+        pet.fifty_fifty_tokens
+    };
 
     let _ = sqlx::query(
         r#"
@@ -2349,15 +1890,25 @@ pub async fn feed_shiba_pet(
         student_id,
         "SHIBA_PET_CARE",
         bonus_xp,
-        if evolved { "Evolusi Shiba Pet!" } else { "Merawat Shiba Pet" },
+        if evolved {
+            "Evolusi Maskot Game!"
+        } else {
+            "Merawat Maskot Game"
+        },
     )
     .await;
 
     let updated_pet = load_or_create_pet(&ctx.pool, req_ctx.tenant_id, student_id).await;
     let msg = if evolved {
-        format!("YEAY! Shiba berevolusi jadi {}! Bonus +{} XP & +1 Token 50:50!", updated_pet.stage_title, bonus_xp)
+        format!(
+            "YEAY! Ciko naik ke {}! Bonus +{} XP & +1 Petunjuk!",
+            updated_pet.stage_title, bonus_xp
+        )
     } else {
-        format!("Nyam! Shiba makan 1 biskuit (+{} XP). Energi Shiba: {}/100.", bonus_xp, updated_pet.food_points)
+        format!(
+            "Mantap! +{} XP untuk Ciko. Energi: {}/100.",
+            bonus_xp, updated_pet.food_points
+        )
     };
 
     Ok(Json(ApiResponse::success(
@@ -2392,7 +1943,7 @@ pub async fn open_daily_chest(
     let today = wib_today();
 
     let student_opt = sqlx::query(
-        "SELECT id FROM students WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 AND deleted_at IS NULL LIMIT 1"
+        "SELECT id FROM students WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 AND deleted_at IS NULL LIMIT 1",
     )
     .bind(actor.id)
     .bind(req_ctx.tenant_id)
@@ -2422,7 +1973,7 @@ pub async fn open_daily_chest(
     let _ = load_or_create_pet(&ctx.pool, req_ctx.tenant_id, student_id).await;
 
     let claimed_row = sqlx::query(
-        "SELECT reward_type, reward_amount, reward_label FROM daily_quest_chest_claims WHERE student_id = $1 AND claim_date = $2 LIMIT 1"
+        "SELECT reward_type, reward_amount, reward_label FROM daily_quest_chest_claims WHERE student_id = $1 AND claim_date = $2 LIMIT 1",
     )
     .bind(student_id)
     .bind(today)
@@ -2438,7 +1989,9 @@ pub async fn open_daily_chest(
             .await
             .ok()
             .flatten();
-        let (txp, lvl): (i64, i32) = cur.map(|r| (r.get("total_xp"), r.get("level"))).unwrap_or((0, 1));
+        let (txp, lvl): (i64, i32) = cur
+            .map(|r| (r.get("total_xp"), r.get("level")))
+            .unwrap_or((0, 1));
         let pet = load_or_create_pet(&ctx.pool, req_ctx.tenant_id, student_id).await;
         return Ok(Json(ApiResponse::success(
             DailyChestResponse {
@@ -2460,8 +2013,8 @@ pub async fn open_daily_chest(
     let roll = next_rand(&mut rng) % 4;
     let (reward_type, reward_amount, reward_label) = match roll {
         0 => ("XP", 35, "+35 XP Kejutan".to_string()),
-        1 => ("BISCUIT", 2, "+2 Biskuit Shiba Spesial".to_string()),
-        2 => ("POWERUP", 1, "+1 Token 50:50 & +1 Biskuit".to_string()),
+        1 => ("BISCUIT", 2, "+2 Koin Energi Spesial".to_string()),
+        2 => ("POWERUP", 1, "+1 Petunjuk & +1 Koin Energi".to_string()),
         _ => ("XP", 50, "JACKPOT +50 XP Harian!".to_string()),
     };
 
@@ -2482,20 +2035,32 @@ pub async fn open_daily_chest(
     .await;
 
     let (total_xp, level) = if reward_type == "XP" {
-        let (t, l, _, _) = award_extra_xp(&ctx.pool, req_ctx.tenant_id, student_id, "DAILY_CHEST", reward_amount, &reward_label).await;
+        let (t, l, _, _) = award_extra_xp(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            student_id,
+            "DAILY_CHEST",
+            reward_amount,
+            &reward_label,
+        )
+        .await;
         (t, l)
     } else {
         if reward_type == "BISCUIT" {
-            let _ = sqlx::query("UPDATE student_shiba_pets SET biscuits = biscuits + $2, updated_at = NOW() WHERE student_id = $1")
-                .bind(student_id)
-                .bind(reward_amount)
-                .execute(&ctx.pool)
-                .await;
+            let _ = sqlx::query(
+                "UPDATE student_shiba_pets SET biscuits = biscuits + $2, updated_at = NOW() WHERE student_id = $1",
+            )
+            .bind(student_id)
+            .bind(reward_amount)
+            .execute(&ctx.pool)
+            .await;
         } else {
-            let _ = sqlx::query("UPDATE student_shiba_pets SET fifty_fifty_tokens = fifty_fifty_tokens + 1, biscuits = biscuits + 1, updated_at = NOW() WHERE student_id = $1")
-                .bind(student_id)
-                .execute(&ctx.pool)
-                .await;
+            let _ = sqlx::query(
+                "UPDATE student_shiba_pets SET fifty_fifty_tokens = fifty_fifty_tokens + 1, biscuits = biscuits + 1, updated_at = NOW() WHERE student_id = $1",
+            )
+            .bind(student_id)
+            .execute(&ctx.pool)
+            .await;
         }
         let cur = sqlx::query("SELECT total_xp, level FROM student_xp WHERE student_id = $1 LIMIT 1")
             .bind(student_id)
@@ -2503,7 +2068,8 @@ pub async fn open_daily_chest(
             .await
             .ok()
             .flatten();
-        cur.map(|r| (r.get("total_xp"), r.get("level"))).unwrap_or((0, 1))
+        cur.map(|r| (r.get("total_xp"), r.get("level")))
+            .unwrap_or((0, 1))
     };
 
     let pet = load_or_create_pet(&ctx.pool, req_ctx.tenant_id, student_id).await;
