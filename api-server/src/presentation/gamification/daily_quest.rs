@@ -145,11 +145,14 @@ pub struct SubmitDailyQuestResponse {
     pub message: String,
 }
 
-const ALL_MODES: [&str; 4] = [
+const ALL_MODES: [&str; 7] = [
     "CROSSWORD",
     "SLIDING_PUZZLE",
     "BLOCK_PUZZLE",
     "NUMBER_MERGE",
+    "KAHOOT_BLITZ",
+    "WORD_SCRAMBLE",
+    "COGNITIVE_TRAINER",
 ];
 
 fn wib_today() -> NaiveDate {
@@ -184,10 +187,13 @@ fn indonesian_day_label(date: NaiveDate) -> String {
 }
 
 fn featured_mode_for_date(date: NaiveDate) -> &'static str {
-    match date.weekday().num_days_from_monday() % 4 {
+    match date.weekday().num_days_from_monday() % 7 {
         0 => "CROSSWORD",
-        1 => "SLIDING_PUZZLE",
+        1 => "KAHOOT_BLITZ",
         2 => "BLOCK_PUZZLE",
+        3 => "WORD_SCRAMBLE",
+        4 => "COGNITIVE_TRAINER",
+        5 => "SLIDING_PUZZLE",
         _ => "NUMBER_MERGE",
     }
 }
@@ -198,6 +204,9 @@ fn normalize_mode(raw: Option<&str>, fallback: &str) -> String {
         Some("SLIDING_PUZZLE") => "SLIDING_PUZZLE".to_string(),
         Some("BLOCK_PUZZLE") => "BLOCK_PUZZLE".to_string(),
         Some("NUMBER_MERGE") => "NUMBER_MERGE".to_string(),
+        Some("KAHOOT_BLITZ") => "KAHOOT_BLITZ".to_string(),
+        Some("WORD_SCRAMBLE") => "WORD_SCRAMBLE".to_string(),
+        Some("COGNITIVE_TRAINER") => "COGNITIVE_TRAINER".to_string(),
         _ => fallback.to_string(),
     }
 }
@@ -208,6 +217,9 @@ fn mode_display_label(code: &str) -> &'static str {
         "SLIDING_PUZZLE" => "Puzzle Geser",
         "BLOCK_PUZZLE" => "Block Blast",
         "NUMBER_MERGE" => "2048 Angka",
+        "KAHOOT_BLITZ" => "Kuis Kilat Arena",
+        "WORD_SCRAMBLE" => "Susun Kata ID & EN",
+        "COGNITIVE_TRAINER" => "Latih Kognitif",
         _ => "Zona Game",
     }
 }
@@ -325,7 +337,7 @@ async fn ensure_daily_quest_tables(pool: &PgPool) {
 
     // Clean up legacy hardcoded trivia modes if still cached in daily_quests
     let _ = sqlx::query(
-        "DELETE FROM daily_quests WHERE game_mode NOT IN ('CROSSWORD', 'SLIDING_PUZZLE', 'BLOCK_PUZZLE', 'NUMBER_MERGE')"
+        "DELETE FROM daily_quests WHERE game_mode NOT IN ('CROSSWORD', 'SLIDING_PUZZLE', 'BLOCK_PUZZLE', 'NUMBER_MERGE', 'KAHOOT_BLITZ', 'WORD_SCRAMBLE', 'COGNITIVE_TRAINER')"
     )
     .execute(pool)
     .await;
@@ -940,8 +952,477 @@ fn generate_number_merge_challenge(rng: &mut u64, round: i32) -> Value {
     })
 }
 
+// ── 5. PROCEDURAL KAHOOT BLITZ QUIZ ARENA ──────────────────────────────────
+
+struct BlitzFact {
+    question: &'static str,
+    correct: &'static str,
+    wrongs: [&'static str; 3],
+    topic: &'static str,
+    explanation: &'static str,
+}
+
+const BLITZ_FACTS_A: &[BlitzFact] = &[
+    BlitzFact { question: "Proses tumbuhan membuat makanan sendiri dengan cahaya matahari disebut...", correct: "Fotosintesis", wrongs: ["Respirasi", "Evaporasi", "Fermentasi"], topic: "IPA Dasar", explanation: "Tumbuhan hijau memakai klorofil dan cahaya matahari untuk menghasilkan glukosa & oksigen." },
+    BlitzFact { question: "Lambang dasar negara Indonesia Pancasila sila ke-3 adalah...", correct: "Pohon Beringin", wrongs: ["Bintang Emas", "Kepala Banteng", "Padi & Kapas"], topic: "PPKn", explanation: "Pohon Beringin melambangkan Persatuan Indonesia tempat seluruh rakyat berteduh." },
+    BlitzFact { question: "Bangun ruang berbentuk seperti dadu memiliki jumlah sisi sebanyak...", correct: "6 Sisi", wrongs: ["4 Sisi", "8 Sisi", "12 Sisi"], topic: "Matematika", explanation: "Kubus memiliki 6 sisi persegi yang sama luas." },
+    BlitzFact { question: "Alat pernapasan utama ikan yang hidup di dalam air adalah...", correct: "Insang", wrongs: ["Paru-paru", "Trakea", "Kulit"], topic: "Biologi", explanation: "Insang menyaring oksigen terlarut dari air." },
+    BlitzFact { question: "Ibu kota Provinsi Jawa Barat tempat bermukimnya Suku Sunda adalah...", correct: "Bandung", wrongs: ["Semarang", "Surabaya", "Serang"], topic: "IPS", explanation: "Kota Bandung merupakan ibu kota Provinsi Jawa Barat." },
+    BlitzFact { question: "Sinonim atau persamaan makna kata 'Cermat' dalam Bahasa Indonesia adalah...", correct: "Teliti", wrongs: ["Ceroboh", "Cepat", "Malas"], topic: "Bahasa Indonesia", explanation: "Cermat berarti penuh kehati-hatian dan teliti." },
+];
+
+const BLITZ_FACTS_B: &[BlitzFact] = &[
+    BlitzFact { question: "Organel sel tumbuhan yang berfungsi menangkap energi cahaya untuk fotosintesis adalah...", correct: "Kloroplas", wrongs: ["Mitokondria", "Ribosom", "Lisosom"], topic: "Biologi SMP", explanation: "Kloroplas mengandung pigmen hijau klorofil." },
+    BlitzFact { question: "Bunyi tidak dapat merambat di ruang hampa udara karena termasuk gelombang...", correct: "Mekanik", wrongs: ["Elektromagnetik", "Gravitasi", "Radio"], topic: "Fisika SMP", explanation: "Gelombang mekanik memerlukan medium perantara (padat, cair, atau gas)." },
+    BlitzFact { question: "Sumpah Pemuda yang mempersatukan bangsa Indonesia diikrarkan pada tanggal...", correct: "28 Oktober 1928", wrongs: ["17 Agustus 1945", "20 Mei 1908", "10 November 1945"], topic: "Sejarah", explanation: "Kongres Pemuda II tanggal 28 Oktober 1928 melahirkan Sumpah Pemuda." },
+    BlitzFact { question: "Persamaan kimia sederhana air murni tersusun atas atom hidrogen dan oksigen dengan rumus...", correct: "H2O", wrongs: ["CO2", "NaCl", "O2"], topic: "Kimia Dasar", explanation: "Setiap molekul air terdiri dari 2 atom Hidrogen dan 1 atom Oksigen." },
+    BlitzFact { question: "Majas yang membandingkan benda mati seolah-olah hidup seperti manusia disebut...", correct: "Personifikasi", wrongs: ["Hiperbola", "Metafora", "Simile"], topic: "Bahasa Indonesia", explanation: "Personifikasi memberi sifat insani pada benda mati, misalnya 'angin berbisik'." },
+    BlitzFact { question: "Garis khayal yang membelah Bumi menjadi belahan utara dan selatan secara simetris disebut...", correct: "Khatulistiwa", wrongs: ["Meridian", "Bujur Timur", "Garis Wallace"], topic: "Geografi", explanation: "Garis Khatulistiwa berada tepat pada posisi 0 derajat lintang." },
+];
+
+const BLITZ_FACTS_C: &[BlitzFact] = &[
+    BlitzFact { question: "Kenaikan harga barang dan jasa secara umum serta terus menerus dalam perekonomian disebut...", correct: "Inflasi", wrongs: ["Deflasi", "Devaluasi", "Resesi"], topic: "Ekonomi SMA", explanation: "Inflasi menurunkan daya beli mata uang bila tidak diimbangi kenaikan pendapatan." },
+    BlitzFact { question: "Pembelahan sel yang menghasilkan dua sel anak dengan jumlah kromosom identik induknya disebut...", correct: "Mitosis", wrongs: ["Meiosis", "Osmosis", "Diffusi"], topic: "Biologi SMA", explanation: "Mitosis berperan untuk pertumbuhan & regenerasi jaringan tubuh." },
+    BlitzFact { question: "Perubahan UUD 1945 secara konstitusional dilakukan melalui lembaga negara bernama...", correct: "MPR", wrongs: ["DPR", "MA", "BPK"], topic: "PPKn SMA", explanation: "Majelis Permusyawaratan Rakyat berwenang mengubah dan menetapkan UUD." },
+    BlitzFact { question: "Dalam jaringan komputer, perangkat keras yang mengatur lalu lintas paket data antar jaringan adalah...", correct: "Router", wrongs: ["Printer", "Scanner", "Switch Hub"], topic: "Informatika", explanation: "Router menentukan jalur rute terbaik pengiriman paket IP antar jaringan." },
+    BlitzFact { question: "Sistem bilangan komputer yang hanya terdiri atas kombinasi digit 0 dan 1 disebut bilangan...", correct: "Biner", wrongs: ["Oktal", "Desimal", "Heksadesimal"], topic: "Informatika", explanation: "Komputer digital bekerja pada logika dua keadaan (0/1) atau basis-2 (biner)." },
+    BlitzFact { question: "Zat gizi utama yang berfungsi sebagai pembangun sel dan perbaikan jaringan tubuh adalah...", correct: "Protein", wrongs: ["Karbohidrat", "Mineral", "Vitamin"], topic: "Kimia/Biologi", explanation: "Protein disusun oleh asam amino yang membangun otot, enzim, dan sel tubuh." },
+];
+
+fn generate_kahoot_blitz_challenge(rng: &mut u64, grade_band: &str) -> Value {
+    let mut questions: Vec<Value> = Vec::new();
+
+    // 2 Procedural dynamic math/logic questions calibrated to grade_band
+    for i in 0..2 {
+        let (prompt, ans_str, d1, d2, d3, exp, topic) = match grade_band {
+            "PAKET_A" => {
+                let a = (12 + (next_rand(rng) % 28)) as i32;
+                let b = (6 + (next_rand(rng) % 19)) as i32;
+                let mult = (3 + (next_rand(rng) % 6)) as i32;
+                if i == 0 {
+                    let ans = a + b;
+                    (
+                        format!("Hitung cepat: {} + {} = ?", a, b),
+                        ans.to_string(),
+                        (ans + 10).to_string(),
+                        (ans - 2).to_string(),
+                        (ans + 4).to_string(),
+                        format!("{} + {} = {}.", a, b, ans),
+                        "Numerasi Kilat",
+                    )
+                } else {
+                    let ans = mult * 10 + 5;
+                    let q_left = mult * 2;
+                    let q_val = q_left * 5;
+                    (
+                        format!("{} × 5 + 5 = ?", q_left),
+                        (q_val + 5).to_string(),
+                        (q_val + 10).to_string(),
+                        (q_val).to_string(),
+                        (q_val + 15).to_string(),
+                        format!("{} × 5 = {}, lalu ditambah 5 menjadi {}.", q_left, q_val, q_val + 5),
+                        "Perkalian Dasar",
+                    )
+                }
+            }
+            "PAKET_B" => {
+                let a = (4 + (next_rand(rng) % 9)) as i32;
+                let x = (2 + (next_rand(rng) % 8)) as i32;
+                let b = (3 + (next_rand(rng) % 12)) as i32;
+                if i == 0 {
+                    let rhs = a * x + b;
+                    (
+                        format!("Jika {}x + {} = {}, maka nilai x adalah...", a, b, rhs),
+                        format!("x = {}", x),
+                        format!("x = {}", x + 2),
+                        format!("x = {}", (x - 1).max(1)),
+                        format!("x = {}", x + 4),
+                        format!("{}x = {} - {} = {}, sehingga x = {}.", a, rhs, b, a * x, x),
+                        "Aljabar Cepat",
+                    )
+                } else {
+                    let pct = ((1 + (next_rand(rng) % 4)) * 10) as i32;
+                    let base = ((2 + (next_rand(rng) % 7)) * 50) as i32;
+                    let ans = base * pct / 100;
+                    (
+                        format!("Berapa {}% dari {}?", pct, base),
+                        ans.to_string(),
+                        (ans + 15).to_string(),
+                        (ans / 2).max(5).to_string(),
+                        (ans + 30).to_string(),
+                        format!("{}% × {} = {}.", pct, base, ans),
+                        "Persentase",
+                    )
+                }
+            }
+            _ => {
+                if i == 0 {
+                    let r = (2 + (next_rand(rng) % 5)) as i32;
+                    let k = (3 + (next_rand(rng) % 8)) as i32;
+                    let ans = r * r + k;
+                    (
+                        format!("Hasil dari {}² + {} = ?", r, k),
+                        ans.to_string(),
+                        (ans + 4).to_string(),
+                        (r * 2 + k).to_string(),
+                        (ans - 3).to_string(),
+                        format!("{}² = {}, ditambah {} menjadi {}.", r, r * r, k, ans),
+                        "Pangkat & Aritmatika",
+                    )
+                } else {
+                    let a = (3 + (next_rand(rng) % 7)) as i32;
+                    let b = (4 + (next_rand(rng) % 8)) as i32;
+                    let c = (2 + (next_rand(rng) % 5)) as i32;
+                    let ans = a * b - c;
+                    (
+                        format!("Nilai dari {} × {} - {} = ?", a, b, c),
+                        ans.to_string(),
+                        (ans + 6).to_string(),
+                        (a * (b - c)).to_string(),
+                        (ans - 4).to_string(),
+                        format!("Dahulukan perkalian: ({} × {}) - {} = {}.", a, b, c, ans),
+                        "Logika Operasi",
+                    )
+                }
+            }
+        };
+
+        let mut opts = vec![(true, ans_str), (false, d1), (false, d2), (false, d3)];
+        shuffle_vec(&mut opts, rng);
+        let correct_index = opts.iter().position(|(c, _)| *c).unwrap_or(0);
+        let opt_texts: Vec<String> = opts.into_iter().map(|(_, s)| s).collect();
+        questions.push(json!({
+            "id": format!("k_math_{}", i),
+            "question": prompt,
+            "options": opt_texts,
+            "correct_index": correct_index,
+            "topic_tag": topic,
+            "explanation": exp
+        }));
+    }
+
+    let bank = match grade_band {
+        "PAKET_A" => BLITZ_FACTS_A,
+        "PAKET_B" => BLITZ_FACTS_B,
+        _ => BLITZ_FACTS_C,
+    };
+    let mut facts: Vec<&BlitzFact> = bank.iter().collect();
+    shuffle_vec(&mut facts, rng);
+    for (idx, f) in facts.into_iter().take(4).enumerate() {
+        let mut opts = vec![
+            (true, f.correct.to_string()),
+            (false, f.wrongs[0].to_string()),
+            (false, f.wrongs[1].to_string()),
+            (false, f.wrongs[2].to_string()),
+        ];
+        shuffle_vec(&mut opts, rng);
+        let correct_index = opts.iter().position(|(c, _)| *c).unwrap_or(0);
+        let opt_texts: Vec<String> = opts.into_iter().map(|(_, s)| s).collect();
+        questions.push(json!({
+            "id": format!("k_fact_{}", idx),
+            "question": f.question,
+            "options": opt_texts,
+            "correct_index": correct_index,
+            "topic_tag": f.topic,
+            "explanation": f.explanation
+        }));
+    }
+    shuffle_vec(&mut questions, rng);
+
+    let seed = next_rand(rng) % 9_000_000;
+    json!({
+        "id": format!("kb_{}", seed),
+        "grade_band": grade_band,
+        "time_per_question": 15,
+        "questions": questions
+    })
+}
+
+// ── 6. BILINGUAL WORD SCRAMBLE (SUSUN & TEBAK KATA ID + EN) ──────────────────
+
+struct BilingualWordItem {
+    word: &'static str,
+    lang: &'static str,
+    clue: &'static str,
+    explanation: &'static str,
+}
+
+const BILINGUAL_WORDS_A: &[BilingualWordItem] = &[
+    BilingualWordItem { word: "BUKU", lang: "ID", clue: "Kumpulan lembar kertas bertulisan untuk membaca dan belajar", explanation: "Buku merupakan sumber ilmu utama di sekolah dan perpustakaan." },
+    BilingualWordItem { word: "PETA", lang: "ID", clue: "Gambar permukaan bumi atau wilayah yang diperkecil pada bidang datar", explanation: "Peta membantu mengenali letak geografis dan arah mata angin." },
+    BilingualWordItem { word: "AKAR", lang: "ID", clue: "Bagian tumbuhan di dalam tanah yang menyerap air dan mineral", explanation: "Akar juga menegakkan batang tumbuhan agar berdiri kokoh." },
+    BilingualWordItem { word: "APPLE", lang: "EN", clue: "Buah manis berwarna merah atau hijau (Bahasa Inggris)", explanation: "Apple artinya buah apel dalam Bahasa Inggris." },
+    BilingualWordItem { word: "WATER", lang: "EN", clue: "Benda cair bening yang kita minum setiap hari (Bahasa Inggris)", explanation: "Water berarti air; semua makhluk hidup membutuhkannya." },
+    BilingualWordItem { word: "SMILE", lang: "EN", clue: "Ekspresi wajah ramah saat bahagia (Bahasa Inggris)", explanation: "Smile artinya tersenyum." },
+    BilingualWordItem { word: "HOUSE", lang: "EN", clue: "Bangunan tempat tinggal bersama keluarga (Bahasa Inggris)", explanation: "House berarti rumah tempat tinggal." },
+    BilingualWordItem { word: "JUJUR", lang: "ID", clue: "Sifat terpuji mengatakan kebenaran apa adanya", explanation: "Kejujuran membangun kepercayaan dalam masyarakat." },
+];
+
+const BILINGUAL_WORDS_B: &[BilingualWordItem] = &[
+    BilingualWordItem { word: "KARYA", lang: "ID", clue: "Hasil ciptaan, buah pikiran, atau buatan yang bernilai", explanation: "Karya ilmiah atau seni lahir dari kreativitas dan ketekunan." },
+    BilingualWordItem { word: "DIKSI", lang: "ID", clue: "Pilihan kata yang tepat dan selaras dalam mengarang kalimat", explanation: "Diksi yang baik membuat tulisan lebih indah dan mudah dipahami." },
+    BilingualWordItem { word: "MAGNET", lang: "ID", clue: "Benda yang memiliki dua kutub dan dapat menarik besi", explanation: "Kutub senama tolak-menolak, sedangkan kutub berlawanan tarik-menarik." },
+    BilingualWordItem { word: "PLANET", lang: "EN", clue: "Benda langit besar yang mengorbit matahari (English)", explanation: "Planet (Earth, Mars, Jupiter) beredar mengelilingi bintang induknya." },
+    BilingualWordItem { word: "SCHOOL", lang: "EN", clue: "Tempat siswa belajar bersama guru (English)", explanation: "School berarti sekolah." },
+    BilingualWordItem { word: "FOREST", lang: "EN", clue: "Wilayah luas penuh pepohonan sebagai paru-paru bumi (English)", explanation: "Forest berarti hutan; rumah bagi flora dan fauna." },
+    BilingualWordItem { word: "BRIDGE", lang: "EN", clue: "Struktur penghubung dua wilayah di atas sungai atau jurang (English)", explanation: "Bridge berarti jembatan." },
+    BilingualWordItem { word: "CERDAS", lang: "ID", clue: "Cepat mengerti, tajam pikiran, dan tepat mencari solusi", explanation: "Kecerdasan diasah lewat kebiasaan membaca dan latihan logika." },
+];
+
+const BILINGUAL_WORDS_C: &[BilingualWordItem] = &[
+    BilingualWordItem { word: "PUSTAKA", lang: "ID", clue: "Koleksi buku rujukan atau kitab yang tertata di perpustakaan", explanation: "Daftar pustaka merujuk seluruh sumber bacaan sebuah karya tulis." },
+    BilingualWordItem { word: "ENERGI", lang: "ID", clue: "Kemampuan untuk melakukan usaha atau menggerakkan suatu kerja", explanation: "Hukum kekekalan energi menyatakan energi tidak dapat diciptakan atau dimusnahkan." },
+    BilingualWordItem { word: "SCIENCE", lang: "EN", clue: "Ilmu pengetahuan sistematis berbasis eksperimen (English)", explanation: "Science mencakup cabang Physics, Chemistry, dan Biology." },
+    BilingualWordItem { word: "FUTURE", lang: "EN", clue: "Masa yang akan datang setelah hari ini (English)", explanation: "Future berarti masa depan." },
+    BilingualWordItem { word: "JUSTICE", lang: "EN", clue: "Prinsip keadilan hukum dan kesetaraan hak warga (English)", explanation: "Justice berarti keadilan." },
+    BilingualWordItem { word: "LIBRARY", lang: "EN", clue: "Gedung atau ruang penyimpanan koleksi buku & arsip (English)", explanation: "Library berarti perpustakaan." },
+    BilingualWordItem { word: "NETWORK", lang: "EN", clue: "Jaringan komputer atau hubungan koneksi komunikasi (English)", explanation: "Network berarti jaringan, dasar teknologi internet." },
+    BilingualWordItem { word: "MANDIRI", lang: "ID", clue: "Mampu berdiri sendiri tanpa bergantung penuh pada orang lain", explanation: "Kemandirian belajar merupakan karakter profil pelajar unggul." },
+];
+
+fn generate_word_scramble_challenge(rng: &mut u64, grade_band: &str) -> Value {
+    let bank = match grade_band {
+        "PAKET_A" => BILINGUAL_WORDS_A,
+        "PAKET_B" => BILINGUAL_WORDS_B,
+        _ => BILINGUAL_WORDS_C,
+    };
+    let mut picks: Vec<&BilingualWordItem> = bank.iter().collect();
+    shuffle_vec(&mut picks, rng);
+
+    let items: Vec<Value> = picks
+        .into_iter()
+        .take(5)
+        .enumerate()
+        .map(|(idx, item)| {
+            let mut chars: Vec<String> = item.word.chars().map(|c| c.to_string()).collect();
+            // Add 1 decoy letter for Paket B or 2 decoys for Paket C for extra fun challenge
+            let decoy_pool = ["A", "E", "I", "N", "R", "S", "T"];
+            let decoys = match grade_band {
+                "PAKET_A" => 0,
+                "PAKET_B" => 1,
+                _ => 2,
+            };
+            for _ in 0..decoys {
+                let ch = decoy_pool[(next_rand(rng) as usize) % decoy_pool.len()];
+                chars.push(ch.to_string());
+            }
+            shuffle_vec(&mut chars, rng);
+            let category = if item.lang == "EN" {
+                "Bahasa Inggris (EN)"
+            } else {
+                "Bahasa Indonesia (ID)"
+            };
+            json!({
+                "id": format!("ws_item_{}", idx),
+                "word": item.word,
+                "scrambled_letters": chars,
+                "language": item.lang,
+                "category": category,
+                "clue": item.clue,
+                "explanation": item.explanation
+            })
+        })
+        .collect();
+
+    let seed = next_rand(rng) % 9_000_000;
+    json!({
+        "id": format!("ws_{}", seed),
+        "grade_band": grade_band,
+        "items": items
+    })
+}
+
+// ── 7. PROCEDURAL COGNITIVE TRAINER (PAKET A / B / C) ───────────────────────
+
+fn generate_cognitive_trainer_challenge(rng: &mut u64, grade_band: &str) -> Value {
+    let mut stages: Vec<Value> = Vec::new();
+
+    // Stage 1: Visual Working Memory Matrix
+    let (grid_n, target_count) = match grade_band {
+        "PAKET_A" => (3usize, 3usize),
+        "PAKET_B" => (4usize, 4usize),
+        _ => (4usize, 5usize),
+    };
+    let mut all_cells: Vec<usize> = (0..(grid_n * grid_n)).collect();
+    shuffle_vec(&mut all_cells, rng);
+    all_cells.truncate(target_count);
+    stages.push(json!({
+        "id": "cog_mem_1",
+        "kind": "MEMORY_GRID",
+        "prompt": format!("Hafalkan {} kotak permata yang menyala dalam 2.5 detik, lalu ketuk posisinya!", target_count),
+        "grid_size": grid_n,
+        "targets": all_cells,
+        "view_ms": 2500
+    }));
+
+    // Stage 2: Stroop Executive Focus (Choose INK COLOR, ignore written word)
+    let color_defs = [
+        ("MERAH", "RED", "Merah"),
+        ("BIRU", "BLUE", "Biru"),
+        ("HIJAU", "GREEN", "Hijau"),
+        ("KUNING", "AMBER", "Kuning"),
+    ];
+    let word_idx = (next_rand(rng) as usize) % color_defs.len();
+    let mut ink_idx = (next_rand(rng) as usize) % color_defs.len();
+    if ink_idx == word_idx {
+        ink_idx = (word_idx + 1) % color_defs.len();
+    }
+    let mut stroop_opts: Vec<(bool, String)> = color_defs
+        .iter()
+        .enumerate()
+        .map(|(i, (_, _, label))| (i == ink_idx, (*label).to_string()))
+        .collect();
+    shuffle_vec(&mut stroop_opts, rng);
+    let stroop_correct = stroop_opts.iter().position(|(c, _)| *c).unwrap_or(0);
+    let stroop_labels: Vec<String> = stroop_opts.into_iter().map(|(_, s)| s).collect();
+    stages.push(json!({
+        "id": "cog_stroop_2",
+        "kind": "STROOP_FOCUS",
+        "prompt": "Fokus! Pilih WARNA TINTA tulisan di bawah (abaikan arti katanya):",
+        "display_word": color_defs[word_idx].0,
+        "ink_color": color_defs[ink_idx].1,
+        "options": stroop_labels,
+        "correct_index": stroop_correct,
+        "explanation": format!("Tinta tulisannya berwarna {}, bukan teks '{}'.", color_defs[ink_idx].2, color_defs[word_idx].0)
+    }));
+
+    // Stage 3: Adaptive Logical Pattern / Sequence Reasoning
+    let (seq_str, ans_val, d1, d2, d3, seq_exp) = match grade_band {
+        "PAKET_A" => {
+            let start = (2 + (next_rand(rng) % 7)) as i32;
+            let step = (2 + (next_rand(rng) % 4)) as i32;
+            let a1 = start;
+            let a2 = start + step;
+            let a3 = start + step * 2;
+            let a4 = start + step * 3;
+            let ans = start + step * 4;
+            (
+                format!("{},  {},  {},  {},  ?", a1, a2, a3, a4),
+                ans,
+                ans + step,
+                ans - 1,
+                ans + 2,
+                format!("Setiap angka selalu bertambah +{}. Maka {} + {} = {}.", step, a4, step, ans),
+            )
+        }
+        "PAKET_B" => {
+            let start = (1 + (next_rand(rng) % 4)) as i32;
+            let diff1 = (2 + (next_rand(rng) % 3)) as i32;
+            let a1 = start;
+            let a2 = a1 + diff1;
+            let a3 = a2 + diff1 * 2;
+            let a4 = a3 + diff1 * 3;
+            let ans = a4 + diff1 * 4;
+            (
+                format!("{},  {},  {},  {},  ?", a1, a2, a3, a4),
+                ans,
+                ans + diff1,
+                ans - diff1,
+                a4 + diff1 * 3,
+                format!("Selisih pola bertingkat (+{}, +{}, +{}, +{}). Jadi {} + {} = {}.", diff1, diff1 * 2, diff1 * 3, diff1 * 4, a4, diff1 * 4, ans),
+            )
+        }
+        _ => {
+            // Paket C Fibonacci / Alternating Geometric
+            let x = (2 + (next_rand(rng) % 5)) as i32;
+            let y = (3 + (next_rand(rng) % 6)) as i32;
+            let z = x + y;
+            let w = y + z;
+            let ans = z + w;
+            (
+                format!("{},  {},  {},  {},  ?", x, y, z, w),
+                ans,
+                ans + 3,
+                ans - 2,
+                w * 2,
+                format!("Pola Fibonacci: tiap suku adalah jumlah dua suku sebelumnya ({} + {} = {}).", z, w, ans),
+            )
+        }
+    };
+    let mut seq_opts = vec![
+        (true, ans_val.to_string()),
+        (false, d1.to_string()),
+        (false, d2.to_string()),
+        (false, d3.to_string()),
+    ];
+    shuffle_vec(&mut seq_opts, rng);
+    let seq_correct = seq_opts.iter().position(|(c, _)| *c).unwrap_or(0);
+    let seq_labels: Vec<String> = seq_opts.into_iter().map(|(_, s)| s).collect();
+    stages.push(json!({
+        "id": "cog_seq_3",
+        "kind": "PATTERN_SEQUENCE",
+        "prompt": "Temukan angka berikutnya dari pola deret logika berikut:",
+        "sequence": seq_str,
+        "options": seq_labels,
+        "correct_index": seq_correct,
+        "explanation": seq_exp
+    }));
+
+    // Stage 4: Second Visual Memory Grid (slightly harder on Paket B/C!)
+    let (grid_n2, target_count2) = match grade_band {
+        "PAKET_A" => (3usize, 4usize),
+        "PAKET_B" => (4usize, 5usize),
+        _ => (4usize, 6usize),
+    };
+    let mut all_cells2: Vec<usize> = (0..(grid_n2 * grid_n2)).collect();
+    shuffle_vec(&mut all_cells2, rng);
+    all_cells2.truncate(target_count2);
+    stages.push(json!({
+        "id": "cog_mem_4",
+        "kind": "MEMORY_GRID",
+        "prompt": format!("Putaran Memori Cepat: ingat {} posisi permata menyala!", target_count2),
+        "grid_size": grid_n2,
+        "targets": all_cells2,
+        "view_ms": 2400
+    }));
+
+    // Stage 5: Processing Speed Quantitative Comparison
+    let (left_expr, right_expr, lval, rval) = match grade_band {
+        "PAKET_A" => {
+            let a = (11 + (next_rand(rng) % 15)) as i32;
+            let b = (4 + (next_rand(rng) % 9)) as i32;
+            let c = (18 + (next_rand(rng) % 16)) as i32;
+            let d = (2 + (next_rand(rng) % 7)) as i32;
+            (format!("{} + {}", a, b), format!("{} - {}", c + d, d), a + b, c)
+        }
+        "PAKET_B" => {
+            let a = (4 + (next_rand(rng) % 7)) as i32;
+            let b = (5 + (next_rand(rng) % 6)) as i32;
+            let c = (20 + (next_rand(rng) % 25)) as i32;
+            let d = (3 + (next_rand(rng) % 10)) as i32;
+            (format!("{} × {}", a, b), format!("{} + {}", c, d), a * b, c + d)
+        }
+        _ => {
+            let a = (3 + (next_rand(rng) % 6)) as i32;
+            let b = (6 + (next_rand(rng) % 9)) as i32;
+            let c = (5 + (next_rand(rng) % 6)) as i32;
+            let d = (4 + (next_rand(rng) % 8)) as i32;
+            (format!("{}² + {}", a, b), format!("{} × {} - 2", c, d), a * a + b, c * d - 2)
+        }
+    };
+    let cmp_correct_idx = if lval > rval { 0 } else if lval == rval { 1 } else { 2 };
+    stages.push(json!({
+        "id": "cog_cmp_5",
+        "kind": "QUICK_COMPARE",
+        "prompt": "Bandingkan nilai sisi kiri dan sisi kanan dengan cepat!",
+        "left_expr": left_expr,
+        "right_expr": right_expr,
+        "options": ["Kiri Lebih Besar (>)", "Sama Besar (=)", "Kiri Lebih Kecil (<)"],
+        "correct_index": cmp_correct_idx,
+        "explanation": format!("Nilai kiri = {} sedangkan nilai kanan = {}.", lval, rval)
+    }));
+
+    let seed = next_rand(rng) % 9_000_000;
+    json!({
+        "id": format!("ct_{}", seed),
+        "grade_band": grade_band,
+        "stages": stages
+    })
+}
+
 fn build_game_payload(
     mode: &str,
+    grade_band: &str,
     round: i32,
     rng: &mut u64,
 ) -> (String, String, String, Value) {
@@ -972,9 +1453,36 @@ fn build_game_payload(
             let bp = generate_block_puzzle_challenge(rng, round);
             (
                 "Block Blast 8×8".to_string(),
-                "Susun 3 balok warna ke papan 8×8, bersihkan baris & kolom penuh!".to_string(),
+                "Susun 3 balok permata ke papan 8×8, bersihkan baris & kolom penuh!".to_string(),
                 "Strategi Geometri".to_string(),
                 json!([bp]),
+            )
+        }
+        "KAHOOT_BLITZ" => {
+            let kb = generate_kahoot_blitz_challenge(rng, grade_band);
+            (
+                "Kuis Kilat Arena (Kahoot Style)".to_string(),
+                "Jawab cepat 6 tantangan adaptif sebelum waktu habis untuk bonus kombo!".to_string(),
+                format!("Arena {}", grade_band.replace('_', " ")),
+                json!([kb]),
+            )
+        }
+        "WORD_SCRAMBLE" => {
+            let ws = generate_word_scramble_challenge(rng, grade_band);
+            (
+                "Susun & Tebak Kata (ID & EN)".to_string(),
+                "Rangkai huruf acak menjadi kosakata Bahasa Indonesia & Inggris!".to_string(),
+                "Bilingual ID • EN".to_string(),
+                json!([ws]),
+            )
+        }
+        "COGNITIVE_TRAINER" => {
+            let ct = generate_cognitive_trainer_challenge(rng, grade_band);
+            (
+                "Latih Kognitif Cerdas".to_string(),
+                "Latih memori visual, fokus Stroop, logika pola, & kecepatan hitung!".to_string(),
+                format!("Kognitif {}", grade_band.replace('_', " ")),
+                json!([ct]),
             )
         }
         _ => {
@@ -1157,7 +1665,7 @@ pub async fn get_daily_quest(
             ),
             None => {
                 let (gen_title, gen_subtitle, gen_subject, gen_challenges) =
-                    build_game_payload(&requested_mode, round, &mut rng);
+                    build_game_payload(&requested_mode, &grade_band, round, &mut rng);
                 let base_xp = if round > 0 {
                     25
                 } else if requested_mode == featured_mode {
