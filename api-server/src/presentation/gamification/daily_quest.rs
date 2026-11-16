@@ -794,29 +794,24 @@ struct PuzzleTheme {
 
 const PUZZLE_THEMES: &[PuzzleTheme] = &[
     PuzzleTheme {
-        id: "TATA_SURYA",
-        title: "Galaksi & Tata Surya",
-        subtitle: "Susun kembali planet dan orbit ruang angkasa",
+        id: "PET_TREASURE",
+        title: "Ciko & Peti Harta Ilmu",
+        subtitle: "Susun kepingan ruang belajar ajaib & peti koin Ciko",
     },
     PuzzleTheme {
-        id: "NUSANTARA",
-        title: "Pesona Nusantara",
-        subtitle: "Rangkai panorama gunung dan kepulauan Indonesia",
+        id: "NUSANTARA_MAP",
+        title: "Peta Eksplorasi Nusantara",
+        subtitle: "Rangkai panorama peta budaya & wilayah kepulauan",
     },
     PuzzleTheme {
-        id: "LAB_SAINS",
-        title: "Laboratorium Cerdas",
-        subtitle: "Urutkan peralatan eksperimen sains di lab",
+        id: "MORNING_STUDY",
+        title: "Ruang Belajar Pagi",
+        subtitle: "Susun kembali kamar belajar yang hangat dan rapi",
     },
     PuzzleTheme {
-        id: "SAMUDRA",
-        title: "Eksplorasi Samudra",
-        subtitle: "Susun terumbu karang dan kapal riset laut",
-    },
-    PuzzleTheme {
-        id: "KOTA_HIJAU",
-        title: "Kota Ramah Lingkungan",
-        subtitle: "Satukan menara surya, taman kota & kincir angin",
+        id: "STUDENT_QUEST",
+        title: "Misi Pelajar Cerdas",
+        subtitle: "Satukan potongan ilustrasi aktivitas belajar seru",
     },
 ];
 
