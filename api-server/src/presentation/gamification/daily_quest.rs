@@ -53,6 +53,14 @@ pub struct ShibaPetStatus {
     pub stage_title: String,
     pub food_points: i32,
     pub points_to_next_stage: i32,
+    pub energy_required: i32,
+    pub student_xp: i64,
+    pub xp_required_next: i64,
+    pub xp_remaining_next: i64,
+    pub evolution_progress_percent: i32,
+    pub max_stage: i32,
+    pub ready_to_evolve: bool,
+    pub evolve_requirement_hint: String,
     pub total_fed: i32,
     pub biscuits: i32,
     pub fifty_fifty_tokens: i32,
@@ -233,12 +241,38 @@ fn mode_display_label(code: &str) -> &'static str {
     }
 }
 
+const MAX_CIKO_STAGE: i32 = 6;
+
 fn shiba_stage_title(stage: i32) -> &'static str {
     match stage {
         1 => "Anak Kucing Penasaran",
         2 => "Kucing Pelajar Aktif",
         3 => "Detektif Kucing Pintar",
-        _ => "Profesor Kucing Emas",
+        4 => "Profesor Kucing Emas",
+        5 => "Kucing Astronot Kosmik",
+        _ => "Kucing Cyber AI Legendaris",
+    }
+}
+
+fn stage_energy_required(stage: i32) -> i32 {
+    match stage {
+        1 => 120,
+        2 => 220,
+        3 => 360,
+        4 => 540,
+        5 => 780,
+        _ => 1000,
+    }
+}
+
+fn stage_xp_required(stage: i32) -> i64 {
+    match stage {
+        1 => 250,
+        2 => 700,
+        3 => 1500,
+        4 => 2800,
+        5 => 4500,
+        _ => 6000,
     }
 }
 
@@ -248,15 +282,87 @@ fn build_pet_status(
     total_fed: i32,
     biscuits: i32,
     tokens: i32,
+    student_xp: i64,
 ) -> ShibaPetStatus {
-    let clamped_stage = pet_stage.max(1);
-    let points = food_points.clamp(0, 99);
+    let clamped_stage = pet_stage.clamp(1, MAX_CIKO_STAGE);
+    let energy_req = stage_energy_required(clamped_stage);
+    let safe_xp = student_xp.max(0);
+    let xp_req = stage_xp_required(clamped_stage);
+    let prev_xp_floor = if clamped_stage <= 1 {
+        0
+    } else {
+        stage_xp_required(clamped_stage - 1)
+    };
+
+    let points = if clamped_stage >= MAX_CIKO_STAGE {
+        energy_req
+    } else {
+        food_points.clamp(0, energy_req)
+    };
+    let points_remaining = if clamped_stage >= MAX_CIKO_STAGE {
+        0
+    } else {
+        (energy_req - points).max(0)
+    };
+    let xp_remaining = if clamped_stage >= MAX_CIKO_STAGE {
+        0
+    } else {
+        (xp_req - safe_xp).max(0)
+    };
+
+    let energy_ratio = (points as f64 / energy_req.max(1) as f64).clamp(0.0, 1.0);
+    let xp_span = (xp_req - prev_xp_floor).max(1) as f64;
+    let xp_ratio = (((safe_xp - prev_xp_floor).max(0) as f64) / xp_span).clamp(0.0, 1.0);
+    let evo_pct = if clamped_stage >= MAX_CIKO_STAGE {
+        100
+    } else {
+        ((energy_ratio * 0.5 + xp_ratio * 0.5) * 100.0).round() as i32
+    };
+    let ready_to_evolve =
+        clamped_stage < MAX_CIKO_STAGE && points >= energy_req && safe_xp >= xp_req;
+
+    let hint = if clamped_stage >= MAX_CIKO_STAGE {
+        "Wujud Puncak Kucing Cyber AI tercapai! Rawat Ciko agar selalu bersemangat.".to_string()
+    } else if ready_to_evolve {
+        format!(
+            "Energi & EXP penuh! Beri 1 makan lagi untuk Evolusi Lv.{}!",
+            clamped_stage + 1
+        )
+    } else if points_remaining > 0 && xp_remaining > 0 {
+        format!(
+            "Butuh {} Energi makan & {} EXP belajar menuju Lv.{}",
+            points_remaining,
+            xp_remaining,
+            clamped_stage + 1
+        )
+    } else if points_remaining > 0 {
+        format!(
+            "Syarat EXP terpenuhi! Butuh {} Energi makan lagi ke Lv.{}",
+            points_remaining,
+            clamped_stage + 1
+        )
+    } else {
+        format!(
+            "Energi penuh! Kumpulkan {} EXP lagi (Tugas/Kuis/Game) ke Lv.{}",
+            xp_remaining,
+            clamped_stage + 1
+        )
+    };
+
     ShibaPetStatus {
         pet_name: "Ciko Pintar".to_string(),
         pet_stage: clamped_stage,
         stage_title: shiba_stage_title(clamped_stage).to_string(),
         food_points: points,
-        points_to_next_stage: (100 - points).max(0),
+        points_to_next_stage: points_remaining,
+        energy_required: energy_req,
+        student_xp: safe_xp,
+        xp_required_next: xp_req,
+        xp_remaining_next: xp_remaining,
+        evolution_progress_percent: evo_pct,
+        max_stage: MAX_CIKO_STAGE,
+        ready_to_evolve,
+        evolve_requirement_hint: hint,
         total_fed,
         biscuits: biscuits.max(0),
         fifty_fifty_tokens: tokens.max(0),
@@ -267,7 +373,7 @@ async fn load_or_create_pet(pool: &PgPool, tenant_id: Uuid, student_id: Uuid) ->
     let _ = sqlx::query(
         r#"
         INSERT INTO student_shiba_pets (student_id, tenant_id, pet_stage, food_points, total_fed, biscuits, fifty_fifty_tokens, updated_at)
-        VALUES ($1, $2, 1, 25, 0, 2, 1, NOW())
+        VALUES ($1, $2, 1, 20, 0, 2, 1, NOW())
         ON CONFLICT (student_id) DO NOTHING
         "#,
     )
@@ -275,6 +381,16 @@ async fn load_or_create_pet(pool: &PgPool, tenant_id: Uuid, student_id: Uuid) ->
     .bind(tenant_id)
     .execute(pool)
     .await;
+
+    let student_xp: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(total_xp, 0)::bigint FROM student_xp WHERE student_id = $1 LIMIT 1",
+    )
+    .bind(student_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(0);
 
     let row = sqlx::query(
         "SELECT pet_stage, food_points, total_fed, biscuits, fifty_fifty_tokens FROM student_shiba_pets WHERE student_id = $1 LIMIT 1",
@@ -292,8 +408,9 @@ async fn load_or_create_pet(pool: &PgPool, tenant_id: Uuid, student_id: Uuid) ->
             r.get("total_fed"),
             r.get("biscuits"),
             r.get("fifty_fifty_tokens"),
+            student_xp,
         ),
-        None => build_pet_status(1, 25, 0, 2, 1),
+        None => build_pet_status(1, 20, 0, 2, 1, student_xp),
     }
 }
 
@@ -2055,7 +2172,7 @@ pub async fn get_daily_quest(
 
         Some(load_or_create_pet(&ctx.pool, req_ctx.tenant_id, sid).await)
     } else {
-        Some(build_pet_status(1, 25, 0, 2, 1))
+        Some(build_pet_status(1, 20, 0, 2, 1, 0))
     };
 
     let lb_rows = if round == 0 {
@@ -2220,7 +2337,7 @@ pub async fn submit_daily_quest(
                 leveled_up: false,
                 is_preview_account: true,
                 biscuits_earned: if safe_correct > 0 { 2 } else { 0 },
-                pet_status: Some(build_pet_status(1, 25, 0, 2, 1)),
+                pet_status: Some(build_pet_status(1, 20, 0, 2, 1, 0)),
                 message: format!(
                     "Mode Pratinjau selesai dengan skor {}% (simulasi +{} XP).",
                     score_percent, computed_xp
@@ -2568,7 +2685,7 @@ pub async fn feed_shiba_pet(
                 bonus_xp_earned: 0,
                 total_xp: 0,
                 level: 1,
-                pet_status: build_pet_status(1, 50, 1, 1, 1),
+                pet_status: build_pet_status(1, 40, 1, 1, 1, 0),
                 message: "Mode Pratinjau: Ciko senang menerima koin energimu!".to_string(),
             },
             req_ctx.request_id,
@@ -2602,17 +2719,28 @@ pub async fn feed_shiba_pet(
         )));
     }
 
-    let next_points = pet.food_points + 25;
-    let evolved = next_points >= 100;
+    let energy_req = stage_energy_required(pet.pet_stage);
+    let xp_req = stage_xp_required(pet.pet_stage);
+    let energy_gain = if pet.student_xp >= xp_req { 25 } else { 20 };
+    let next_points = pet.food_points + energy_gain;
+    let xp_after_base_feed = pet.student_xp + 5;
+
+    let can_evolve = pet.pet_stage < MAX_CIKO_STAGE
+        && next_points >= energy_req
+        && xp_after_base_feed >= xp_req;
+
+    let evolved = can_evolve;
     let final_stage = if evolved {
-        (pet.pet_stage + 1).min(4)
+        (pet.pet_stage + 1).min(MAX_CIKO_STAGE)
     } else {
         pet.pet_stage
     };
     let final_points = if evolved {
-        next_points - 100
+        (next_points - energy_req).max(0)
+    } else if pet.pet_stage >= MAX_CIKO_STAGE {
+        energy_req
     } else {
-        next_points
+        next_points.min(energy_req)
     };
     let next_tokens = if evolved {
         pet.fifty_fifty_tokens + 1
@@ -2640,7 +2768,7 @@ pub async fn feed_shiba_pet(
     .execute(&ctx.pool)
     .await;
 
-    let bonus_xp = if evolved { 30 } else { 5 };
+    let bonus_xp = if evolved { 30 + (final_stage * 10) } else { 5 };
     let (total_xp, level, _, _) = award_extra_xp(
         &ctx.pool,
         req_ctx.tenant_id,
@@ -2658,13 +2786,24 @@ pub async fn feed_shiba_pet(
     let updated_pet = load_or_create_pet(&ctx.pool, req_ctx.tenant_id, student_id).await;
     let msg = if evolved {
         format!(
-            "YEAY! Ciko naik ke {}! Bonus +{} XP & +1 Petunjuk!",
-            updated_pet.stage_title, bonus_xp
+            "EVOLUSI BARU! Ciko naik ke Lv.{} ({})! Bonus +{} XP & +1 Petunjuk!",
+            updated_pet.pet_stage, updated_pet.stage_title, bonus_xp
+        )
+    } else if updated_pet.pet_stage < MAX_CIKO_STAGE
+        && updated_pet.food_points >= updated_pet.energy_required
+        && updated_pet.xp_remaining_next > 0
+    {
+        format!(
+            "Nyum! Energi Ciko sudah penuh ({}/{}), butuh {} EXP belajar lagi untuk Evolusi Lv.{}!",
+            updated_pet.food_points,
+            updated_pet.energy_required,
+            updated_pet.xp_remaining_next,
+            updated_pet.pet_stage + 1
         )
     } else {
         format!(
-            "Mantap! +{} XP untuk Ciko. Energi: {}/100.",
-            bonus_xp, updated_pet.food_points
+            "Nyum! +{} Energi & +{} XP. Energi: {}/{}.",
+            energy_gain, bonus_xp, updated_pet.food_points, updated_pet.energy_required
         )
     };
 
@@ -2719,7 +2858,7 @@ pub async fn open_daily_chest(
                 reward_label: "+35 XP Kejutan".to_string(),
                 total_xp: 35,
                 level: 1,
-                pet_status: build_pet_status(1, 25, 0, 2, 1),
+                pet_status: build_pet_status(1, 20, 0, 2, 1, 35),
                 message: "Mode Pratinjau: Peti Kejutan berisi +35 XP!".to_string(),
             },
             req_ctx.request_id,
