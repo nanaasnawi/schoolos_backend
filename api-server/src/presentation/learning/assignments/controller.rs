@@ -1874,6 +1874,9 @@ async fn get_submissions(
             let sub_id: Uuid = r.get("id");
             let student_id: Uuid = r.get("student_id");
             let student_user_id: Option<Uuid> = r.try_get("student_user_id").ok().flatten();
+            let sub_status: String = r.get("status");
+            let sub_score: Option<i32> = r.get("score");
+            let is_graded = sub_status.eq_ignore_ascii_case("graded") || sub_score.is_some();
             let answers = answer_rows
                 .iter()
                 .filter(|a| {
@@ -1881,17 +1884,29 @@ async fn get_submissions(
                     let a_student_id: Uuid = a.get("student_id");
                     a_sub_id == sub_id || a_student_id == student_id || (student_user_id.is_some() && Some(a_student_id) == student_user_id)
                 })
-                .map(|a| SubmissionAnswerDetailDto {
-                    question_id: a.get("question_id"),
-                    question_text: a.get("question_text"),
-                    question_type: a.get("question_type"),
-                    max_points: a.get("max_points"),
-                    chosen_choice_id: a.get("chosen_choice_id"),
-                    chosen_choice_text: a.get("chosen_choice_text"),
-                    is_correct: a.get("is_correct"),
-                    text_answer: a.get("text_answer"),
-                    points_earned: a.get::<Option<i32>, _>("points_earned").unwrap_or(0),
-                    teacher_feedback: a.get("teacher_feedback"),
+                .map(|a| {
+                    let question_type: String = a.get("question_type");
+                    let max_points: i32 = a.get("max_points");
+                    let is_correct: Option<bool> = a.get("is_correct");
+                    let raw_points = a.get::<Option<i32>, _>("points_earned").unwrap_or(0);
+                    let is_mc = question_type.eq_ignore_ascii_case("MULTIPLE_CHOICE") || question_type.eq_ignore_ascii_case("PG");
+                    let effective_points = if raw_points == 0 && is_graded && is_mc && is_correct == Some(true) {
+                        max_points.max(1)
+                    } else {
+                        raw_points
+                    };
+                    SubmissionAnswerDetailDto {
+                        question_id: a.get("question_id"),
+                        question_text: a.get("question_text"),
+                        question_type,
+                        max_points,
+                        chosen_choice_id: a.get("chosen_choice_id"),
+                        chosen_choice_text: a.get("chosen_choice_text"),
+                        is_correct,
+                        text_answer: a.get("text_answer"),
+                        points_earned: effective_points,
+                        teacher_feedback: a.get("teacher_feedback"),
+                    }
                 })
                 .collect();
 
@@ -1903,8 +1918,8 @@ async fn get_submissions(
                 content: r.get("content"),
                 file_url: r.get("file_url"),
                 submitted_at: r.get("submitted_at"),
-                status: r.get("status"),
-                score: r.get("score"),
+                status: sub_status,
+                score: sub_score,
                 feedback: r.get("feedback"),
                 graded_at: r.get("graded_at"),
                 graded_by: r.get("graded_by"),
@@ -1939,12 +1954,18 @@ async fn grade(
 
     let grader_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
 
+    let has_explicit_grades = payload
+        .answer_grades
+        .as_ref()
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+
     if let Some(ref answer_grades) = payload.answer_grades {
         for ag in answer_grades {
             let _ = sqlx::query(
                 r#"
                 UPDATE assignment_submission_answers
-                SET points_earned = $1, teacher_feedback = $2, graded_at = NOW(), graded_by = $3
+                SET points_earned = $1, teacher_feedback = COALESCE($2, teacher_feedback), graded_at = NOW(), graded_by = $3
                 WHERE submission_id = $4 AND question_id = $5
                 "#,
             )
@@ -1955,6 +1976,92 @@ async fn grade(
             .bind(ag.question_id)
             .execute(&ctx.pool)
             .await;
+        }
+    }
+
+    if !has_explicit_grades {
+        // Auto-sync per-question points in DB when grading client (e.g. legacy client) didn't pass answer_grades:
+        // 1) Multiple Choice gets max_points when correct, else 0.
+        // 2) Remaining score is distributed proportionally to non-MC (Essay) answers up to their max_points.
+        let existing_rows = sqlx::query(
+            r#"
+            SELECT
+                ans.question_id,
+                COALESCE(q.question_type, 'MULTIPLE_CHOICE') as question_type,
+                COALESCE(q.points, 10) as max_points,
+                COALESCE(c.is_correct, false) as is_correct,
+                COALESCE(ans.points_earned, 0) as current_points
+            FROM assignment_submission_answers ans
+            LEFT JOIN assignment_questions q ON q.id = ans.question_id
+            LEFT JOIN assignment_question_choices c ON c.id = ans.chosen_choice_id
+            WHERE ans.submission_id = $1
+            ORDER BY COALESCE(q.order_index, 0) ASC, ans.created_at ASC
+            "#,
+        )
+        .bind(submission_id)
+        .fetch_all(&ctx.pool)
+        .await
+        .unwrap_or_default();
+
+        let mut pg_total: i32 = 0;
+        let mut essay_items: Vec<(Uuid, i32, i32)> = Vec::new();
+        for row in &existing_rows {
+            let qid: Uuid = row.get("question_id");
+            let qtype: String = row.get("question_type");
+            let max_pts: i32 = row.get("max_points");
+            let is_corr: bool = row.get("is_correct");
+            let cur_pts: i32 = row.get("current_points");
+            let is_mc = qtype.eq_ignore_ascii_case("MULTIPLE_CHOICE") || qtype.eq_ignore_ascii_case("PG");
+            if is_mc {
+                let earned = if is_corr { max_pts.max(1) } else { 0 };
+                pg_total += earned;
+                let _ = sqlx::query(
+                    r#"
+                    UPDATE assignment_submission_answers
+                    SET points_earned = $1, graded_at = NOW(), graded_by = $2
+                    WHERE submission_id = $3 AND question_id = $4
+                    "#,
+                )
+                .bind(earned)
+                .bind(grader_id)
+                .bind(submission_id)
+                .bind(qid)
+                .execute(&ctx.pool)
+                .await;
+            } else {
+                essay_items.push((qid, max_pts.max(1), cur_pts));
+            }
+        }
+
+        if !essay_items.is_empty() {
+            let all_essays_zero = essay_items.iter().all(|(_, _, cur)| *cur == 0);
+            if all_essays_zero {
+                let mut remaining = (payload.score - pg_total).max(0);
+                let total_essay_max: i32 = essay_items.iter().map(|(_, m, _)| *m).sum::<i32>().max(1);
+                let len = essay_items.len();
+                for (i, (qid, max_pts, _)) in essay_items.into_iter().enumerate() {
+                    let alloc = if i + 1 == len {
+                        remaining.min(max_pts)
+                    } else {
+                        ((remaining as i64 * max_pts as i64) / total_essay_max as i64) as i32
+                    }
+                    .clamp(0, max_pts);
+                    remaining = (remaining - alloc).max(0);
+                    let _ = sqlx::query(
+                        r#"
+                        UPDATE assignment_submission_answers
+                        SET points_earned = $1, graded_at = NOW(), graded_by = $2
+                        WHERE submission_id = $3 AND question_id = $4
+                        "#,
+                    )
+                    .bind(alloc)
+                    .bind(grader_id)
+                    .bind(submission_id)
+                    .bind(qid)
+                    .execute(&ctx.pool)
+                    .await;
+                }
+            }
         }
     }
 
