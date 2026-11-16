@@ -6,6 +6,7 @@ use chrono::{Datelike, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 use super::controller::calculate_level;
@@ -13,15 +14,23 @@ use crate::{
     bootstrap::ApplicationContext,
     error::ApiError,
     extractors::RequestContext,
+    infrastructure::nvidia_ai::{call_nvidia_nim, ChatMessage},
     response::ApiResponse,
 };
 use school_core::common::error::{ApplicationError, InfrastructureError};
+
+fn default_level() -> i32 {
+    1
+}
 
 #[derive(Debug, Deserialize)]
 pub struct DailyQuestQuery {
     pub mode: Option<String>,
     #[serde(default)]
     pub round: i32,
+    pub subject: Option<String>,
+    #[serde(default = "default_level")]
+    pub level: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -335,9 +344,9 @@ async fn ensure_daily_quest_tables(pool: &PgPool) {
     .execute(pool)
     .await;
 
-    // Clean up legacy hardcoded trivia modes if still cached in daily_quests
+    // Clean up legacy hardcoded trivia modes or outdated crossword schema without max_hints
     let _ = sqlx::query(
-        "DELETE FROM daily_quests WHERE game_mode NOT IN ('CROSSWORD', 'SLIDING_PUZZLE', 'BLOCK_PUZZLE', 'NUMBER_MERGE', 'KAHOOT_BLITZ', 'WORD_SCRAMBLE', 'COGNITIVE_TRAINER')"
+        "DELETE FROM daily_quests WHERE game_mode NOT IN ('CROSSWORD', 'SLIDING_PUZZLE', 'BLOCK_PUZZLE', 'NUMBER_MERGE', 'KAHOOT_BLITZ', 'WORD_SCRAMBLE', 'COGNITIVE_TRAINER') OR (game_mode = 'CROSSWORD' AND NOT (challenges_json::text LIKE '%max_hints%'))"
     )
     .execute(pool)
     .await;
@@ -528,6 +537,152 @@ const CROSSWORD_LEXICON: &[WordEntry] = &[
     WordEntry { word: "ROBOT", clue: "Mesin otomatis terprogram yang dapat melakukan tugas fisik atau digital", topic: "Teknologi" },
 ];
 
+#[derive(Clone)]
+struct DynamicWordEntry {
+    word: String,
+    clue: String,
+    topic: String,
+    subject: &'static str,
+}
+
+fn normalize_crossword_subject(raw: Option<&str>) -> &'static str {
+    match raw.map(|s| s.trim().to_uppercase()).as_deref() {
+        Some("IPA") | Some("SAINS") => "IPA",
+        Some("MATEMATIKA") | Some("MATH") => "MATEMATIKA",
+        Some("IPS") | Some("SEJARAH") | Some("PPKN") => "IPS",
+        Some("BAHASA") | Some("INDO") | Some("LITERASI") => "BAHASA",
+        Some("INFORMATIKA") | Some("TIK") => "INFORMATIKA",
+        Some("INGGRIS") | Some("ENGLISH") => "INGGRIS",
+        _ => "UMUM",
+    }
+}
+
+fn subject_display_label(code: &str) -> &'static str {
+    match code {
+        "IPA" => "IPA & Sains",
+        "MATEMATIKA" => "Matematika",
+        "IPS" => "IPS & Sejarah",
+        "BAHASA" => "Bahasa Indonesia",
+        "INFORMATIKA" => "Informatika",
+        "INGGRIS" => "Bahasa Inggris",
+        _ => "Semua Mapel",
+    }
+}
+
+fn topic_to_subject_code(topic: &str) -> &'static str {
+    let u = topic.to_uppercase();
+    if u.contains("IPA") || u.contains("BIOLOGI") || u.contains("FISIKA") || u.contains("KIMIA") || u.contains("ASTRONOMI") {
+        "IPA"
+    } else if u.contains("MATEMATIKA") || u.contains("GEOMETRI") || u.contains("STATISTIKA") {
+        "MATEMATIKA"
+    } else if u.contains("GEOGRAFI") || u.contains("EKONOMI") || u.contains("SEJARAH") || u.contains("PPKN") || u.contains("IPS") {
+        "IPS"
+    } else if u.contains("INFORMATIKA") || u.contains("DIGITAL") || u.contains("TEKNOLOGI") {
+        "INFORMATIKA"
+    } else if u.contains("INGGRIS") || u.contains("ENGLISH") {
+        "INGGRIS"
+    } else {
+        "BAHASA"
+    }
+}
+
+const ENGLISH_CROSSWORD_EXTRA: &[WordEntry] = &[
+    WordEntry { word: "SCHOOL", clue: "Bahasa Inggris dari kata 'Sekolah'", topic: "Bahasa Inggris" },
+    WordEntry { word: "WATER", clue: "Bahasa Inggris dari kata 'Air'", topic: "Bahasa Inggris" },
+    WordEntry { word: "BRAIN", clue: "Bahasa Inggris dari kata 'Otak'", topic: "Bahasa Inggris" },
+    WordEntry { word: "LIGHT", clue: "Bahasa Inggris dari kata 'Cahaya / Terang'", topic: "Bahasa Inggris" },
+    WordEntry { word: "WRITE", clue: "Kata kerja Bahasa Inggris untuk 'Menulis'", topic: "Bahasa Inggris" },
+    WordEntry { word: "LEARN", clue: "Kata kerja Bahasa Inggris untuk 'Belajar'", topic: "Bahasa Inggris" },
+    WordEntry { word: "EARTH", clue: "Bahasa Inggris dari planet 'Bumi'", topic: "Bahasa Inggris" },
+    WordEntry { word: "SPACE", clue: "Bahasa Inggris dari 'Ruang Angkasa'", topic: "Bahasa Inggris" },
+    WordEntry { word: "GREEN", clue: "Bahasa Inggris dari warna 'Hijau'", topic: "Bahasa Inggris" },
+    WordEntry { word: "FRIEND", clue: "Bahasa Inggris dari kata 'Teman / Sahabat'", topic: "Bahasa Inggris" },
+    WordEntry { word: "SMART", clue: "Bahasa Inggris dari sifat 'Cerdas / Pintar'", topic: "Bahasa Inggris" },
+    WordEntry { word: "APPLE", clue: "Bahasa Inggris dari buah 'Apel'", topic: "Bahasa Inggris" },
+    WordEntry { word: "BOOK", clue: "Bahasa Inggris dari benda 'Buku'", topic: "Bahasa Inggris" },
+    WordEntry { word: "READ", clue: "Kata kerja Bahasa Inggris untuk 'Membaca'", topic: "Bahasa Inggris" },
+];
+
+async fn try_generate_ai_crossword_words(
+    subject_code: &str,
+    level: i32,
+    grade_band: &str,
+    rng_seed: u64,
+) -> Vec<DynamicWordEntry> {
+    let subj_label = subject_display_label(subject_code);
+    let band_label = match grade_band {
+        "PAKET_A" => "SD / Paket A (dasar, mudah dipahami anak SD)",
+        "PAKET_B" => "SMP / Paket B (menengah)",
+        _ => "SMA / Paket C (menengah-atas, analitis)",
+    };
+    let difficulty_hint = if level <= 2 {
+        "Tingkat Pemula: pakai 10-12 kata tunggal pendek (3-6 huruf, umum & mudah)."
+    } else if level <= 4 {
+        "Tingkat Menengah: pakai 10-12 kata tunggal sedang (4-8 huruf)."
+    } else {
+        "Tingkat Master: pakai 12-14 kata ilmiah/akademik yang lebih menantang (5-9 huruf)."
+    };
+
+    let sys_prompt = "Kamu adalah pembuat soal Teka-Teki Silang (TTS) edukatif profesional untuk kurikulum Indonesia. WAJIB keluarkan HANYA JSON array valid tanpa markdown atau teks tambahan.";
+    let user_prompt = format!(
+        "Buatkan tepat 12 kata & petunjuk Teka-Teki Silang untuk Mapel: {subj_label}, Jenjang: {band_label}, Level: {level}, Variasi Acak Seed: {rng_seed}.\n\
+        {difficulty_hint}\n\
+        Aturan KETAT tiap item JSON:\n\
+        1. \"word\": HARUS 1 kata huruf alfabet A-Z saja tanpa spasi, angka, atau tanda hubung (panjang 3-9 huruf).\n\
+        2. \"clue\": petunjuk pertanyaan singkat padat dalam Bahasa Indonesia.\n\
+        3. \"topic\": nama topik singkat (misal \"{subj_label}\").\n\
+        Format output JSON array: [{\"word\":\"ATOM\",\"clue\":\"Partikel terkecil penyusun unsur\",\"topic\":\"IPA\"}]",
+    );
+
+    let messages = vec![
+        ChatMessage { role: "system", content: sys_prompt },
+        ChatMessage { role: "user", content: &user_prompt },
+    ];
+
+    let raw = match call_nvidia_nim(messages, 0.75, 900).await {
+        Ok(txt) => txt,
+        Err(_) => return Vec::new(),
+    };
+
+    let trimmed = raw.trim();
+    let parsed_val = serde_json::from_str::<Value>(trimmed).ok().or_else(|| {
+        let s = trimmed.find('[')?;
+        let e = trimmed.rfind(']')?;
+        if e > s {
+            serde_json::from_str::<Value>(&trimmed[s..=e]).ok()
+        } else {
+            None
+        }
+    });
+
+    let Some(Value::Array(items)) = parsed_val else {
+        return Vec::new();
+    };
+
+    let mut out: Vec<DynamicWordEntry> = Vec::new();
+    let mut seen = HashSet::new();
+    for item in items {
+        let word_raw = item["word"].as_str().unwrap_or("").trim().to_uppercase();
+        let clue = item["clue"].as_str().unwrap_or("").trim().to_string();
+        let topic = item["topic"].as_str().unwrap_or(subj_label).trim().to_string();
+
+        if (3..=9).contains(&word_raw.len())
+            && word_raw.chars().all(|c| c.is_ascii_alphabetic())
+            && !clue.is_empty()
+            && !seen.contains(&word_raw)
+        {
+            seen.insert(word_raw.clone());
+            out.push(DynamicWordEntry {
+                word: word_raw,
+                clue,
+                topic,
+                subject: topic_to_subject_code(subject_code),
+            });
+        }
+    }
+    out
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Dir {
     Across,
@@ -536,7 +691,7 @@ enum Dir {
 
 #[derive(Clone)]
 struct PlacedWord {
-    entry: WordEntry,
+    entry: DynamicWordEntry,
     row: usize,
     col: usize,
     dir: Dir,
@@ -559,7 +714,6 @@ fn can_place_word(
         return None;
     }
 
-    // Cell right before word & right after word must be empty
     let br = sr - dr;
     let bc = sc - dc;
     if br >= 0 && bc >= 0 && grid[br as usize][bc as usize] != '\0' {
@@ -577,7 +731,6 @@ fn can_place_word(
         let c = (sc + dc * (k as isize)) as usize;
         let existing = grid[r][c];
         if existing == '\0' {
-            // Check perpendicular neighbors so parallel words don't smear together
             let (pr1, pc1) = (r as isize + dc, c as isize + dr);
             let (pr2, pc2) = (r as isize - dc, c as isize - dr);
             if pr1 >= 0 && pr1 < 11 && pc1 >= 0 && pc1 < 11 && grid[pr1 as usize][pc1 as usize] != '\0' {
@@ -587,7 +740,6 @@ fn can_place_word(
                 return None;
             }
         } else if existing == ch {
-            // Ensure no collinear continuation on existing letter
             let prev_collinear = if k == 0 {
                 false
             } else {
@@ -618,18 +770,70 @@ fn commit_word(grid: &mut [[char; 11]; 11], word: &str, row: usize, col: usize, 
     }
 }
 
-fn generate_crossword_challenge(rng: &mut u64) -> Value {
+fn generate_crossword_challenge(
+    rng: &mut u64,
+    ai_words: Vec<DynamicWordEntry>,
+    subject_code: &str,
+    level: i32,
+) -> Value {
+    let safe_level = level.max(1);
+    let target_words: usize = match safe_level {
+        1..=2 => 5,
+        3..=4 => 7,
+        _ => 8,
+    };
+    let max_hints: i32 = if safe_level >= 5 { 2 } else { 3 };
+    let difficulty_label = if safe_level <= 2 {
+        "Pemula"
+    } else if safe_level <= 4 {
+        "Menengah"
+    } else {
+        "Master"
+    };
+
+    let ai_generated = ai_words.len() >= 4;
+
+    // Build fallback/supplement lexicon prioritizing matching subject
+    let mut fallback_entries: Vec<DynamicWordEntry> = CROSSWORD_LEXICON
+        .iter()
+        .chain(ENGLISH_CROSSWORD_EXTRA.iter())
+        .map(|e| DynamicWordEntry {
+            word: e.word.to_string(),
+            clue: e.clue.to_string(),
+            topic: e.topic.to_string(),
+            subject: topic_to_subject_code(e.topic),
+        })
+        .collect();
+
+    if subject_code != "UMUM" {
+        fallback_entries.sort_by_key(|e| if e.subject == subject_code { 0 } else { 1 });
+    }
+
+    let mut combined_base: Vec<DynamicWordEntry> = ai_words;
+    let mut seen_words: HashSet<String> = combined_base.iter().map(|e| e.word.clone()).collect();
+    for fb in fallback_entries {
+        if !seen_words.contains(&fb.word) {
+            seen_words.insert(fb.word.clone());
+            combined_base.push(fb);
+        }
+    }
+
     let mut best_placed: Vec<PlacedWord> = Vec::new();
     let mut best_grid = [['\0'; 11]; 11];
 
-    for _attempt in 0..8 {
-        let mut pool: Vec<WordEntry> = CROSSWORD_LEXICON.to_vec();
-        shuffle_vec(&mut pool, rng);
+    for _attempt in 0..10 {
+        let mut pool: Vec<DynamicWordEntry> = combined_base.clone();
+        // Keep AI + subject words near front while still shuffling nicely
+        let split_at = pool.iter().position(|e| e.subject != subject_code && subject_code != "UMUM").unwrap_or(pool.len());
+        let split_at = split_at.max(10.min(pool.len()));
+        shuffle_vec(&mut pool[..split_at], rng);
+        if split_at < pool.len() {
+            shuffle_vec(&mut pool[split_at..], rng);
+        }
 
-        // Pick a strong seed word of 5..8 chars
         let anchor_idx = pool
             .iter()
-            .position(|e| (5..=8).contains(&e.word.chars().count()))
+            .position(|e| (4..=8).contains(&e.word.chars().count()))
             .unwrap_or(0);
         let anchor = pool.remove(anchor_idx);
         let anchor_len = anchor.word.chars().count();
@@ -637,7 +841,8 @@ fn generate_crossword_challenge(rng: &mut u64) -> Value {
         let mut grid = [['\0'; 11]; 11];
         let mut placed: Vec<PlacedWord> = Vec::new();
         let start_col = (11usize.saturating_sub(anchor_len)) / 2;
-        commit_word(&mut grid, anchor.word, 5, start_col, Dir::Across);
+        commit_word(&mut grid, &anchor.word, 5, start_col, Dir::Across);
+        let mut used_words: Vec<String> = vec![anchor.word.clone()];
         placed.push(PlacedWord {
             entry: anchor,
             row: 5,
@@ -645,11 +850,9 @@ fn generate_crossword_challenge(rng: &mut u64) -> Value {
             dir: Dir::Across,
         });
 
-        let mut used_words: Vec<&'static str> = vec![anchor.word];
-
         for _pass in 0..2 {
             for cand in &pool {
-                if placed.len() >= 7 {
+                if placed.len() >= target_words {
                     break;
                 }
                 if used_words.contains(&cand.word) {
@@ -673,7 +876,7 @@ fn generate_crossword_challenge(rng: &mut u64) -> Value {
                             } else {
                                 (ir as isize - ck as isize, ic as isize)
                             };
-                            if let Some(inter) = can_place_word(&grid, cand.word, sr, sc, target_dir) {
+                            if let Some(inter) = can_place_word(&grid, &cand.word, sr, sc, target_dir) {
                                 let center_dist =
                                     ((sr - 5).abs() + (sc - 5).abs()) as usize;
                                 let score = inter * 20 + 20usize.saturating_sub(center_dist);
@@ -690,14 +893,14 @@ fn generate_crossword_challenge(rng: &mut u64) -> Value {
                 }
 
                 if let Some((_, r, c, dir)) = best_fit {
-                    commit_word(&mut grid, cand.word, r, c, dir);
+                    commit_word(&mut grid, &cand.word, r, c, dir);
+                    used_words.push(cand.word.clone());
                     placed.push(PlacedWord {
-                        entry: *cand,
+                        entry: cand.clone(),
                         row: r,
                         col: c,
                         dir,
                     });
-                    used_words.push(cand.word);
                 }
             }
         }
@@ -706,12 +909,11 @@ fn generate_crossword_challenge(rng: &mut u64) -> Value {
             best_placed = placed;
             best_grid = grid;
         }
-        if best_placed.len() >= 6 {
+        if best_placed.len() >= target_words {
             break;
         }
     }
 
-    // Trim grid bounding box
     let mut min_r = 10usize;
     let mut max_r = 0usize;
     let mut min_c = 10usize;
@@ -739,7 +941,6 @@ fn generate_crossword_challenge(rng: &mut u64) -> Value {
         compact_grid.push(row_str);
     }
 
-    // Assign clue numbers in reading order (row-major)
     let mut starts: Vec<(usize, usize, usize)> = Vec::new();
     for (idx, pw) in best_placed.iter().enumerate() {
         starts.push((pw.row - min_r, pw.col - min_c, idx));
@@ -787,12 +988,27 @@ fn generate_crossword_challenge(rng: &mut u64) -> Value {
     });
 
     json!({
-        "id": format!("cw_{}", next_rand(rng) % 100_000),
+        "id": format!("cw_{}_{}_{}", subject_code, safe_level, next_rand(rng) % 100_000),
         "rows": rows,
         "cols": cols,
         "grid": compact_grid,
         "clues": clues_json,
-        "topic_tag": "Lintas Pelajaran"
+        "max_hints": max_hints,
+        "level": safe_level,
+        "difficulty_label": difficulty_label,
+        "subject": subject_code,
+        "subject_label": subject_display_label(subject_code),
+        "ai_generated": ai_generated,
+        "available_subjects": [
+            { "code": "UMUM", "label": "Semua Mapel" },
+            { "code": "IPA", "label": "IPA & Sains" },
+            { "code": "MATEMATIKA", "label": "Matematika" },
+            { "code": "IPS", "label": "IPS & Sejarah" },
+            { "code": "BAHASA", "label": "Bahasa Indonesia" },
+            { "code": "INFORMATIKA", "label": "Informatika" },
+            { "code": "INGGRIS", "label": "Bahasa Inggris" }
+        ],
+        "topic_tag": subject_display_label(subject_code)
     })
 }
 
@@ -1424,15 +1640,18 @@ fn build_game_payload(
     mode: &str,
     grade_band: &str,
     round: i32,
+    subject_code: &str,
+    level: i32,
+    ai_cw_words: Vec<DynamicWordEntry>,
     rng: &mut u64,
 ) -> (String, String, String, Value) {
     match mode {
         "CROSSWORD" => {
-            let cw = generate_crossword_challenge(rng);
+            let cw = generate_crossword_challenge(rng, ai_cw_words, subject_code, level);
             (
-                "Teka-Teki Silang (TTS)".to_string(),
-                "Isi kotak mendatar dan menurun berdasarkan petunjuk wawasan!".to_string(),
-                "Bahasa & Wawasan".to_string(),
+                format!("Teka-Teki Silang Level {} • {}", level, subject_display_label(subject_code)),
+                "Isi kotak mendatar dan menurun dari petunjuk AI dinamis!".to_string(),
+                subject_display_label(subject_code).to_string(),
                 json!([cw]),
             )
         }
@@ -1625,9 +1844,20 @@ pub async fn get_daily_quest(
     };
 
     let grade_band = detect_grade_band(&class_name);
-    let mut rng = seed_for_quest(today, round, actor.id, &requested_mode, &grade_band);
+    let effective_level = if query.level > 0 { query.level } else { (round + 1).max(1) };
+    let effective_subject = normalize_crossword_subject(query.subject.as_deref());
+    let custom_crossword_req = requested_mode == "CROSSWORD"
+        && (round > 0 || effective_level > 1 || effective_subject != "UMUM");
 
-    let existing = if round == 0 {
+    let mut rng = seed_for_quest(
+        today,
+        round + effective_level * 17,
+        actor.id,
+        &format!("{}_{}", requested_mode, effective_subject),
+        &grade_band,
+    );
+
+    let existing = if round == 0 && !custom_crossword_req {
         sqlx::query(
             r#"
             SELECT id, title, subtitle, subject_name, source_label, xp_reward, challenges_json
@@ -1664,18 +1894,42 @@ pub async fn get_daily_quest(
                 r.get::<Value, _>("challenges_json"),
             ),
             None => {
-                let (gen_title, gen_subtitle, gen_subject, gen_challenges) =
-                    build_game_payload(&requested_mode, &grade_band, round, &mut rng);
-                let base_xp = if round > 0 {
-                    25
+                let ai_cw_words = if requested_mode == "CROSSWORD" {
+                    let seed_val = next_rand(&mut rng);
+                    try_generate_ai_crossword_words(
+                        effective_subject,
+                        effective_level,
+                        &grade_band,
+                        seed_val,
+                    )
+                    .await
+                } else {
+                    Vec::new()
+                };
+                let used_ai = ai_cw_words.len() >= 4;
+                let (gen_title, gen_subtitle, gen_subject, gen_challenges) = build_game_payload(
+                    &requested_mode,
+                    &grade_band,
+                    round,
+                    effective_subject,
+                    effective_level,
+                    ai_cw_words,
+                    &mut rng,
+                );
+                let base_xp = if round > 0 || custom_crossword_req {
+                    25 + (effective_level.clamp(1, 5) * 5)
                 } else if requested_mode == featured_mode {
                     80
                 } else {
                     60
                 };
-                let src = "PROCEDURAL_ENGINE".to_string();
+                let src = if used_ai {
+                    "AI_CROSSWORD".to_string()
+                } else {
+                    "PROCEDURAL_ENGINE".to_string()
+                };
 
-                if round == 0 {
+                if round == 0 && !custom_crossword_req {
                     let row = sqlx::query(
                         r#"
                         INSERT INTO daily_quests (id, tenant_id, quest_date, grade_band, game_mode, title, subtitle, subject_name, source_label, xp_reward, challenges_json)
