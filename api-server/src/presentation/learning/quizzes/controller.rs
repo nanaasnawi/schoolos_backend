@@ -1879,11 +1879,11 @@ async fn grade_attempt(
         let _ = ctx.grade_attempt.execute(command).await;
     }
 
-    // ── FCM update NILAI kuis ke siswa pemilik attempt ──
+    // ── FCM update & sinkronisasi XP dari poin hasil penilaian kuis ke siswa ──
     {
         use sqlx::Row;
         if let Some(row) = sqlx::query(
-            "SELECT q.tenant_id AS tenant_id, q.title AS title, s.user_id AS user_id, st.full_name AS sname, a.score AS score FROM quiz_attempts a JOIN quizzes q ON q.id = a.quiz_id JOIN students s ON s.id = a.student_id JOIN students st ON st.id = a.student_id WHERE a.id = $1 AND a.tenant_id = $2 LIMIT 1",
+            "SELECT q.tenant_id AS tenant_id, q.title AS title, a.student_id AS student_id, s.user_id AS user_id, st.full_name AS sname, a.score AS score FROM quiz_attempts a JOIN quizzes q ON q.id = a.quiz_id JOIN students s ON s.id = a.student_id JOIN students st ON st.id = a.student_id WHERE a.id = $1 AND a.tenant_id = $2 LIMIT 1",
         )
         .bind(attempt_id)
         .bind(req_ctx.tenant_id)
@@ -1897,6 +1897,28 @@ async fn grade_attempt(
             let qtitle: String = row.try_get("title").unwrap_or_else(|_| "Kuis".to_string());
             let score: Option<f64> = row.try_get::<Option<f64>, _>("score").ok().flatten()
                 .or_else(|| row.try_get::<Option<i32>, _>("score").ok().flatten().map(|v| v as f64));
+            let quiz_earned_points: i32 = sqlx::query_scalar::<_, i32>(
+                "SELECT COALESCE(SUM(points_earned), 0)::int FROM attempt_answers WHERE attempt_id = $1",
+            )
+            .bind(attempt_id)
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap_or(0);
+            let fallback_quiz_score = score.map(|v| v.round() as i32).unwrap_or(0).max(0);
+            let xp_pts = if quiz_earned_points > 0 { quiz_earned_points } else { fallback_quiz_score };
+            if let Ok(student_uuid) = row.try_get::<Uuid, _>("student_id") {
+                let xp_desc = format!("Poin Kuis: {} ({} Poin)", qtitle, xp_pts);
+                let _ = crate::presentation::gamification::controller::sync_scored_xp_for_student(
+                    &ctx.pool,
+                    tid.unwrap_or(req_ctx.tenant_id),
+                    student_uuid,
+                    "QUIZ_SCORE",
+                    attempt_id,
+                    xp_pts,
+                    &xp_desc,
+                )
+                .await;
+            }
             let t = format!("🏆 Nilai Keluar: {}", qtitle);
             let b = match score {
                 Some(v) => format!("Nilai kuismu sudah dinilai: {}. Cek detail di aplikasi!", v),
