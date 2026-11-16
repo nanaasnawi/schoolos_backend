@@ -1937,7 +1937,7 @@ async fn get_submissions(
 async fn grade(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
-    Path((_id, submission_id)): Path<(Uuid, Uuid)>,
+    Path((assignment_id, submission_id)): Path<(Uuid, Uuid)>,
     Json(payload): Json<GradeSubmissionRequest>,
 ) -> Result<Json<ApiResponse<SubmissionResponse>>, ApiError> {
     use crate::middleware::require_permission;
@@ -2122,7 +2122,7 @@ async fn grade(
     .await
     .unwrap_or_default();
 
-    let answers = answer_rows
+    let answers: Vec<SubmissionAnswerDetailDto> = answer_rows
         .into_iter()
         .map(|a| SubmissionAnswerDetailDto {
             question_id: a.get("question_id"),
@@ -2137,6 +2137,35 @@ async fn grade(
             teacher_feedback: a.get("teacher_feedback"),
         })
         .collect();
+
+    // Otomatis tambahkan poin butir soal hasil penilaian guru ke XP siswa
+    let total_question_points: i32 = answers.iter().map(|a| a.points_earned.max(0)).sum();
+    let earned_xp = if !answers.is_empty() && total_question_points > 0 {
+        total_question_points
+    } else {
+        payload.score.max(0)
+    };
+    let assignment_title: String = sqlx::query_scalar::<_, String>(
+        "SELECT title FROM assignments WHERE id = $1 AND tenant_id = $2 LIMIT 1",
+    )
+    .bind(assignment_id)
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| "Tugas".to_string());
+    let xp_desc = format!("Poin Tugas: {} ({} Poin)", assignment_title, earned_xp);
+    let _ = crate::presentation::gamification::controller::sync_scored_xp_for_student(
+        &ctx.pool,
+        req_ctx.tenant_id,
+        submission.student_id,
+        "ASSIGNMENT_SCORE",
+        submission_id,
+        earned_xp,
+        &xp_desc,
+    )
+    .await;
 
     let mut resp = SubmissionResponse::from(submission);
     if let Some(si) = student_info {

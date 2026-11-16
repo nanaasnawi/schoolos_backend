@@ -396,3 +396,143 @@ pub async fn award_student_xp(
         req_ctx.request_id,
     )))
 }
+
+/// Sinkronisasi XP otomatis berdasarkan poin jawaban yang diperoleh siswa saat guru menilai tugas/kuis.
+/// Idempoten terhadap `(student_id, action_type, reference_id)` dan menyesuaikan selisih (`delta`) bila guru mengedit nilai.
+pub(crate) async fn sync_scored_xp_for_student(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+    raw_student_id: Uuid,
+    action_type: &str,
+    reference_id: Uuid,
+    target_xp: i32,
+    description: &str,
+) -> (i64, i32, i32, bool) {
+    let target = target_xp.max(0);
+    let effective_student_id: Uuid = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM students WHERE (id = $1 OR user_id = $1) AND tenant_id = $2 LIMIT 1",
+    )
+    .bind(raw_student_id)
+    .bind(tenant_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(raw_student_id);
+
+    let existing_tx = sqlx::query(
+        r#"
+        SELECT id, xp_amount
+        FROM student_xp_transactions
+        WHERE student_id = $1 AND action_type = $2 AND reference_id = $3
+        LIMIT 1
+        "#,
+    )
+    .bind(effective_student_id)
+    .bind(action_type)
+    .bind(reference_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+
+    let delta_xp: i64 = match existing_tx {
+        Some(row) => {
+            let tx_id: Uuid = row.get("id");
+            let old_xp: i32 = row.get("xp_amount");
+            let delta = (target - old_xp) as i64;
+            let _ = sqlx::query(
+                "UPDATE student_xp_transactions SET xp_amount = $1, description = $2 WHERE id = $3",
+            )
+            .bind(target)
+            .bind(description)
+            .bind(tx_id)
+            .execute(pool)
+            .await;
+            delta
+        }
+        None => {
+            if target <= 0 {
+                return (0, 1, 1, false);
+            }
+            let res = sqlx::query(
+                r#"
+                INSERT INTO student_xp_transactions (id, tenant_id, student_id, action_type, reference_id, xp_amount, description, created_at)
+                VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, NOW())
+                ON CONFLICT (student_id, action_type, reference_id) DO NOTHING
+                "#,
+            )
+            .bind(tenant_id)
+            .bind(effective_student_id)
+            .bind(action_type)
+            .bind(reference_id)
+            .bind(target)
+            .bind(description)
+            .execute(pool)
+            .await;
+            match res {
+                Ok(r) if r.rows_affected() > 0 => target as i64,
+                _ => 0,
+            }
+        }
+    };
+
+    let current_xp_row = sqlx::query(
+        "SELECT total_xp, level, streak_days, last_activity_date FROM student_xp WHERE student_id = $1",
+    )
+    .bind(effective_student_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+
+    let (old_total, old_level, old_streak, last_date) = match current_xp_row {
+        Some(r) => (
+            r.get::<i64, _>("total_xp"),
+            r.get::<i32, _>("level"),
+            r.get::<i32, _>("streak_days"),
+            r.try_get::<Option<chrono::NaiveDate>, _>("last_activity_date").ok().flatten(),
+        ),
+        None => (0, 1, 1, None),
+    };
+
+    if delta_xp == 0 {
+        return (old_total, old_level, old_streak, false);
+    }
+
+    let new_total = (old_total + delta_xp).max(0);
+    let new_level = calculate_level(new_total);
+    let today = chrono::Utc::now().date_naive();
+    let new_streak = if delta_xp > 0 {
+        match last_date {
+            Some(d) if d == today => old_streak.max(1),
+            Some(d) if d == today.pred_opt().unwrap_or(today) => old_streak + 1,
+            _ => old_streak.max(1),
+        }
+    } else {
+        old_streak.max(1)
+    };
+
+    let _ = sqlx::query(
+        r#"
+        INSERT INTO student_xp (student_id, tenant_id, total_xp, level, streak_days, last_activity_date, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, NOW())
+        ON CONFLICT (student_id) DO UPDATE SET
+            total_xp = EXCLUDED.total_xp,
+            level = EXCLUDED.level,
+            streak_days = EXCLUDED.streak_days,
+            last_activity_date = EXCLUDED.last_activity_date,
+            updated_at = NOW()
+        "#,
+    )
+    .bind(effective_student_id)
+    .bind(tenant_id)
+    .bind(new_total)
+    .bind(new_level)
+    .bind(new_streak)
+    .bind(today)
+    .execute(pool)
+    .await;
+
+    (new_total, new_level, new_streak, new_level > old_level)
+}
