@@ -95,7 +95,7 @@ pub fn ai_routes() -> Router<ApplicationContext> {
     security(("Bearer" = []))
 )]
 async fn generate_content(
-    State(_ctx): State<ApplicationContext>,
+    State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
     Json(payload): Json<GenerateAiContentRequest>,
 ) -> Result<Json<ApiResponse<GenerateAiContentResponse>>, ApiError> {
@@ -111,10 +111,11 @@ async fn generate_content(
     let subject = payload.subject_name.as_deref().unwrap_or("Umum");
     let num_q = payload.num_questions.unwrap_or(5).clamp(1, 15);
     let diff = payload.difficulty.as_deref().unwrap_or("Sedang");
+    let include_images = payload.include_images.unwrap_or(true);
 
     match payload.mode.to_uppercase().as_str() {
         "INFOGRAPHIC" => {
-            let info = nvidia_ai::generate_infographic(topic, grade, subject)
+            let info = nvidia_ai::generate_infographic(&ctx.pool, topic, grade, subject, include_images)
                 .await
                 .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
