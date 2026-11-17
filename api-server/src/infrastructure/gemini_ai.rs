@@ -619,6 +619,11 @@ pub async fn probe_and_generate_hero_image(
                 Err(err) => {
                     tracing::warn!("Gemini probe failed ({:?}): {}", route.kind, err);
                     match route.kind {
+                        GeminiRouteKind::CloudflareWorkersAi => {
+                            if cloudflare_err.is_none() {
+                                cloudflare_err = Some(err);
+                            }
+                        }
                         GeminiRouteKind::GoogleGenerateContent => {
                             if ai_studio_err.is_none() {
                                 ai_studio_err = Some(err);
