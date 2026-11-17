@@ -1324,23 +1324,27 @@ pub async fn generate_assignment(
     let fmt_upper = assignment_format.unwrap_or("STRUCTURED_QUESTIONS").to_uppercase();
     let is_homework = fmt_upper == "HOMEWORK_PR";
     let is_pure_game = fmt_upper == "INTERACTIVE_GAMES";
-    let is_game_mixed = fmt_upper.contains("GAME");
+    let is_game_mixed = fmt_upper.contains("GAME") && !is_pure_game;
+    let effective_num_mcq = if is_homework || is_pure_game { 0 } else { num_mcq };
+    let effective_num_essay = if is_homework {
+        num_essay.max(1)
+    } else if is_pure_game || is_game_mixed {
+        0
+    } else if effective_num_mcq == 0 && num_essay == 0 {
+        2
+    } else {
+        num_essay
+    };
     let now_ts = chrono::Utc::now().timestamp_millis();
 
-    let num_games: usize = if is_pure_game {
-        3
-    } else if is_game_mixed {
-        3
-    } else {
-        0
-    };
+    let num_games: usize = if is_pure_game || is_game_mixed { 3 } else { 0 };
 
     let total_questions = if is_homework {
-        num_essay.max(1)
+        effective_num_essay
     } else if is_pure_game {
         num_games
     } else {
-        num_mcq + num_essay + num_games
+        effective_num_mcq + effective_num_essay + num_games
     };
 
     let game_schema_hint = r#"
@@ -1396,30 +1400,39 @@ CONTOH FORMAT WAJIB UNTUK 3 TIPE GAME INTERAKTIF:
 
     let slot_instructions = if is_homework {
         format!(
-            "Array 'questions' WAJIB BERISI TEPAT {num_essay} BUTIR SOAL ESSAY / LEMBAR KERJA.\n- Butir 1 sampai {num_essay}: Tipe 'ESSAY' (analitis / tugas observasi kontekstual)."
+            "Array 'questions' WAJIB BERISI TEPAT {effective_num_essay} BUTIR SOAL ESSAY / LEMBAR KERJA.\n- Butir 1 sampai {effective_num_essay}: Tipe 'ESSAY' (analitis / tugas observasi kontekstual)."
         )
     } else if is_pure_game {
         format!(
-            "Array 'questions' WAJIB BERISI TEPAT 3 BUTIR TUGAS GAME INTERAKTIF AKTIF:\n\
+            "Array 'questions' WAJIB BERISI TEPAT 3 BUTIR TUGAS GAME INTERAKTIF AKTIF (TANPA PG & TANPA ESSAY):\n\
             - Butir 1: question_type = 'MATCHING' (4 pasangan konsep).\n\
             - Butir 2: question_type = 'ORDERING' (4 langkah terurut dari awal hingga akhir).\n\
             - Butir 3: question_type = 'FILL_BLANK' (template berisi {{1}} dan {{2}}, 2 blanks, 2 distractors).\n\
+            - DILARANG menyertakan soal 'ESSAY' maupun 'MULTIPLE_CHOICE'!\n\
             {game_schema_hint}"
         )
     } else if is_game_mixed {
         format!(
-            "Array 'questions' WAJIB BERISI TEPAT {total_questions} BUTIR SOAL VARIATIF:\n\
-            - {num_mcq} butir 'MULTIPLE_CHOICE' (4 opsi A-D, tepat 1 is_correct: true)\n\
+            "Array 'questions' WAJIB BERISI TEPAT {total_questions} BUTIR SOAL OTOMATIS (TANPA ESSAY):\n\
+            - {effective_num_mcq} butir 'MULTIPLE_CHOICE' (4 opsi A-D, tepat 1 is_correct: true)\n\
             - 1 butir 'MATCHING' (4 pairs)\n\
             - 1 butir 'ORDERING' (4 items berurutan benar)\n\
             - 1 butir 'FILL_BLANK' (template berisi {{1}} dan {{2}}, 2 blanks, 2 distractors)\n\
-            - {num_essay} butir 'ESSAY'\n\
+            - DILARANG KERAS menyertakan soal bertipe 'ESSAY' pada format Game ini!\n\
             {game_schema_hint}"
+        )
+    } else if effective_num_mcq > 0 && effective_num_essay == 0 {
+        format!(
+            "Array 'questions' WAJIB BERISI TEPAT {effective_num_mcq} BUTIR SOAL PILIHAN GANDA MURNI ('question_type': 'MULTIPLE_CHOICE') dengan 4 pilihan A, B, C, D dan kunci is_correct tepat 1 true.\nDILARANG menyertakan soal bertipe 'ESSAY'! Jumlah soal di array questions harus PERSIS {effective_num_mcq} butir."
+        )
+    } else if effective_num_mcq == 0 && effective_num_essay > 0 {
+        format!(
+            "Array 'questions' WAJIB BERISI TEPAT {effective_num_essay} BUTIR SOAL URAIAN / ESSAY MURNI ('question_type': 'ESSAY') dengan rubrik pedoman penskoran komprehensif.\nDILARANG menyertakan soal bertipe 'MULTIPLE_CHOICE'! Jumlah soal di array questions harus PERSIS {effective_num_essay} butir."
         )
     } else {
         format!(
-            "Array 'questions' WAJIB BERISI TEPAT {total_questions} BUTIR SOAL DENGAN PEMBAGIAN PERSIS:\n- Butir 1 sampai {num_mcq}: SOAL PILIHAN GANDA ('question_type': 'MULTIPLE_CHOICE') dengan 4 pilihan A, B, C, D dan kunci is_correct tepat 1 true.\n- Butir {essay_start} sampai {total_questions}: SOAL URAIAN / ESSAY ('question_type': 'ESSAY') dengan rubrik pedoman penskoran komprehensif.\nDILARANG KERAS mengurangi jumlah soal! Jumlah soal di array questions harus PERSIS {total_questions} butir.",
-            essay_start = num_mcq + 1
+            "Array 'questions' WAJIB BERISI TEPAT {total_questions} BUTIR SOAL DENGAN PEMBAGIAN PERSIS:\n- Butir 1 sampai {effective_num_mcq}: SOAL PILIHAN GANDA ('question_type': 'MULTIPLE_CHOICE') dengan 4 pilihan A, B, C, D dan kunci is_correct tepat 1 true.\n- Butir {essay_start} sampai {total_questions}: SOAL URAIAN / ESSAY ('question_type': 'ESSAY') dengan rubrik pedoman penskoran komprehensif.\nDILARANG KERAS mengurangi jumlah soal! Jumlah soal di array questions harus PERSIS {total_questions} butir.",
+            essay_start = effective_num_mcq + 1
         )
     };
 
@@ -1506,8 +1519,8 @@ PENTING & WAJIB:
                 grade_level,
                 subject_name,
                 assignment_format,
-                num_mcq,
-                num_essay,
+                effective_num_mcq,
+                effective_num_essay,
                 difficulty,
                 include_images,
             ));
@@ -1538,8 +1551,8 @@ PENTING & WAJIB:
                 grade_level,
                 subject_name,
                 assignment_format,
-                num_mcq,
-                num_essay,
+                effective_num_mcq,
+                effective_num_essay,
                 difficulty,
                 include_images,
             ));
@@ -1730,7 +1743,7 @@ PENTING & WAJIB:
             questions = final_games;
         } else {
             // Pad missing MCQs if AI returned fewer than requested
-            while final_mcqs.len() < num_mcq {
+            while final_mcqs.len() < effective_num_mcq {
                 let idx = final_mcqs.len() + 1;
                 final_mcqs.push(AssignmentQuestionDto {
                     id: format!("asg-mcq-pad-{idx}-{now_ts}"),
@@ -1761,8 +1774,8 @@ PENTING & WAJIB:
                 });
             }
 
-            // Pad missing Essays if AI returned fewer than requested
-            while final_essays.len() < num_essay {
+            // Pad missing Essays if AI returned fewer than requested (always 0 for game formats)
+            while final_essays.len() < effective_num_essay {
                 let idx = final_essays.len() + 1;
                 final_essays.push(AssignmentQuestionDto {
                     id: format!("asg-essay-pad-{idx}-{now_ts}"),
@@ -1776,28 +1789,28 @@ PENTING & WAJIB:
                 });
             }
 
-            final_mcqs.truncate(num_mcq);
-            final_essays.truncate(num_essay);
+            final_mcqs.truncate(effective_num_mcq);
+            final_essays.truncate(effective_num_essay);
 
             questions = final_mcqs;
             questions.extend(final_games);
             questions.extend(final_essays);
         }
     } else {
-        while questions.len() < num_essay {
+        while questions.len() < effective_num_essay {
             let idx = questions.len() + 1;
             questions.push(AssignmentQuestionDto {
                 id: format!("asg-hw-pad-{idx}-{now_ts}"),
                 question_text: format!("Tugas Mandiri {idx}: Lakukan pengamatan dan susun laporan terstruktur mengenai {topic} sesuai panduan modul {subject_name}."),
                 question_type: "ESSAY".to_string(),
-                points: (100 / (num_essay.max(1) as i32)).max(10),
+                points: (100 / (effective_num_essay.max(1) as i32)).max(10),
                 image_url: None,
                 choices: Vec::new(),
                 interaction_config: None,
                 explanation: format!("Rubrik: Penilaian berbasis kelengkapan laporan, orisinalitas analisis, dan ketepatan kaidah {subject_name}."),
             });
         }
-        questions.truncate(num_essay);
+        questions.truncate(effective_num_essay);
     }
 
     Ok(GeneratedAssignmentDto {
@@ -2206,18 +2219,18 @@ pub fn fallback_generate_assignment(
     let fmt_upper = assignment_format.unwrap_or("STRUCTURED_QUESTIONS").to_uppercase();
     let is_homework = fmt_upper == "HOMEWORK_PR";
     let is_pure_game = fmt_upper == "INTERACTIVE_GAMES";
-    let is_game_mixed = fmt_upper.contains("GAME");
+    let is_game_mixed = fmt_upper.contains("GAME") && !is_pure_game;
 
     let safe_image: Option<String> = None;
 
-    let mcq_templates = if is_homework || is_pure_game {
+    let mcq_templates = if is_homework || is_pure_game || num_mcq == 0 {
         Vec::new()
     } else {
         generate_pedagogical_question_templates(subject_name, topic, grade_level, difficulty, num_mcq)
     };
     let mut questions = Vec::new();
 
-    if !is_homework && !is_pure_game {
+    if !is_homework && !is_pure_game && num_mcq > 0 {
         for (idx, (q_text, choices_text, correct_idx, expl)) in mcq_templates.into_iter().enumerate() {
             let choices = choices_text
                 .into_iter()
@@ -2241,7 +2254,7 @@ pub fn fallback_generate_assignment(
         }
     }
 
-    if is_game_mixed {
+    if is_pure_game || is_game_mixed {
         questions.push(build_fallback_matching_question(topic, subject_name, now_ts));
         questions.push(build_fallback_ordering_question(topic, subject_name, now_ts));
         questions.push(build_fallback_fill_blank_question(topic, subject_name, now_ts));
@@ -2249,7 +2262,7 @@ pub fn fallback_generate_assignment(
 
     let essay_count = if is_homework {
         num_essay.max(1)
-    } else if is_pure_game {
+    } else if is_pure_game || is_game_mixed {
         0
     } else {
         num_essay

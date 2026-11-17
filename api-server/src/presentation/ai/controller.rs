@@ -178,10 +178,11 @@ async fn generate_content(
             let format = payload.assignment_format.as_deref().unwrap_or("STRUCTURED_QUESTIONS");
             let fmt_upper = format.to_uppercase();
             let is_pure_game = fmt_upper == "INTERACTIVE_GAMES";
+            let is_any_game = is_pure_game || fmt_upper.contains("GAME");
             let is_homework = fmt_upper == "HOMEWORK_PR"
-                || (!is_pure_game && (fmt_upper.contains("HOMEWORK") || fmt_upper.contains("PR")));
+                || (!is_any_game && (fmt_upper.contains("HOMEWORK") || fmt_upper.contains("PR")));
 
-            let num_mcq = if is_homework || is_pure_game {
+            let mut num_mcq = if is_homework || is_pure_game {
                 0
             } else {
                 payload.num_mcq
@@ -190,7 +191,7 @@ async fn generate_content(
                     .clamp(0, 25)
             };
 
-            let num_essay = if is_pure_game {
+            let num_essay = if is_any_game {
                 0
             } else if is_homework {
                 payload.num_essay
@@ -203,6 +204,10 @@ async fn generate_content(
                     .unwrap_or(2)
                     .clamp(0, 15)
             };
+
+            if !is_homework && !is_any_game && num_mcq == 0 && num_essay == 0 {
+                num_mcq = 4;
+            }
 
             let include_images = payload.include_images.unwrap_or(false);
 
