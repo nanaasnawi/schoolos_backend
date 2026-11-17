@@ -228,6 +228,8 @@ pub struct GeneratedInfographicDto {
     pub title: String,
     pub description: String,
     pub blocks: Vec<InfographicBlockDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_warning: Option<String>,
 }
 
 // ── Subject-Pedagogical Prompt Intelligence ──
@@ -476,46 +478,60 @@ async fn generate_infographic_images_batch(
     subject_name: &str,
     grade_level: &str,
     card_prompts: &[String],
-) -> (Option<String>, Vec<Option<String>>) {
-    use crate::infrastructure::gemini_ai::generate_infographic_image_url;
+) -> (Option<String>, Vec<Option<String>>, Option<String>) {
+    use crate::infrastructure::gemini_ai::{
+        generate_card_image_with_route, probe_and_generate_hero_image,
+    };
 
     let hero_prompt = format!(
         "Editorial hero banner illustration summarizing '{topic}' ({subject_name}) for an educational magazine cover"
     );
-    let fut_hero = generate_infographic_image_url(pool, &hero_prompt, subject_name, grade_level, "16:9");
+
+    let (hero_url, route) = match probe_and_generate_hero_image(
+        pool,
+        &hero_prompt,
+        subject_name,
+        grade_level,
+        "16:9",
+    )
+    .await
+    {
+        Ok((url, winning_route)) => (Some(url), winning_route),
+        Err(warn_msg) => {
+            return (None, vec![None; card_prompts.len()], Some(warn_msg));
+        }
+    };
 
     let fut_c0 = async {
         match card_prompts.first() {
-            Some(p) => generate_infographic_image_url(pool, p, subject_name, grade_level, "16:9").await,
+            Some(p) => generate_card_image_with_route(pool, &route, p, subject_name, grade_level, "16:9").await,
             None => None,
         }
     };
     let fut_c1 = async {
         match card_prompts.get(1) {
-            Some(p) => generate_infographic_image_url(pool, p, subject_name, grade_level, "16:9").await,
+            Some(p) => generate_card_image_with_route(pool, &route, p, subject_name, grade_level, "16:9").await,
             None => None,
         }
     };
 
-    // Wave 1: Hero + Cards 1-2 concurrently
-    let (hero_url, c0, c1) = tokio::join!(fut_hero, fut_c0, fut_c1);
+    let (c0, c1) = tokio::join!(fut_c0, fut_c1);
 
-    // Wave 2: Cards 3-4 concurrently (prevents burst rate-limit spikes)
     let fut_c2 = async {
         match card_prompts.get(2) {
-            Some(p) => generate_infographic_image_url(pool, p, subject_name, grade_level, "16:9").await,
+            Some(p) => generate_card_image_with_route(pool, &route, p, subject_name, grade_level, "16:9").await,
             None => None,
         }
     };
     let fut_c3 = async {
         match card_prompts.get(3) {
-            Some(p) => generate_infographic_image_url(pool, p, subject_name, grade_level, "16:9").await,
+            Some(p) => generate_card_image_with_route(pool, &route, p, subject_name, grade_level, "16:9").await,
             None => None,
         }
     };
 
     let (c2, c3) = tokio::join!(fut_c2, fut_c3);
-    (hero_url, vec![c0, c1, c2, c3])
+    (hero_url, vec![c0, c1, c2, c3], None)
 }
 
 pub async fn generate_infographic(
@@ -613,10 +629,10 @@ Output HANYA JSON tanpa teks pembuka/penutup."#
         })
         .collect();
 
-    let (hero_url, card_urls) = if include_images {
+    let (hero_url, card_urls, image_warning) = if include_images {
         generate_infographic_images_batch(pool, topic, subject_name, grade_level, &card_prompts).await
     } else {
-        (None, vec![None; card_prompts.len()])
+        (None, vec![None; card_prompts.len()], None)
     };
 
     if let Some(cover_url) = hero_url {
@@ -652,6 +668,7 @@ Output HANYA JSON tanpa teks pembuka/penutup."#
         title: parsed.title,
         description: parsed.description,
         blocks,
+        image_warning,
     })
 }
 
@@ -693,10 +710,10 @@ pub async fn fallback_generate_infographic(
         .map(|(_, h, s)| format!("{h}: {s} ({topic})"))
         .collect();
 
-    let (hero_url, card_urls) = if include_images {
+    let (hero_url, card_urls, image_warning) = if include_images {
         generate_infographic_images_batch(pool, topic, subject_name, grade_level, &card_prompts).await
     } else {
-        (None, vec![None; 4])
+        (None, vec![None; 4], None)
     };
 
     if let Some(cover_url) = hero_url {
@@ -728,6 +745,7 @@ pub async fn fallback_generate_infographic(
         title: format!("Infografis Modul: {topic}"),
         description: format!("Media pembelajaran visual Kurikulum Merdeka jenjang {grade_level} ({subject_name})."),
         blocks,
+        image_warning,
     }
 }
 
