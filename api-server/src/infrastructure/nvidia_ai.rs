@@ -482,7 +482,7 @@ async fn generate_infographic_images_batch(
     use crate::infrastructure::cloudflare_ai::{generate_card_image, generate_hero_image};
 
     let hero_prompt = format!(
-        "Editorial hero banner illustration summarizing '{topic}' ({subject_name}) for an educational magazine cover"
+        "A rich wordless 3D Pixar-style visual scene depicting the core concept of {topic} in {subject_name} through expressive characters, symbolic objects, and vibrant scenery; pure clean illustration with no text, no typography, no words, no letters, and no banners"
     );
 
     let (hero_url, cf_cfg) = match generate_hero_image(pool, &hero_prompt, subject_name, grade_level).await {
@@ -547,36 +547,37 @@ Format output HARUS berupa JSON murni dengan skema persis:
       "step_number": 1,
       "headline": "Judul Poin Visual 1",
       "summary": "Penjelasan ringkas 2-3 kalimat yang mendalam dan mudah dipahami siswa.",
-      "image_prompt": "Deskripsi adegan ilustrasi visual edukatif yang konkret dalam Bahasa Inggris untuk digambar oleh AI ilustrasi"
+      "image_prompt": "Detailed wordless visual scene in English describing ONLY physical objects, characters, actions, and setting (strictly NO text, NO words, NO letters, NO posters, NO signs, NO captions, pure clean illustration)"
     }},
     {{
       "step_number": 2,
       "headline": "Judul Poin Visual 2",
       "summary": "Penjelasan ringkas 2-3 kalimat yang mendalam dan mudah dipahami siswa.",
-      "image_prompt": "Deskripsi adegan ilustrasi visual edukatif yang konkret"
+      "image_prompt": "Detailed wordless visual scene in English describing ONLY physical objects, characters, actions, and setting (strictly NO text, NO words, NO letters, NO labels, pure clean illustration)"
     }},
     {{
       "step_number": 3,
       "headline": "Judul Poin Visual 3",
       "summary": "Penjelasan ringkas 2-3 kalimat yang mendalam dan mudah dipahami siswa.",
-      "image_prompt": "Deskripsi adegan ilustrasi visual edukatif yang konkret"
+      "image_prompt": "Detailed wordless visual scene in English describing ONLY physical objects, characters, actions, and setting (strictly NO text, NO words, NO letters, NO labels, pure clean illustration)"
     }},
     {{
       "step_number": 4,
       "headline": "Kesimpulan & Tahukah Kamu?",
       "summary": "Fakta menarik dan intisari penting untuk diingat siswa.",
-      "image_prompt": "Deskripsi adegan ilustrasi visual edukatif yang konkret"
+      "image_prompt": "Detailed wordless visual scene in English describing ONLY physical objects, characters, actions, and setting (strictly NO text, NO words, NO letters, NO labels, pure clean illustration)"
     }}
   ]
 }}
 
+ATURAN KHUSUS image_prompt: Deskripsikan HANYA objek visual nyata, karakter, ekspresi, dan suasana alam/ruang secara konkret dalam bahasa Inggris. DILARANG meminta poster, papan tulis bertulisan, spanduk, balon kata, label, atau teks apa pun di dalam gambar agar ilustrasi bersih (no text, no typography, no words, no letters, pure clean illustration).
 Output HANYA JSON tanpa teks pembuka/penutup."#
     );
 
     let messages = vec![
         ChatMessage {
             role: "system",
-            content: "You are an educational designer creating structured infographic cards in strict JSON, strictly respecting the subject matter rules.",
+            content: "You are an educational designer creating structured infographic cards in strict JSON, strictly respecting the subject matter rules. For every image_prompt field, write a concrete wordless English visual scene with no text, no typography, no words, no letters, and no labels.",
         },
         ChatMessage {
             role: "user",

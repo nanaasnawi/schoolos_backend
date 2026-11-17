@@ -111,10 +111,9 @@ fn build_infographic_visual_prompt(
     grade_level: &str,
 ) -> String {
     format!(
-        "Create a vibrant, child-safe educational illustration for an Indonesian school infographic module.\n\
-        Subject: {subject_name} | Student Level: {grade_level}\n\
-        Visual Scene / Concept: {concept_prompt}\n\
-        Art Direction: clean stylized 3D Pixar-inspired textbook illustration, crisp bright lighting, high visual clarity, clear subject focus, NO garbled or random text labels, NO watermarks."
+        "Pure clean wordless 3D Pixar-style educational illustration for {subject_name} ({grade_level}), visual storytelling only.\n\
+        Visual scene: {concept_prompt}\n\
+        Style & constraints: vibrant colors, crisp warm lighting, clean composition, blank unlabeled book covers/walls/signs, strictly no text, no typography, no words, no letters, no numbers, no titles, no labels, no captions, no speech bubbles, no watermarks, pure clean illustration."
     )
 }
 
