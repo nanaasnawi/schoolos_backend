@@ -455,7 +455,9 @@ pub async fn probe_and_generate_hero_image(
         vec![GeminiRouteKind::GoogleGenerateContent]
     };
 
-    let mut last_err = "Gemini gagal menghasilkan gambar".to_string();
+    let mut ai_studio_err: Option<String> = None;
+    let mut vertex_err: Option<String> = None;
+    let mut interactions_err: Option<String> = None;
 
     for kind in &kinds {
         for model in &models {
@@ -483,13 +485,42 @@ pub async fn probe_and_generate_hero_image(
                 }
                 Err(err) => {
                     tracing::warn!("Gemini probe failed ({:?}): {}", route.kind, err);
-                    last_err = err;
+                    match route.kind {
+                        GeminiRouteKind::GoogleGenerateContent => {
+                            if ai_studio_err.is_none() {
+                                ai_studio_err = Some(err);
+                            }
+                        }
+                        GeminiRouteKind::VertexExpressGenerateContent => {
+                            if vertex_err.is_none() {
+                                vertex_err = Some(err);
+                            }
+                        }
+                        GeminiRouteKind::GoogleInteractions => {
+                            if interactions_err.is_none() {
+                                interactions_err = Some(err);
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
-    Err(last_err)
+    let summary_parts: Vec<String> = [
+        ai_studio_err.map(|e| format!("AI Studio: {e}")),
+        vertex_err.map(|e| format!("Vertex: {e}")),
+        interactions_err.map(|e| format!("Interactions: {e}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    Err(if summary_parts.is_empty() {
+        "Gemini gagal menghasilkan gambar".to_string()
+    } else {
+        summary_parts.join(" | ")
+    })
 }
 
 /// Fast direct generation for infographic step cards using the already-proven winning route.
