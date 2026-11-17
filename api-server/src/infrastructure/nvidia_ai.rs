@@ -12,6 +12,12 @@ pub struct ChatMessage<'a> {
     pub content: &'a str,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct OwnedChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
 #[derive(Debug, Serialize)]
 struct ChatCompletionRequest<'a> {
     model: &'a str,
@@ -20,6 +26,8 @@ struct ChatCompletionRequest<'a> {
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,6 +105,7 @@ pub async fn call_nvidia_nim(
             temperature,
             max_tokens,
             reasoning_effort: Some("none"),
+            stream: None,
         };
 
         let resp = match client
@@ -144,6 +153,165 @@ pub async fn call_nvidia_nim(
 
     Err(ApplicationError::Internal(if last_error.is_empty() {
         "NVIDIA NIM returned empty response across all candidate models".to_string()
+    } else {
+        last_error
+    }))
+}
+
+fn extract_stream_delta_from_sse_line(line: &str) -> Option<Result<String, ()>> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with(':') {
+        return None;
+    }
+    let data = trimmed.strip_prefix("data:")?.trim();
+    if data == "[DONE]" {
+        return Some(Err(()));
+    }
+    let val: serde_json::Value = serde_json::from_str(data).ok()?;
+    let choices = val.get("choices")?.as_array()?;
+    let first = choices.first()?;
+    let delta_text = first
+        .get("delta")
+        .and_then(|d| d.get("content"))
+        .and_then(|c| c.as_str())
+        .or_else(|| {
+            first
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_str())
+        })?;
+    if delta_text.is_empty() {
+        None
+    } else {
+        Some(Ok(delta_text.to_string()))
+    }
+}
+
+/// Streams NVIDIA NIM chat completion token deltas in real time over `tx`.
+pub async fn stream_nvidia_nim(
+    messages: Vec<OwnedChatMessage>,
+    temperature: f32,
+    max_tokens: u32,
+    tx: tokio::sync::mpsc::Sender<String>,
+) -> Result<String, ApplicationError> {
+    let (api_key, configured_model, api_url) = get_config()?;
+    let client = get_ai_client();
+
+    let mut candidate_models = vec![configured_model.as_str()];
+    let active_models = [
+        "nvidia/nemotron-3.5-lightning-30b-a3b",
+        "nvidia/nemotron-3.5-super-vl-120b-a12b",
+        "nvidia/nemotron-3-ultra-550b-a55b",
+    ];
+    for m in active_models {
+        if !candidate_models.contains(&m) {
+            candidate_models.push(m);
+        }
+    }
+
+    let msg_refs: Vec<ChatMessage<'_>> = messages
+        .iter()
+        .map(|m| ChatMessage {
+            role: m.role.as_str(),
+            content: m.content.as_str(),
+        })
+        .collect();
+
+    let mut last_error = String::new();
+
+    for candidate in candidate_models {
+        let payload = ChatCompletionRequest {
+            model: candidate,
+            messages: msg_refs.clone(),
+            temperature,
+            max_tokens,
+            reasoning_effort: Some("none"),
+            stream: Some(true),
+        };
+
+        let mut resp = match client
+            .post(&api_url)
+            .timeout(Duration::from_secs(90))
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .json(&payload)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                last_error = format!("Failed to stream from NVIDIA NIM ({candidate}): {e}");
+                continue;
+            }
+        };
+
+        let status = resp.status();
+        if !status.is_success() {
+            let err_body = resp.text().await.unwrap_or_default();
+            last_error = format!("NVIDIA NIM stream ({candidate}) HTTP {status}: {err_body}");
+            continue;
+        }
+
+        let mut buf: Vec<u8> = Vec::with_capacity(4096);
+        let mut streamed_any = false;
+        let mut stream_done = false;
+
+        while let Some(chunk_res) = match resp.chunk().await {
+            Ok(opt) => opt.map(Ok),
+            Err(e) => Some(Err(e)),
+        } {
+            let chunk = match chunk_res {
+                Ok(c) => c,
+                Err(e) => {
+                    last_error = format!("Stream read interrupted ({candidate}): {e}");
+                    break;
+                }
+            };
+
+            buf.extend_from_slice(&chunk);
+
+            while let Some(nl_pos) = buf.iter().position(|&b| b == b'\n') {
+                let raw_line: Vec<u8> = buf.drain(..=nl_pos).collect();
+                let line = String::from_utf8_lossy(&raw_line);
+                if let Some(parsed) = extract_stream_delta_from_sse_line(&line) {
+                    match parsed {
+                        Ok(delta) => {
+                            streamed_any = true;
+                            if tx.send(delta).await.is_err() {
+                                // Client disconnected
+                                return Ok(candidate.to_string());
+                            }
+                        }
+                        Err(()) => {
+                            stream_done = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if stream_done {
+                break;
+            }
+        }
+
+        // Flush any trailing unterminated SSE line
+        if !stream_done && !buf.is_empty() {
+            let line = String::from_utf8_lossy(&buf);
+            if let Some(Ok(delta)) = extract_stream_delta_from_sse_line(&line) {
+                streamed_any = true;
+                let _ = tx.send(delta).await;
+            }
+        }
+
+        if streamed_any {
+            return Ok(candidate.to_string());
+        }
+    }
+
+    Err(ApplicationError::Internal(if last_error.is_empty() {
+        "NVIDIA NIM stream returned empty response across all candidate models".to_string()
     } else {
         last_error
     }))
