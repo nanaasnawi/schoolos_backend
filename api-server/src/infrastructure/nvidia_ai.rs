@@ -479,24 +479,14 @@ async fn generate_infographic_images_batch(
     grade_level: &str,
     card_prompts: &[String],
 ) -> (Option<String>, Vec<Option<String>>, Option<String>) {
-    use crate::infrastructure::gemini_ai::{
-        generate_card_image_with_route, probe_and_generate_hero_image,
-    };
+    use crate::infrastructure::cloudflare_ai::{generate_card_image, generate_hero_image};
 
     let hero_prompt = format!(
         "Editorial hero banner illustration summarizing '{topic}' ({subject_name}) for an educational magazine cover"
     );
 
-    let (hero_url, route) = match probe_and_generate_hero_image(
-        pool,
-        &hero_prompt,
-        subject_name,
-        grade_level,
-        "16:9",
-    )
-    .await
-    {
-        Ok((url, winning_route)) => (Some(url), winning_route),
+    let (hero_url, cf_cfg) = match generate_hero_image(pool, &hero_prompt, subject_name, grade_level).await {
+        Ok((url, cfg)) => (Some(url), cfg),
         Err(warn_msg) => {
             return (None, vec![None; card_prompts.len()], Some(warn_msg));
         }
@@ -504,13 +494,13 @@ async fn generate_infographic_images_batch(
 
     let fut_c0 = async {
         match card_prompts.first() {
-            Some(p) => generate_card_image_with_route(pool, &route, p, subject_name, grade_level, "16:9").await,
+            Some(p) => generate_card_image(pool, &cf_cfg, p, subject_name, grade_level).await,
             None => None,
         }
     };
     let fut_c1 = async {
         match card_prompts.get(1) {
-            Some(p) => generate_card_image_with_route(pool, &route, p, subject_name, grade_level, "16:9").await,
+            Some(p) => generate_card_image(pool, &cf_cfg, p, subject_name, grade_level).await,
             None => None,
         }
     };
@@ -519,13 +509,13 @@ async fn generate_infographic_images_batch(
 
     let fut_c2 = async {
         match card_prompts.get(2) {
-            Some(p) => generate_card_image_with_route(pool, &route, p, subject_name, grade_level, "16:9").await,
+            Some(p) => generate_card_image(pool, &cf_cfg, p, subject_name, grade_level).await,
             None => None,
         }
     };
     let fut_c3 = async {
         match card_prompts.get(3) {
-            Some(p) => generate_card_image_with_route(pool, &route, p, subject_name, grade_level, "16:9").await,
+            Some(p) => generate_card_image(pool, &cf_cfg, p, subject_name, grade_level).await,
             None => None,
         }
     };
@@ -557,7 +547,7 @@ Format output HARUS berupa JSON murni dengan skema persis:
       "step_number": 1,
       "headline": "Judul Poin Visual 1",
       "summary": "Penjelasan ringkas 2-3 kalimat yang mendalam dan mudah dipahami siswa.",
-      "image_prompt": "Deskripsi adegan ilustrasi visual edukatif yang konkret dalam Bahasa Inggris/Indonesia untuk digambar Gemini AI"
+      "image_prompt": "Deskripsi adegan ilustrasi visual edukatif yang konkret dalam Bahasa Inggris untuk digambar oleh AI ilustrasi"
     }},
     {{
       "step_number": 2,
