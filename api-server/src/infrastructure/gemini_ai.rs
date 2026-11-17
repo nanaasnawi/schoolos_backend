@@ -8,6 +8,7 @@ use uuid::Uuid;
 const DEFAULT_GEMINI_API_URL: &str = "https://generativelanguage.googleapis.com/v1beta/interactions";
 const DEFAULT_GEMINI_MODEL: &str = "gemini-3.1-flash-lite-image";
 const STANDARD_GEMINI_MODELS_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+const VERTEX_EXPRESS_MODELS_BASE: &str = "https://aiplatform.googleapis.com/v1/publishers/google/models";
 
 static SHARED_GEMINI_CLIENT: OnceLock<Client> = OnceLock::new();
 
@@ -21,12 +22,13 @@ fn get_gemini_client() -> &'static Client {
     })
 }
 
-fn get_gemini_config() -> Option<(String, String, String)> {
+fn get_gemini_config() -> Result<(String, String, String), String> {
     // Strictly load Gemini API key from Railway/environment variable (never hardcode secrets!)
     let api_key = std::env::var("GEMINI_API_KEY")
         .ok()
         .map(|k| k.trim().to_string())
-        .filter(|k| !k.is_empty())?;
+        .filter(|k| !k.is_empty())
+        .ok_or_else(|| "Variable GEMINI_API_KEY belum terpasang di Railway".to_string())?;
 
     let api_url = std::env::var("GEMINI_API_URL")
         .ok()
@@ -40,7 +42,20 @@ fn get_gemini_config() -> Option<(String, String, String)> {
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| DEFAULT_GEMINI_MODEL.to_string());
 
-    Some((api_key, api_url, model))
+    Ok((api_key, api_url, model))
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum GeminiRouteKind {
+    GoogleGenerateContent,
+    VertexExpressGenerateContent,
+    GoogleInteractions,
+}
+
+#[derive(Clone, Debug)]
+pub struct ResolvedGeminiRoute {
+    pub kind: GeminiRouteKind,
+    pub model: String,
 }
 
 /// Zero-dependency standard + URL-safe Base64 decoder so Cargo.lock stays unchanged.
@@ -81,7 +96,6 @@ fn decode_base64(input: &str) -> Option<Vec<u8>> {
 }
 
 fn extract_image_from_gemini_json(val: &Value) -> Option<(String, Vec<u8>)> {
-    // 1. Gemini Interactions API: `outputs` top-level array
     if let Some(outputs) = val.get("outputs").and_then(|v| v.as_array()) {
         for item in outputs {
             if let Some(found) = extract_image_from_output_obj(item) {
@@ -90,7 +104,6 @@ fn extract_image_from_gemini_json(val: &Value) -> Option<(String, Vec<u8>)> {
         }
     }
 
-    // 2. Gemini Interactions API: `steps[].outputs[]`
     if let Some(steps) = val.get("steps").and_then(|v| v.as_array()) {
         for step in steps {
             if let Some(outputs) = step.get("outputs").and_then(|v| v.as_array()) {
@@ -103,7 +116,6 @@ fn extract_image_from_gemini_json(val: &Value) -> Option<(String, Vec<u8>)> {
         }
     }
 
-    // 3. Standard Gemini generateContent: `candidates[].content.parts[].inlineData` / `inline_data`
     if let Some(candidates) = val.get("candidates").and_then(|v| v.as_array()) {
         for cand in candidates {
             if let Some(parts) = cand
@@ -167,14 +179,46 @@ fn extract_image_from_output_obj(item: &Value) -> Option<(String, Vec<u8>)> {
     None
 }
 
-async fn call_gemini_generate_content(
+fn build_infographic_visual_prompt(
+    concept_prompt: &str,
+    subject_name: &str,
+    grade_level: &str,
+) -> String {
+    format!(
+        "Create a vibrant, child-safe educational illustration for an Indonesian school infographic module.\n\
+        Subject: {subject_name} | Student Level: {grade_level}\n\
+        Visual Scene / Concept: {concept_prompt}\n\
+        Art Direction: clean stylized 3D Pixar-inspired textbook illustration, crisp bright lighting, high visual clarity, clear subject focus, NO garbled or random text labels, NO watermarks."
+    )
+}
+
+fn extract_google_error_message(txt: &str, status_code: u16) -> String {
+    if let Ok(v) = serde_json::from_str::<Value>(txt) {
+        if let Some(msg) = v
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+        {
+            let short = msg.chars().take(140).collect::<String>();
+            return format!("HTTP {status_code}: {short}");
+        }
+    }
+    let fallback = txt.trim().chars().take(120).collect::<String>();
+    if fallback.is_empty() {
+        format!("HTTP {status_code}")
+    } else {
+        format!("HTTP {status_code}: {fallback}")
+    }
+}
+
+async fn call_generate_content_url(
     client: &Client,
     api_key: &str,
     target_url: &str,
     model: &str,
     prompt: &str,
     aspect_ratio: &str,
-) -> Option<(String, Vec<u8>)> {
+) -> Result<(String, Vec<u8>), String> {
     let payload_with_cfg = json!({
         "contents": [{
             "role": "user",
@@ -183,234 +227,142 @@ async fn call_gemini_generate_content(
         "generationConfig": {
             "responseModalities": ["TEXT", "IMAGE"],
             "imageConfig": {
-                "aspectRatio": aspect_ratio,
-                "imageSize": "1K"
+                "aspectRatio": aspect_ratio
             }
         }
     });
 
-    if let Ok(resp) = client
+    let resp = client
         .post(target_url)
         .header("x-goog-api-key", api_key)
         .header("Content-Type", "application/json")
         .json(&payload_with_cfg)
         .send()
         .await
-    {
-        let status = resp.status();
-        let txt = resp.text().await.unwrap_or_default();
-        if status.is_success() {
-            if let Ok(parsed) = serde_json::from_str::<Value>(&txt) {
-                if let Some(img) = extract_image_from_gemini_json(&parsed) {
-                    tracing::info!("Gemini generateContent ({model}) produced infographic image");
-                    return Some(img);
-                }
+        .map_err(|e| format!("Network error ({model}): {e}"))?;
+
+    let status = resp.status();
+    let txt = resp.text().await.unwrap_or_default();
+    if status.is_success() {
+        if let Ok(parsed) = serde_json::from_str::<Value>(&txt) {
+            if let Some(img) = extract_image_from_gemini_json(&parsed) {
+                return Ok(img);
             }
-            tracing::warn!(
-                "Gemini generateContent ({model}) HTTP 200 without image bytes: {}",
-                &txt.chars().take(240).collect::<String>()
-            );
-        } else {
-            tracing::warn!(
-                "Gemini generateContent ({model}) HTTP {}: {}",
-                status.as_u16(),
-                &txt.chars().take(240).collect::<String>()
-            );
-            // Retry with minimal generationConfig in case imageConfig/imageSize is rejected by model variant
-            if status.as_u16() == 400 {
-                let payload_min = json!({
-                    "contents": [{
-                        "role": "user",
-                        "parts": [{ "text": prompt }]
-                    }],
-                    "generationConfig": {
-                        "responseModalities": ["IMAGE"]
-                    }
-                });
-                if let Ok(resp2) = client
-                    .post(target_url)
-                    .header("x-goog-api-key", api_key)
-                    .header("Content-Type", "application/json")
-                    .json(&payload_min)
-                    .send()
-                    .await
-                {
-                    let st2 = resp2.status();
-                    let txt2 = resp2.text().await.unwrap_or_default();
-                    if st2.is_success() {
-                        if let Ok(parsed2) = serde_json::from_str::<Value>(&txt2) {
-                            if let Some(img) = extract_image_from_gemini_json(&parsed2) {
-                                tracing::info!("Gemini generateContent minimal ({model}) produced infographic image");
-                                return Some(img);
-                            }
-                        }
-                    } else {
-                        tracing::warn!(
-                            "Gemini generateContent minimal ({model}) HTTP {}: {}",
-                            st2.as_u16(),
-                            &txt2.chars().take(240).collect::<String>()
-                        );
+        }
+        return Err(format!("{model}: respon 200 tetapi tidak berisi byte gambar"));
+    }
+
+    let first_err = extract_google_error_message(&txt, status.as_u16());
+
+    if status.as_u16() == 400 {
+        let payload_min = json!({
+            "contents": [{
+                "role": "user",
+                "parts": [{ "text": prompt }]
+            }],
+            "generationConfig": {
+                "responseModalities": ["IMAGE"]
+            }
+        });
+        if let Ok(resp2) = client
+            .post(target_url)
+            .header("x-goog-api-key", api_key)
+            .header("Content-Type", "application/json")
+            .json(&payload_min)
+            .send()
+            .await
+        {
+            let st2 = resp2.status();
+            let txt2 = resp2.text().await.unwrap_or_default();
+            if st2.is_success() {
+                if let Ok(parsed2) = serde_json::from_str::<Value>(&txt2) {
+                    if let Some(img) = extract_image_from_gemini_json(&parsed2) {
+                        return Ok(img);
                     }
                 }
             }
         }
     }
 
-    None
+    Err(format!("{model} -> {first_err}"))
 }
 
-async fn call_gemini_interactions(
+async fn call_interactions_url(
     client: &Client,
     api_key: &str,
     interactions_url: &str,
     model: &str,
     prompt: &str,
-) -> Option<(String, Vec<u8>)> {
-    // Interactions API expects lowercase `response_modalities: ["image"]`
+) -> Result<(String, Vec<u8>), String> {
     let payload = json!({
         "model": model,
         "input": prompt,
         "response_modalities": ["image"]
     });
 
-    if let Ok(resp) = client
+    let resp = client
         .post(interactions_url)
         .header("x-goog-api-key", api_key)
         .header("Content-Type", "application/json")
         .json(&payload)
         .send()
         .await
-    {
-        let status = resp.status();
-        let txt = resp.text().await.unwrap_or_default();
-        if status.is_success() {
-            if let Ok(parsed) = serde_json::from_str::<Value>(&txt) {
-                if let Some(img) = extract_image_from_gemini_json(&parsed) {
-                    tracing::info!("Gemini Interactions ({model}) produced infographic image");
-                    return Some(img);
-                }
+        .map_err(|e| format!("Network error ({model}): {e}"))?;
+
+    let status = resp.status();
+    let txt = resp.text().await.unwrap_or_default();
+    if status.is_success() {
+        if let Ok(parsed) = serde_json::from_str::<Value>(&txt) {
+            if let Some(img) = extract_image_from_gemini_json(&parsed) {
+                return Ok(img);
             }
-            tracing::warn!(
-                "Gemini Interactions ({model}) HTTP 200 without image bytes: {}",
-                &txt.chars().take(240).collect::<String>()
-            );
-        } else {
-            tracing::warn!(
-                "Gemini Interactions ({model}) HTTP {}: {}",
-                status.as_u16(),
-                &txt.chars().take(240).collect::<String>()
-            );
         }
+        return Err(format!("{model} (interactions): respon 200 tanpa gambar"));
     }
 
-    None
+    Err(format!(
+        "{model} (interactions) -> {}",
+        extract_google_error_message(&txt, status.as_u16())
+    ))
 }
 
-async fn request_gemini_raw_image(
+async fn execute_single_route(
+    client: &Client,
+    api_key: &str,
+    api_url: &str,
+    route: &ResolvedGeminiRoute,
     prompt: &str,
     aspect_ratio: &str,
-) -> Option<(String, Vec<u8>)> {
-    let (api_key, api_url, configured_model) = get_gemini_config()?;
-    let client = get_gemini_client();
-
-    let mut models = vec![configured_model.clone()];
-    for fallback in [
-        "gemini-3.1-flash-lite-image",
-        "gemini-3.1-flash-image-preview",
-        "gemini-2.5-flash-image",
-    ] {
-        if !models.iter().any(|m| m == fallback) {
-            models.push(fallback.to_string());
+) -> Result<(String, Vec<u8>), String> {
+    let model = route.model.as_str();
+    match route.kind {
+        GeminiRouteKind::GoogleGenerateContent => {
+            let target_url = if !api_url.contains("aiplatform")
+                && !api_url.contains("/interactions")
+                && api_url.contains(":generateContent")
+            {
+                api_url.to_string()
+            } else if !api_url.contains("aiplatform")
+                && !api_url.contains("/interactions")
+                && api_url.contains("/models")
+            {
+                format!("{}/{}:generateContent", api_url.trim_end_matches('/'), model)
+            } else {
+                format!("{}/{}:generateContent", STANDARD_GEMINI_MODELS_BASE, model)
+            };
+            call_generate_content_url(client, api_key, &target_url, model, prompt, aspect_ratio).await
+        }
+        GeminiRouteKind::VertexExpressGenerateContent => {
+            let target_url = format!("{}/{}:generateContent", VERTEX_EXPRESS_MODELS_BASE, model);
+            call_generate_content_url(client, api_key, &target_url, model, prompt, aspect_ratio).await
+        }
+        GeminiRouteKind::GoogleInteractions => {
+            call_interactions_url(client, api_key, api_url, model, prompt).await
         }
     }
-
-    let is_interactions = api_url.to_lowercase().contains("/interactions");
-
-    for model in &models {
-        let generate_content_url = if !is_interactions && api_url.contains(":generateContent") {
-            api_url.clone()
-        } else if !is_interactions && api_url.contains("/models") {
-            format!("{}/{}:generateContent", api_url.trim_end_matches('/'), model)
-        } else {
-            format!("{}/{}:generateContent", STANDARD_GEMINI_MODELS_BASE, model)
-        };
-
-        // Note: Google's `gemini-3.1-flash-lite-image` docs mark `/v1beta/interactions`
-        // as unsupported and route image models through `:generateContent`.
-        if is_interactions && !model.contains("lite") {
-            if let Some(img) = call_gemini_interactions(
-                client,
-                api_key.as_str(),
-                api_url.as_str(),
-                model.as_str(),
-                prompt,
-            )
-            .await
-            {
-                return Some(img);
-            }
-            if let Some(img) = call_gemini_generate_content(
-                client,
-                api_key.as_str(),
-                generate_content_url.as_str(),
-                model.as_str(),
-                prompt,
-                aspect_ratio,
-            )
-            .await
-            {
-                return Some(img);
-            }
-        } else {
-            if let Some(img) = call_gemini_generate_content(
-                client,
-                api_key.as_str(),
-                generate_content_url.as_str(),
-                model.as_str(),
-                prompt,
-                aspect_ratio,
-            )
-            .await
-            {
-                return Some(img);
-            }
-            if is_interactions {
-                if let Some(img) = call_gemini_interactions(
-                    client,
-                    api_key.as_str(),
-                    api_url.as_str(),
-                    model.as_str(),
-                    prompt,
-                )
-                .await
-                {
-                    return Some(img);
-                }
-            }
-        }
-    }
-
-    None
 }
 
-/// Generates an educational illustration via Gemini Image API, stores it in PostgreSQL
-/// `uploaded_files` + local disk cache, and returns `/uploads/<filename>`.
-pub async fn generate_infographic_image_url(
-    pool: &PgPool,
-    concept_prompt: &str,
-    subject_name: &str,
-    grade_level: &str,
-    aspect_ratio: &str,
-) -> Option<String> {
-    let prompt = format!(
-        "Create a vibrant, child-safe educational illustration for an Indonesian school infographic module.\n\
-        Subject: {subject_name} | Student Level: {grade_level}\n\
-        Visual Scene / Concept: {concept_prompt}\n\
-        Art Direction: clean stylized 3D Pixar-inspired textbook illustration, crisp bright lighting, high visual clarity, clear subject focus, NO garbled or random text labels, NO watermarks."
-    );
-
-    let (mime, bytes) = request_gemini_raw_image(&prompt, aspect_ratio).await?;
-
+async fn persist_image(pool: &PgPool, mime: &str, bytes: Vec<u8>) -> String {
     let (clean_mime, ext) = if mime.contains("png") {
         ("image/png", "png")
     } else if mime.contains("webp") {
@@ -443,5 +395,121 @@ pub async fn generate_infographic_image_url(
     let disk_path = std::path::PathBuf::from("uploads").join(&filename);
     let _ = tokio::fs::write(&disk_path, &bytes).await;
 
-    Some(format!("/uploads/{filename}"))
+    format!("/uploads/{filename}")
+}
+
+/// Generates the Hero cover image while probing across Google AI Studio, Vertex AI Express
+/// (for `AQ.` express keys), and Interactions endpoints, returning both the `/uploads/...` URL
+/// and the winning route so subsequent cards run concurrently without redundant retries.
+pub async fn probe_and_generate_hero_image(
+    pool: &PgPool,
+    concept_prompt: &str,
+    subject_name: &str,
+    grade_level: &str,
+    aspect_ratio: &str,
+) -> Result<(String, ResolvedGeminiRoute), String> {
+    let (api_key, api_url, configured_model) = get_gemini_config()?;
+    let client = get_gemini_client();
+    let prompt = build_infographic_visual_prompt(concept_prompt, subject_name, grade_level);
+
+    let mut models = vec![configured_model.clone()];
+    for fallback in [
+        "gemini-3.1-flash-lite-image",
+        "gemini-3.1-flash-image",
+        "gemini-3.1-flash-image-preview",
+        "gemini-2.5-flash-image",
+    ] {
+        if !models.iter().any(|m| m == fallback) {
+            models.push(fallback.to_string());
+        }
+    }
+
+    let is_vertex_url = api_url.to_lowercase().contains("aiplatform.googleapis.com");
+    let is_interactions_url = api_url.to_lowercase().contains("/interactions");
+
+    let kinds: Vec<GeminiRouteKind> = if is_vertex_url {
+        vec![
+            GeminiRouteKind::VertexExpressGenerateContent,
+            GeminiRouteKind::GoogleGenerateContent,
+        ]
+    } else if api_key.starts_with("AQ.") {
+        // An AQ. key may be either Google AI Studio or Vertex AI Express Mode
+        if is_interactions_url {
+            vec![
+                GeminiRouteKind::GoogleGenerateContent,
+                GeminiRouteKind::VertexExpressGenerateContent,
+                GeminiRouteKind::GoogleInteractions,
+            ]
+        } else {
+            vec![
+                GeminiRouteKind::GoogleGenerateContent,
+                GeminiRouteKind::VertexExpressGenerateContent,
+            ]
+        }
+    } else if is_interactions_url {
+        vec![
+            GeminiRouteKind::GoogleGenerateContent,
+            GeminiRouteKind::GoogleInteractions,
+        ]
+    } else {
+        vec![GeminiRouteKind::GoogleGenerateContent]
+    };
+
+    let mut last_err = "Gemini gagal menghasilkan gambar".to_string();
+
+    for kind in &kinds {
+        for model in &models {
+            if matches!(kind, GeminiRouteKind::GoogleInteractions) && model.contains("lite") {
+                continue;
+            }
+            let route = ResolvedGeminiRoute {
+                kind: *kind,
+                model: model.clone(),
+            };
+            match execute_single_route(
+                client,
+                api_key.as_str(),
+                api_url.as_str(),
+                &route,
+                &prompt,
+                aspect_ratio,
+            )
+            .await
+            {
+                Ok((mime, bytes)) => {
+                    tracing::info!("Gemini hero image succeeded via {:?} ({})", route.kind, route.model);
+                    let url = persist_image(pool, &mime, bytes).await;
+                    return Ok((url, route));
+                }
+                Err(err) => {
+                    tracing::warn!("Gemini probe failed ({:?}): {}", route.kind, err);
+                    last_err = err;
+                }
+            }
+        }
+    }
+
+    Err(last_err)
+}
+
+/// Fast direct generation for infographic step cards using the already-proven winning route.
+pub async fn generate_card_image_with_route(
+    pool: &PgPool,
+    route: &ResolvedGeminiRoute,
+    concept_prompt: &str,
+    subject_name: &str,
+    grade_level: &str,
+    aspect_ratio: &str,
+) -> Option<String> {
+    let (api_key, api_url, _) = get_gemini_config().ok()?;
+    let client = get_gemini_client();
+    let prompt = build_infographic_visual_prompt(concept_prompt, subject_name, grade_level);
+
+    match execute_single_route(client, api_key.as_str(), api_url.as_str(), route, &prompt, aspect_ratio).await {
+        Ok((mime, bytes)) => Some(persist_image(pool, &mime, bytes).await),
+        Err(err) => {
+            tracing::warn!("Gemini card image failed ({}): {}", route.model, err);
+            None
+        }
+    }
 }
