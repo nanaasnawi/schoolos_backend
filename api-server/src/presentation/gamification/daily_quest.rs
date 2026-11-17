@@ -382,14 +382,15 @@ async fn load_or_create_pet(pool: &PgPool, tenant_id: Uuid, student_id: Uuid) ->
     .execute(pool)
     .await;
 
-    let student_xp: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(total_xp, 0)::bigint FROM student_xp WHERE student_id = $1 LIMIT 1",
+    let student_xp: i64 = sqlx::query(
+        "SELECT COALESCE(total_xp, 0)::bigint AS txp FROM student_xp WHERE student_id = $1 LIMIT 1",
     )
     .bind(student_id)
     .fetch_optional(pool)
     .await
     .ok()
     .flatten()
+    .map(|r| r.get::<i64, _>("txp"))
     .unwrap_or(0);
 
     let row = sqlx::query(
@@ -748,7 +749,7 @@ async fn try_generate_ai_crossword_words(
         1. \"word\": HARUS 1 kata huruf alfabet A-Z saja tanpa spasi, angka, atau tanda hubung (panjang 3-9 huruf).\n\
         2. \"clue\": petunjuk pertanyaan singkat padat dalam Bahasa Indonesia.\n\
         3. \"topic\": nama topik singkat (misal \"{subj_label}\").\n\
-        Format output JSON array: [{\"word\":\"ATOM\",\"clue\":\"Partikel terkecil penyusun unsur\",\"topic\":\"IPA\"}]",
+        Format output JSON array: [{{\"word\":\"ATOM\",\"clue\":\"Partikel terkecil penyusun unsur\",\"topic\":\"IPA\"}}]",
     );
 
     let messages = vec![
