@@ -16,11 +16,13 @@ pub struct AssignmentQuestionDto {
     pub id: Option<Uuid>,
     pub question_text: String,
     #[serde(default = "default_question_type")]
-    pub question_type: String, // "MULTIPLE_CHOICE" or "ESSAY"
+    pub question_type: String, // "MULTIPLE_CHOICE" | "ESSAY" | "MATCHING" | "ORDERING" | "FILL_BLANK"
     pub points: Option<i32>,
     pub order_index: Option<i32>,
     #[serde(default)]
     pub choices: Vec<AssignmentChoiceDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction_config: Option<serde_json::Value>,
 }
 
 fn default_question_type() -> String {
@@ -46,4 +48,6 @@ pub struct SubmissionAnswerDetailDto {
     pub text_answer: Option<String>,
     pub points_earned: i32,
     pub teacher_feedback: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction_config: Option<serde_json::Value>,
 }

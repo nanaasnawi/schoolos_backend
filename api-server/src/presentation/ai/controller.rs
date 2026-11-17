@@ -176,11 +176,12 @@ async fn generate_content(
         }
         "ASSIGNMENT" => {
             let format = payload.assignment_format.as_deref().unwrap_or("STRUCTURED_QUESTIONS");
-            let is_homework = format.eq_ignore_ascii_case("HOMEWORK_PR")
-                || format.to_uppercase().contains("HOMEWORK")
-                || format.to_uppercase().contains("PR");
+            let fmt_upper = format.to_uppercase();
+            let is_pure_game = fmt_upper == "INTERACTIVE_GAMES";
+            let is_homework = fmt_upper == "HOMEWORK_PR"
+                || (!is_pure_game && (fmt_upper.contains("HOMEWORK") || fmt_upper.contains("PR")));
 
-            let num_mcq = if is_homework {
+            let num_mcq = if is_homework || is_pure_game {
                 0
             } else {
                 payload.num_mcq
@@ -189,7 +190,9 @@ async fn generate_content(
                     .clamp(0, 25)
             };
 
-            let num_essay = if is_homework {
+            let num_essay = if is_pure_game {
+                0
+            } else if is_homework {
                 payload.num_essay
                     .or(payload.num_questions)
                     .unwrap_or(2)

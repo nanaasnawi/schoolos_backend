@@ -14,6 +14,10 @@ pub struct AssignmentFilterQuery {
     pub session_id: Option<Uuid>,
 }
 
+use super::interactive_game::{
+    calculate_total_percentage_score, grade_interactive_answer, is_interactive_game_type,
+    shuffle_interaction_for_student,
+};
 use super::dto::{
     assignment_question_dto::{
         AssignmentChoiceDto, AssignmentQuestionDto, SubmissionAnswerDetailDto,
@@ -49,14 +53,101 @@ pub fn assignment_routes() -> Router<ApplicationContext> {
         .route("/{id}/submissions/{submission_id}/grade", post(grade))
 }
 
+static INTERACTION_CONFIG_READY: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+async fn ensure_interaction_config_column(pool: &sqlx::PgPool) {
+    INTERACTION_CONFIG_READY
+        .get_or_init(|| async {
+            if let Err(e) = sqlx::query(
+                "ALTER TABLE assignment_questions ADD COLUMN IF NOT EXISTS interaction_config JSONB DEFAULT NULL",
+            )
+            .execute(pool)
+            .await
+            {
+                tracing::warn!("ensure_interaction_config_column failed: {e}");
+            }
+        })
+        .await;
+}
+
+async fn persist_assignment_questions(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+    assignment_id: Uuid,
+    questions: Vec<AssignmentQuestionDto>,
+) -> Vec<AssignmentQuestionDto> {
+    ensure_interaction_config_column(pool).await;
+    let mut created_questions = Vec::with_capacity(questions.len());
+    for (q_idx, q) in questions.into_iter().enumerate() {
+        let question_id = q.id.unwrap_or_else(Uuid::new_v4);
+        let order_idx = q.order_index.unwrap_or(q_idx as i32);
+        let points = q.points.unwrap_or(10);
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO assignment_questions (id, tenant_id, assignment_id, question_text, question_type, points, order_index, interaction_config)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            "#,
+        )
+        .bind(question_id)
+        .bind(tenant_id)
+        .bind(assignment_id)
+        .bind(&q.question_text)
+        .bind(&q.question_type)
+        .bind(points)
+        .bind(order_idx)
+        .bind(&q.interaction_config)
+        .execute(pool)
+        .await;
+
+        let mut created_choices = Vec::with_capacity(q.choices.len());
+        for (c_idx, c) in q.choices.into_iter().enumerate() {
+            let choice_id = c.id.unwrap_or_else(Uuid::new_v4);
+            let c_order_idx = c.order_index.unwrap_or(c_idx as i32);
+            let is_correct = c.is_correct.unwrap_or(false);
+            let _ = sqlx::query(
+                r#"
+                INSERT INTO assignment_question_choices (id, question_id, choice_text, is_correct, order_index)
+                VALUES ($1, $2, $3, $4, $5)
+                "#,
+            )
+            .bind(choice_id)
+            .bind(question_id)
+            .bind(&c.choice_text)
+            .bind(is_correct)
+            .bind(c_order_idx)
+            .execute(pool)
+            .await;
+
+            created_choices.push(AssignmentChoiceDto {
+                id: Some(choice_id),
+                choice_text: c.choice_text,
+                is_correct: Some(is_correct),
+                order_index: Some(c_order_idx),
+            });
+        }
+
+        created_questions.push(AssignmentQuestionDto {
+            id: Some(question_id),
+            question_text: q.question_text,
+            question_type: q.question_type,
+            points: Some(points),
+            order_index: Some(order_idx),
+            choices: created_choices,
+            interaction_config: q.interaction_config,
+        });
+    }
+    created_questions
+}
+
 async fn fetch_assignment_questions(
     pool: &sqlx::PgPool,
     assignment_id: Uuid,
     hide_correct_answers: bool,
 ) -> Result<Vec<AssignmentQuestionDto>, sqlx::Error> {
+    ensure_interaction_config_column(pool).await;
     let q_rows = sqlx::query(
         r#"
-        SELECT id, question_text, question_type, points, order_index
+        SELECT id, question_text, question_type, points, order_index, interaction_config
         FROM assignment_questions
         WHERE assignment_id = $1
         ORDER BY order_index ASC, created_at ASC
@@ -86,6 +177,14 @@ async fn fetch_assignment_questions(
     let mut questions = Vec::new();
     for q in q_rows {
         let q_id: Uuid = q.get("id");
+        let q_type: String = q.get("question_type");
+        let raw_cfg: Option<serde_json::Value> = q.try_get("interaction_config").ok().flatten();
+        let effective_cfg = if hide_correct_answers && is_interactive_game_type(&q_type) {
+            raw_cfg.map(|cfg| shuffle_interaction_for_student(&q_type, &cfg))
+        } else {
+            raw_cfg
+        };
+
         let choices = c_rows
             .iter()
             .filter(|c| c.get::<Uuid, _>("question_id") == q_id)
@@ -104,10 +203,11 @@ async fn fetch_assignment_questions(
         questions.push(AssignmentQuestionDto {
             id: Some(q_id),
             question_text: q.get("question_text"),
-            question_type: q.get("question_type"),
+            question_type: q_type,
             points: Some(q.get("points")),
             order_index: Some(q.get("order_index")),
             choices,
+            interaction_config: effective_cfg,
         });
     }
 
@@ -371,64 +471,7 @@ async fn create(
     );
 
     let questions_to_return = if let Some(questions) = payload.questions {
-        let mut created_questions = Vec::new();
-        for (q_idx, q) in questions.into_iter().enumerate() {
-            let question_id = q.id.unwrap_or_else(Uuid::new_v4);
-            let order_idx = q.order_index.unwrap_or(q_idx as i32);
-            let points = q.points.unwrap_or(10);
-            let _ = sqlx::query(
-                r#"
-                INSERT INTO assignment_questions (id, tenant_id, assignment_id, question_text, question_type, points, order_index)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                "#,
-            )
-            .bind(question_id)
-            .bind(req_ctx.tenant_id)
-            .bind(assignment.id)
-            .bind(&q.question_text)
-            .bind(&q.question_type)
-            .bind(points)
-            .bind(order_idx)
-            .execute(&ctx.pool)
-            .await;
-
-            let mut created_choices = Vec::new();
-            for (c_idx, c) in q.choices.into_iter().enumerate() {
-                let choice_id = c.id.unwrap_or_else(Uuid::new_v4);
-                let c_order_idx = c.order_index.unwrap_or(c_idx as i32);
-                let is_correct = c.is_correct.unwrap_or(false);
-                let _ = sqlx::query(
-                    r#"
-                    INSERT INTO assignment_question_choices (id, question_id, choice_text, is_correct, order_index)
-                    VALUES ($1, $2, $3, $4, $5)
-                    "#,
-                )
-                .bind(choice_id)
-                .bind(question_id)
-                .bind(&c.choice_text)
-                .bind(is_correct)
-                .bind(c_order_idx)
-                .execute(&ctx.pool)
-                .await;
-
-                created_choices.push(AssignmentChoiceDto {
-                    id: Some(choice_id),
-                    choice_text: c.choice_text,
-                    is_correct: Some(is_correct),
-                    order_index: Some(c_order_idx),
-                });
-            }
-
-            created_questions.push(AssignmentQuestionDto {
-                id: Some(question_id),
-                question_text: q.question_text,
-                question_type: q.question_type,
-                points: Some(points),
-                order_index: Some(order_idx),
-                choices: created_choices,
-            });
-        }
-        created_questions
+        persist_assignment_questions(&ctx.pool, req_ctx.tenant_id, assignment.id, questions).await
     } else {
         Vec::new()
     };
@@ -440,6 +483,9 @@ async fn create(
     resp.class_name = class_name;
     resp.subject_name = subject_name;
     resp.teacher_name = teacher_name;
+    resp.has_game_questions = questions_to_return
+        .iter()
+        .any(|q| is_interactive_game_type(&q.question_type));
     resp.questions = questions_to_return;
 
     // Kirim push TUGAS baru ke siswa rombel target (atau semua siswa bila tanpa kelas)
@@ -562,7 +608,7 @@ async fn list(
             .map(|a| a.roles.iter().any(|r| r.name == "Siswa"))
             .unwrap_or(false);
 
-    let items: Vec<AssignmentResponse> = if is_teacher {
+    let mut items: Vec<AssignmentResponse> = if is_teacher {
         let rows = sqlx::query(
             r#"
             SELECT 
@@ -660,6 +706,7 @@ async fn list(
                 total_students: r.try_get::<Option<i64>, _>("total_students").ok().flatten(),
                 submitted_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
                 submission_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
+                has_game_questions: false,
                 questions: Vec::new(),
             })
             .collect()
@@ -791,6 +838,7 @@ async fn list(
                 total_students: r.try_get::<Option<i64>, _>("total_students").ok().flatten(),
                 submitted_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
                 submission_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
+                has_game_questions: false,
                 questions: Vec::new(),
             })
             .collect()
@@ -888,10 +936,31 @@ async fn list(
                 total_students: r.try_get::<Option<i64>, _>("total_students").ok().flatten(),
                 submitted_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
                 submission_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
+                has_game_questions: false,
                 questions: Vec::new(),
             })
             .collect()
     };
+
+    if !items.is_empty() {
+        let asg_ids: Vec<Uuid> = items.iter().map(|i| i.id).collect();
+        if let Ok(game_ids) = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT DISTINCT assignment_id
+            FROM assignment_questions
+            WHERE assignment_id = ANY($1)
+              AND UPPER(question_type) IN ('MATCHING', 'ORDERING', 'FILL_BLANK')
+            "#,
+        )
+        .bind(&asg_ids)
+        .fetch_all(&ctx.pool)
+        .await
+        {
+            for item in &mut items {
+                item.has_game_questions = game_ids.contains(&item.id);
+            }
+        }
+    }
 
     Ok(Json(ApiResponse::success(items, req_ctx.request_id)))
 }
@@ -1073,6 +1142,7 @@ async fn get_by_id(
                 total_students: r.try_get::<Option<i64>, _>("total_students").ok().flatten(),
                 submitted_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
                 submission_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
+                has_game_questions: questions.iter().any(|q| is_interactive_game_type(&q.question_type)),
                 questions,
             };
             Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
@@ -1227,51 +1297,16 @@ async fn update(
             .execute(&ctx.pool)
             .await;
 
-        for (q_idx, q) in questions.into_iter().enumerate() {
-            let question_id = q.id.unwrap_or_else(Uuid::new_v4);
-            let order_idx = q.order_index.unwrap_or(q_idx as i32);
-            let points = q.points.unwrap_or(10);
-            let _ = sqlx::query(
-                r#"
-                INSERT INTO assignment_questions (id, tenant_id, assignment_id, question_text, question_type, points, order_index)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                "#,
-            )
-            .bind(question_id)
-            .bind(req_ctx.tenant_id)
-            .bind(id)
-            .bind(&q.question_text)
-            .bind(&q.question_type)
-            .bind(points)
-            .bind(order_idx)
-            .execute(&ctx.pool)
-            .await;
-
-            for (c_idx, c) in q.choices.into_iter().enumerate() {
-                let choice_id = c.id.unwrap_or_else(Uuid::new_v4);
-                let c_order_idx = c.order_index.unwrap_or(c_idx as i32);
-                let is_correct = c.is_correct.unwrap_or(false);
-                let _ = sqlx::query(
-                    r#"
-                    INSERT INTO assignment_question_choices (id, question_id, choice_text, is_correct, order_index)
-                    VALUES ($1, $2, $3, $4, $5)
-                    "#,
-                )
-                .bind(choice_id)
-                .bind(question_id)
-                .bind(&c.choice_text)
-                .bind(is_correct)
-                .bind(c_order_idx)
-                .execute(&ctx.pool)
-                .await;
-            }
-        }
+        let _ = persist_assignment_questions(&ctx.pool, req_ctx.tenant_id, id, questions).await;
     }
 
     let questions = fetch_assignment_questions(&ctx.pool, id, false)
         .await
         .unwrap_or_default();
     let mut resp = AssignmentResponse::from(assignment);
+    resp.has_game_questions = questions
+        .iter()
+        .any(|q| is_interactive_game_type(&q.question_type));
     resp.questions = questions;
 
     Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
@@ -1529,34 +1564,148 @@ async fn submit(
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
+    ensure_interaction_config_column(&ctx.pool).await;
+    let q_meta_rows = sqlx::query(
+        "SELECT id, COALESCE(question_type, 'MULTIPLE_CHOICE') as question_type, COALESCE(points, 10) as points, interaction_config FROM assignment_questions WHERE assignment_id = $1",
+    )
+    .bind(id)
+    .fetch_all(&ctx.pool)
+    .await
+    .unwrap_or_default();
+
+    let mut has_game_question = false;
+    let mut has_essay = false;
+    let mut total_max_points: i32 = 0;
+    let mut q_meta_map: std::collections::HashMap<Uuid, (String, i32, Option<serde_json::Value>)> =
+        std::collections::HashMap::new();
+    let mut mc_q_ids: Vec<Uuid> = Vec::new();
+
+    for r in &q_meta_rows {
+        let qid: Uuid = r.get("id");
+        let qtype: String = r.get("question_type");
+        let pts: i32 = r.get::<i32, _>("points").max(1);
+        let cfg: Option<serde_json::Value> = r.try_get("interaction_config").ok().flatten();
+        total_max_points += pts;
+        if is_interactive_game_type(&qtype) {
+            has_game_question = true;
+        } else if qtype.eq_ignore_ascii_case("MULTIPLE_CHOICE") || qtype.eq_ignore_ascii_case("PG") {
+            mc_q_ids.push(qid);
+        } else {
+            has_essay = true;
+        }
+        q_meta_map.insert(qid, (qtype, pts, cfg));
+    }
+
+    let auto_grade_all = !q_meta_rows.is_empty()
+        && has_game_question
+        && !has_essay
+        && payload.file_url.as_deref().unwrap_or("").trim().is_empty();
+
+    let mut correct_choice_ids: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    if auto_grade_all && !mc_q_ids.is_empty() {
+        if let Ok(rows) = sqlx::query(
+            "SELECT id FROM assignment_question_choices WHERE question_id = ANY($1) AND is_correct = true",
+        )
+        .bind(&mc_q_ids)
+        .fetch_all(&ctx.pool)
+        .await
+        {
+            for cr in rows {
+                correct_choice_ids.insert(cr.get("id"));
+            }
+        }
+    }
+
+    let mut earned_points_sum: i32 = 0;
     if let Some(answers) = payload.answers {
         for ans in answers {
+            let mut earned = 0i32;
+            let mut is_auto_graded = false;
+            if let Some((qtype, max_pts, cfg)) = q_meta_map.get(&ans.question_id) {
+                if is_interactive_game_type(qtype) {
+                    if let Some(ref cfg_val) = cfg {
+                        let grade_res = grade_interactive_answer(
+                            qtype,
+                            cfg_val,
+                            ans.text_answer.as_deref(),
+                            *max_pts,
+                        );
+                        earned = grade_res.points_earned;
+                        is_auto_graded = true;
+                    }
+                } else if auto_grade_all
+                    && (qtype.eq_ignore_ascii_case("MULTIPLE_CHOICE")
+                        || qtype.eq_ignore_ascii_case("PG"))
+                {
+                    if let Some(chosen_id) = ans.chosen_choice_id {
+                        if correct_choice_ids.contains(&chosen_id) {
+                            earned = *max_pts;
+                        }
+                    }
+                    is_auto_graded = true;
+                }
+            }
+            earned_points_sum += earned;
 
-            // Simpan jawaban siswa secara aman ke database.
-            // Poin dan nilai TIDAK dihitung otomatis di sini agar koreksi diserahkan ke Guru.
             let _ = sqlx::query(
                 r#"
                 INSERT INTO assignment_submission_answers (
-                    submission_id, question_id, chosen_choice_id, text_answer, points_earned
+                    submission_id, question_id, chosen_choice_id, text_answer, points_earned, graded_at
                 )
-                VALUES ($1, $2, $3, $4, 0)
+                VALUES ($1, $2, $3, $4, $5, CASE WHEN $6 THEN NOW() ELSE NULL END)
                 ON CONFLICT (submission_id, question_id) DO UPDATE SET
                     chosen_choice_id = EXCLUDED.chosen_choice_id,
-                    text_answer = EXCLUDED.text_answer
+                    text_answer = EXCLUDED.text_answer,
+                    points_earned = EXCLUDED.points_earned,
+                    graded_at = CASE WHEN $6 THEN NOW() ELSE assignment_submission_answers.graded_at END
                 "#,
             )
             .bind(submission.id)
             .bind(ans.question_id)
             .bind(ans.chosen_choice_id)
             .bind(&ans.text_answer)
+            .bind(earned)
+            .bind(is_auto_graded)
             .execute(&ctx.pool)
             .await;
         }
     }
 
-    // Status pengerjaan tugas tetap 'submitted' (Menunggu Koreksi Guru).
-    // Nilai score tetap None sampai Guru melakukan koreksi dan penilaian resmi.
-    let final_submission = submission;
+    let mut final_submission = submission;
+    if auto_grade_all && total_max_points > 0 {
+        let auto_score = calculate_total_percentage_score(earned_points_sum, total_max_points);
+        let auto_feedback = "Penilaian otomatis Misi Game Interaktif";
+        let _ = sqlx::query(
+            r#"
+            UPDATE assignment_submissions
+            SET score = $1, status = 'graded', graded_at = NOW(), feedback = $2
+            WHERE id = $3
+            "#,
+        )
+        .bind(auto_score)
+        .bind(auto_feedback)
+        .bind(final_submission.id)
+        .execute(&ctx.pool)
+        .await;
+
+        final_submission.score = Some(auto_score);
+        final_submission.status = "graded".to_string();
+        final_submission.feedback = Some(auto_feedback.to_string());
+
+        let asg_title: String = assignment.get("title");
+        let xp_val = if earned_points_sum > 0 { earned_points_sum } else { auto_score };
+        let xp_desc = format!("Misi Game Tugas: {} ({} Poin)", asg_title, xp_val);
+        let _ = crate::presentation::gamification::controller::sync_scored_xp_for_student(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            final_submission.student_id,
+            "ASSIGNMENT_SCORE",
+            final_submission.id,
+            xp_val,
+            &xp_desc,
+        )
+        .await;
+    }
 
     let mut resp = SubmissionResponse::from(final_submission);
 
@@ -1572,7 +1721,8 @@ async fn submit(
             c.is_correct as is_correct,
             ans.text_answer,
             ans.points_earned,
-            ans.teacher_feedback
+            ans.teacher_feedback,
+            q.interaction_config
         FROM assignment_submission_answers ans
         LEFT JOIN assignment_questions q ON q.id = ans.question_id
         LEFT JOIN assignment_question_choices c ON c.id = ans.chosen_choice_id
@@ -1598,6 +1748,7 @@ async fn submit(
             text_answer: a.get("text_answer"),
             points_earned: a.get::<Option<i32>, _>("points_earned").unwrap_or(0),
             teacher_feedback: a.get("teacher_feedback"),
+            interaction_config: a.try_get("interaction_config").ok().flatten(),
         })
         .collect();
 
@@ -1854,7 +2005,8 @@ async fn get_submissions(
             c.is_correct as is_correct,
             ans.text_answer,
             ans.points_earned,
-            ans.teacher_feedback
+            ans.teacher_feedback,
+            q.interaction_config
         FROM assignment_submission_answers ans
         JOIN assignment_submissions sub ON sub.id = ans.submission_id
         LEFT JOIN assignment_questions q ON q.id = ans.question_id
@@ -1906,6 +2058,7 @@ async fn get_submissions(
                         text_answer: a.get("text_answer"),
                         points_earned: effective_points,
                         teacher_feedback: a.get("teacher_feedback"),
+                        interaction_config: a.try_get("interaction_config").ok().flatten(),
                     }
                 })
                 .collect();
@@ -2028,6 +2181,8 @@ async fn grade(
                 .bind(qid)
                 .execute(&ctx.pool)
                 .await;
+            } else if is_interactive_game_type(&qtype) {
+                pg_total += cur_pts;
             } else {
                 essay_items.push((qid, max_pts.max(1), cur_pts));
             }
@@ -2109,7 +2264,8 @@ async fn grade(
             c.is_correct as is_correct,
             ans.text_answer,
             ans.points_earned,
-            ans.teacher_feedback
+            ans.teacher_feedback,
+            q.interaction_config
         FROM assignment_submission_answers ans
         LEFT JOIN assignment_questions q ON q.id = ans.question_id
         LEFT JOIN assignment_question_choices c ON c.id = ans.chosen_choice_id
@@ -2135,6 +2291,7 @@ async fn grade(
             text_answer: a.get("text_answer"),
             points_earned: a.get::<Option<i32>, _>("points_earned").unwrap_or(0),
             teacher_feedback: a.get("teacher_feedback"),
+            interaction_config: a.try_get("interaction_config").ok().flatten(),
         })
         .collect();
 
