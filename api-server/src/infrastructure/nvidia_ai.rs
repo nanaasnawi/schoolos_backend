@@ -458,6 +458,7 @@ struct RawInfographicCard {
     step_number: u32,
     headline: String,
     summary: String,
+    image_prompt: Option<String>,
     image_search_keyword: Option<String>,
     image_suggestion: Option<String>,
 }
@@ -469,10 +470,60 @@ struct RawInfographicResponse {
     cards: Vec<RawInfographicCard>,
 }
 
+async fn generate_infographic_images_batch(
+    pool: &sqlx::PgPool,
+    topic: &str,
+    subject_name: &str,
+    grade_level: &str,
+    card_prompts: &[String],
+) -> (Option<String>, Vec<Option<String>>) {
+    use crate::infrastructure::gemini_ai::generate_infographic_image_url;
+
+    let hero_prompt = format!(
+        "Editorial hero banner illustration summarizing '{topic}' ({subject_name}) for an educational magazine cover"
+    );
+    let fut_hero = generate_infographic_image_url(pool, &hero_prompt, subject_name, grade_level, "16:9");
+
+    let fut_c0 = async {
+        match card_prompts.first() {
+            Some(p) => generate_infographic_image_url(pool, p, subject_name, grade_level, "16:9").await,
+            None => None,
+        }
+    };
+    let fut_c1 = async {
+        match card_prompts.get(1) {
+            Some(p) => generate_infographic_image_url(pool, p, subject_name, grade_level, "16:9").await,
+            None => None,
+        }
+    };
+
+    // Wave 1: Hero + Cards 1-2 concurrently
+    let (hero_url, c0, c1) = tokio::join!(fut_hero, fut_c0, fut_c1);
+
+    // Wave 2: Cards 3-4 concurrently (prevents burst rate-limit spikes)
+    let fut_c2 = async {
+        match card_prompts.get(2) {
+            Some(p) => generate_infographic_image_url(pool, p, subject_name, grade_level, "16:9").await,
+            None => None,
+        }
+    };
+    let fut_c3 = async {
+        match card_prompts.get(3) {
+            Some(p) => generate_infographic_image_url(pool, p, subject_name, grade_level, "16:9").await,
+            None => None,
+        }
+    };
+
+    let (c2, c3) = tokio::join!(fut_c2, fut_c3);
+    (hero_url, vec![c0, c1, c2, c3])
+}
+
 pub async fn generate_infographic(
+    pool: &sqlx::PgPool,
     topic: &str,
     grade_level: &str,
     subject_name: &str,
+    include_images: bool,
 ) -> Result<GeneratedInfographicDto, ApplicationError> {
     let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
     let prompt = format!(
@@ -490,25 +541,25 @@ Format output HARUS berupa JSON murni dengan skema persis:
       "step_number": 1,
       "headline": "Judul Poin Visual 1",
       "summary": "Penjelasan ringkas 2-3 kalimat yang mendalam dan mudah dipahami siswa.",
-      "image_search_keyword": "1-3 kata kunci pencarian gambar ensiklopedia nyata (contoh: 'Tata Surya' / 'Photosynthesis Diagram' / 'Water Cycle')"
+      "image_prompt": "Deskripsi adegan ilustrasi visual edukatif yang konkret dalam Bahasa Inggris/Indonesia untuk digambar Gemini AI"
     }},
     {{
       "step_number": 2,
       "headline": "Judul Poin Visual 2",
       "summary": "Penjelasan ringkas 2-3 kalimat yang mendalam dan mudah dipahami siswa.",
-      "image_search_keyword": "1-3 kata kunci pencarian gambar ensiklopedia nyata"
+      "image_prompt": "Deskripsi adegan ilustrasi visual edukatif yang konkret"
     }},
     {{
       "step_number": 3,
       "headline": "Judul Poin Visual 3",
       "summary": "Penjelasan ringkas 2-3 kalimat yang mendalam dan mudah dipahami siswa.",
-      "image_search_keyword": "1-3 kata kunci pencarian gambar ensiklopedia nyata"
+      "image_prompt": "Deskripsi adegan ilustrasi visual edukatif yang konkret"
     }},
     {{
       "step_number": 4,
       "headline": "Kesimpulan & Tahukah Kamu?",
       "summary": "Fakta menarik dan intisari penting untuk diingat siswa.",
-      "image_search_keyword": "1-3 kata kunci pencarian gambar ensiklopedia nyata"
+      "image_prompt": "Deskripsi adegan ilustrasi visual edukatif yang konkret"
     }}
   ]
 }}
@@ -531,7 +582,7 @@ Output HANYA JSON tanpa teks pembuka/penutup."#
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("call_nvidia_nim failed for infographic: {e}. Utilizing pedagogical fallback.");
-            return Ok(fallback_generate_infographic(topic, grade_level, subject_name).await);
+            return Ok(fallback_generate_infographic(pool, topic, grade_level, subject_name, include_images).await);
         }
     };
     let cleaned = extract_clean_json(&raw);
@@ -540,35 +591,52 @@ Output HANYA JSON tanpa teks pembuka/penutup."#
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("Failed to parse AI Infographic JSON ({e}). Utilizing pedagogical fallback.");
-            return Ok(fallback_generate_infographic(topic, grade_level, subject_name).await);
+            return Ok(fallback_generate_infographic(pool, topic, grade_level, subject_name, include_images).await);
         }
     };
 
     let now_ts = chrono::Utc::now().timestamp_millis();
     let mut blocks = Vec::new();
 
-    // 1. Hero Cover Image for the Magazine / Infographic Header (Searched from Google/Wikipedia)
-    let cover_url = search_real_educational_image(topic, subject_name).await;
-    blocks.push(InfographicBlockDto {
-        id: format!("ai-block-hero-cover-{}", now_ts),
-        block_type: "IMAGE".to_string(),
-        content: cover_url,
-    });
+    let card_prompts: Vec<String> = parsed
+        .cards
+        .iter()
+        .take(4)
+        .map(|c| {
+            c.image_prompt
+                .as_deref()
+                .or(c.image_search_keyword.as_deref())
+                .or(c.image_suggestion.as_deref())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| format!("{}: {} ({})", c.headline, s, topic))
+                .unwrap_or_else(|| format!("{}: {} ({})", c.headline, c.summary, topic))
+        })
+        .collect();
+
+    let (hero_url, card_urls) = if include_images {
+        generate_infographic_images_batch(pool, topic, subject_name, grade_level, &card_prompts).await
+    } else {
+        (None, vec![None; card_prompts.len()])
+    };
+
+    if let Some(cover_url) = hero_url {
+        blocks.push(InfographicBlockDto {
+            id: format!("ai-block-hero-cover-{}", now_ts),
+            block_type: "IMAGE".to_string(),
+            content: cover_url,
+        });
+    }
 
     for (idx, card) in parsed.cards.into_iter().enumerate() {
-        let card_query = card
-            .image_search_keyword
-            .as_deref()
-            .or(card.image_suggestion.as_deref())
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or(topic);
-
-        let image_url = search_real_educational_image(card_query, subject_name).await;
-        blocks.push(InfographicBlockDto {
-            id: format!("ai-block-img-{}-{}", idx + 1, now_ts),
-            block_type: "IMAGE".to_string(),
-            content: image_url,
-        });
+        if let Some(Some(image_url)) = card_urls.get(idx) {
+            if !image_url.trim().is_empty() {
+                blocks.push(InfographicBlockDto {
+                    id: format!("ai-block-img-{}-{}", idx + 1, now_ts),
+                    block_type: "IMAGE".to_string(),
+                    content: image_url.clone(),
+                });
+            }
+        }
 
         blocks.push(InfographicBlockDto {
             id: format!("ai-block-text-{}-{}", idx + 1, now_ts),
@@ -588,19 +656,14 @@ Output HANYA JSON tanpa teks pembuka/penutup."#
 }
 
 pub async fn fallback_generate_infographic(
+    pool: &sqlx::PgPool,
     topic: &str,
     grade_level: &str,
     subject_name: &str,
+    include_images: bool,
 ) -> GeneratedInfographicDto {
     let now_ts = chrono::Utc::now().timestamp_millis();
-    let cover_url = search_real_educational_image(topic, subject_name).await;
     let mut blocks = Vec::new();
-
-    blocks.push(InfographicBlockDto {
-        id: format!("ai-block-hero-cover-{}", now_ts),
-        block_type: "IMAGE".to_string(),
-        content: cover_url,
-    });
 
     let cards = [
         (
@@ -625,7 +688,35 @@ pub async fn fallback_generate_infographic(
         ),
     ];
 
-    for (step_no, headline, summary) in cards {
+    let card_prompts: Vec<String> = cards
+        .iter()
+        .map(|(_, h, s)| format!("{h}: {s} ({topic})"))
+        .collect();
+
+    let (hero_url, card_urls) = if include_images {
+        generate_infographic_images_batch(pool, topic, subject_name, grade_level, &card_prompts).await
+    } else {
+        (None, vec![None; 4])
+    };
+
+    if let Some(cover_url) = hero_url {
+        blocks.push(InfographicBlockDto {
+            id: format!("ai-block-hero-cover-{}", now_ts),
+            block_type: "IMAGE".to_string(),
+            content: cover_url,
+        });
+    }
+
+    for (idx, (step_no, headline, summary)) in cards.into_iter().enumerate() {
+        if let Some(Some(img_url)) = card_urls.get(idx) {
+            if !img_url.trim().is_empty() {
+                blocks.push(InfographicBlockDto {
+                    id: format!("ai-block-img-{}-{}", step_no, now_ts),
+                    block_type: "IMAGE".to_string(),
+                    content: img_url.clone(),
+                });
+            }
+        }
         blocks.push(InfographicBlockDto {
             id: format!("ai-block-text-{}-{}", step_no, now_ts),
             block_type: "TEXT".to_string(),
