@@ -1,10 +1,16 @@
 use axum::{
     extract::State,
+    response::sse::{Event, KeepAlive, Sse},
     routing::post,
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sqlx::Row;
+use std::convert::Infallible;
+use tokio::sync::OnceCell;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::{Stream, StreamExt};
 use uuid::Uuid;
 
 use crate::{
@@ -13,7 +19,7 @@ use crate::{
     extractors::RequestContext,
     infrastructure::nvidia_ai::{
         self, GeneratedArticleDto, GeneratedAssignmentDto, GeneratedCbtQuizDto,
-        GeneratedInfographicDto, StudentAnalyticsInsightDto,
+        GeneratedInfographicDto, OwnedChatMessage, StudentAnalyticsInsightDto,
     },
     response::ApiResponse,
 };
@@ -77,11 +83,33 @@ pub struct TanyaAiResponse {
     pub model: String,
 }
 
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct AiFeedbackRequest {
+    pub thread_id: String,
+    pub message_id: String,
+    pub rating: String, // "UP" | "DOWN"
+    pub question_text: Option<String>,
+    pub ai_reply_text: String,
+    pub subject_name: Option<String>,
+    pub grade_level: Option<String>,
+    pub model_name: Option<String>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AiFeedbackResponse {
+    pub id: Uuid,
+    pub rating: String,
+    pub recorded: bool,
+}
+
 pub fn ai_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/generate-content", post(generate_content))
         .route("/analytics/student", post(analyze_student))
         .route("/tanya-ai", post(tanya_ai))
+        .route("/tanya-ai/stream", post(tanya_ai_stream))
+        .route("/feedback", post(submit_ai_feedback))
 }
 
 #[utoipa::path(
@@ -378,6 +406,322 @@ async fn analyze_student(
     Ok(Json(ApiResponse::success(insights, req_ctx.request_id)))
 }
 
+struct PreparedTanyaAiContext {
+    messages: Vec<OwnedChatMessage>,
+    subject: String,
+    question: String,
+    fallback_model: String,
+}
+
+async fn fetch_grounded_curriculum_sources(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+    question: &str,
+    subject: &str,
+    grade: &str,
+) -> Vec<String> {
+    let mut sources: Vec<String> = Vec::new();
+    let keyword_term = question
+        .split_whitespace()
+        .find(|w| w.len() >= 4 && !w.starts_with('['))
+        .unwrap_or(subject);
+    let subject_like = format!("%{}%", subject.trim());
+    let keyword_like = format!("%{}%", keyword_term.trim());
+
+    // 1. Real SIBI / Digital Library Books matching subject or question keyword
+    if let Ok(book_rows) = sqlx::query(
+        r#"
+        SELECT lb.title,
+               COALESCE(lb.publisher, 'SIBI Kemdikdasmen') AS publisher,
+               lb.total_pages,
+               COALESCE(s.name, '') AS subject_name
+        FROM library_books lb
+        LEFT JOIN subjects s ON s.id = lb.subject_id
+        WHERE (lb.title ILIKE $1 OR s.name ILIKE $1 OR lb.title ILIKE $2)
+        ORDER BY CASE WHEN lb.title ILIKE $2 THEN 0 ELSE 1 END, lb.created_at DESC
+        LIMIT 3
+        "#,
+    )
+    .bind(&subject_like)
+    .bind(&keyword_like)
+    .fetch_all(pool)
+    .await
+    {
+        for r in book_rows {
+            let title: String = r.try_get("title").unwrap_or_default();
+            let publisher: String = r.try_get("publisher").unwrap_or_else(|_| "SIBI Kemdikdasmen".to_string());
+            let total_pages: i32 = r.try_get("total_pages").unwrap_or(0);
+            let subj: String = r.try_get("subject_name").unwrap_or_default();
+            if !title.is_empty() {
+                sources.push(format!(
+                    "Buku SIBI \"{title}\" ({publisher}{}{})",
+                    if subj.is_empty() { String::new() } else { format!(", Mapel {subj}") },
+                    if total_pages > 0 { format!(", {total_pages} hal.") } else { String::new() }
+                ));
+            }
+        }
+    }
+
+    // 2. Real Teacher Learning Materials in this tenant
+    if let Ok(mat_rows) = sqlx::query(
+        r#"
+        SELECT lm.title,
+               COALESCE(t.full_name, '') AS teacher_name,
+               lm.start_page,
+               lm.end_page
+        FROM learning_materials lm
+        LEFT JOIN teachers t ON t.id = lm.teacher_id
+        LEFT JOIN subjects s ON s.id = lm.subject_id
+        WHERE lm.tenant_id = $1
+          AND lm.deleted_at IS NULL
+          AND lm.is_active = true
+          AND (lm.title ILIKE $2 OR s.name ILIKE $3 OR lm.description ILIKE $2)
+        ORDER BY lm.updated_at DESC
+        LIMIT 3
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(&keyword_like)
+    .bind(&subject_like)
+    .fetch_all(pool)
+    .await
+    {
+        for r in mat_rows {
+            let title: String = r.try_get("title").unwrap_or_default();
+            let teacher: String = r.try_get("teacher_name").unwrap_or_default();
+            let sp: Option<i32> = r.try_get("start_page").ok().flatten();
+            let ep: Option<i32> = r.try_get("end_page").ok().flatten();
+            let page_info = match (sp, ep) {
+                (Some(a), Some(b)) => format!(", Halaman {a}–{b}"),
+                (Some(a), None) => format!(", Halaman {a}"),
+                _ => String::new(),
+            };
+            let teacher_info = if teacher.is_empty() {
+                String::new()
+            } else {
+                format!(" oleh {teacher}")
+            };
+            if !title.is_empty() {
+                sources.push(format!("Materi Ajar \"{title}\"{teacher_info}{page_info}"));
+            }
+        }
+    }
+
+    // 3. Real Modul Ajar Kurikulum Merdeka authored by teachers
+    if let Ok(modul_rows) = sqlx::query(
+        r#"
+        SELECT ma.title,
+               ma.grade_level,
+               ma.subject_name,
+               COALESCE(u.full_name, '') AS author_name
+        FROM modul_ajar ma
+        LEFT JOIN users u ON u.id = ma.created_by
+        WHERE (ma.tenant_id = $1 OR ma.tenant_id IS NULL)
+          AND ma.deleted_at IS NULL
+          AND (ma.subject_name ILIKE $2 OR ma.title ILIKE $3 OR ma.grade_level ILIKE $4)
+        ORDER BY ma.updated_at DESC
+        LIMIT 2
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(&subject_like)
+    .bind(&keyword_like)
+    .bind(format!("%{}%", grade.trim()))
+    .fetch_all(pool)
+    .await
+    {
+        for r in modul_rows {
+            let title: String = r.try_get("title").unwrap_or_default();
+            let m_grade: String = r.try_get("grade_level").unwrap_or_default();
+            let author: String = r.try_get("author_name").unwrap_or_default();
+            if !title.is_empty() {
+                let by_author = if author.is_empty() { String::new() } else { format!(" ({author})") };
+                sources.push(format!("Modul Ajar \"{title}\" — {m_grade}{by_author}"));
+            }
+        }
+    }
+
+    sources
+}
+
+async fn prepare_tanya_ai_context(
+    pool: &sqlx::PgPool,
+    req_ctx: &RequestContext,
+    payload: &TanyaAiRequest,
+) -> Result<PreparedTanyaAiContext, ApiError> {
+    let question = payload.question.trim().to_string();
+    if question.is_empty() {
+        return Err(ApiError::new(
+            ApplicationError::Domain(DomainError::Validation("Pertanyaan untuk AI tidak boleh kosong".to_string())),
+            &req_ctx.request_id,
+        ));
+    }
+
+    // Directly query database for authoritative active academic year & school info
+    let db_academic_year = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM academic_years WHERE tenant_id = $1 AND is_active = true AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 1"
+    )
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| "2026/2027".to_string());
+
+    let db_semester = sqlx::query_scalar::<_, i32>(
+        "SELECT current_semester FROM academic_years WHERE tenant_id = $1 AND is_active = true AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 1"
+    )
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(1);
+
+    let sem_label = if db_semester == 2 { "Genap" } else { "Ganjil" };
+
+    let db_school_name = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM schools WHERE tenant_id = $1 LIMIT 1"
+    )
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| "PKBM AS-SALAFIYAH".to_string());
+
+    let subject = payload.subject_name.as_deref().unwrap_or("Umum").to_string();
+    let grade = payload.grade_level.as_deref().unwrap_or("Siswa").to_string();
+
+    let is_principal = grade.to_uppercase().contains("KEPALA")
+        || grade.to_uppercase().contains("PRINCIPAL")
+        || subject.to_uppercase().contains("SUPERVISI");
+
+    let is_teacher = grade.to_uppercase().contains("GURU")
+        || grade.to_uppercase().contains("TEACHER")
+        || subject.to_uppercase().contains("WORKSTATION")
+        || subject.to_uppercase().contains("PEDAGOGIK");
+
+    let grounded_sources = if !is_principal {
+        fetch_grounded_curriculum_sources(pool, req_ctx.tenant_id, &question, &subject, &grade).await
+    } else {
+        Vec::new()
+    };
+
+    let sources_block = if grounded_sources.is_empty() {
+        format!(
+            "Belum ada judul spesifik yang cocok langsung di katalog query ini; JANGAN mengarang nomor halaman buku fiktif atau nama penulis palsu! \
+            Untuk sitasi di akhir jawaban, cantumkan acuan resmi: \"📚 **Sumber:** Kurikulum Merdeka ({subject} • {grade}) & Data Akademik {db_school_name} T.A {db_academic_year} (Semester {sem_label})\"."
+        )
+    } else {
+        let joined = grounded_sources
+            .iter()
+            .enumerate()
+            .map(|(i, s)| format!("{}. {}", i + 1, s))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "Daftar Referensi Otoritatif dari Database Sekolah/SIBI:\n{joined}\n\
+            WAJIB: Sertakan bagian penutup di paling akhir jawaban berupa baris:\n\
+            📚 **Sumber:** <sebutkan sumber paling relevan dari daftar di atas atau acuan Kurikulum Merdeka {subject} {grade}; DILARANG mengarang nomor halaman atau nama guru yang tidak ada di daftar>."
+        )
+    };
+
+    let authoritative_db_directive = format!(
+        "[KONTEKS OTORITATIF DATABASE REALTIME & ANTI-HALUSINASI]\n\
+        - Satuan Pendidikan: {db_school_name}\n\
+        - Tahun Ajaran Aktif Resmi di Database: T.A {db_academic_year} (Semester {sem_label})\n\
+        - INSTRUKSI KETAT: Seluruh analisis, rekomendasi, dan jawaban WAJIB merujuk ke Tahun Ajaran resmi aktif di database yaitu T.A {db_academic_year} (Semester {sem_label}). DILARANG MENGGUNAKAN tahun kadaluarsa seperti 2024/2025.\n\
+        - KEJUJURAN AKADEMIK & SITASI SUMBER: Jika ragu pada fakta spesifik, katakan terus terang jangan mengarang. Akhiri setiap jawaban edukatif/analitis dengan bagian singkat:\n  📚 **Sumber:** ...\n\
+        {sources_block}"
+    );
+
+    let system_prompt = if is_principal {
+        format!(
+            "Anda adalah 'AI Analitik Kepala Sekolah' (Executive Academic & Operational Intelligence Advisor) di SchoolOS (Akselerasi Edu). \
+            Peran Anda adalah Asisten Eksekutif Kepala Sekolah / Pimpinan PKBM berstandar Kurikulum Merdeka. \
+            Fokus & Kemampuan Utama: \
+            1. Menganalisis data akademik real-time, ketercapaian target KKTP, dan evaluasi hasil belajar warga belajar. \
+            2. Memantau keaktifan guru/tutor dalam pengunggahan materi/modul pembelajaran, pembuatan tugas mandiri, serta penyelenggaraan kuis dan asesmen CBT. \
+            3. Memberikan evaluasi teknis supervisi manajerial, deteksi dini siswa butuh intervensi (Early Warning System), serta rekomendasi taktis peningkatan mutu dan stabilitas PKBM. \
+            4. Menyelaraskan seluruh analisis dengan regulasi Permendikbudristek dan prinsip Kurikulum Merdeka. \
+            Gunakan Bahasa Indonesia formal-profesional yang lugas, analitis, taktis, berbasis data riil yang disertakan dalam konteks, terstruktur rapi dengan Markdown, dan tutup dengan baris `📚 **Sumber:**` yang menyebutkan data/periode laporan aktual."
+        )
+    } else if is_teacher {
+        format!(
+            "Anda adalah 'AI Pedagogik & Workstation Guru' (Teacher Pedagogical & Instructional Co-Pilot) di SchoolOS (Akselerasi Edu). \
+            Mata Pelajaran fokus: {subject}, Jenjang/Kelas: {grade}. \
+            Anda patuh penuh pada regulasi Kurikulum Merdeka (Kepmendikbudristek & BSKAP No. 032/H/KR/2024 & BSKAP No. 033/H/KR/2024). \
+            Fokus & Kemampuan Utama: \
+            1. Membantu penyusunan Draf Modul Ajar Kurikulum Merdeka yang komprehensif (Tujuan Pembelajaran/TP dari CP & ATP, Pemahaman Bermakna, Pertanyaan Pemantik, Rencana Pembelajaran Berdiferensiasi Konten-Proses-Produk, LKPD, serta Asesmen Formatif & Sumatif). \
+            2. Merancang kisi-kisi dan butir soal HOTS (Higher Order Thinking Skills) untuk kuis dan asesmen CBT (Pilihan Ganda, Pilihan Ganda Kompleks, Menjodohkan, Esai) beserta kunci dan rubrik penilaian. \
+            3. Membantu merumuskan Kriteria Ketercapaian Tujuan Pembelajaran (KKTP) berbasis interval nilai atau rubrik deskriptif untuk tugas siswa. \
+            4. Memberikan saran diferensiasi pembelajaran dan rencana tindak lanjut remidial/pengayaan berdasarkan kondisi siswa nyata di kelas. \
+            Gunakan Bahasa Indonesia edukatif yang profesional, ramah, membimbing tahap demi tahap, solutif, terstruktur rapi dengan Markdown, dan selalu cantumkan `📚 **Sumber:**` di akhir jawaban."
+        )
+    } else {
+        format!(
+            "Anda adalah 'Guru AI' (Asisten Belajar Pintar & Interaktif Kurikulum Merdeka) di SchoolOS (Akselerasi Edu). \
+            Mata Pelajaran fokus: {subject}, Jenjang/Kelas: {grade}. \
+            Tugas Anda: Membantu siswa dan guru menjawab pertanyaan, menjelaskan materi pelajaran dengan jelas, ramah, membimbing tahap demi tahap, memberikan rumus dan contoh relevan jika diperlukan, serta memotivasi belajar. \
+            Gunakan Bahasa Indonesia yang baik, komunikatif, rapi dalam format Markdown, serta WAJIB menyertakan `📚 **Sumber:**` di bagian paling akhir jawaban berdasarkan referensi yang diberikan (Buku SIBI, Modul Ajar/Materi Guru, atau Kurikulum Merdeka)."
+        )
+    };
+
+    let mut messages: Vec<OwnedChatMessage> = Vec::new();
+    messages.push(OwnedChatMessage {
+        role: "system".to_string(),
+        content: system_prompt,
+    });
+    messages.push(OwnedChatMessage {
+        role: "system".to_string(),
+        content: authoritative_db_directive,
+    });
+
+    if let Some(ref ctx_str) = payload.context {
+        if !ctx_str.trim().is_empty() {
+            messages.push(OwnedChatMessage {
+                role: "system".to_string(),
+                content: ctx_str.clone(),
+            });
+        }
+    }
+
+    let history_slice: &[TanyaAiMessageDto] = payload.history.as_deref().unwrap_or(&[]);
+    let history_tail = if history_slice.len() > 6 {
+        &history_slice[history_slice.len() - 6..]
+    } else {
+        history_slice
+    };
+
+    for h in history_tail {
+        let role = match h.role.as_str() {
+            "assistant" | "model" | "bot" => "assistant",
+            _ => "user",
+        };
+        let content = h.content.replace("2024/2025", &db_academic_year);
+        messages.push(OwnedChatMessage {
+            role: role.to_string(),
+            content,
+        });
+    }
+
+    messages.push(OwnedChatMessage {
+        role: "user".to_string(),
+        content: question.clone(),
+    });
+
+    let fallback_model = std::env::var("NVIDIA_MODEL")
+        .unwrap_or_else(|_| "nvidia/nemotron-3.5-lightning-30b-a3b".to_string());
+
+    Ok(PreparedTanyaAiContext {
+        messages,
+        subject,
+        question,
+        fallback_model,
+    })
+}
+
 #[utoipa::path(
     post,
     path = "/api/v1/ai/tanya-ai",
@@ -393,167 +737,210 @@ async fn tanya_ai(
     req_ctx: RequestContext,
     Json(payload): Json<TanyaAiRequest>,
 ) -> Result<Json<ApiResponse<TanyaAiResponse>>, ApiError> {
-    let question = payload.question.trim();
-    if question.is_empty() {
-        return Err(ApiError::new(
-            ApplicationError::Domain(DomainError::Validation("Pertanyaan untuk AI tidak boleh kosong".to_string())),
-            &req_ctx.request_id,
-        ));
-    }
-
-    // Directly query database for authoritative active academic year & school info
-    let db_academic_year = sqlx::query_scalar::<_, String>(
-        "SELECT name FROM academic_years WHERE tenant_id = $1 AND is_active = true AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 1"
-    )
-    .bind(req_ctx.tenant_id)
-    .fetch_optional(&ctx.pool)
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or_else(|| "2026/2027".to_string());
-
-    let db_semester = sqlx::query_scalar::<_, i32>(
-        "SELECT current_semester FROM academic_years WHERE tenant_id = $1 AND is_active = true AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 1"
-    )
-    .bind(req_ctx.tenant_id)
-    .fetch_optional(&ctx.pool)
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or(1);
-
-    let sem_label = if db_semester == 2 { "Genap" } else { "Ganjil" };
-
-    let db_school_name = sqlx::query_scalar::<_, String>(
-        "SELECT name FROM schools WHERE tenant_id = $1 LIMIT 1"
-    )
-    .bind(req_ctx.tenant_id)
-    .fetch_optional(&ctx.pool)
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or_else(|| "PKBM AS-SALAFIYAH".to_string());
-
-    let authoritative_db_directive = format!(
-        "[KONTEKS OTORITATIF DATABASE REALTIME]\n\
-        - Satuan Pendidikan: {db_school_name}\n\
-        - Tahun Ajaran Aktif Resmi di Database: T.A {db_academic_year} (Semester {sem_label})\n\
-        - INSTRUKSI KETAT: Seluruh analisis, rekomendasi, dan Kesimpulan Eksekutif WAJIB merujuk ke Tahun Ajaran resmi aktif di database yaitu T.A {db_academic_year} (Semester {sem_label}). DILARANG MENGGUNAKAN tahun kadaluarsa seperti 2024/2025."
-    );
-
-    let subject = payload.subject_name.as_deref().unwrap_or("Umum");
-    let grade = payload.grade_level.as_deref().unwrap_or("Siswa");
-
-    let is_principal = grade.to_uppercase().contains("KEPALA")
-        || grade.to_uppercase().contains("PRINCIPAL")
-        || subject.to_uppercase().contains("SUPERVISI");
-
-    let is_teacher = grade.to_uppercase().contains("GURU")
-        || grade.to_uppercase().contains("TEACHER")
-        || subject.to_uppercase().contains("WORKSTATION")
-        || subject.to_uppercase().contains("PEDAGOGIK");
-
-    let system_prompt = if is_principal {
-        format!(
-            "Anda adalah 'AI Analitik Kepala Sekolah' (Executive Academic & Operational Intelligence Advisor) di SchoolOS (Akselerasi Edu). \
-            Peran Anda adalah Asisten Eksekutif Kepala Sekolah / Pimpinan PKBM berstandar Kurikulum Merdeka. \
-            Fokus & Kemampuan Utama: \
-            1. Menganalisis data akademik real-time, ketercapaian target KKTP, dan evaluasi hasil belajar warga belajar. \
-            2. Memantau keaktifan guru/tutor dalam pengunggahan materi/modul pembelajaran, pembuatan tugas mandiri, serta penyelenggaraan kuis dan asesmen CBT. \
-            3. Memberikan evaluasi teknis supervisi manajerial, deteksi dini siswa butuh intervensi (Early Warning System), serta rekomendasi taktis peningkatan mutu dan stabilitas PKBM. \
-            4. Menyelaraskan seluruh analisis dengan regulasi Permendikbudristek dan prinsip Kurikulum Merdeka. \
-            Gunakan Bahasa Indonesia formal-profesional yang lugas, analitis, taktis, berbasis data riil yang disertakan dalam konteks, dan terstruktur rapi dengan Markdown."
-        )
-    } else if is_teacher {
-        format!(
-            "Anda adalah 'AI Pedagogik & Workstation Guru' (Teacher Pedagogical & Instructional Co-Pilot) di SchoolOS (Akselerasi Edu). \
-            Mata Pelajaran fokus: {subject}, Jenjang/Kelas: {grade}. \
-            Anda patuh penuh pada regulasi Kurikulum Merdeka (Kepmendikbudristek & BSKAP No. 032/H/KR/2024 & BSKAP No. 033/H/KR/2024). \
-            Fokus & Kemampuan Utama: \
-            1. Membantu penyusunan Draf Modul Ajar Kurikulum Merdeka yang komprehensif (Tujuan Pembelajaran/TP dari CP & ATP, Pemahaman Bermakna, Pertanyaan Pemantik, Rencana Pembelajaran Berdiferensiasi Konten-Proses-Produk, LKPD, serta Asesmen Formatif & Sumatif). \
-            2. Merancang kisi-kisi dan butir soal HOTS (Higher Order Thinking Skills) untuk kuis dan asesmen CBT (Pilihan Ganda, Pilihan Ganda Kompleks, Menjodohkan, Esai) beserta kunci dan rubrik penilaian. \
-            3. Membantu merumuskan Kriteria Ketercapaian Tujuan Pembelajaran (KKTP) berbasis interval nilai atau rubrik deskriptif untuk tugas siswa. \
-            4. Memberikan saran diferensiasi pembelajaran dan rencana tindak lanjut remidial/pengayaan berdasarkan kondisi siswa nyata di kelas. \
-            Gunakan Bahasa Indonesia edukatif yang profesional, ramah, membimbing tahap demi tahap, solutif, dan terstruktur rapi dengan Markdown."
-        )
-    } else {
-        format!(
-            "Anda adalah 'Guru AI' (Asisten Belajar Pintar & Interaktif Kurikulum Merdeka) di SchoolOS (Akselerasi Edu). \
-            Mata Pelajaran fokus: {subject}, Jenjang/Kelas: {grade}. \
-            Tugas Anda: Membantu siswa dan guru menjawab pertanyaan, menjelaskan materi pelajaran dengan jelas, ramah, membimbing tahap demi tahap, memberikan rumus dan contoh relevan jika diperlukan, serta memotivasi belajar. \
-            Gunakan Bahasa Indonesia yang baik, komunikatif, dan rapi dalam format Markdown."
-        )
-    };
-
-    let mut messages: Vec<nvidia_ai::ChatMessage<'_>> = Vec::new();
-    messages.push(nvidia_ai::ChatMessage {
-        role: "system",
-        content: &system_prompt,
-    });
-    messages.push(nvidia_ai::ChatMessage {
-        role: "system",
-        content: &authoritative_db_directive,
-    });
-
-    if let Some(ref ctx_str) = payload.context {
-        if !ctx_str.trim().is_empty() {
-            messages.push(nvidia_ai::ChatMessage {
-                role: "system",
-                content: ctx_str,
-            });
-        }
-    }
-
-    let history_slice: Vec<TanyaAiMessageDto> = payload.history.unwrap_or_default();
-    let history_tail = if history_slice.len() > 6 {
-        &history_slice[history_slice.len() - 6..]
-    } else {
-        &history_slice[..]
-    };
-
-    let sanitized_history: Vec<(&str, String)> = history_tail
+    let prepared = prepare_tanya_ai_context(&ctx.pool, &req_ctx, &payload).await?;
+    let msg_refs: Vec<nvidia_ai::ChatMessage<'_>> = prepared
+        .messages
         .iter()
-        .map(|h| {
-            let role = match h.role.as_str() {
-                "assistant" | "model" | "bot" => "assistant",
-                _ => "user",
-            };
-            let content = h.content.replace("2024/2025", &db_academic_year);
-            (role, content)
+        .map(|m| nvidia_ai::ChatMessage {
+            role: m.role.as_str(),
+            content: m.content.as_str(),
         })
         .collect();
 
-    for (role, content) in &sanitized_history {
-        messages.push(nvidia_ai::ChatMessage {
-            role,
-            content,
-        });
-    }
-
-    messages.push(nvidia_ai::ChatMessage {
-        role: "user",
-        content: question,
-    });
-
-    let reply = match nvidia_ai::call_nvidia_nim(messages, 0.7, 1500).await {
+    let reply = match nvidia_ai::call_nvidia_nim(msg_refs, 0.7, 1500).await {
         Ok(r) => r,
         Err(err) => {
             tracing::warn!("NVIDIA NIM call failed for tanya-ai: {err:?}");
             format!(
-                "Halo! Terima kasih atas pertanyaannya mengenai **{subject}**.\n\n\
-                Pertanyaan Anda: *\"{question}\"*\n\n\
-                Saat ini jaringan komputasi Guru AI sedang mengalami sinkronisasi model NVIDIA AI. Silakan coba kembali sesaat lagi atau diskusikan pertanyaan ini langsung dengan Guru Pengampu di sesi belajar ya! Tetap semangat belajar! 🚀"
+                "Halo! Terima kasih atas pertanyaannya mengenai **{}**.\n\n\
+                Pertanyaan Anda: *\"{}\"* \n\n\
+                Saat ini jaringan komputasi Guru AI sedang mengalami sinkronisasi model NVIDIA AI. Silakan coba kembali sesaat lagi atau diskusikan pertanyaan ini langsung dengan Guru Pengampu di sesi belajar ya! Tetap semangat belajar! 🚀",
+                prepared.subject, prepared.question
             )
         }
     };
 
-    let model_name = std::env::var("NVIDIA_MODEL")
-        .unwrap_or_else(|_| "nvidia/nemotron-3.5-lightning-30b-a3b".to_string());
-
     Ok(Json(ApiResponse::success(
         TanyaAiResponse {
             reply,
-            model: model_name,
+            model: prepared.fallback_model,
+        },
+        req_ctx.request_id,
+    )))
+}
+
+async fn tanya_ai_stream(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Json(payload): Json<TanyaAiRequest>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let prepared = prepare_tanya_ai_context(&ctx.pool, &req_ctx, &payload).await?;
+    let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<Event>(64);
+
+    tokio::spawn(async move {
+        let (delta_tx, mut delta_rx) = tokio::sync::mpsc::channel::<String>(64);
+        let sse_tx_forward = sse_tx.clone();
+
+        let forward_task = tokio::spawn(async move {
+            let mut sent_any = false;
+            while let Some(chunk) = delta_rx.recv().await {
+                sent_any = true;
+                let data = json!({ "text": chunk }).to_string();
+                if sse_tx_forward
+                    .send(Event::default().event("delta").data(data))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            sent_any
+        });
+
+        let stream_result = nvidia_ai::stream_nvidia_nim(prepared.messages, 0.7, 1500, delta_tx).await;
+        let sent_any = forward_task.await.unwrap_or(false);
+
+        let used_model = match stream_result {
+            Ok(model) => model,
+            Err(err) => {
+                tracing::warn!("NVIDIA NIM SSE stream failed for tanya-ai: {err:?}");
+                if !sent_any {
+                    let fallback = format!(
+                        "Halo! Terima kasih atas pertanyaannya mengenai **{}**.\n\n\
+                        Pertanyaan Anda: *\"{}\"* \n\n\
+                        Saat ini jaringan komputasi Guru AI sedang mengalami sinkronisasi model NVIDIA AI. Silakan coba kembali sesaat lagi atau diskusikan langsung dengan Guru Pengampu di sesi belajar ya! Tetap semangat belajar! 🚀",
+                        prepared.subject, prepared.question
+                    );
+                    let _ = sse_tx
+                        .send(Event::default().event("delta").data(json!({ "text": fallback }).to_string()))
+                        .await;
+                }
+                prepared.fallback_model
+            }
+        };
+
+        let done_payload = json!({ "model": used_model, "finished": true }).to_string();
+        let _ = sse_tx
+            .send(Event::default().event("done").data(done_payload))
+            .await;
+    });
+
+    let stream = ReceiverStream::new(sse_rx).map(Ok::<Event, Infallible>);
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+static AI_FEEDBACK_TABLE_READY: OnceCell<()> = OnceCell::const_new();
+
+async fn ensure_ai_feedback_table(pool: &sqlx::PgPool) {
+    AI_FEEDBACK_TABLE_READY
+        .get_or_init(|| async {
+            let ddl = r#"
+                CREATE TABLE IF NOT EXISTS ai_feedback_logs (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                    user_id UUID NOT NULL,
+                    thread_id VARCHAR(120) NOT NULL,
+                    message_id VARCHAR(120) NOT NULL,
+                    rating VARCHAR(20) NOT NULL CHECK (rating IN ('UP', 'DOWN')),
+                    question_text TEXT,
+                    ai_reply_text TEXT NOT NULL,
+                    subject_name VARCHAR(120),
+                    grade_level VARCHAR(120),
+                    model_name VARCHAR(120),
+                    reason TEXT,
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+                )
+            "#;
+            if let Err(e) = sqlx::query(ddl).execute(pool).await {
+                tracing::warn!("ensure_ai_feedback_table DDL failed: {e}");
+            }
+            let _ = sqlx::query(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_feedback_user_msg ON ai_feedback_logs(tenant_id, user_id, message_id)"
+            )
+            .execute(pool)
+            .await;
+        })
+        .await;
+}
+
+async fn submit_ai_feedback(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Json(payload): Json<AiFeedbackRequest>,
+) -> Result<Json<ApiResponse<AiFeedbackResponse>>, ApiError> {
+    let normalized_rating = match payload.rating.trim().to_uppercase().as_str() {
+        "UP" | "UPVOTE" | "THUMBS_UP" | "HELPFUL" | "GOOD" => "UP",
+        "DOWN" | "DOWNVOTE" | "THUMBS_DOWN" | "INACCURATE" | "BAD" => "DOWN",
+        _ => {
+            return Err(ApiError::new(
+                ApplicationError::Domain(DomainError::Validation(
+                    "Rating feedback harus bernilai 'UP' atau 'DOWN'".to_string(),
+                )),
+                &req_ctx.request_id,
+            ));
+        }
+    };
+
+    let msg_id = payload.message_id.trim();
+    let thread_id = payload.thread_id.trim();
+    if msg_id.is_empty() || thread_id.is_empty() || payload.ai_reply_text.trim().is_empty() {
+        return Err(ApiError::new(
+            ApplicationError::Domain(DomainError::Validation(
+                "thread_id, message_id, dan ai_reply_text wajib diisi".to_string(),
+            )),
+            &req_ctx.request_id,
+        ));
+    }
+
+    ensure_ai_feedback_table(&ctx.pool).await;
+
+    let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_else(Uuid::nil);
+    let record_id = Uuid::new_v4();
+
+    let saved_id = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        INSERT INTO ai_feedback_logs (
+            id, tenant_id, user_id, thread_id, message_id, rating,
+            question_text, ai_reply_text, subject_name, grade_level, model_name, reason
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        ON CONFLICT (tenant_id, user_id, message_id)
+        DO UPDATE SET
+            rating = EXCLUDED.rating,
+            question_text = COALESCE(EXCLUDED.question_text, ai_feedback_logs.question_text),
+            ai_reply_text = EXCLUDED.ai_reply_text,
+            reason = EXCLUDED.reason,
+            updated_at = NOW()
+        RETURNING id
+        "#,
+    )
+    .bind(record_id)
+    .bind(req_ctx.tenant_id)
+    .bind(user_id)
+    .bind(thread_id)
+    .bind(msg_id)
+    .bind(normalized_rating)
+    .bind(payload.question_text.as_deref())
+    .bind(payload.ai_reply_text.trim())
+    .bind(payload.subject_name.as_deref())
+    .bind(payload.grade_level.as_deref())
+    .bind(payload.model_name.as_deref())
+    .bind(payload.reason.as_deref())
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Internal(format!("Gagal menyimpan feedback AI: {e}")),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    Ok(Json(ApiResponse::success(
+        AiFeedbackResponse {
+            id: saved_id,
+            rating: normalized_rating.to_string(),
+            recorded: true,
         },
         req_ctx.request_id,
     )))
