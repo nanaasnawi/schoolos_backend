@@ -41,6 +41,8 @@ pub struct AssignmentResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub submission_count: Option<i64>,
     #[serde(default)]
+    pub has_game_questions: bool,
+    #[serde(default)]
     pub questions: Vec<AssignmentQuestionDto>,
 }
 
@@ -70,6 +72,7 @@ impl From<Assignment> for AssignmentResponse {
             total_students: None,
             submitted_count: None,
             submission_count: None,
+            has_game_questions: false,
             questions: Vec::new(),
         }
     }

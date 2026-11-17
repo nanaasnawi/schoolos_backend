@@ -1132,12 +1132,14 @@ pub struct CbtQuestionChoiceDto {
 pub struct AssignmentQuestionDto {
     pub id: String,
     pub question_text: String,
-    pub question_type: String, // "MULTIPLE_CHOICE" | "ESSAY"
+    pub question_type: String, // "MULTIPLE_CHOICE" | "ESSAY" | "MATCHING" | "ORDERING" | "FILL_BLANK"
     pub points: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_url: Option<String>,
     #[serde(default)]
     pub choices: Vec<CbtQuestionChoiceDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction_config: Option<serde_json::Value>,
     #[serde(default)]
     pub explanation: String,
 }
@@ -1319,20 +1321,100 @@ pub async fn generate_assignment(
     include_images: bool,
 ) -> Result<GeneratedAssignmentDto, ApplicationError> {
     let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
-    let is_homework = assignment_format
-        .map(|f| f.to_uppercase() == "HOMEWORK_PR")
-        .unwrap_or(false);
+    let fmt_upper = assignment_format.unwrap_or("STRUCTURED_QUESTIONS").to_uppercase();
+    let is_homework = fmt_upper == "HOMEWORK_PR";
+    let is_pure_game = fmt_upper == "INTERACTIVE_GAMES";
+    let is_game_mixed = fmt_upper.contains("GAME");
     let now_ts = chrono::Utc::now().timestamp_millis();
+
+    let num_games: usize = if is_pure_game {
+        3
+    } else if is_game_mixed {
+        3
+    } else {
+        0
+    };
 
     let total_questions = if is_homework {
         num_essay.max(1)
+    } else if is_pure_game {
+        num_games
     } else {
-        num_mcq + num_essay
+        num_mcq + num_essay + num_games
     };
+
+    let game_schema_hint = r#"
+CONTOH FORMAT WAJIB UNTUK 3 TIPE GAME INTERAKTIF:
+1) Tipe 'MATCHING' (Menjodohkan 4 pasangan):
+{{
+  "id": "g-match-1",
+  "question_text": "Jodohkan konsep berikut dengan penjelasan atau pasangannya yang tepat:",
+  "question_type": "MATCHING",
+  "points": 20,
+  "choices": [],
+  "interaction_config": {{
+    "pairs": [
+      {{ "id": "p1", "left": "Istilah A", "right": "Definisi A yang tepat" }},
+      {{ "id": "p2", "left": "Istilah B", "right": "Definisi B yang tepat" }},
+      {{ "id": "p3", "left": "Istilah C", "right": "Definisi C yang tepat" }},
+      {{ "id": "p4", "left": "Istilah D", "right": "Definisi D yang tepat" }}
+    ]
+  }},
+  "explanation": "Pembahasan singkat..."
+}}
+2) Tipe 'ORDERING' (Urutkan 4 langkah/kronologi secara berurutan dari awal hingga akhir):
+{{
+  "id": "g-order-1",
+  "question_text": "Susunlah tahapan atau kronologi berikut sesuai urutan yang benar:",
+  "question_type": "ORDERING",
+  "points": 20,
+  "choices": [],
+  "interaction_config": {{
+    "items": [
+      {{ "id": "o1", "text": "Tahap pertama yang benar..." }},
+      {{ "id": "o2", "text": "Tahap kedua yang benar..." }},
+      {{ "id": "o3", "text": "Tahap ketiga yang benar..." }},
+      {{ "id": "o4", "text": "Tahap keempat yang benar..." }}
+    ]
+  }},
+  "explanation": "Alasan urutan..."
+}}
+3) Tipe 'FILL_BLANK' (Kalimat rumpang dengan placeholder {{1}}, {{2}} + distraktor):
+{{
+  "id": "g-fill-1",
+  "question_text": "Lengkapi bagian kalimat yang kosong menggunakan pilihan bank kata yang tepat:",
+  "question_type": "FILL_BLANK",
+  "points": 20,
+  "choices": [],
+  "interaction_config": {{
+    "template": "Kalimat edukatif lengkap dengan bagian rumpang {{1}} serta lanjutan {{2}}.",
+    "blanks": ["jawaban_1", "jawaban_2"],
+    "distractors": ["pengecoh_1", "pengecoh_2"]
+  }},
+  "explanation": "Penjelasan jawaban..."
+}}"#;
 
     let slot_instructions = if is_homework {
         format!(
             "Array 'questions' WAJIB BERISI TEPAT {num_essay} BUTIR SOAL ESSAY / LEMBAR KERJA.\n- Butir 1 sampai {num_essay}: Tipe 'ESSAY' (analitis / tugas observasi kontekstual)."
+        )
+    } else if is_pure_game {
+        format!(
+            "Array 'questions' WAJIB BERISI TEPAT 3 BUTIR TUGAS GAME INTERAKTIF AKTIF:\n\
+            - Butir 1: question_type = 'MATCHING' (4 pasangan konsep).\n\
+            - Butir 2: question_type = 'ORDERING' (4 langkah terurut dari awal hingga akhir).\n\
+            - Butir 3: question_type = 'FILL_BLANK' (template berisi {{1}} dan {{2}}, 2 blanks, 2 distractors).\n\
+            {game_schema_hint}"
+        )
+    } else if is_game_mixed {
+        format!(
+            "Array 'questions' WAJIB BERISI TEPAT {total_questions} BUTIR SOAL VARIATIF:\n\
+            - {num_mcq} butir 'MULTIPLE_CHOICE' (4 opsi A-D, tepat 1 is_correct: true)\n\
+            - 1 butir 'MATCHING' (4 pairs)\n\
+            - 1 butir 'ORDERING' (4 items berurutan benar)\n\
+            - 1 butir 'FILL_BLANK' (template berisi {{1}} dan {{2}}, 2 blanks, 2 distractors)\n\
+            - {num_essay} butir 'ESSAY'\n\
+            {game_schema_hint}"
         )
     } else {
         format!(
@@ -1393,7 +1475,7 @@ PENTING & WAJIB:
 - Pastikan teks soal dan pilihan jawaban SESUAI ATURAN MAPEL ({subject_name}).
 - 'question_text' HANYA BERISI TEKS PERTANYAAN UTAMA / STIMULUS SOAL. DILARANG KERAS MENYISIPKAN OPSI PILIHAN JAWABAN (A, B, C, D) KE DALAM 'question_text'. Seluruh opsi pilihan HANYA boleh ada di dalam array 'choices'!
 - Nilai 'choice_text' di dalam 'choices' HANYA berisi kalimat jawaban tanpa menyertakan label prefix 'A.', 'B.', 'C.', atau 'D.'.
-- Array 'questions' HARUS berisi TEPAT {total_questions} butir soal ({num_mcq} PG dan {num_essay} Essay). Jangan berhenti menulis sebelum mencapai {total_questions} butir!
+- Array 'questions' HARUS berisi TEPAT {total_questions} butir soal sesuai instruksi komposisi di atas. Jangan berhenti menulis sebelum mencapai {total_questions} butir!
 - Nilai 'rubric' dan 'instructions' HARUS berupa STRING TEKS tunggal (BUKAN JSON object/map).
 - Output HANYA JSON tanpa teks lain.
 - Pastikan seluruh string multi-baris menggunakan escape sequence \n dan BUKAN karakter raw newline."#,
@@ -1544,8 +1626,17 @@ PENTING & WAJIB:
         }
 
         let explicit_type = q_val.get("question_type").and_then(|v| v.as_str());
-        let question_type = explicit_type.map(|t| t.to_uppercase()).unwrap_or_else(|| {
-            if choices.is_empty() {
+        let raw_interaction = q_val.get("interaction_config").cloned();
+        let question_type = explicit_type.map(|t| t.trim().to_uppercase()).unwrap_or_else(|| {
+            if raw_interaction.is_some() {
+                if raw_interaction.as_ref().and_then(|v| v.get("pairs")).is_some() {
+                    "MATCHING".to_string()
+                } else if raw_interaction.as_ref().and_then(|v| v.get("items")).is_some() {
+                    "ORDERING".to_string()
+                } else {
+                    "FILL_BLANK".to_string()
+                }
+            } else if choices.is_empty() {
                 "ESSAY".to_string()
             } else {
                 "MULTIPLE_CHOICE".to_string()
@@ -1580,6 +1671,7 @@ PENTING & WAJIB:
             points,
             image_url: img,
             choices,
+            interaction_config: raw_interaction,
             explanation,
         });
     }
@@ -1599,74 +1691,98 @@ PENTING & WAJIB:
                 points: 20,
                 image_url: img,
                 choices: Vec::new(),
+                interaction_config: None,
                 explanation: rubric_str.clone(),
             });
         }
     }
 
-    // ── Enforce Exact Counts for PG & Essay ──
+    // ── Enforce Exact Counts & Keep Interactive Game Questions ──
     if !is_homework {
         let mut final_mcqs: Vec<AssignmentQuestionDto> = Vec::new();
+        let mut final_games: Vec<AssignmentQuestionDto> = Vec::new();
         let mut final_essays: Vec<AssignmentQuestionDto> = Vec::new();
 
         for q in questions {
-            if q.question_type == "MULTIPLE_CHOICE" && !q.choices.is_empty() {
+            let qt = q.question_type.as_str();
+            if qt == "MULTIPLE_CHOICE" && !q.choices.is_empty() {
                 final_mcqs.push(q);
+            } else if matches!(qt, "MATCHING" | "ORDERING" | "FILL_BLANK") && q.interaction_config.is_some() {
+                final_games.push(q);
             } else {
                 final_essays.push(q);
             }
         }
 
-        // Pad missing MCQs if AI returned fewer than requested
-        while final_mcqs.len() < num_mcq {
-            let idx = final_mcqs.len() + 1;
-            final_mcqs.push(AssignmentQuestionDto {
-                id: format!("asg-mcq-pad-{idx}-{now_ts}"),
-                question_text: format!("Pertanyaan pemahaman konsep {subject_name} butir ke-{idx} terkait materi {topic}:"),
-                question_type: "MULTIPLE_CHOICE".to_string(),
-                points: 10,
-                image_url: None,
-                choices: vec![
-                    CbtQuestionChoiceDto {
-                        choice_text: format!("A. Konsep esensial terapan {topic} secara tepat dan sahih"),
-                        is_correct: true,
-                    },
-                    CbtQuestionChoiceDto {
-                        choice_text: "B. Pernyataan alternatif yang kurang spesifik".to_string(),
-                        is_correct: false,
-                    },
-                    CbtQuestionChoiceDto {
-                        choice_text: "C. Distraktor teoritis sekunder".to_string(),
-                        is_correct: false,
-                    },
-                    CbtQuestionChoiceDto {
-                        choice_text: "D. Opsi yang bertentangan dengan prinsip materi".to_string(),
-                        is_correct: false,
-                    },
-                ],
-                explanation: format!("Kunci A merupakan konsep mendasar pada materi {topic} ({subject_name})."),
-            });
+        if is_game_mixed {
+            if !final_games.iter().any(|g| g.question_type == "MATCHING") {
+                final_games.push(build_fallback_matching_question(topic, subject_name, now_ts));
+            }
+            if !final_games.iter().any(|g| g.question_type == "ORDERING") {
+                final_games.push(build_fallback_ordering_question(topic, subject_name, now_ts));
+            }
+            if !final_games.iter().any(|g| g.question_type == "FILL_BLANK") {
+                final_games.push(build_fallback_fill_blank_question(topic, subject_name, now_ts));
+            }
         }
 
-        // Pad missing Essays if AI returned fewer than requested
-        while final_essays.len() < num_essay {
-            let idx = final_essays.len() + 1;
-            final_essays.push(AssignmentQuestionDto {
-                id: format!("asg-essay-pad-{idx}-{now_ts}"),
-                question_text: format!("Jelaskan secara mendalam analisis dan penerapan konsep {topic} dalam konteks nyata (Aspek Evaluasi {idx}):"),
-                question_type: "ESSAY".to_string(),
-                points: 20,
-                image_url: None,
-                choices: Vec::new(),
-                explanation: format!("Rubrik: Skor maksimal jika siswa mampu menjabarkan konsep {topic} disertai contoh konkret dan argumentasi logis yang runtut."),
-            });
+        if is_pure_game {
+            questions = final_games;
+        } else {
+            // Pad missing MCQs if AI returned fewer than requested
+            while final_mcqs.len() < num_mcq {
+                let idx = final_mcqs.len() + 1;
+                final_mcqs.push(AssignmentQuestionDto {
+                    id: format!("asg-mcq-pad-{idx}-{now_ts}"),
+                    question_text: format!("Pertanyaan pemahaman konsep {subject_name} butir ke-{idx} terkait materi {topic}:"),
+                    question_type: "MULTIPLE_CHOICE".to_string(),
+                    points: 10,
+                    image_url: None,
+                    choices: vec![
+                        CbtQuestionChoiceDto {
+                            choice_text: format!("Konsep esensial terapan {topic} secara tepat dan sahih"),
+                            is_correct: true,
+                        },
+                        CbtQuestionChoiceDto {
+                            choice_text: "Pernyataan alternatif yang kurang spesifik".to_string(),
+                            is_correct: false,
+                        },
+                        CbtQuestionChoiceDto {
+                            choice_text: "Distraktor teoritis sekunder".to_string(),
+                            is_correct: false,
+                        },
+                        CbtQuestionChoiceDto {
+                            choice_text: "Opsi yang bertentangan dengan prinsip materi".to_string(),
+                            is_correct: false,
+                        },
+                    ],
+                    interaction_config: None,
+                    explanation: format!("Kunci A merupakan konsep mendasar pada materi {topic} ({subject_name})."),
+                });
+            }
+
+            // Pad missing Essays if AI returned fewer than requested
+            while final_essays.len() < num_essay {
+                let idx = final_essays.len() + 1;
+                final_essays.push(AssignmentQuestionDto {
+                    id: format!("asg-essay-pad-{idx}-{now_ts}"),
+                    question_text: format!("Jelaskan secara mendalam analisis dan penerapan konsep {topic} dalam konteks nyata (Aspek Evaluasi {idx}):"),
+                    question_type: "ESSAY".to_string(),
+                    points: 20,
+                    image_url: None,
+                    choices: Vec::new(),
+                    interaction_config: None,
+                    explanation: format!("Rubrik: Skor maksimal jika siswa mampu menjabarkan konsep {topic} disertai contoh konkret dan argumentasi logis yang runtut."),
+                });
+            }
+
+            final_mcqs.truncate(num_mcq);
+            final_essays.truncate(num_essay);
+
+            questions = final_mcqs;
+            questions.extend(final_games);
+            questions.extend(final_essays);
         }
-
-        final_mcqs.truncate(num_mcq);
-        final_essays.truncate(num_essay);
-
-        questions = final_mcqs;
-        questions.extend(final_essays);
     } else {
         while questions.len() < num_essay {
             let idx = questions.len() + 1;
@@ -1677,6 +1793,7 @@ PENTING & WAJIB:
                 points: (100 / (num_essay.max(1) as i32)).max(10),
                 image_url: None,
                 choices: Vec::new(),
+                interaction_config: None,
                 explanation: format!("Rubrik: Penilaian berbasis kelengkapan laporan, orisinalitas analisis, dan ketepatan kaidah {subject_name}."),
             });
         }
@@ -1697,6 +1814,63 @@ PENTING & WAJIB:
         tasks: tasks_vec,
         questions,
     })
+}
+
+fn build_fallback_matching_question(topic: &str, subject: &str, ts: i64) -> AssignmentQuestionDto {
+    AssignmentQuestionDto {
+        id: format!("asg-match-fb-{ts}"),
+        question_text: format!("Jodohkan konsep {topic} ({subject}) berikut dengan penjelasan yang paling sesuai:"),
+        question_type: "MATCHING".to_string(),
+        points: 20,
+        image_url: None,
+        choices: Vec::new(),
+        interaction_config: Some(serde_json::json!({
+            "pairs": [
+                { "id": "p1", "left": format!("Konsep Dasar {topic}"), "right": "Fondasi teori utama pembelajaran topik ini" },
+                { "id": "p2", "left": "Identifikasi Masalah", "right": "Mengamati persoalan nyata sesuai topik" },
+                { "id": "p3", "left": "Analisis Kritis", "right": "Menghubungkan sebab akibat secara logis" },
+                { "id": "p4", "left": "Penerapan Praktis", "right": "Implementasi langsung dalam keseharian" }
+            ]
+        })),
+        explanation: format!("Setiap pasangan mencerminkan tahapan penguasaan konsep {topic}."),
+    }
+}
+
+fn build_fallback_ordering_question(topic: &str, subject: &str, ts: i64) -> AssignmentQuestionDto {
+    AssignmentQuestionDto {
+        id: format!("asg-order-fb-{ts}"),
+        question_text: format!("Urutkan tahapan mempelajari dan menerapkan '{topic}' ({subject}) dari awal hingga akhir:"),
+        question_type: "ORDERING".to_string(),
+        points: 20,
+        image_url: None,
+        choices: Vec::new(),
+        interaction_config: Some(serde_json::json!({
+            "items": [
+                { "id": "o1", "text": format!("Memahami definisi inti materi {topic}") },
+                { "id": "o2", "text": "Mengidentifikasi contoh dan komponen penting" },
+                { "id": "o3", "text": "Menerapkan konsep untuk memecahkan latihan soal" },
+                { "id": "o4", "text": "Menarik kesimpulan dan refleksi pembelajaran" }
+            ]
+        })),
+        explanation: "Urutan belajar dimulai dari pemahaman konsep dasar hingga refleksi.".to_string(),
+    }
+}
+
+fn build_fallback_fill_blank_question(topic: &str, subject: &str, ts: i64) -> AssignmentQuestionDto {
+    AssignmentQuestionDto {
+        id: format!("asg-fill-fb-{ts}"),
+        question_text: format!("Lengkapi ringkasan konsep '{topic}' ({subject}) dengan pilihan kata yang tepat:"),
+        question_type: "FILL_BLANK".to_string(),
+        points: 20,
+        image_url: None,
+        choices: Vec::new(),
+        interaction_config: Some(serde_json::json!({
+            "template": format!("Dalam mata pelajaran {subject}, penguasaan topik {topic} diawali dengan memahami {{1}} lalu diterapkan lewat {{2}} nyata."),
+            "blanks": ["konsep dasar", "latihan"],
+            "distractors": ["hafalan pasif", "dugaan acak"]
+        })),
+        explanation: "Pemahaman konsep dasar dan latihan terarah adalah kunci penguasaan materi.".to_string(),
+    }
 }
 
 pub fn generate_pedagogical_question_templates(
@@ -2029,16 +2203,21 @@ pub fn fallback_generate_assignment(
     _include_images: bool,
 ) -> GeneratedAssignmentDto {
     let now_ts = chrono::Utc::now().timestamp_millis();
-    let is_homework = assignment_format
-        .map(|f| f.to_uppercase() == "HOMEWORK_PR")
-        .unwrap_or(false);
+    let fmt_upper = assignment_format.unwrap_or("STRUCTURED_QUESTIONS").to_uppercase();
+    let is_homework = fmt_upper == "HOMEWORK_PR";
+    let is_pure_game = fmt_upper == "INTERACTIVE_GAMES";
+    let is_game_mixed = fmt_upper.contains("GAME");
 
     let safe_image: Option<String> = None;
 
-    let mcq_templates = generate_pedagogical_question_templates(subject_name, topic, grade_level, difficulty, num_mcq);
+    let mcq_templates = if is_homework || is_pure_game {
+        Vec::new()
+    } else {
+        generate_pedagogical_question_templates(subject_name, topic, grade_level, difficulty, num_mcq)
+    };
     let mut questions = Vec::new();
 
-    if !is_homework {
+    if !is_homework && !is_pure_game {
         for (idx, (q_text, choices_text, correct_idx, expl)) in mcq_templates.into_iter().enumerate() {
             let choices = choices_text
                 .into_iter()
@@ -2056,12 +2235,25 @@ pub fn fallback_generate_assignment(
                 points: 10,
                 image_url: safe_image.clone(),
                 choices,
+                interaction_config: None,
                 explanation: expl,
             });
         }
     }
 
-    let essay_count = if is_homework { num_essay.max(1) } else { num_essay };
+    if is_game_mixed {
+        questions.push(build_fallback_matching_question(topic, subject_name, now_ts));
+        questions.push(build_fallback_ordering_question(topic, subject_name, now_ts));
+        questions.push(build_fallback_fill_blank_question(topic, subject_name, now_ts));
+    }
+
+    let essay_count = if is_homework {
+        num_essay.max(1)
+    } else if is_pure_game {
+        0
+    } else {
+        num_essay
+    };
     let essay_pts = (100 / essay_count.max(1) as i32).max(15);
 
     let essay_prompts = [
@@ -2085,6 +2277,7 @@ pub fn fallback_generate_assignment(
             points: essay_pts,
             image_url: None,
             choices: Vec::new(),
+            interaction_config: None,
             explanation: "Rubrik Penskoran: Skor maksimal diberikan bila siswa menjabarkan konsep secara tepat, argumentasi logis runtut, disertai contoh kontekstual yang relevan (Skala 0 - 100).".to_string(),
         });
     }
