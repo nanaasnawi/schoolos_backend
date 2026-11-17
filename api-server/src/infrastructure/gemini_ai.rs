@@ -9,6 +9,7 @@ const DEFAULT_GEMINI_API_URL: &str = "https://generativelanguage.googleapis.com/
 const DEFAULT_GEMINI_MODEL: &str = "gemini-3.1-flash-lite-image";
 const STANDARD_GEMINI_MODELS_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 const VERTEX_EXPRESS_MODELS_BASE: &str = "https://aiplatform.googleapis.com/v1/publishers/google/models";
+const DEFAULT_CLOUDFLARE_IMAGE_MODEL: &str = "@cf/black-forest-labs/flux-1-schnell";
 
 static SHARED_GEMINI_CLIENT: OnceLock<Client> = OnceLock::new();
 
@@ -20,6 +21,26 @@ fn get_gemini_client() -> &'static Client {
             .build()
             .unwrap_or_else(|_| Client::new())
     })
+}
+
+fn get_cloudflare_config() -> Option<(String, String, String)> {
+    let account_id = std::env::var("CLOUDFLARE_ACCOUNT_ID")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())?;
+
+    let api_token = std::env::var("CLOUDFLARE_API_TOKEN")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())?;
+
+    let model = std::env::var("CLOUDFLARE_IMAGE_MODEL")
+        .ok()
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| DEFAULT_CLOUDFLARE_IMAGE_MODEL.to_string());
+
+    Some((account_id, api_token, model))
 }
 
 fn get_gemini_config() -> Result<(String, String, String), String> {
@@ -47,6 +68,7 @@ fn get_gemini_config() -> Result<(String, String, String), String> {
 
 #[derive(Clone, Copy, Debug)]
 pub enum GeminiRouteKind {
+    CloudflareWorkersAi,
     GoogleGenerateContent,
     VertexExpressGenerateContent,
     GoogleInteractions,
@@ -326,6 +348,80 @@ async fn call_interactions_url(
     ))
 }
 
+async fn call_cloudflare_flux(
+    client: &Client,
+    account_id: &str,
+    api_token: &str,
+    model: &str,
+    prompt: &str,
+) -> Result<(String, Vec<u8>), String> {
+    let url = format!(
+        "https://api.cloudflare.com/client/v4/accounts/{}/ai/run/{}",
+        account_id, model
+    );
+    let clipped_prompt: String = prompt.chars().take(1900).collect();
+    let payload = json!({
+        "prompt": clipped_prompt,
+        "steps": 6
+    });
+
+    let resp = client
+        .post(url.as_str())
+        .header("Authorization", format!("Bearer {api_token}"))
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Network error ({model}): {e}"))?;
+
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let raw_bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed reading response ({model}): {e}"))?;
+
+    if status.is_success() && content_type.starts_with("image/") && !raw_bytes.is_empty() {
+        return Ok((content_type, raw_bytes.to_vec()));
+    }
+
+    let txt = String::from_utf8_lossy(&raw_bytes).into_owned();
+    if status.is_success() {
+        if let Ok(val) = serde_json::from_str::<Value>(&txt) {
+            let b64 = val
+                .get("result")
+                .and_then(|r| r.get("image"))
+                .and_then(|i| i.as_str())
+                .or_else(|| val.get("image").and_then(|i| i.as_str()))
+                .unwrap_or("");
+            if let Some(bytes) = decode_base64(b64) {
+                return Ok(("image/jpeg".to_string(), bytes));
+            }
+        }
+        return Err(format!("{model}: respon 200 tetapi tidak berisi byte gambar"));
+    }
+
+    let cf_msg = serde_json::from_str::<Value>(&txt)
+        .ok()
+        .and_then(|v| {
+            v.get("errors")
+                .and_then(|e| e.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|err| err.get("message"))
+                .and_then(|m| m.as_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| extract_google_error_message(&txt, status.as_u16()));
+
+    Err(format!("{model} -> HTTP {}: {}", status.as_u16(), cf_msg))
+}
+
 async fn execute_single_route(
     client: &Client,
     api_key: &str,
@@ -336,6 +432,11 @@ async fn execute_single_route(
 ) -> Result<(String, Vec<u8>), String> {
     let model = route.model.as_str();
     match route.kind {
+        GeminiRouteKind::CloudflareWorkersAi => {
+            let (account_id, api_token, _) = get_cloudflare_config()
+                .ok_or_else(|| "CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN belum terpasang".to_string())?;
+            call_cloudflare_flux(client, &account_id, &api_token, model, prompt).await
+        }
         GeminiRouteKind::GoogleGenerateContent => {
             let target_url = if !api_url.contains("aiplatform")
                 && !api_url.contains("/interactions")
@@ -398,9 +499,8 @@ async fn persist_image(pool: &PgPool, mime: &str, bytes: Vec<u8>) -> String {
     format!("/uploads/{filename}")
 }
 
-/// Generates the Hero cover image while probing across Google AI Studio, Vertex AI Express
-/// (for `AQ.` express keys), and Interactions endpoints, returning both the `/uploads/...` URL
-/// and the winning route so subsequent cards run concurrently without redundant retries.
+/// Generates the Hero cover image prioritizing Cloudflare Workers AI (`flux-1-schnell`)
+/// when configured, and probing Google AI Studio / Vertex Express as fallback.
 pub async fn probe_and_generate_hero_image(
     pool: &PgPool,
     concept_prompt: &str,
@@ -408,9 +508,42 @@ pub async fn probe_and_generate_hero_image(
     grade_level: &str,
     aspect_ratio: &str,
 ) -> Result<(String, ResolvedGeminiRoute), String> {
-    let (api_key, api_url, configured_model) = get_gemini_config()?;
     let client = get_gemini_client();
     let prompt = build_infographic_visual_prompt(concept_prompt, subject_name, grade_level);
+
+    let mut cloudflare_err: Option<String> = None;
+
+    if let Some((account_id, api_token, cf_model)) = get_cloudflare_config() {
+        match call_cloudflare_flux(client, &account_id, &api_token, &cf_model, &prompt).await {
+            Ok((mime, bytes)) => {
+                tracing::info!("Cloudflare Workers AI hero image succeeded ({cf_model})");
+                let url = persist_image(pool, &mime, bytes).await;
+                return Ok((
+                    url,
+                    ResolvedGeminiRoute {
+                        kind: GeminiRouteKind::CloudflareWorkersAi,
+                        model: cf_model,
+                    },
+                ));
+            }
+            Err(err) => {
+                tracing::warn!("Cloudflare FLUX failed: {err}");
+                cloudflare_err = Some(err);
+            }
+        }
+    }
+
+    let (api_key, api_url, configured_model) = match get_gemini_config() {
+        Ok(cfg) => cfg,
+        Err(gem_err) => {
+            return Err(match cloudflare_err {
+                Some(cf) => format!("Cloudflare: {cf}"),
+                None => format!(
+                    "{gem_err}. Tambahkan CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN (FLUX.1 gratis) di Railway."
+                ),
+            });
+        }
+    };
 
     let mut models = vec![configured_model.clone()];
     for fallback in [
@@ -508,6 +641,7 @@ pub async fn probe_and_generate_hero_image(
     }
 
     let summary_parts: Vec<String> = [
+        cloudflare_err.map(|e| format!("Cloudflare: {e}")),
         ai_studio_err.map(|e| format!("AI Studio: {e}")),
         vertex_err.map(|e| format!("Vertex: {e}")),
         interactions_err.map(|e| format!("Interactions: {e}")),
@@ -517,7 +651,7 @@ pub async fn probe_and_generate_hero_image(
     .collect();
 
     Err(if summary_parts.is_empty() {
-        "Gemini gagal menghasilkan gambar".to_string()
+        "Image AI gagal menghasilkan gambar".to_string()
     } else {
         summary_parts.join(" | ")
     })
@@ -532,10 +666,21 @@ pub async fn generate_card_image_with_route(
     grade_level: &str,
     aspect_ratio: &str,
 ) -> Option<String> {
-    let (api_key, api_url, _) = get_gemini_config().ok()?;
     let client = get_gemini_client();
     let prompt = build_infographic_visual_prompt(concept_prompt, subject_name, grade_level);
 
+    if matches!(route.kind, GeminiRouteKind::CloudflareWorkersAi) {
+        let (account_id, api_token, _) = get_cloudflare_config()?;
+        return match call_cloudflare_flux(client, &account_id, &api_token, &route.model, &prompt).await {
+            Ok((mime, bytes)) => Some(persist_image(pool, &mime, bytes).await),
+            Err(err) => {
+                tracing::warn!("Cloudflare FLUX card image failed ({}): {}", route.model, err);
+                None
+            }
+        };
+    }
+
+    let (api_key, api_url, _) = get_gemini_config().ok()?;
     match execute_single_route(client, api_key.as_str(), api_url.as_str(), route, &prompt, aspect_ratio).await {
         Ok((mime, bytes)) => Some(persist_image(pool, &mime, bytes).await),
         Err(err) => {
