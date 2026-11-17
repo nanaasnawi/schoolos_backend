@@ -1,5 +1,5 @@
+pub mod cloudflare_ai;
 pub mod fcm;
-pub mod gemini_ai;
 pub mod nvidia_ai;
 pub mod observability;
 pub mod scheduled_publish_worker;
