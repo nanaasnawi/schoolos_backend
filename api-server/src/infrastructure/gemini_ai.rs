@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 const DEFAULT_GEMINI_API_URL: &str = "https://generativelanguage.googleapis.com/v1beta/interactions";
 const DEFAULT_GEMINI_MODEL: &str = "gemini-3.1-flash-lite-image";
+const STANDARD_GEMINI_MODELS_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 
 static SHARED_GEMINI_CLIENT: OnceLock<Client> = OnceLock::new();
 
@@ -102,7 +103,7 @@ fn extract_image_from_gemini_json(val: &Value) -> Option<(String, Vec<u8>)> {
         }
     }
 
-    // 3. Legacy/standard `candidates[].content.parts[].inlineData` / `inline_data`
+    // 3. Standard Gemini generateContent: `candidates[].content.parts[].inlineData` / `inline_data`
     if let Some(candidates) = val.get("candidates").and_then(|v| v.as_array()) {
         for cand in candidates {
             if let Some(parts) = cand
@@ -118,7 +119,7 @@ fn extract_image_from_gemini_json(val: &Value) -> Option<(String, Vec<u8>)> {
                             .get("mimeType")
                             .or_else(|| in_obj.get("mime_type"))
                             .and_then(|m| m.as_str())
-                            .unwrap_or("image/jpeg");
+                            .unwrap_or("image/png");
                         if let Some(bytes) = decode_base64(b64) {
                             return Some((mime.to_string(), bytes));
                         }
@@ -156,10 +157,149 @@ fn extract_image_from_output_obj(item: &Value) -> Option<(String, Vec<u8>)> {
                 .get("mime_type")
                 .or_else(|| item.get("mimeType"))
                 .and_then(|m| m.as_str())
-                .unwrap_or("image/jpeg");
+                .unwrap_or("image/png");
             if let Some(bytes) = decode_base64(b64) {
                 return Some((mime.to_string(), bytes));
             }
+        }
+    }
+
+    None
+}
+
+async fn call_gemini_generate_content(
+    client: &Client,
+    api_key: &str,
+    target_url: &str,
+    model: &str,
+    prompt: &str,
+    aspect_ratio: &str,
+) -> Option<(String, Vec<u8>)> {
+    let payload_with_cfg = json!({
+        "contents": [{
+            "role": "user",
+            "parts": [{ "text": prompt }]
+        }],
+        "generationConfig": {
+            "responseModalities": ["TEXT", "IMAGE"],
+            "imageConfig": {
+                "aspectRatio": aspect_ratio,
+                "imageSize": "1K"
+            }
+        }
+    });
+
+    if let Ok(resp) = client
+        .post(target_url)
+        .header("x-goog-api-key", api_key)
+        .header("Content-Type", "application/json")
+        .json(&payload_with_cfg)
+        .send()
+        .await
+    {
+        let status = resp.status();
+        let txt = resp.text().await.unwrap_or_default();
+        if status.is_success() {
+            if let Ok(parsed) = serde_json::from_str::<Value>(&txt) {
+                if let Some(img) = extract_image_from_gemini_json(&parsed) {
+                    tracing::info!("Gemini generateContent ({model}) produced infographic image");
+                    return Some(img);
+                }
+            }
+            tracing::warn!(
+                "Gemini generateContent ({model}) HTTP 200 without image bytes: {}",
+                &txt.chars().take(240).collect::<String>()
+            );
+        } else {
+            tracing::warn!(
+                "Gemini generateContent ({model}) HTTP {}: {}",
+                status.as_u16(),
+                &txt.chars().take(240).collect::<String>()
+            );
+            // Retry with minimal generationConfig in case imageConfig/imageSize is rejected by model variant
+            if status.as_u16() == 400 {
+                let payload_min = json!({
+                    "contents": [{
+                        "role": "user",
+                        "parts": [{ "text": prompt }]
+                    }],
+                    "generationConfig": {
+                        "responseModalities": ["IMAGE"]
+                    }
+                });
+                if let Ok(resp2) = client
+                    .post(target_url)
+                    .header("x-goog-api-key", api_key)
+                    .header("Content-Type", "application/json")
+                    .json(&payload_min)
+                    .send()
+                    .await
+                {
+                    let st2 = resp2.status();
+                    let txt2 = resp2.text().await.unwrap_or_default();
+                    if st2.is_success() {
+                        if let Ok(parsed2) = serde_json::from_str::<Value>(&txt2) {
+                            if let Some(img) = extract_image_from_gemini_json(&parsed2) {
+                                tracing::info!("Gemini generateContent minimal ({model}) produced infographic image");
+                                return Some(img);
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            "Gemini generateContent minimal ({model}) HTTP {}: {}",
+                            st2.as_u16(),
+                            &txt2.chars().take(240).collect::<String>()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+async fn call_gemini_interactions(
+    client: &Client,
+    api_key: &str,
+    interactions_url: &str,
+    model: &str,
+    prompt: &str,
+) -> Option<(String, Vec<u8>)> {
+    // Interactions API expects lowercase `response_modalities: ["image"]`
+    let payload = json!({
+        "model": model,
+        "input": prompt,
+        "response_modalities": ["image"]
+    });
+
+    if let Ok(resp) = client
+        .post(interactions_url)
+        .header("x-goog-api-key", api_key)
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+    {
+        let status = resp.status();
+        let txt = resp.text().await.unwrap_or_default();
+        if status.is_success() {
+            if let Ok(parsed) = serde_json::from_str::<Value>(&txt) {
+                if let Some(img) = extract_image_from_gemini_json(&parsed) {
+                    tracing::info!("Gemini Interactions ({model}) produced infographic image");
+                    return Some(img);
+                }
+            }
+            tracing::warn!(
+                "Gemini Interactions ({model}) HTTP 200 without image bytes: {}",
+                &txt.chars().take(240).collect::<String>()
+            );
+        } else {
+            tracing::warn!(
+                "Gemini Interactions ({model}) HTTP {}: {}",
+                status.as_u16(),
+                &txt.chars().take(240).collect::<String>()
+            );
         }
     }
 
@@ -175,6 +315,7 @@ async fn request_gemini_raw_image(
 
     let mut models = vec![configured_model.clone()];
     for fallback in [
+        "gemini-3.1-flash-lite-image",
         "gemini-3.1-flash-image-preview",
         "gemini-2.5-flash-image",
     ] {
@@ -186,112 +327,64 @@ async fn request_gemini_raw_image(
     let is_interactions = api_url.to_lowercase().contains("/interactions");
 
     for model in &models {
-        if is_interactions {
-            // Variant 1: Gemini Interactions API response_format schema
-            let body_v1 = json!({
-                "model": model,
-                "input": prompt,
-                "response_format": {
-                    "type": "image",
-                    "mime_type": "image/jpeg",
-                    "aspect_ratio": aspect_ratio
-                }
-            });
+        let generate_content_url = if !is_interactions && api_url.contains(":generateContent") {
+            api_url.clone()
+        } else if !is_interactions && api_url.contains("/models") {
+            format!("{}/{}:generateContent", api_url.trim_end_matches('/'), model)
+        } else {
+            format!("{}/{}:generateContent", STANDARD_GEMINI_MODELS_BASE, model)
+        };
 
-            if let Ok(resp) = client
-                .post(api_url.as_str())
-                .header("x-goog-api-key", api_key.as_str())
-                .header("Content-Type", "application/json")
-                .json(&body_v1)
-                .send()
-                .await
+        // Note: Google's `gemini-3.1-flash-lite-image` docs mark `/v1beta/interactions`
+        // as unsupported and route image models through `:generateContent`.
+        if is_interactions && !model.contains("lite") {
+            if let Some(img) = call_gemini_interactions(
+                client,
+                api_key.as_str(),
+                api_url.as_str(),
+                model.as_str(),
+                prompt,
+            )
+            .await
             {
-                let status = resp.status();
-                let txt = resp.text().await.unwrap_or_default();
-                if status.is_success() {
-                    if let Ok(parsed) = serde_json::from_str::<Value>(&txt) {
-                        if let Some(img) = extract_image_from_gemini_json(&parsed) {
-                            return Some(img);
-                        }
-                    }
-                    tracing::warn!(
-                        "Gemini Interactions ({model}) succeeded without image bytes: {}",
-                        &txt.chars().take(240).collect::<String>()
-                    );
-                } else {
-                    tracing::warn!(
-                        "Gemini Interactions ({model}) v1 HTTP {}: {}",
-                        status.as_u16(),
-                        &txt.chars().take(240).collect::<String>()
-                    );
-                    // Variant 2: Interactions API with response_modalities if response_format rejected
-                    if status.as_u16() == 400 {
-                        let body_v2 = json!({
-                            "model": model,
-                            "input": prompt,
-                            "response_modalities": ["IMAGE"]
-                        });
-                        if let Ok(resp2) = client
-                            .post(api_url.as_str())
-                            .header("x-goog-api-key", api_key.as_str())
-                            .header("Content-Type", "application/json")
-                            .json(&body_v2)
-                            .send()
-                            .await
-                        {
-                            let st2 = resp2.status();
-                            let txt2 = resp2.text().await.unwrap_or_default();
-                            if st2.is_success() {
-                                if let Ok(parsed2) = serde_json::from_str::<Value>(&txt2) {
-                                    if let Some(img) = extract_image_from_gemini_json(&parsed2) {
-                                        return Some(img);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                return Some(img);
+            }
+            if let Some(img) = call_gemini_generate_content(
+                client,
+                api_key.as_str(),
+                generate_content_url.as_str(),
+                model.as_str(),
+                prompt,
+                aspect_ratio,
+            )
+            .await
+            {
+                return Some(img);
             }
         } else {
-            // Standard generateContent REST endpoint
-            let target_url = if api_url.contains(":generateContent") {
-                api_url.clone()
-            } else {
-                let clean = api_url.trim_end_matches('/');
-                format!("{clean}/{model}:generateContent")
-            };
-
-            let body_std = json!({
-                "contents": [{
-                    "parts": [{ "text": prompt }]
-                }],
-                "generationConfig": {
-                    "responseModalities": ["IMAGE"]
-                }
-            });
-
-            if let Ok(resp) = client
-                .post(target_url.as_str())
-                .header("x-goog-api-key", api_key.as_str())
-                .header("Content-Type", "application/json")
-                .json(&body_std)
-                .send()
-                .await
+            if let Some(img) = call_gemini_generate_content(
+                client,
+                api_key.as_str(),
+                generate_content_url.as_str(),
+                model.as_str(),
+                prompt,
+                aspect_ratio,
+            )
+            .await
             {
-                let status = resp.status();
-                let txt = resp.text().await.unwrap_or_default();
-                if status.is_success() {
-                    if let Ok(parsed) = serde_json::from_str::<Value>(&txt) {
-                        if let Some(img) = extract_image_from_gemini_json(&parsed) {
-                            return Some(img);
-                        }
-                    }
-                } else {
-                    tracing::warn!(
-                        "Gemini generateContent ({model}) HTTP {}: {}",
-                        status.as_u16(),
-                        &txt.chars().take(240).collect::<String>()
-                    );
+                return Some(img);
+            }
+            if is_interactions {
+                if let Some(img) = call_gemini_interactions(
+                    client,
+                    api_key.as_str(),
+                    api_url.as_str(),
+                    model.as_str(),
+                    prompt,
+                )
+                .await
+                {
+                    return Some(img);
                 }
             }
         }
