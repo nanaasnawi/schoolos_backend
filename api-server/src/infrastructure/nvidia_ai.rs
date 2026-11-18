@@ -1017,6 +1017,62 @@ struct RawArticleResponse {
     markdown_article: String,
 }
 
+fn extract_json_string_until_closing_quote(after_opening_quote: &str) -> String {
+    let mut out = String::with_capacity(after_opening_quote.len());
+    let mut chars = after_opening_quote.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('r') => {}
+                Some('t') => out.push('\t'),
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some('/') => out.push('/'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => break,
+            }
+        } else if c == '"' {
+            // Stop cleanly at the unescaped closing quote of this JSON string
+            break;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn sanitize_article_markdown(raw_md: &str) -> String {
+    let mut text = raw_md.replace("\r\n", "\n").trim().to_string();
+    // Strip accidental leaked sibling JSON keys if present at tail
+    for marker in ["\", \"glossary\"", "\",\"glossary\"", "\",\n  \"glossary\"", "\",\n\"glossary\""] {
+        if let Some(pos) = text.find(marker) {
+            text.truncate(pos);
+        }
+    }
+    text = text.trim_end_matches(|c| c == '}' || c == ',' || c == ' ').trim().to_string();
+
+    // Expand collapsed single-line Markdown tables (`| Col | | :--- | | Val |`) onto separate lines
+    let mut out_lines: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if line.contains("| :---") || line.contains("|:---") || line.contains("| ---") || line.contains("|---") {
+            let expanded = line.replace("| |", "|\n|");
+            for sub in expanded.lines() {
+                let s = sub.trim();
+                if !s.is_empty() {
+                    out_lines.push(s.to_string());
+                }
+            }
+        } else {
+            out_lines.push(line.to_string());
+        }
+    }
+    out_lines.join("\n")
+}
+
 fn parse_or_extract_article(
     raw: &str,
     default_topic: &str,
@@ -1027,7 +1083,7 @@ fn parse_or_extract_article(
         return GeneratedArticleDto {
             title: parsed.title,
             description: parsed.description,
-            article_content: parsed.markdown_article,
+            article_content: sanitize_article_markdown(&parsed.markdown_article),
         };
     }
 
@@ -1040,20 +1096,20 @@ fn parse_or_extract_article(
             return GeneratedArticleDto {
                 title: parsed.title,
                 description: parsed.description,
-                article_content: parsed.markdown_article,
+                article_content: sanitize_article_markdown(&parsed.markdown_article),
             };
         }
     }
 
-    // Fallback: Ekstraksi manual yang sangat aman
+    // Fallback: Ekstraksi manual aman dengan scanning escape-sequence JSON (anti bocor sibling field)
     let title = if let Some(idx) = raw.find("\"title\"") {
         let rest = &raw[idx + 7..];
         if let Some(start) = rest.find('"') {
-            let after_quote = &rest[start + 1..];
-            if let Some(end) = after_quote.find('"') {
-                after_quote[..end].to_string()
-            } else {
+            let extracted = extract_json_string_until_closing_quote(&rest[start + 1..]);
+            if extracted.trim().is_empty() {
                 default_topic.to_string()
+            } else {
+                extracted
             }
         } else {
             default_topic.to_string()
@@ -1065,9 +1121,9 @@ fn parse_or_extract_article(
     let description = if let Some(idx) = raw.find("\"description\"") {
         let rest = &raw[idx + 13..];
         if let Some(start) = rest.find('"') {
-            let after_quote = &rest[start + 1..];
-            if let Some(end) = after_quote.find('"') {
-                after_quote[..end].to_string()
+            let extracted = extract_json_string_until_closing_quote(&rest[start + 1..]);
+            if !extracted.trim().is_empty() {
+                extracted
             } else if is_english_subject(default_subject) {
                 format!("Educational learning article for {default_subject}")
             } else {
@@ -1084,23 +1140,10 @@ fn parse_or_extract_article(
         format!("Naskah artikel pembelajaran {default_subject}")
     };
 
-    let mut article_content = if let Some(idx) = raw.find("\"markdown_article\"") {
+    let raw_article = if let Some(idx) = raw.find("\"markdown_article\"") {
         let rest = &raw[idx + 18..];
         if let Some(start) = rest.find('"') {
-            let after_quote = &rest[start + 1..];
-            let content_str = if let Some(end) = after_quote.rfind('"') {
-                if end > 0 {
-                    &after_quote[..end]
-                } else {
-                    after_quote
-                }
-            } else {
-                after_quote
-            };
-            content_str
-                .replace("\\n", "\n")
-                .replace("\\\"", "\"")
-                .replace("\\\\", "\\")
+            extract_json_string_until_closing_quote(&rest[start + 1..])
         } else {
             raw.to_string()
         }
@@ -1108,15 +1151,10 @@ fn parse_or_extract_article(
         raw.to_string()
     };
 
-    if article_content.ends_with('}') {
-        article_content.pop();
-    }
-    let article_content = article_content.trim().to_string();
-
     GeneratedArticleDto {
         title,
         description,
-        article_content,
+        article_content: sanitize_article_markdown(&raw_article),
     }
 }
 
@@ -1134,7 +1172,8 @@ Write a complete LEARNING ARTICLE for {grade_level} students studying "{subject_
 
 {subject_guideline}
 
-Output MUST be strictly valid JSON using this exact schema (with EVERY field — title, description, and the entire markdown_article — written 100% in natural English, NO Indonesian words):
+Output MUST be strictly valid JSON with ONLY these 3 keys: "title", "description", "markdown_article" (do NOT add separate JSON keys like "glossary" outside "markdown_article"). If you include Markdown tables, put EACH row on its own line separated by \n.
+Every field — title, description, and the entire markdown_article — MUST be written 100% in natural English (NO Indonesian words):
 {{
   "title": "Engaging English Learning Article Title on {topic}",
   "description": "Concise 1-2 sentence introduction to this learning module.",
@@ -1150,7 +1189,7 @@ Tuliskan naskah ARTIKEL PEMBELAJARAN lengkap untuk jenjang {grade_level} mata pe
 
 {subject_guideline}
 
-Format output HARUS berupa JSON murni dengan skema:
+Format output HARUS berupa JSON murni dengan HANYA 3 key ini saja: "title", "description", dan "markdown_article" (DILARANG menambahkan key JSON tambahan seperti "glossary" di luar "markdown_article"; masukkan glosarium langsung di dalam markdown_article!). Jika membuat tabel perbandingan Markdown, tuliskan SETIAP baris tabel di baris baru yang dipisah \n (bukan digabung dalam satu baris).
 {{
   "title": "Judul Naskah Pembelajaran",
   "description": "Deskripsi pengantar singkat 1-2 kalimat.",
