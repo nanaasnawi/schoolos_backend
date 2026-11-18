@@ -401,18 +401,25 @@ pub struct GeneratedInfographicDto {
 }
 
 // ── Subject-Pedagogical Prompt Intelligence ──
+pub fn is_english_subject(subject: &str) -> bool {
+    let lower = subject.trim().to_lowercase();
+    lower.contains("inggris") || lower.contains("english")
+}
+
 pub fn build_subject_pedagogical_instructions(subject: &str, grade: &str) -> String {
+    if is_english_subject(subject) {
+        return format!(
+            r#"### MANDATORY SUBJECT RULE (ENGLISH LANGUAGE / {subject}):
+- EVERY part of the generated output — title, description, instructions, rubric, headings, summaries, reading passages, dialogues, questions, interactive game items, options (A, B, C, D), and explanations — MUST BE WRITTEN 100% IN NATURAL ENGLISH.
+- STRICTLY FORBIDDEN to use Indonesian words anywhere in student-facing content, headings, titles, descriptions, questions, or options.
+- Calibrate vocabulary and grammar complexity appropriately for {grade}.
+- Emphasize authentic communicative English skills (Reading Comprehension, Grammar in Context, Vocabulary Building, and relevant text types such as Narrative, Descriptive, Recount, Report, or Procedure)."#
+        );
+    }
+
     let lower_subject = subject.trim().to_lowercase();
 
-    let specific_rule = if lower_subject.contains("inggris") || lower_subject.contains("english") {
-        format!(
-            r#"### ATURAN WAJIB MAPEL (BAHASA INGGRIS / ENGLISH):
-- Seluruh konten: judul, deskripsi, naskah bacaan (reading passage/dialogue), butir soal, penugasan, dan SEMUA opsi jawaban (A, B, C, D) WAJIB DITULIS DALAM BAHASA INGGRIS (Full English Language).
-- DILARANG KERAS menggunakan bahasa Indonesia untuk teks bacaan, butir tugas, atau opsi soal Bahasa Inggris.
-- Sesuaikan tingkat kosakata (vocabulary) dan tata bahasa (grammar) dengan tingkat siswa {grade}.
-- Cantumkan aspek komunikatif autentik (misal: Reading Comprehension, Grammar in Context, Vocabulary Building, Text Types seperti Narrative, Descriptive, Recount, Report, Procedure)."#
-        )
-    } else if lower_subject.contains("matematika")
+    let specific_rule = if lower_subject.contains("matematika")
         || lower_subject.contains("math")
         || lower_subject.contains("aljabar")
         || lower_subject.contains("geometri")
@@ -699,9 +706,52 @@ pub async fn generate_infographic(
     subject_name: &str,
     include_images: bool,
 ) -> Result<GeneratedInfographicDto, ApplicationError> {
+    let is_english = is_english_subject(subject_name);
     let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
-    let prompt = format!(
-        r#"Anda adalah pendidik spesialis penyusun media pembelajaran visual Kurikulum Merdeka di Indonesia.
+    let prompt = if is_english {
+        format!(
+            r#"You are an educational visual media designer creating an INTERACTIVE INFOGRAPHIC module for {grade_level} students studying "{subject_name}" on the topic: "{topic}".
+
+{subject_guideline}
+
+Output MUST be strictly valid JSON using this exact schema (with EVERY value — title, description, headline, and summary — written 100% in natural English, NO Indonesian words):
+{{
+  "title": "Engaging Infographic Title on {topic}",
+  "description": "Concise 1-2 sentence overview of this English visual learning module.",
+  "cards": [
+    {{
+      "step_number": 1,
+      "headline": "Introduction & Core Vocabulary",
+      "summary": "Clear 2-3 sentence student-friendly explanation in natural English with relevant examples.",
+      "image_prompt": "Detailed wordless visual scene in English describing ONLY physical objects, characters, actions, and setting (strictly NO text, NO words, NO letters, NO posters, NO signs, NO captions, pure clean illustration)"
+    }},
+    {{
+      "step_number": 2,
+      "headline": "Key Concepts & Expressions",
+      "summary": "Clear 2-3 sentence student-friendly explanation in natural English showing sentence patterns or grammar in context.",
+      "image_prompt": "Detailed wordless visual scene in English describing ONLY physical objects, characters, actions, and setting (strictly NO text, NO words, NO letters, NO labels, pure clean illustration)"
+    }},
+    {{
+      "step_number": 3,
+      "headline": "Real-Life Usage & Dialogue",
+      "summary": "Clear 2-3 sentence student-friendly explanation in natural English showing practical usage.",
+      "image_prompt": "Detailed wordless visual scene in English describing ONLY physical objects, characters, actions, and setting (strictly NO text, NO words, NO letters, NO labels, pure clean illustration)"
+    }},
+    {{
+      "step_number": 4,
+      "headline": "Conclusion & Did You Know?",
+      "summary": "Interesting insight and key takeaway written 100% in English.",
+      "image_prompt": "Detailed wordless visual scene in English describing ONLY physical objects, characters, actions, and setting (strictly NO text, NO words, NO letters, NO labels, pure clean illustration)"
+    }}
+  ]
+}}
+
+SPECIAL RULE for image_prompt: Describe ONLY concrete visual objects, characters, expressions, and environment in English. NEVER ask for posters, chalkboards with writing, banners, speech bubbles, labels, or any text inside the illustration.
+Output ONLY pure JSON with no leading or trailing prose."#
+        )
+    } else {
+        format!(
+            r#"Anda adalah pendidik spesialis penyusun media pembelajaran visual Kurikulum Merdeka di Indonesia.
 Buatkan materi INFOGRAFIS INTERAKTIF untuk siswa jenjang {grade_level} pada mata pelajaran {subject_name} dengan topik: "{topic}".
 
 {subject_guideline}
@@ -740,12 +790,19 @@ Format output HARUS berupa JSON murni dengan skema persis:
 
 ATURAN KHUSUS image_prompt: Deskripsikan HANYA objek visual nyata, karakter, ekspresi, dan suasana alam/ruang secara konkret dalam bahasa Inggris. DILARANG meminta poster, papan tulis bertulisan, spanduk, balon kata, label, atau teks apa pun di dalam gambar agar ilustrasi bersih (no text, no typography, no words, no letters, pure clean illustration).
 Output HANYA JSON tanpa teks pembuka/penutup."#
-    );
+        )
+    };
+
+    let system_prompt = if is_english {
+        "You are an English curriculum visual designer creating structured English infographic cards in strict JSON. Every title, description, headline, and summary MUST be written 100% in natural English (zero Indonesian). For every image_prompt field, write a concrete wordless English visual scene with no text, no typography, no words, no letters, and no labels."
+    } else {
+        "You are an educational designer creating structured infographic cards in strict JSON, strictly respecting the subject matter rules. For every image_prompt field, write a concrete wordless English visual scene with no text, no typography, no words, no letters, and no labels."
+    };
 
     let messages = vec![
         ChatMessage {
             role: "system",
-            content: "You are an educational designer creating structured infographic cards in strict JSON, strictly respecting the subject matter rules. For every image_prompt field, write a concrete wordless English visual scene with no text, no typography, no words, no letters, and no labels.",
+            content: system_prompt,
         },
         ChatMessage {
             role: "user",
@@ -839,30 +896,56 @@ pub async fn fallback_generate_infographic(
     include_images: bool,
 ) -> GeneratedInfographicDto {
     let now_ts = chrono::Utc::now().timestamp_millis();
+    let is_english = is_english_subject(subject_name);
     let mut blocks = Vec::new();
 
-    let cards = [
-        (
-            1,
-            format!("Pengenalan {topic}"),
-            format!("Mempelajari dasar-dasar {topic} pada mata pelajaran {subject_name} ({grade_level}) guna membangun pemahaman konseptual yang kokoh."),
-        ),
-        (
-            2,
-            "Prinsip Utama & Karakteristik".to_string(),
-            format!("Konsep {topic} memiliki karakteristik spesifik yang menghubungkan teori dasar dengan fenomena yang terjadi di lingkungan sekitar."),
-        ),
-        (
-            3,
-            "Aplikasi & Penerapan Nyata".to_string(),
-            format!("Dalam kehidupan sehari-hari, prinsip {topic} diterapkan untuk menyelesaikan berbagai tantangan dan masalah kontekstual secara analitis."),
-        ),
-        (
-            4,
-            "Kesimpulan & Refleksi Belajar".to_string(),
-            format!("Penguasaan materi {topic} membentuk kecakapan bernalar kritis sesuai capaian pembelajaran Kurikulum Merdeka."),
-        ),
-    ];
+    let cards = if is_english {
+        [
+            (
+                1,
+                format!("Introduction to {topic}"),
+                format!("Learning the fundamentals and core vocabulary of {topic} in {subject_name} ({grade_level}) to build confident English understanding."),
+            ),
+            (
+                2,
+                "Core Concepts & Language Patterns".to_string(),
+                format!("Key concepts in {topic} connect essential vocabulary, sentence structures, and everyday communication contexts."),
+            ),
+            (
+                3,
+                "Real-Life Usage & Examples".to_string(),
+                format!("In daily communication, expressions and examples around {topic} help students describe situations, share ideas, and interact clearly in English."),
+            ),
+            (
+                4,
+                "Summary & Did You Know?".to_string(),
+                format!("Mastering {topic} strengthens reading comprehension, vocabulary range, and confident English communication."),
+            ),
+        ]
+    } else {
+        [
+            (
+                1,
+                format!("Pengenalan {topic}"),
+                format!("Mempelajari dasar-dasar {topic} pada mata pelajaran {subject_name} ({grade_level}) guna membangun pemahaman konseptual yang kokoh."),
+            ),
+            (
+                2,
+                "Prinsip Utama & Karakteristik".to_string(),
+                format!("Konsep {topic} memiliki karakteristik spesifik yang menghubungkan teori dasar dengan fenomena yang terjadi di lingkungan sekitar."),
+            ),
+            (
+                3,
+                "Aplikasi & Penerapan Nyata".to_string(),
+                format!("Dalam kehidupan sehari-hari, prinsip {topic} diterapkan untuk menyelesaikan berbagai tantangan dan masalah kontekstual secara analitis."),
+            ),
+            (
+                4,
+                "Kesimpulan & Refleksi Belajar".to_string(),
+                format!("Penguasaan materi {topic} membentuk kecakapan bernalar kritis sesuai capaian pembelajaran Kurikulum Merdeka."),
+            ),
+        ]
+    };
 
     let card_prompts: Vec<String> = cards
         .iter()
@@ -901,8 +984,16 @@ pub async fn fallback_generate_infographic(
     }
 
     GeneratedInfographicDto {
-        title: format!("Infografis Modul: {topic}"),
-        description: format!("Media pembelajaran visual Kurikulum Merdeka jenjang {grade_level} ({subject_name})."),
+        title: if is_english {
+            format!("Module Infographic: {topic}")
+        } else {
+            format!("Infografis Modul: {topic}")
+        },
+        description: if is_english {
+            format!("Interactive English visual learning module for {grade_level} ({subject_name}).")
+        } else {
+            format!("Media pembelajaran visual Kurikulum Merdeka jenjang {grade_level} ({subject_name}).")
+        },
         blocks,
         image_warning,
     }
@@ -977,12 +1068,18 @@ fn parse_or_extract_article(
             let after_quote = &rest[start + 1..];
             if let Some(end) = after_quote.find('"') {
                 after_quote[..end].to_string()
+            } else if is_english_subject(default_subject) {
+                format!("Educational learning article for {default_subject}")
             } else {
                 format!("Naskah artikel pembelajaran {default_subject}")
             }
+        } else if is_english_subject(default_subject) {
+            format!("Educational learning article for {default_subject}")
         } else {
             format!("Naskah artikel pembelajaran {default_subject}")
         }
+    } else if is_english_subject(default_subject) {
+        format!("Educational learning article for {default_subject}")
     } else {
         format!("Naskah artikel pembelajaran {default_subject}")
     };
@@ -1028,9 +1125,27 @@ pub async fn generate_article(
     grade_level: &str,
     subject_name: &str,
 ) -> Result<GeneratedArticleDto, ApplicationError> {
+    let is_english = is_english_subject(subject_name);
     let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
-    let prompt = format!(
-        r#"Anda adalah guru ahli Kurikulum Merdeka di Indonesia.
+    let prompt = if is_english {
+        format!(
+            r#"You are an expert English curriculum author.
+Write a complete LEARNING ARTICLE for {grade_level} students studying "{subject_name}" on the topic: "{topic}".
+
+{subject_guideline}
+
+Output MUST be strictly valid JSON using this exact schema (with EVERY field — title, description, and the entire markdown_article — written 100% in natural English, NO Indonesian words):
+{{
+  "title": "Engaging English Learning Article Title on {topic}",
+  "description": "Concise 1-2 sentence introduction to this learning module.",
+  "markdown_article": "Full structured learning article in Markdown:\n# Title\n## 1. Introduction & Warm-Up\n## 2. Core Concepts & Language Focus (include clear rules, examples, or an authentic English reading passage/dialogue)\n## 3. Contextual Examples & Guided Practice\n## 4. Key Takeaways\n## 5. Vocabulary Glossary"
+}}
+
+Make sure the writing is thorough, clear, well-escaped valid JSON with properly closed quotes and braces. Output ONLY JSON with no other text."#
+        )
+    } else {
+        format!(
+            r#"Anda adalah guru ahli Kurikulum Merdeka di Indonesia.
 Tuliskan naskah ARTIKEL PEMBELAJARAN lengkap untuk jenjang {grade_level} mata pelajaran {subject_name} dengan topik: "{topic}".
 
 {subject_guideline}
@@ -1043,12 +1158,19 @@ Format output HARUS berupa JSON murni dengan skema:
 }}
 
 Pastikan teks padat, mendalam, format JSON valid dengan escape karakter benar, dan selalu ditutup sempurna. Output HANYA JSON tanpa teks lain."#
-    );
+        )
+    };
+
+    let system_prompt = if is_english {
+        "You are an expert English educational content writer creating deep, engaging learning articles in strict JSON. Write 100% in natural English with zero Indonesian."
+    } else {
+        "You are an expert educational content writer creating deep, subject-specific learning articles in strict JSON."
+    };
 
     let messages = vec![
         ChatMessage {
             role: "system",
-            content: "You are an expert educational content writer creating deep, subject-specific learning articles in strict JSON.",
+            content: system_prompt,
         },
         ChatMessage {
             role: "user",
@@ -1073,6 +1195,51 @@ pub fn fallback_generate_article(
     grade_level: &str,
     subject_name: &str,
 ) -> GeneratedArticleDto {
+    if is_english_subject(subject_name) {
+        let article_md = format!(
+            r#"# Learning Module: {topic}
+**Subject:** {subject_name} | **Grade Level:** {grade_level} | **Curriculum:** Kurikulum Merdeka
+
+---
+
+## 1. Introduction & Warm-Up
+Have you ever noticed how **{topic}** appears in everyday English conversations and reading texts? Understanding this topic helps students build stronger reading comprehension, vocabulary range, and confident communication skills in real-life contexts for {grade_level}.
+
+## 2. Core Concepts & Language Focus
+In studying **{topic}** ({subject_name}), focus on these three essential pillars:
+1. **Key Vocabulary & Expressions:** Recognize important words, phrases, and expressions related to {topic} accurately in context.
+2. **Sentence Structure & Grammar Patterns:** Observe how sentences around {topic} are constructed clearly and naturally in spoken and written English.
+3. **Communicative Purpose:** Understand how speakers and writers use {topic} to share ideas, describe people or activities, and ask or answer questions.
+
+> 💡 **Learning Tip:** Meaningful English mastery comes from understanding how words and expressions work in real communication, not just memorizing isolated lists.
+
+## 3. Contextual Examples & Guided Analysis
+Apply your understanding through a structured approach:
+- **Context:** Reading a short dialogue or descriptive text focused on {topic}.
+- **Step-by-Step Practice:**
+  1. *Observe:* Identify the key words, main idea, and supporting details about {topic}.
+  2. *Connect:* Relate the expressions to real situations in your daily routine at home or school.
+  3. *Produce:* Write or speak two to three clear English sentences using the expressions you just learned.
+
+## 4. Key Takeaways
+- **{topic}** is a core communicative topic in {subject_name} for {grade_level}.
+- Combining vocabulary recognition with authentic sentence practice leads to lasting fluency.
+- Reviewing examples and practicing aloud strengthens both accuracy and confidence.
+
+## 5. Key Vocabulary & Self-Reflection
+- **{topic}:** The central theme integrating vocabulary, grammar in context, and everyday English communication.
+- **Contextual Clue:** Information in a surrounding sentence or passage that helps clarify an unfamiliar word's meaning.
+- **Self-Reflection:** Which new English words or expressions from "{topic}" can you start using in a conversation today?
+"#
+        );
+
+        return GeneratedArticleDto {
+            title: format!("Learning Module: {topic}"),
+            description: format!("Structured English learning module for {grade_level} ({subject_name})."),
+            article_content: article_md,
+        };
+    }
+
     let article_md = format!(
         r#"# Modul Pembelajaran: {topic}
 **Mata Pelajaran:** {subject_name} | **Jenjang:** {grade_level} | **Standar:** Kurikulum Merdeka
@@ -1320,6 +1487,7 @@ pub async fn generate_assignment(
     difficulty: &str,
     include_images: bool,
 ) -> Result<GeneratedAssignmentDto, ApplicationError> {
+    let is_english = is_english_subject(subject_name);
     let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
     let fmt_upper = assignment_format.unwrap_or("STRUCTURED_QUESTIONS").to_uppercase();
     let is_homework = fmt_upper == "HOMEWORK_PR";
@@ -1347,7 +1515,59 @@ pub async fn generate_assignment(
         effective_num_mcq + effective_num_essay + num_games
     };
 
-    let game_schema_hint = r#"
+    let game_schema_hint = if is_english {
+        r#"
+MANDATORY JSON EXAMPLES FOR THE 3 INTERACTIVE GAME TYPES (WRITE EVERY ITEM 100% IN ENGLISH):
+1) Type 'MATCHING' (4 pairs):
+{{
+  "id": "g-match-1",
+  "question_text": "Match each English word, expression, or concept below with its accurate meaning:",
+  "question_type": "MATCHING",
+  "points": 20,
+  "choices": [],
+  "interaction_config": {{
+    "pairs": [
+      {{ "id": "p1", "left": "Term A", "right": "Clear English definition A" }},
+      {{ "id": "p2", "left": "Term B", "right": "Clear English definition B" }},
+      {{ "id": "p3", "left": "Term C", "right": "Clear English definition C" }},
+      {{ "id": "p4", "left": "Term D", "right": "Clear English definition D" }}
+    ]
+  }},
+  "explanation": "Short English explanation..."
+}}
+2) Type 'ORDERING' (4 steps in correct chronological/logical order from first to last):
+{{
+  "id": "g-order-1",
+  "question_text": "Arrange the following steps or dialogue lines into the correct order:",
+  "question_type": "ORDERING",
+  "points": 20,
+  "choices": [],
+  "interaction_config": {{
+    "items": [
+      {{ "id": "o1", "text": "Correct first step in English..." }},
+      {{ "id": "o2", "text": "Correct second step in English..." }},
+      {{ "id": "o3", "text": "Correct third step in English..." }},
+      {{ "id": "o4", "text": "Correct fourth step in English..." }}
+    ]
+  }},
+  "explanation": "Reason for the sequence..."
+}}
+3) Type 'FILL_BLANK' (Cloze sentence with {{1}}, {{2}} placeholders + distractors):
+{{
+  "id": "g-fill-1",
+  "question_text": "Complete the blanks in the English sentence using the correct words from the word bank:",
+  "question_type": "FILL_BLANK",
+  "points": 20,
+  "choices": [],
+  "interaction_config": {{
+    "template": "Complete English sentence with blank {{1}} and continuation {{2}}.",
+    "blanks": ["answer_1", "answer_2"],
+    "distractors": ["distractor_1", "distractor_2"]
+  }},
+  "explanation": "Brief grammar or vocabulary explanation..."
+}}"#
+    } else {
+        r#"
 CONTOH FORMAT WAJIB UNTUK 3 TIPE GAME INTERAKTIF:
 1) Tipe 'MATCHING' (Menjodohkan 4 pasangan):
 {{
@@ -1396,9 +1616,48 @@ CONTOH FORMAT WAJIB UNTUK 3 TIPE GAME INTERAKTIF:
     "distractors": ["pengecoh_1", "pengecoh_2"]
   }},
   "explanation": "Penjelasan jawaban..."
-}}"#;
+}}"#
+    };
 
-    let slot_instructions = if is_homework {
+    let slot_instructions = if is_english {
+        if is_homework {
+            format!(
+                "Array 'questions' MUST contain EXACTLY {effective_num_essay} ESSAY / WORKSHEET items in natural English.\n- Items 1 to {effective_num_essay}: Type 'ESSAY' (writing, reading analysis, or contextual English task)."
+            )
+        } else if is_pure_game {
+            format!(
+                "Array 'questions' MUST contain EXACTLY 3 INTERACTIVE GAME TASKS IN ENGLISH (NO MULTIPLE_CHOICE & NO ESSAY):\n\
+                - Item 1: question_type = 'MATCHING' (4 pairs in English).\n\
+                - Item 2: question_type = 'ORDERING' (4 ordered steps/lines in English).\n\
+                - Item 3: question_type = 'FILL_BLANK' (template in English containing {{1}} and {{2}}, 2 blanks, 2 distractors).\n\
+                - STRICTLY FORBIDDEN to include 'ESSAY' or 'MULTIPLE_CHOICE' items!\n\
+                {game_schema_hint}"
+            )
+        } else if is_game_mixed {
+            format!(
+                "Array 'questions' MUST contain EXACTLY {total_questions} AUTO-GRADED ENGLISH QUESTIONS (NO ESSAY):\n\
+                - {effective_num_mcq} 'MULTIPLE_CHOICE' items (4 options, strictly 1 is_correct: true)\n\
+                - 1 'MATCHING' item (4 pairs in English)\n\
+                - 1 'ORDERING' item (4 ordered items in English)\n\
+                - 1 'FILL_BLANK' item (English template containing {{1}} and {{2}}, 2 blanks, 2 distractors)\n\
+                - STRICTLY FORBIDDEN to include 'ESSAY' items in this game format!\n\
+                {game_schema_hint}"
+            )
+        } else if effective_num_mcq > 0 && effective_num_essay == 0 {
+            format!(
+                "Array 'questions' MUST contain EXACTLY {effective_num_mcq} MULTIPLE_CHOICE items ('question_type': 'MULTIPLE_CHOICE') in natural English with 4 choices and strictly 1 true.\nDo NOT include 'ESSAY' items! Exact length = {effective_num_mcq}."
+            )
+        } else if effective_num_mcq == 0 && effective_num_essay > 0 {
+            format!(
+                "Array 'questions' MUST contain EXACTLY {effective_num_essay} ESSAY items ('question_type': 'ESSAY') in natural English with clear English scoring rubrics.\nDo NOT include 'MULTIPLE_CHOICE' items! Exact length = {effective_num_essay}."
+            )
+        } else {
+            format!(
+                "Array 'questions' MUST contain EXACTLY {total_questions} ENGLISH QUESTIONS:\n- Items 1 to {effective_num_mcq}: MULTIPLE_CHOICE ('question_type': 'MULTIPLE_CHOICE') with 4 English choices.\n- Items {essay_start} to {total_questions}: ESSAY ('question_type': 'ESSAY') with English prompts and rubrics.",
+                essay_start = effective_num_mcq + 1
+            )
+        }
+    } else if is_homework {
         format!(
             "Array 'questions' WAJIB BERISI TEPAT {effective_num_essay} BUTIR SOAL ESSAY / LEMBAR KERJA.\n- Butir 1 sampai {effective_num_essay}: Tipe 'ESSAY' (analitis / tugas observasi kontekstual)."
         )
@@ -1436,8 +1695,68 @@ CONTOH FORMAT WAJIB UNTUK 3 TIPE GAME INTERAKTIF:
         )
     };
 
-    let prompt = format!(
-        r#"Anda adalah pengembang asesmen resmi Kurikulum Merdeka Indonesia.
+    let assignment_type_val = if is_homework {
+        "HOMEWORK_PR"
+    } else {
+        "STRUCTURED_QUESTIONS"
+    };
+
+    let prompt = if is_english {
+        format!(
+            r#"You are an expert English curriculum assessment designer.
+Create a complete English student assignment package for subject: "{subject_name}", topic: "{topic}", grade level: "{grade_level}", difficulty: "{difficulty}" (Batch ID: {now_ts}).
+
+{subject_guideline}
+
+STRUCTURE AND QUESTION COUNT RULES:
+{slot_instructions}
+
+Output MUST be strictly valid pure JSON using this schema (EVERY text field MUST be 100% in natural English, NO Indonesian words):
+{{
+  "title": "English Assignment: {topic}",
+  "instructions": "Clear step-by-step instructions in English...",
+  "assignment_type": "{assignment_type_val}",
+  "rubric": "Grading Rubric: 0-100 scale based on accuracy, comprehension, and completeness.",
+  "tasks": [
+    "Task 1: Clear measurable English task...",
+    "Task 2: Contextual English communication practice..."
+  ],
+  "questions": [
+    {{
+      "id": "q1",
+      "question_text": "Multiple-choice question stem written in English...",
+      "question_type": "MULTIPLE_CHOICE",
+      "points": 10,
+      "choices": [
+        {{ "choice_text": "Option A in English", "is_correct": true }},
+        {{ "choice_text": "Option B in English", "is_correct": false }},
+        {{ "choice_text": "Option C in English", "is_correct": false }},
+        {{ "choice_text": "Option D in English", "is_correct": false }}
+      ],
+      "explanation": "Concise English explanation of the answer key..."
+    }},
+    {{
+      "id": "q2",
+      "question_text": "Analytical or communicative English essay prompt...",
+      "question_type": "ESSAY",
+      "points": 20,
+      "choices": [],
+      "explanation": "English essay grading rubric..."
+    }}
+  ]
+}}
+
+STRICT REQUIREMENTS:
+- Write 100% in natural English appropriate for {grade_level}. ZERO Indonesian words.
+- 'question_text' must contain ONLY the question stem (no A/B/C/D options inside 'question_text').
+- 'choice_text' must NOT include prefix labels like 'A.', 'B.', 'C.', 'D.'.
+- 'questions' length MUST be EXACTLY {total_questions}.
+- 'rubric' and 'instructions' MUST be single plain strings (NOT nested JSON objects).
+- Output ONLY pure JSON with escaped newlines (\n) inside strings."#
+        )
+    } else {
+        format!(
+            r#"Anda adalah pengembang asesmen resmi Kurikulum Merdeka Indonesia.
 Buatkan paket penugasan siswa terstruktur untuk mata pelajaran: "{subject_name}", topik: "{topic}", jenjang: "{grade_level}", tingkat kesulitan: "{difficulty}" (Batch ID: {now_ts}).
 
 {subject_guideline}
@@ -1491,18 +1810,20 @@ PENTING & WAJIB:
 - Array 'questions' HARUS berisi TEPAT {total_questions} butir soal sesuai instruksi komposisi di atas. Jangan berhenti menulis sebelum mencapai {total_questions} butir!
 - Nilai 'rubric' dan 'instructions' HARUS berupa STRING TEKS tunggal (BUKAN JSON object/map).
 - Output HANYA JSON tanpa teks lain.
-- Pastikan seluruh string multi-baris menggunakan escape sequence \n dan BUKAN karakter raw newline."#,
-        assignment_type_val = if is_homework {
-            "HOMEWORK_PR"
-        } else {
-            "STRUCTURED_QUESTIONS"
-        }
-    );
+- Pastikan seluruh string multi-baris menggunakan escape sequence \n dan BUKAN karakter raw newline."#
+        )
+    };
+
+    let system_prompt = if is_english {
+        "You are an expert English curriculum assessor creating 100% English student assignments and interactive learning games in strict JSON with zero Indonesian."
+    } else {
+        "You are an educational assessor creating student assignments strictly adhering to Indonesian Kurikulum Merdeka in strict JSON."
+    };
 
     let messages = vec![
         ChatMessage {
             role: "system",
-            content: "You are an educational assessor creating student assignments strictly adhering to Indonesian Kurikulum Merdeka in strict JSON.",
+            content: system_prompt,
         },
         ChatMessage {
             role: "user",
@@ -1565,14 +1886,32 @@ PENTING & WAJIB:
         .title
         .map(|v| json_value_to_string(&v))
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("Tugas Siswa: {topic}"));
+        .unwrap_or_else(|| {
+            if is_english {
+                format!("English Assignment: {topic}")
+            } else {
+                format!("Tugas Siswa: {topic}")
+            }
+        });
     let instructions_str = parsed
         .instructions
         .map(|v| json_value_to_string(&v))
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "Kerjakan penugasan berikut dengan seksama dan teliti.".to_string());
+        .unwrap_or_else(|| {
+            if is_english {
+                "Complete each task and question below carefully and thoughtfully in English.".to_string()
+            } else {
+                "Kerjakan penugasan berikut dengan seksama dan teliti.".to_string()
+            }
+        });
     let rubric_str = parsed.rubric.map(|v| json_value_to_string(&v)).filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "Rubrik Penilaian: Skala Skor 0 - 100 berdasarkan ketepatan konsep dan kelengkapan analisis.".to_string());
+        .unwrap_or_else(|| {
+            if is_english {
+                "Grading Rubric: 0 - 100 scale based on English comprehension, grammatical accuracy, and completeness.".to_string()
+            } else {
+                "Rubrik Penilaian: Skala Skor 0 - 100 berdasarkan ketepatan konsep dan kelengkapan analisis.".to_string()
+            }
+        });
 
     let tasks_vec: Vec<String> = match parsed.tasks {
         Some(serde_json::Value::Array(arr)) => {
@@ -1743,35 +2082,39 @@ PENTING & WAJIB:
             questions = final_games;
         } else {
             // Pad missing MCQs if AI returned fewer than requested
-            while final_mcqs.len() < effective_num_mcq {
-                let idx = final_mcqs.len() + 1;
-                final_mcqs.push(AssignmentQuestionDto {
-                    id: format!("asg-mcq-pad-{idx}-{now_ts}"),
-                    question_text: format!("Pertanyaan pemahaman konsep {subject_name} butir ke-{idx} terkait materi {topic}:"),
-                    question_type: "MULTIPLE_CHOICE".to_string(),
-                    points: 10,
-                    image_url: None,
-                    choices: vec![
-                        CbtQuestionChoiceDto {
-                            choice_text: format!("Konsep esensial terapan {topic} secara tepat dan sahih"),
-                            is_correct: true,
-                        },
-                        CbtQuestionChoiceDto {
-                            choice_text: "Pernyataan alternatif yang kurang spesifik".to_string(),
-                            is_correct: false,
-                        },
-                        CbtQuestionChoiceDto {
-                            choice_text: "Distraktor teoritis sekunder".to_string(),
-                            is_correct: false,
-                        },
-                        CbtQuestionChoiceDto {
-                            choice_text: "Opsi yang bertentangan dengan prinsip materi".to_string(),
-                            is_correct: false,
-                        },
-                    ],
-                    interaction_config: None,
-                    explanation: format!("Kunci A merupakan konsep mendasar pada materi {topic} ({subject_name})."),
-                });
+            if final_mcqs.len() < effective_num_mcq {
+                let needed = effective_num_mcq - final_mcqs.len();
+                let pad_templates = generate_pedagogical_question_templates(
+                    subject_name,
+                    topic,
+                    grade_level,
+                    difficulty,
+                    effective_num_mcq,
+                );
+                let start_idx = final_mcqs.len();
+                for offset in 0..needed {
+                    let tpl = &pad_templates[(start_idx + offset) % pad_templates.len()];
+                    let idx = final_mcqs.len() + 1;
+                    let choices = tpl
+                        .1
+                        .iter()
+                        .enumerate()
+                        .map(|(c_idx, text)| CbtQuestionChoiceDto {
+                            choice_text: text.clone(),
+                            is_correct: c_idx == tpl.2,
+                        })
+                        .collect();
+                    final_mcqs.push(AssignmentQuestionDto {
+                        id: format!("asg-mcq-pad-{idx}-{now_ts}"),
+                        question_text: tpl.0.clone(),
+                        question_type: "MULTIPLE_CHOICE".to_string(),
+                        points: 10,
+                        image_url: None,
+                        choices,
+                        interaction_config: None,
+                        explanation: tpl.3.clone(),
+                    });
+                }
             }
 
             // Pad missing Essays if AI returned fewer than requested (always 0 for game formats)
@@ -1779,13 +2122,21 @@ PENTING & WAJIB:
                 let idx = final_essays.len() + 1;
                 final_essays.push(AssignmentQuestionDto {
                     id: format!("asg-essay-pad-{idx}-{now_ts}"),
-                    question_text: format!("Jelaskan secara mendalam analisis dan penerapan konsep {topic} dalam konteks nyata (Aspek Evaluasi {idx}):"),
+                    question_text: if is_english {
+                        format!("Explain your understanding and practical examples of '{topic}' in {subject_name} ({grade_level}) (Part {idx}):")
+                    } else {
+                        format!("Jelaskan secara mendalam analisis dan penerapan konsep {topic} dalam konteks nyata (Aspek Evaluasi {idx}):")
+                    },
                     question_type: "ESSAY".to_string(),
                     points: 20,
                     image_url: None,
                     choices: Vec::new(),
                     interaction_config: None,
-                    explanation: format!("Rubrik: Skor maksimal jika siswa mampu menjabarkan konsep {topic} disertai contoh konkret dan argumentasi logis yang runtut."),
+                    explanation: if is_english {
+                        format!("Rubric: Full credit is awarded for accurate English explanations of {topic}, clear supporting examples, and coherent reasoning.")
+                    } else {
+                        format!("Rubrik: Skor maksimal jika siswa mampu menjabarkan konsep {topic} disertai contoh konkret dan argumentasi logis yang runtut.")
+                    },
                 });
             }
 
@@ -1801,13 +2152,21 @@ PENTING & WAJIB:
             let idx = questions.len() + 1;
             questions.push(AssignmentQuestionDto {
                 id: format!("asg-hw-pad-{idx}-{now_ts}"),
-                question_text: format!("Tugas Mandiri {idx}: Lakukan pengamatan dan susun laporan terstruktur mengenai {topic} sesuai panduan modul {subject_name}."),
+                question_text: if is_english {
+                    format!("Independent Task {idx}: Observe real-life examples and write a structured report in English about '{topic}' for {subject_name}.")
+                } else {
+                    format!("Tugas Mandiri {idx}: Lakukan pengamatan dan susun laporan terstruktur mengenai {topic} sesuai panduan modul {subject_name}.")
+                },
                 question_type: "ESSAY".to_string(),
                 points: (100 / (effective_num_essay.max(1) as i32)).max(10),
                 image_url: None,
                 choices: Vec::new(),
                 interaction_config: None,
-                explanation: format!("Rubrik: Penilaian berbasis kelengkapan laporan, orisinalitas analisis, dan ketepatan kaidah {subject_name}."),
+                explanation: if is_english {
+                    format!("Rubric: Assessment is based on completeness, original analysis, and accurate English usage in {subject_name}.")
+                } else {
+                    format!("Rubrik: Penilaian berbasis kelengkapan laporan, orisinalitas analisis, dan ketepatan kaidah {subject_name}.")
+                },
             });
         }
         questions.truncate(effective_num_essay);
@@ -1830,6 +2189,26 @@ PENTING & WAJIB:
 }
 
 fn build_fallback_matching_question(topic: &str, subject: &str, ts: i64) -> AssignmentQuestionDto {
+    if is_english_subject(subject) {
+        return AssignmentQuestionDto {
+            id: format!("asg-match-fb-{ts}"),
+            question_text: format!("Match each key concept of '{topic}' ({subject}) with its accurate explanation:"),
+            question_type: "MATCHING".to_string(),
+            points: 20,
+            image_url: None,
+            choices: Vec::new(),
+            interaction_config: Some(serde_json::json!({
+                "pairs": [
+                    { "id": "p1", "left": format!("Core Concept of {topic}"), "right": "Main foundation and key vocabulary of this English topic" },
+                    { "id": "p2", "left": "Contextual Meaning", "right": "Understanding words and phrases through real situations" },
+                    { "id": "p3", "left": "Sentence Structure", "right": "Organizing expressions with accurate English grammar" },
+                    { "id": "p4", "left": "Real-Life Practice", "right": "Using the expressions in everyday speaking and writing" }
+                ]
+            })),
+            explanation: format!("Each pair represents a core learning stage for mastering {topic} in English."),
+        };
+    }
+
     AssignmentQuestionDto {
         id: format!("asg-match-fb-{ts}"),
         question_text: format!("Jodohkan konsep {topic} ({subject}) berikut dengan penjelasan yang paling sesuai:"),
@@ -1850,6 +2229,26 @@ fn build_fallback_matching_question(topic: &str, subject: &str, ts: i64) -> Assi
 }
 
 fn build_fallback_ordering_question(topic: &str, subject: &str, ts: i64) -> AssignmentQuestionDto {
+    if is_english_subject(subject) {
+        return AssignmentQuestionDto {
+            id: format!("asg-order-fb-{ts}"),
+            question_text: format!("Arrange the steps to learn and practice '{topic}' ({subject}) from first to last:"),
+            question_type: "ORDERING".to_string(),
+            points: 20,
+            image_url: None,
+            choices: Vec::new(),
+            interaction_config: Some(serde_json::json!({
+                "items": [
+                    { "id": "o1", "text": format!("Recognize the key vocabulary and expressions for {topic}") },
+                    { "id": "o2", "text": "Read sample sentences and short dialogues carefully" },
+                    { "id": "o3", "text": "Complete guided grammar and usage exercises" },
+                    { "id": "o4", "text": "Write or speak your own sentences fluently" }
+                ]
+            })),
+            explanation: "Effective English learning moves from vocabulary recognition and reading examples to guided practice and communication.".to_string(),
+        };
+    }
+
     AssignmentQuestionDto {
         id: format!("asg-order-fb-{ts}"),
         question_text: format!("Urutkan tahapan mempelajari dan menerapkan '{topic}' ({subject}) dari awal hingga akhir:"),
@@ -1870,6 +2269,23 @@ fn build_fallback_ordering_question(topic: &str, subject: &str, ts: i64) -> Assi
 }
 
 fn build_fallback_fill_blank_question(topic: &str, subject: &str, ts: i64) -> AssignmentQuestionDto {
+    if is_english_subject(subject) {
+        return AssignmentQuestionDto {
+            id: format!("asg-fill-fb-{ts}"),
+            question_text: format!("Complete the English learning summary on '{topic}' ({subject}) using the correct words:"),
+            question_type: "FILL_BLANK".to_string(),
+            points: 20,
+            image_url: None,
+            choices: Vec::new(),
+            interaction_config: Some(serde_json::json!({
+                "template": format!("In {subject}, mastering {topic} begins with learning key {{1}} and applying it in real {{2}}."),
+                "blanks": ["vocabulary", "conversation"],
+                "distractors": ["silence", "confusion"]
+            })),
+            explanation: "Learning key vocabulary and practicing it in real conversation builds lasting fluency.".to_string(),
+        };
+    }
+
     AssignmentQuestionDto {
         id: format!("asg-fill-fb-{ts}"),
         question_text: format!("Lengkapi ringkasan konsep '{topic}' ({subject}) dengan pilihan kata yang tepat:"),
@@ -2198,7 +2614,11 @@ pub fn generate_pedagogical_question_templates(
         let q_num = i + 1;
         let mut q_text = base.0.clone();
         if i >= base_templates.len() {
-            q_text = format!("(Butir {q_num}) {q_text}");
+            q_text = if is_english {
+                format!("(Item {q_num}) {q_text}")
+            } else {
+                format!("(Butir {q_num}) {q_text}")
+            };
         }
         result.push((q_text, base.1.clone(), base.2, base.3.clone()));
     }
@@ -2216,6 +2636,7 @@ pub fn fallback_generate_assignment(
     _include_images: bool,
 ) -> GeneratedAssignmentDto {
     let now_ts = chrono::Utc::now().timestamp_millis();
+    let is_english = is_english_subject(subject_name);
     let fmt_upper = assignment_format.unwrap_or("STRUCTURED_QUESTIONS").to_uppercase();
     let is_homework = fmt_upper == "HOMEWORK_PR";
     let is_pure_game = fmt_upper == "INTERACTIVE_GAMES";
@@ -2269,12 +2690,21 @@ pub fn fallback_generate_assignment(
     };
     let essay_pts = (100 / essay_count.max(1) as i32).max(15);
 
-    let essay_prompts = [
-        format!("Jelaskan pemahaman komprehensif Anda mengenai konsep '{topic}' pada mata pelajaran {subject_name} ({grade_level}). Tuliskan minimal dua contoh penerapan nyata dalam kehidupan sehari-hari!"),
-        format!("Lakukan analisis terhadap sebuah permasalahan kontekstual yang berkaitan dengan materi '{topic}'. Uraikan langkah-langkah pemecahan masalah secara terstruktur dan berikan kesimpulan logis!"),
-        format!("Susunlah sebuah telaah kritis mengenai tantangan yang dihadapi dalam penguasaan materi '{topic}', serta usulkan ide inovatif untuk mengatasinya!"),
-        format!("Buatlah refleksi pembelajaran mendalam mengenai nilai-nilai baru yang Anda peroleh setelah mempelajari '{topic}', dan bagaimana materi ini membentuk cara berpikir kritis Anda!"),
-    ];
+    let essay_prompts = if is_english {
+        [
+            format!("Write a clear paragraph in English explaining what you learned about '{topic}' ({subject_name}, {grade_level}), and include at least two real-life examples!"),
+            format!("Create a short English dialogue (4-6 lines) featuring key vocabulary and expressions from '{topic}', and briefly explain its communicative purpose."),
+            format!("Analyze how mastering vocabulary and expressions related to '{topic}' helps students communicate effectively in everyday English conversations."),
+            format!("Write a brief self-reflection in English summarizing the most important expressions you learned in '{topic}' and how you will practice them."),
+        ]
+    } else {
+        [
+            format!("Jelaskan pemahaman komprehensif Anda mengenai konsep '{topic}' pada mata pelajaran {subject_name} ({grade_level}). Tuliskan minimal dua contoh penerapan nyata dalam kehidupan sehari-hari!"),
+            format!("Lakukan analisis terhadap sebuah permasalahan kontekstual yang berkaitan dengan materi '{topic}'. Uraikan langkah-langkah pemecahan masalah secara terstruktur dan berikan kesimpulan logis!"),
+            format!("Susunlah sebuah telaah kritis mengenai tantangan yang dihadapi dalam penguasaan materi '{topic}', serta usulkan ide inovatif untuk mengatasinya!"),
+            format!("Buatlah refleksi pembelajaran mendalam mengenai nilai-nilai baru yang Anda peroleh setelah mempelajari '{topic}', dan bagaimana materi ini membentuk cara berpikir kritis Anda!"),
+        ]
+    };
 
     for idx in 0..essay_count {
         let prompt_text = essay_prompts[idx % essay_prompts.len()].clone();
@@ -2282,7 +2712,11 @@ pub fn fallback_generate_assignment(
         questions.push(AssignmentQuestionDto {
             id: format!("asg-essay-{}-{now_ts}", idx + 1),
             question_text: if essay_count > essay_prompts.len() {
-                format!("(Uraian {q_num}) {prompt_text}")
+                if is_english {
+                    format!("(Essay {q_num}) {prompt_text}")
+                } else {
+                    format!("(Uraian {q_num}) {prompt_text}")
+                }
             } else {
                 prompt_text
             },
@@ -2291,8 +2725,29 @@ pub fn fallback_generate_assignment(
             image_url: None,
             choices: Vec::new(),
             interaction_config: None,
-            explanation: "Rubrik Penskoran: Skor maksimal diberikan bila siswa menjabarkan konsep secara tepat, argumentasi logis runtut, disertai contoh kontekstual yang relevan (Skala 0 - 100).".to_string(),
+            explanation: if is_english {
+                "Scoring Rubric: Full score is awarded for clear English grammar, accurate vocabulary usage, logical ideas, and relevant examples (0 - 100 scale).".to_string()
+            } else {
+                "Rubrik Penskoran: Skor maksimal diberikan bila siswa menjabarkan konsep secara tepat, argumentasi logis runtut, disertai contoh kontekstual yang relevan (Skala 0 - 100).".to_string()
+            },
         });
+    }
+
+    if is_english {
+        let tasks = vec![
+            format!("Task 1: Review the key English vocabulary and sentence patterns for '{topic}' carefully."),
+            format!("Task 2: Complete each question and activity below clearly in natural English."),
+            format!("Task 3: Proofread your grammar, spelling, and punctuation before submitting."),
+        ];
+
+        return GeneratedAssignmentDto {
+            title: format!("English Assignment: {topic}"),
+            instructions: format!("Assignment Instructions ({grade_level} - {subject_name}):\n1. Read the prompts and key expressions about '{topic}' carefully.\n2. Answer all items clearly in natural English with accurate grammar and vocabulary.\n3. Difficulty level: {difficulty}. Double-check your answers before submitting."),
+            assignment_type: if is_homework { "HOMEWORK_PR".to_string() } else { "STRUCTURED_QUESTIONS".to_string() },
+            rubric: "Grading Rubric (0 - 100 Scale):\n- 85 - 100: Accurate English vocabulary, clear grammar, well-developed communicative response.\n- 70 - 84: Clear meaning with minor grammatical or spelling errors.\n- 55 - 69: Basic ideas conveyed; needs additional vocabulary and sentence practice.\n- < 55: Needs guided review of core English concepts.".to_string(),
+            tasks,
+            questions,
+        };
     }
 
     let tasks = vec![
@@ -2345,6 +2800,7 @@ pub async fn generate_cbt_quiz(
     difficulty: &str,
     include_images: bool,
 ) -> Result<GeneratedCbtQuizDto, ApplicationError> {
+    let is_english = is_english_subject(subject_name);
     let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
     let now_ts = chrono::Utc::now().timestamp_millis();
     let is_mixed = num_essay > 0
@@ -2357,7 +2813,25 @@ pub async fn generate_cbt_quiz(
         num_mcq
     };
 
-    let composition_instruction = if is_mixed {
+    let composition_instruction = if is_english {
+        if is_mixed {
+            format!(
+                r#"CBT EXAM COMPOSITION RULES (MIXED MULTIPLE CHOICE & ESSAY — ALL IN ENGLISH):
+- Multiple Choice Count: EXACTLY {num_mcq} items ('question_type': 'MULTIPLE_CHOICE').
+  Each MCQ item MUST have 4 English options A, B, C, D, correct_key ('A', 'B', 'C', or 'D'), and an English explanation.
+- Essay Count: EXACTLY {num_essay} items ('question_type': 'ESSAY').
+  Each Essay item MUST include an English scoring rubric in 'explanation' and empty choices.
+- Total length of 'questions' MUST be EXACTLY {total_questions} items ({num_mcq} MCQ + {num_essay} Essay)."#
+            )
+        } else {
+            format!(
+                r#"CBT EXAM COMPOSITION RULES (100% MULTIPLE CHOICE — ALL IN ENGLISH):
+- Multiple Choice Count: EXACTLY {total_questions} items ('question_type': 'MULTIPLE_CHOICE').
+  Each question MUST have 4 English options A, B, C, D, correct_key ('A', 'B', 'C', or 'D'), and an English explanation.
+- Total length of 'questions' MUST be EXACTLY {total_questions} items."#
+            )
+        }
+    } else if is_mixed {
         format!(
             r#"ATURAN KOMPOSISI SOAL CBT (CAMPURAN PG & ESSAY):
 - Jumlah Soal Pilihan Ganda (PG): TEPAT {num_mcq} butir ('question_type': 'MULTIPLE_CHOICE').
@@ -2375,8 +2849,70 @@ pub async fn generate_cbt_quiz(
         )
     };
 
-    let prompt = format!(
-        r#"Anda adalah tim pembuat bank soal ujian CBT resmi sekolah (Kurikulum Merdeka).
+    let sample_second_type = if is_mixed && num_essay > 0 {
+        "ESSAY"
+    } else {
+        "MULTIPLE_CHOICE"
+    };
+    let sample_second_pts = if is_mixed && num_essay > 0 { 20 } else { 10 };
+
+    let prompt = if is_english {
+        format!(
+            r#"You are a school CBT exam author designing official English assessments.
+Create EXACTLY {total_questions} DISTINCT, DYNAMIC English questions for {grade_level} subject "{subject_name}" on topic: "{topic}", difficulty: {difficulty} (Batch ID: {now_ts}).
+
+{subject_guideline}
+
+{composition_instruction}
+
+CRITICAL REQUIREMENTS:
+- EVERY text field (title, description, question_text, options A/B/C/D, and explanation) MUST be written 100% in natural English (ZERO Indonesian words).
+- 'questions' MUST contain EXACTLY {total_questions} unique items.
+- Distribute correct_key evenly across 'A', 'B', 'C', and 'D'.
+
+Output MUST be pure JSON matching this schema:
+{{
+  "title": "CBT Question Set: {topic}",
+  "description": "CBT assessment with {total_questions} English questions on {topic} ({subject_name}).",
+  "questions": [
+    {{
+      "id": "q1",
+      "question_text": "Clear contextual English question 1...",
+      "question_type": "MULTIPLE_CHOICE",
+      "options": {{
+        "A": "Option A in English",
+        "B": "Option B in English",
+        "C": "Option C in English",
+        "D": "Option D in English"
+      }},
+      "correct_key": "B",
+      "explanation": "Concise English explanation of why B is correct...",
+      "bloom_level": "C3",
+      "points": 10
+    }},
+    {{
+      "id": "q2",
+      "question_text": "Next English question...",
+      "question_type": "{sample_second_type}",
+      "options": {{
+        "A": "Option A in English",
+        "B": "Option B in English",
+        "C": "Option C in English",
+        "D": "Option D in English"
+      }},
+      "correct_key": "C",
+      "explanation": "English explanation or grading rubric...",
+      "bloom_level": "C4",
+      "points": {sample_second_pts}
+    }}
+  ]
+}}
+
+Output ONLY pure JSON with no extra text."#
+        )
+    } else {
+        format!(
+            r#"Anda adalah tim pembuat bank soal ujian CBT resmi sekolah (Kurikulum Merdeka).
 Buatkan TEPAT {total_questions} butir soal yang BERBEDA, DINAMIS, dan BERVARIASI untuk jenjang {grade_level} mata pelajaran {subject_name} dengan topik: "{topic}" tingkat kesulitan: {difficulty} (ID Batch: {now_ts}).
 
 {subject_guideline}
@@ -2426,19 +2962,20 @@ Format output HARUS berupa JSON murni dengan skema:
   ]
 }}
 
-Output HANYA JSON tanpa teks pembuka atau penutup."#,
-        sample_second_type = if is_mixed && num_essay > 0 {
-            "ESSAY"
-        } else {
-            "MULTIPLE_CHOICE"
-        },
-        sample_second_pts = if is_mixed && num_essay > 0 { 20 } else { 10 }
-    );
+Output HANYA JSON tanpa teks pembuka atau penutup."#
+        )
+    };
+
+    let system_prompt = if is_english {
+        "You are a professional English CBT exam author producing 100% English question banks in strict valid JSON with zero Indonesian."
+    } else {
+        "You are a professional CBT exam author producing valid JSON question banks strictly respecting the subject matter rules and producing the exact requested count of distinct questions."
+    };
 
     let messages = vec![
         ChatMessage {
             role: "system",
-            content: "You are a professional CBT exam author producing valid JSON question banks strictly respecting the subject matter rules and producing the exact requested count of distinct questions.",
+            content: system_prompt,
         },
         ChatMessage {
             role: "user",
@@ -2625,52 +3162,59 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#,
             }
         }
 
-        while final_mcqs.len() < num_mcq {
-            let idx = final_mcqs.len() + 1;
-            final_mcqs.push(CbtQuestionDto {
-                id: format!("cbt-mcq-pad-{idx}-{now_ts}"),
-                question_text: format!(
-                    "Dalam konteks pembelajaran {}, manakah penjelasan yang paling tepat mengenai implikasi materi {}?",
-                    subject_name, topic
-                ),
-                question_type: Some("MULTIPLE_CHOICE".to_string()),
-                choices: vec![
-                    CbtQuestionChoiceDto {
-                        choice_text: format!("Menganalisis prinsip dan keterkaitan esensial materi {} secara sistematis", topic),
-                        is_correct: true,
-                    },
-                    CbtQuestionChoiceDto {
-                        choice_text: format!("Memusatkan kajian hanya pada aspek teoritis tanpa implementasi"),
-                        is_correct: false,
-                    },
-                    CbtQuestionChoiceDto {
-                        choice_text: format!("Mengabaikan variabel kontekstual dalam evaluasi materi"),
-                        is_correct: false,
-                    },
-                    CbtQuestionChoiceDto {
-                        choice_text: format!("Menyamaratakan seluruh kondisi tanpa membedakan indikator utama"),
-                        is_correct: false,
-                    },
-                ],
-                correct_key: "A".to_string(),
-                explanation: format!(
-                    "Pemahaman mendalam tentang {} pada mata pelajaran {} memerlukan analisis sistematis terhadap seluruh prinsip dasarnya.",
-                    topic, subject_name
-                ),
-                bloom_level: "C3".to_string(),
-                points: default_pts,
-            });
+        if final_mcqs.len() < num_mcq {
+            let needed = num_mcq - final_mcqs.len();
+            let key_labels = ["A", "B", "C", "D"];
+            let pad_templates = generate_pedagogical_question_templates(
+                subject_name,
+                topic,
+                grade_level,
+                difficulty,
+                num_mcq,
+            );
+            let start_idx = final_mcqs.len();
+            for offset in 0..needed {
+                let tpl = &pad_templates[(start_idx + offset) % pad_templates.len()];
+                let idx = final_mcqs.len() + 1;
+                let choices = tpl
+                    .1
+                    .iter()
+                    .enumerate()
+                    .map(|(c_idx, text)| CbtQuestionChoiceDto {
+                        choice_text: text.clone(),
+                        is_correct: c_idx == tpl.2,
+                    })
+                    .collect();
+                final_mcqs.push(CbtQuestionDto {
+                    id: format!("cbt-mcq-pad-{idx}-{now_ts}"),
+                    question_text: tpl.0.clone(),
+                    question_type: Some("MULTIPLE_CHOICE".to_string()),
+                    choices,
+                    correct_key: key_labels[tpl.2 % 4].to_string(),
+                    explanation: tpl.3.clone(),
+                    bloom_level: "C3".to_string(),
+                    points: default_pts,
+                });
+            }
         }
 
         while final_essays.len() < num_essay {
             let idx = final_essays.len() + 1;
             final_essays.push(CbtQuestionDto {
                 id: format!("cbt-essay-pad-{idx}-{now_ts}"),
-                question_text: format!("Analisis dan uraikan pemahaman Anda mengenai penerapan materi {topic} dalam kehidupan sehari-hari (Soal Uraian {idx}):"),
+                question_text: if is_english {
+                    format!("Analyze and write a clear explanation in English showing how '{topic}' ({subject_name}) applies in real-life communication (Essay {idx}):")
+                } else {
+                    format!("Analisis dan uraikan pemahaman Anda mengenai penerapan materi {topic} dalam kehidupan sehari-hari (Soal Uraian {idx}):")
+                },
                 question_type: Some("ESSAY".to_string()),
                 choices: Vec::new(),
                 correct_key: String::new(),
-                explanation: format!("Rubrik: Skor maksimal jika siswa mampu menjabarkan konsep {topic} secara sistematis dengan bukti/contoh logis."),
+                explanation: if is_english {
+                    format!("Rubric: Full points awarded for accurate English concepts on {topic}, clear supporting examples, and grammatical accuracy.")
+                } else {
+                    format!("Rubrik: Skor maksimal jika siswa mampu menjabarkan konsep {topic} secara sistematis dengan bukti/contoh logis.")
+                },
                 bloom_level: "C4".to_string(),
                 points: 20,
             });
@@ -2682,35 +3226,40 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#,
         questions = final_mcqs;
         questions.extend(final_essays);
     } else {
-        while questions.len() < total_questions {
-            let idx = questions.len() + 1;
-            questions.push(CbtQuestionDto {
-                id: format!("cbt-mcq-pad-{idx}-{now_ts}"),
-                question_text: format!("Pertanyaan pilihan ganda evaluasi materi {topic} butir ke-{idx} ({subject_name}):"),
-                question_type: Some("MULTIPLE_CHOICE".to_string()),
-                choices: vec![
-                    CbtQuestionChoiceDto {
-                        choice_text: format!("Prinsip dan pemahaman utama {} yang terverifikasi secara sahih", topic),
-                        is_correct: true,
-                    },
-                    CbtQuestionChoiceDto {
-                        choice_text: format!("Kajian sekunder yang kurang relevan dengan pokok bahasan"),
-                        is_correct: false,
-                    },
-                    CbtQuestionChoiceDto {
-                        choice_text: format!("Asumsi umum yang belum teruji keabsahannya"),
-                        is_correct: false,
-                    },
-                    CbtQuestionChoiceDto {
-                        choice_text: format!("Pernyataan yang berlawanan dengan kaidah {}", subject_name),
-                        is_correct: false,
-                    },
-                ],
-                correct_key: "A".to_string(),
-                explanation: format!("Pilihan A merupakan kunci jawaban yang tepat sesuai kaidah {subject_name}."),
-                bloom_level: "C3".to_string(),
-                points: default_pts,
-            });
+        if questions.len() < total_questions {
+            let needed = total_questions - questions.len();
+            let key_labels = ["A", "B", "C", "D"];
+            let pad_templates = generate_pedagogical_question_templates(
+                subject_name,
+                topic,
+                grade_level,
+                difficulty,
+                total_questions,
+            );
+            let start_idx = questions.len();
+            for offset in 0..needed {
+                let tpl = &pad_templates[(start_idx + offset) % pad_templates.len()];
+                let idx = questions.len() + 1;
+                let choices = tpl
+                    .1
+                    .iter()
+                    .enumerate()
+                    .map(|(c_idx, text)| CbtQuestionChoiceDto {
+                        choice_text: text.clone(),
+                        is_correct: c_idx == tpl.2,
+                    })
+                    .collect();
+                questions.push(CbtQuestionDto {
+                    id: format!("cbt-mcq-pad-{idx}-{now_ts}"),
+                    question_text: tpl.0.clone(),
+                    question_type: Some("MULTIPLE_CHOICE".to_string()),
+                    choices,
+                    correct_key: key_labels[tpl.2 % 4].to_string(),
+                    explanation: tpl.3.clone(),
+                    bloom_level: "C3".to_string(),
+                    points: default_pts,
+                });
+            }
         }
         questions.truncate(total_questions);
     }
@@ -2719,13 +3268,23 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#,
         .title
         .map(|v| json_value_to_string(&v))
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("Paket Soal CBT: {topic}"));
+        .unwrap_or_else(|| {
+            if is_english {
+                format!("CBT Question Set: {topic}")
+            } else {
+                format!("Paket Soal CBT: {topic}")
+            }
+        });
     let desc_str = parsed
         .description
         .map(|v| json_value_to_string(&v))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| {
-            format!("Ujian CBT {total_questions} butir soal materi {topic} ({subject_name}).")
+            if is_english {
+                format!("CBT assessment with {total_questions} questions on {topic} ({subject_name}).")
+            } else {
+                format!("Ujian CBT {total_questions} butir soal materi {topic} ({subject_name}).")
+            }
         });
 
     Ok(GeneratedCbtQuizDto {
@@ -2746,6 +3305,7 @@ pub fn fallback_generate_cbt_quiz(
     _include_images: bool,
 ) -> GeneratedCbtQuizDto {
     let now_ts = chrono::Utc::now().timestamp_millis();
+    let is_english = is_english_subject(subject_name);
     let is_mixed = num_essay > 0
         || quiz_format
             .map(|f| f.to_uppercase() == "MIXED" || f.to_uppercase().contains("CAMPURAN"))
@@ -2782,11 +3342,19 @@ pub fn fallback_generate_cbt_quiz(
     }
 
     if is_mixed && num_essay > 0 {
-        let essay_prompts = [
-            format!("Analisis dan uraikan secara mendalam bagaimana prinsip utama '{topic}' ({subject_name}) diterapkan dalam memecahkan masalah nyata bagi siswa {grade_level}!"),
-            format!("Berdasarkan materi '{topic}', jelaskan hubungan sebab-akibat antar-komponen utama dan berikan satu studi kasus konkret beserta pembahasannya!"),
-            format!("Evaluasilah kelebihan dan tantangan dalam penerapan konsep '{topic}' serta rumuskan rekomendasi solusi yang inovatif dan terukur!"),
-        ];
+        let essay_prompts = if is_english {
+            [
+                format!("Analyze and explain clearly in English how key concepts of '{topic}' ({subject_name}) apply to everyday communication for {grade_level} students!"),
+                format!("Write a short English dialogue or paragraph demonstrating accurate use of vocabulary and sentence patterns from '{topic}'."),
+                format!("Reflect in English on the main ideas of '{topic}' and summarize two practical communication strategies you can use."),
+            ]
+        } else {
+            [
+                format!("Analisis dan uraikan secara mendalam bagaimana prinsip utama '{topic}' ({subject_name}) diterapkan dalam memecahkan masalah nyata bagi siswa {grade_level}!"),
+                format!("Berdasarkan materi '{topic}', jelaskan hubungan sebab-akibat antar-komponen utama dan berikan satu studi kasus konkret beserta pembahasannya!"),
+                format!("Evaluasilah kelebihan dan tantangan dalam penerapan konsep '{topic}' serta rumuskan rekomendasi solusi yang inovatif dan terukur!"),
+            ]
+        };
 
         for idx in 0..num_essay {
             let prompt = essay_prompts[idx % essay_prompts.len()].clone();
@@ -2794,14 +3362,22 @@ pub fn fallback_generate_cbt_quiz(
             questions.push(CbtQuestionDto {
                 id: format!("cbt-essay-{}-{now_ts}", idx + 1),
                 question_text: if num_essay > essay_prompts.len() {
-                    format!("(Uraian {q_num}) {prompt}")
+                    if is_english {
+                        format!("(Essay {q_num}) {prompt}")
+                    } else {
+                        format!("(Uraian {q_num}) {prompt}")
+                    }
                 } else {
                     prompt
                 },
                 question_type: Some("ESSAY".to_string()),
                 choices: Vec::new(),
                 correct_key: "ESSAY".to_string(),
-                explanation: "Rubrik Penskoran: Skor penuh diberikan bila jawaban memuat analisis konsep akurat, argumentasi logis runtut, dan bukti/contoh aplikatif yang valid.".to_string(),
+                explanation: if is_english {
+                    "Scoring Rubric: Full score awarded for accurate English expression, strong comprehension, and coherent supporting details.".to_string()
+                } else {
+                    "Rubrik Penskoran: Skor penuh diberikan bila jawaban memuat analisis konsep akurat, argumentasi logis runtut, dan bukti/contoh aplikatif yang valid.".to_string()
+                },
                 bloom_level: "C4".to_string(),
                 points: 20,
             });
@@ -2809,8 +3385,16 @@ pub fn fallback_generate_cbt_quiz(
     }
 
     GeneratedCbtQuizDto {
-        title: format!("Paket Soal CBT: {topic}"),
-        description: format!("Ujian CBT {total_questions} butir soal materi {topic} ({subject_name}) jenjang {grade_level} ({difficulty})."),
+        title: if is_english {
+            format!("CBT Question Set: {topic}")
+        } else {
+            format!("Paket Soal CBT: {topic}")
+        },
+        description: if is_english {
+            format!("CBT exam with {total_questions} English questions on {topic} ({subject_name}), {grade_level} ({difficulty}).")
+        } else {
+            format!("Ujian CBT {total_questions} butir soal materi {topic} ({subject_name}) jenjang {grade_level} ({difficulty}).")
+        },
         questions,
     }
 }

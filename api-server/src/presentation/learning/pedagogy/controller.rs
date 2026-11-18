@@ -537,6 +537,13 @@ pub async fn synthesize_cp(
         }
     }
 
+    let is_english_tp = crate::infrastructure::nvidia_ai::is_english_subject(&cp_subject_name);
+    let tp_language_directive = if is_english_tp {
+        "\nMANDATORY ENGLISH LANGUAGE RULE:\nBecause the subject is English, ALL text fields in the output JSON ('competency', 'content_scope', 'statement', 'evidence_indicators', 'pedagogical_approach') MUST be written 100% in natural English (start 'statement' with \"Students can...\", NOT \"Peserta didik dapat...\").\n"
+    } else {
+        ""
+    };
+
     // 3. Panggilan ke NVIDIA NIM
     let prompt = format!(
         r#"Anda adalah Pakar Kurikulum Merdeka (Kemendikdasmen RI).
@@ -545,7 +552,7 @@ Anda diberikan naskah resmi Capaian Pembelajaran (CP) berikut:
 - Fase: {phase} ({grade_level})
 - Elemen CP: {element_name}
 - Teks Resmi CP: "{description}"
-
+{tp_language_directive}
 ATURAN KETAT PEDAGOGIS:
 1. DILARANG MENGARANG, MERUBAH, ATAU MENGURANGI teks Capaian Pembelajaran (CP) di atas.
 2. Tugas Anda adalah membedah naskah CP di atas menjadi 3 sampai 6 butir Tujuan Pembelajaran (TP) yang operasional dan terukur.
@@ -587,6 +594,7 @@ OUTPUT HANYA JSON MURNI TANPA PEMBUKA/PENUTUP MARKDOWN."#,
         grade_level = grade_level,
         element_name = cp_element_name,
         description = cp_description,
+        tp_language_directive = tp_language_directive,
         code_prefix = cp_subject_name.chars().filter(|c| c.is_alphabetic()).take(4).collect::<String>().to_uppercase(),
         grade_digit = grade_level.chars().filter(|c| c.is_ascii_digit()).collect::<String>()
     );
@@ -2596,6 +2604,13 @@ pub async fn synthesize_modul_ajar(
 
     let subject_guideline = crate::infrastructure::nvidia_ai::build_subject_pedagogical_instructions(&subject_name, &grade_level);
 
+    let is_english_modul = crate::infrastructure::nvidia_ai::is_english_subject(&subject_name);
+    let modul_language_rule = if is_english_modul {
+        "\nMANDATORY ENGLISH OUTPUT RULE:\nBecause the subject is English, EVERY text value in the output JSON ('title', 'meaningful_understanding', 'trigger_questions', 'differentiation_strategies', 'learning_activities', 'assessment_plan', and 'lkpd_attachments') MUST be written 100% in natural, clear English (NO Indonesian words).\n"
+    } else {
+        ""
+    };
+
     let prompt = format!(
         r#"Anda adalah Ahli Spesialis Kurikulum Merdeka Kemendikdasmen RI & Perancang Modul Ajar Berdiferensiasi.
 Rancang Modul Ajar operasional resmi berdasarkan Tujuan Pembelajaran yang telah disahkan berikut:
@@ -2611,6 +2626,7 @@ Target & Konteks:
 - Profil Pelajar Pancasila: {profiles:?}
 
 {subject_guideline}
+{modul_language_rule}
 
 Format Respon: Wajib JSON murni tanpa markdown/backticks, dengan struktur:
 {{
@@ -2668,7 +2684,8 @@ Format Respon: Wajib JSON murni tanpa markdown/backticks, dengan struktur:
         tp_code = tp_code,
         tp_statement = tp_statement,
         tp_content_scope = tp_content_scope,
-        profiles = profiles_vec
+        profiles = profiles_vec,
+        modul_language_rule = modul_language_rule
     );
 
     let messages = vec![
@@ -2688,18 +2705,34 @@ Format Respon: Wajib JSON murni tanpa markdown/backticks, dengan struktur:
 
     let cleaned_json = crate::infrastructure::nvidia_ai::extract_clean_json(&raw_response);
     let parsed: serde_json::Value = serde_json::from_str(cleaned_json).unwrap_or_else(|_| {
-        serde_json::json!({
-            "title": format!("Modul Ajar: {}", tp_content_scope),
-            "meaningful_understanding": format!("Pemahaman konsep {}", tp_content_scope),
-            "trigger_questions": ["Bagaimana konsep ini relevan bagi kehidupan sehari-hari?"],
-            "differentiation_strategies": {},
-            "learning_activities": [],
-            "assessment_plan": {},
-            "lkpd_attachments": []
-        })
+        if is_english_modul {
+            serde_json::json!({
+                "title": format!("Teaching Module: {}", tp_content_scope),
+                "meaningful_understanding": format!("Deep communicative understanding of {}", tp_content_scope),
+                "trigger_questions": ["How is this topic used in real-life English communication?"],
+                "differentiation_strategies": {},
+                "learning_activities": [],
+                "assessment_plan": {},
+                "lkpd_attachments": []
+            })
+        } else {
+            serde_json::json!({
+                "title": format!("Modul Ajar: {}", tp_content_scope),
+                "meaningful_understanding": format!("Pemahaman konsep {}", tp_content_scope),
+                "trigger_questions": ["Bagaimana konsep ini relevan bagi kehidupan sehari-hari?"],
+                "differentiation_strategies": {},
+                "learning_activities": [],
+                "assessment_plan": {},
+                "lkpd_attachments": []
+            })
+        }
     });
 
-    let default_title = format!("Modul Ajar: {}", tp_content_scope);
+    let default_title = if is_english_modul {
+        format!("Teaching Module: {}", tp_content_scope)
+    } else {
+        format!("Modul Ajar: {}", tp_content_scope)
+    };
     let title = parsed.get("title").and_then(|v| v.as_str()).unwrap_or(&default_title);
     let meaningful_understanding = parsed.get("meaningful_understanding").and_then(|v| v.as_str()).unwrap_or("");
     let trigger_questions = parsed.get("trigger_questions").cloned().unwrap_or_else(|| serde_json::json!([]));

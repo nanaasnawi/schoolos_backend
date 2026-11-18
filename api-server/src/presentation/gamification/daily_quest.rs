@@ -1912,6 +1912,94 @@ async fn award_extra_xp(
     (new_total, new_level, new_streak, new_level > old_level)
 }
 
+fn is_staff_actor(actor: &school_core::authorization::domain::actor::Actor) -> bool {
+    actor.roles.iter().any(|r| {
+        matches!(
+            r.name.to_lowercase().as_str(),
+            "teacher"
+                | "tutor"
+                | "guru"
+                | "admin"
+                | "principal"
+                | "super_admin"
+                | "operator"
+                | "staff"
+        )
+    })
+}
+
+async fn ensure_student_has_active_game_assignment(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+    actor: &school_core::authorization::domain::actor::Actor,
+    request_id: &str,
+) -> Result<(), ApiError> {
+    if is_staff_actor(actor) {
+        return Ok(());
+    }
+
+    let has_active_game = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM assignments a
+            JOIN assignment_questions q ON q.assignment_id = a.id
+            WHERE a.tenant_id = $1
+              AND a.deleted_at IS NULL
+              AND a.is_active = true
+              AND (a.release_at IS NULL OR a.release_at <= NOW())
+              AND (a.due_at IS NULL OR a.due_at >= NOW())
+              AND (
+                  a.status = 'published'
+                  OR a.status = 'active'
+                  OR (a.release_at IS NOT NULL AND a.release_at <= NOW())
+              )
+              AND UPPER(COALESCE(q.question_type, '')) IN ('MATCHING', 'ORDERING', 'FILL_BLANK')
+              AND (
+                  a.class_id IS NULL
+                  OR a.class_id IN (
+                      SELECT en.class_id
+                      FROM students s
+                      JOIN enrollments en ON en.student_id = s.id
+                      WHERE (s.user_id = $2 OR s.id = $2)
+                        AND (en.status ILIKE 'active' OR en.status IS NULL)
+                  )
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM assignment_submissions sub
+                  LEFT JOIN students s2 ON s2.id = sub.student_id
+                  WHERE sub.assignment_id = a.id
+                    AND (sub.student_id = $2 OR s2.user_id = $2)
+                    AND COALESCE(sub.status, 'submitted') != 'unsubmitted'
+              )
+        )
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(actor.id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(InfrastructureError::Database(e)),
+            request_id,
+        )
+    })?;
+
+    if !has_active_game {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Belum ada tugas game aktif dari guru. Game hanya terbuka saat guru memberikan tugas format game.".to_string(),
+            ),
+            request_id,
+        ));
+    }
+
+    Ok(())
+}
+
 pub async fn get_daily_quest(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
@@ -1927,6 +2015,7 @@ pub async fn get_daily_quest(
         )
     })?;
 
+    ensure_student_has_active_game_assignment(&ctx.pool, req_ctx.tenant_id, actor, &req_ctx.request_id).await?;
     ensure_daily_quest_tables(&ctx.pool).await;
 
     let today = wib_today();
@@ -2279,6 +2368,7 @@ pub async fn submit_daily_quest(
         )
     })?;
 
+    ensure_student_has_active_game_assignment(&ctx.pool, req_ctx.tenant_id, actor, &req_ctx.request_id).await?;
     ensure_daily_quest_tables(&ctx.pool).await;
     let today = wib_today();
 
