@@ -1056,6 +1056,7 @@ fn sanitize_article_markdown(raw_md: &str) -> String {
     text = text.trim_end_matches(|c| c == '}' || c == ',' || c == ' ').trim().to_string();
 
     // Expand collapsed single-line Markdown tables (`| Col | | :--- | | Val |`) onto separate lines
+    // and repair unclosed trailing `**` on standalone heading/label lines
     let mut out_lines: Vec<String> = Vec::new();
     for line in text.lines() {
         if line.contains("| :---") || line.contains("|:---") || line.contains("| ---") || line.contains("|---") {
@@ -1067,7 +1068,12 @@ fn sanitize_article_markdown(raw_md: &str) -> String {
                 }
             }
         } else {
-            out_lines.push(line.to_string());
+            let mut repaired = line.to_string();
+            let trimmed = repaired.trim();
+            if trimmed.matches("**").count() % 2 == 1 && trimmed.starts_with("**") && !trimmed[2..].contains('*') {
+                repaired.push_str("**");
+            }
+            out_lines.push(repaired);
         }
     }
     out_lines.join("\n")
