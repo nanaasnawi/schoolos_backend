@@ -644,6 +644,7 @@ async fn prepare_tanya_ai_context(
         {sources_block}"
     );
 
+    let is_english = nvidia_ai::is_english_subject(&subject);
     let system_prompt = if is_principal {
         format!(
             "Anda adalah 'AI Analitik Kepala Sekolah' (Executive Academic & Operational Intelligence Advisor) di SchoolOS (Akselerasi Edu). \
@@ -656,16 +657,30 @@ async fn prepare_tanya_ai_context(
             Gunakan Bahasa Indonesia formal-profesional yang lugas, analitis, taktis, berbasis data riil yang disertakan dalam konteks, terstruktur rapi dengan Markdown, dan tutup dengan baris `📚 **Sumber:**` yang menyebutkan data/periode laporan aktual."
         )
     } else if is_teacher {
+        if is_english {
+            format!(
+                "You are 'AI Pedagogical & Teacher Co-Pilot' in SchoolOS (Akselerasi Edu). \
+                Subject focus: {subject}, Grade/Class: {grade}. \
+                Because the subject is English ({subject}), respond predominantly in clear, academic, and communicative English (unless the teacher asks for a bilingual explanation), formatted neatly with Markdown, and always end with `📚 **Sources:**`."
+            )
+        } else {
+            format!(
+                "Anda adalah 'AI Pedagogik & Workstation Guru' (Teacher Pedagogical & Instructional Co-Pilot) di SchoolOS (Akselerasi Edu). \
+                Mata Pelajaran fokus: {subject}, Jenjang/Kelas: {grade}. \
+                Anda patuh penuh pada regulasi Kurikulum Merdeka (Kepmendikbudristek & BSKAP No. 032/H/KR/2024 & BSKAP No. 033/H/KR/2024). \
+                Fokus & Kemampuan Utama: \
+                1. Membantu penyusunan Draf Modul Ajar Kurikulum Merdeka yang komprehensif (Tujuan Pembelajaran/TP dari CP & ATP, Pemahaman Bermakna, Pertanyaan Pemantik, Rencana Pembelajaran Berdiferensiasi Konten-Proses-Produk, LKPD, serta Asesmen Formatif & Sumatif). \
+                2. Merancang kisi-kisi dan butir soal HOTS (Higher Order Thinking Skills) untuk kuis dan asesmen CBT (Pilihan Ganda, Pilihan Ganda Kompleks, Menjodohkan, Esai) beserta kunci dan rubrik penilaian. \
+                3. Membantu merumuskan Kriteria Ketercapaian Tujuan Pembelajaran (KKTP) berbasis interval nilai atau rubrik deskriptif untuk tugas siswa. \
+                4. Memberikan saran diferensiasi pembelajaran dan rencana tindak lanjut remidial/pengayaan berdasarkan kondisi siswa nyata di kelas. \
+                Gunakan Bahasa Indonesia edukatif yang profesional, ramah, membimbing tahap demi tahap, solutif, terstruktur rapi dengan Markdown, dan selalu cantumkan `📚 **Sumber:**` di akhir jawaban."
+            )
+        }
+    } else if is_english {
         format!(
-            "Anda adalah 'AI Pedagogik & Workstation Guru' (Teacher Pedagogical & Instructional Co-Pilot) di SchoolOS (Akselerasi Edu). \
-            Mata Pelajaran fokus: {subject}, Jenjang/Kelas: {grade}. \
-            Anda patuh penuh pada regulasi Kurikulum Merdeka (Kepmendikbudristek & BSKAP No. 032/H/KR/2024 & BSKAP No. 033/H/KR/2024). \
-            Fokus & Kemampuan Utama: \
-            1. Membantu penyusunan Draf Modul Ajar Kurikulum Merdeka yang komprehensif (Tujuan Pembelajaran/TP dari CP & ATP, Pemahaman Bermakna, Pertanyaan Pemantik, Rencana Pembelajaran Berdiferensiasi Konten-Proses-Produk, LKPD, serta Asesmen Formatif & Sumatif). \
-            2. Merancang kisi-kisi dan butir soal HOTS (Higher Order Thinking Skills) untuk kuis dan asesmen CBT (Pilihan Ganda, Pilihan Ganda Kompleks, Menjodohkan, Esai) beserta kunci dan rubrik penilaian. \
-            3. Membantu merumuskan Kriteria Ketercapaian Tujuan Pembelajaran (KKTP) berbasis interval nilai atau rubrik deskriptif untuk tugas siswa. \
-            4. Memberikan saran diferensiasi pembelajaran dan rencana tindak lanjut remidial/pengayaan berdasarkan kondisi siswa nyata di kelas. \
-            Gunakan Bahasa Indonesia edukatif yang profesional, ramah, membimbing tahap demi tahap, solutif, terstruktur rapi dengan Markdown, dan selalu cantumkan `📚 **Sumber:**` di akhir jawaban."
+            "You are 'Guru AI' (Smart & Interactive English Learning Assistant) in SchoolOS (Akselerasi Edu). \
+            Subject focus: {subject}, Grade/Class: {grade}. \
+            Because the subject is English ({subject}), teach and reply in clear, encouraging English suitable for {grade} (provide brief Indonesian glosses only if the student explicitly asks), explain clearly with Markdown examples, and ALWAYS end with `📚 **Sources:**` citing the given references (Teaching Module, SIBI Book, or Kurikulum Merdeka)."
         )
     } else {
         format!(
@@ -759,12 +774,21 @@ async fn tanya_ai(
         Ok(r) => r,
         Err(err) => {
             tracing::warn!("NVIDIA NIM call failed for tanya-ai: {err:?}");
-            format!(
-                "Halo! Terima kasih atas pertanyaannya mengenai **{}**.\n\n\
-                Pertanyaan Anda: *\"{}\"* \n\n\
-                Saat ini jaringan komputasi Guru AI sedang mengalami sinkronisasi model NVIDIA AI. Silakan coba kembali sesaat lagi atau diskusikan pertanyaan ini langsung dengan Guru Pengampu di sesi belajar ya! Tetap semangat belajar! 🚀",
-                prepared.subject, prepared.question
-            )
+            if nvidia_ai::is_english_subject(&prepared.subject) {
+                format!(
+                    "Hello! Thank you for your question about **{}**.\n\n\
+                    Your question: *\"{}\"* \n\n\
+                    The AI tutor service is currently synchronizing. Please try again in a moment or discuss this topic directly with your English teacher during class! Keep up the great work!",
+                    prepared.subject, prepared.question
+                )
+            } else {
+                format!(
+                    "Halo! Terima kasih atas pertanyaannya mengenai **{}**.\n\n\
+                    Pertanyaan Anda: *\"{}\"* \n\n\
+                    Saat ini jaringan komputasi Guru AI sedang mengalami sinkronisasi model NVIDIA AI. Silakan coba kembali sesaat lagi atau diskusikan pertanyaan ini langsung dengan Guru Pengampu di sesi belajar ya! Tetap semangat belajar! 🚀",
+                    prepared.subject, prepared.question
+                )
+            }
         }
     };
 
@@ -813,12 +837,21 @@ async fn tanya_ai_stream(
             Err(err) => {
                 tracing::warn!("NVIDIA NIM SSE stream failed for tanya-ai: {err:?}");
                 if !sent_any {
-                    let fallback = format!(
-                        "Halo! Terima kasih atas pertanyaannya mengenai **{}**.\n\n\
-                        Pertanyaan Anda: *\"{}\"* \n\n\
-                        Saat ini jaringan komputasi Guru AI sedang mengalami sinkronisasi model NVIDIA AI. Silakan coba kembali sesaat lagi atau diskusikan langsung dengan Guru Pengampu di sesi belajar ya! Tetap semangat belajar! 🚀",
-                        prepared.subject, prepared.question
-                    );
+                    let fallback = if nvidia_ai::is_english_subject(&prepared.subject) {
+                        format!(
+                            "Hello! Thank you for your question about **{}**.\n\n\
+                            Your question: *\"{}\"* \n\n\
+                            The AI tutor service is currently synchronizing. Please try again shortly or discuss this question directly with your English teacher during class! Keep up the great work!",
+                            prepared.subject, prepared.question
+                        )
+                    } else {
+                        format!(
+                            "Halo! Terima kasih atas pertanyaannya mengenai **{}**.\n\n\
+                            Pertanyaan Anda: *\"{}\"* \n\n\
+                            Saat ini jaringan komputasi Guru AI sedang mengalami sinkronisasi model NVIDIA AI. Silakan coba kembali sesaat lagi atau diskusikan langsung dengan Guru Pengampu di sesi belajar ya! Tetap semangat belajar! 🚀",
+                            prepared.subject, prepared.question
+                        )
+                    };
                     let _ = sse_tx
                         .send(Event::default().event("delta").data(json!({ "text": fallback }).to_string()))
                         .await;
