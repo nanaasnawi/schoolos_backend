@@ -15,8 +15,8 @@ pub struct AssignmentFilterQuery {
 }
 
 use super::interactive_game::{
-    calculate_total_percentage_score, grade_interactive_answer, is_interactive_game_type,
-    shuffle_interaction_for_student,
+    calculate_total_percentage_score, compile_crossword_interaction_config,
+    grade_interactive_answer, is_interactive_game_type, shuffle_interaction_for_student,
 };
 use super::dto::{
     assignment_question_dto::{
@@ -82,6 +82,13 @@ async fn persist_assignment_questions(
         let question_id = q.id.unwrap_or_else(Uuid::new_v4);
         let order_idx = q.order_index.unwrap_or(q_idx as i32);
         let points = q.points.unwrap_or(10);
+        let normalized_interaction_config = if q.question_type.trim().eq_ignore_ascii_case("CROSSWORD") {
+            q.interaction_config
+                .as_ref()
+                .map(compile_crossword_interaction_config)
+        } else {
+            q.interaction_config
+        };
         let _ = sqlx::query(
             r#"
             INSERT INTO assignment_questions (id, tenant_id, assignment_id, question_text, question_type, points, order_index, interaction_config)
@@ -95,7 +102,7 @@ async fn persist_assignment_questions(
         .bind(&q.question_type)
         .bind(points)
         .bind(order_idx)
-        .bind(&q.interaction_config)
+        .bind(&normalized_interaction_config)
         .execute(pool)
         .await;
 
@@ -133,7 +140,7 @@ async fn persist_assignment_questions(
             points: Some(points),
             order_index: Some(order_idx),
             choices: created_choices,
-            interaction_config: q.interaction_config,
+            interaction_config: normalized_interaction_config,
         });
     }
     created_questions
