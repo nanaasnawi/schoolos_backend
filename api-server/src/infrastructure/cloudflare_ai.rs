@@ -271,3 +271,16 @@ pub async fn generate_card_image(
         }
     }
 }
+
+/// Optional wordless illustration generator for non-numeric visual prompts (falls back cleanly to `None` if unconfigured).
+pub async fn try_generate_scene_image(
+    pool: &PgPool,
+    concept_prompt: &str,
+    subject_name: &str,
+    grade_level: &str,
+) -> Option<String> {
+    generate_hero_image(pool, concept_prompt, subject_name, grade_level)
+        .await
+        .ok()
+        .map(|(url, _)| url)
+}

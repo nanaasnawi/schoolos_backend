@@ -1554,7 +1554,40 @@ pub fn clean_question_stem(raw: &str) -> String {
     }
 }
 
+fn build_visual_diagram_prompt_instructions(is_english: bool, include_images: bool) -> &'static str {
+    if !include_images {
+        return "";
+    }
+    if is_english {
+        r#"
+VISUAL DIAGRAM / IMAGE QUESTION REQUIREMENT:
+- On 1 to 2 non-game questions (prefer MULTIPLE_CHOICE or ESSAY), include a structured `"diagram_spec"` object AND explicitly refer to that exact diagram inside `"question_text"` (for example: "Observe the bar chart/diagram below...").
+- EVERY number, unit, vertex letter, and step label in `"question_text"` and options MUST match `"diagram_spec"` 100%. Never ask about details that are missing from `"diagram_spec"`.
+- Allowed `"diagram_spec"` shapes:
+  1) `{"type":"bar_chart","title":"...","x_label":"...","y_label":"...","bars":[{"label":"A","value":12},{"label":"B","value":18}]}`
+  2) `{"type":"line_chart","title":"...","x_label":"...","y_label":"...","points":[{"label":"Mon","value":10},{"label":"Tue","value":16}]}`
+  3) `{"type":"pie_chart","title":"...","slices":[{"label":"Math","value":40},{"label":"Science","value":60}]}`
+  4) `{"type":"geometry","shape":"right_triangle|triangle|rectangle|square|circle|trapezoid|cube|cuboid|angle","title":"...","labels":["A","B","C"],"dimensions":{"a":"6 cm","b":"8 cm","c":"? cm"}}`
+  5) `{"type":"flowchart","layout":"linear|cycle","title":"...","steps":[{"label":"1. Step","note":"..."},{"label":"2. ?","note":"..."}]}`
+  6) `{"type":"science_diagram","subtype":"water_cycle|food_chain|circuit|lever|compass_map","title":"...","mode":"seri|paralel"}`
+  7) `{"type":"illustration","prompt":"Wordless visual scene description for English picture comprehension"}`"#
+    } else {
+        r#"
+ATURAN WAJIB SOAL BERGAMBAR / DIAGRAM AKURAT:
+- Pada 1 hingga 2 butir soal non-game (utamakan MULTIPLE_CHOICE atau ESSAY), sertakan properti `"diagram_spec"` terstruktur DAN referensikan gambar tersebut di `"question_text"` (misal: "Perhatikan grafik/diagram/gambar berikut ini! ...").
+- SELURUH angka, satuan, huruf titik sudut, maupun tahap di dalam `"question_text"` dan pilihan jawaban WAJIB SAMA PERSIS dengan isi `"diagram_spec"`. DILARANG bertanya tentang data yang tidak tergambar.
+- Pilihan format `"diagram_spec"` yang didukung sistem rendering presisi:
+  1) `{"type":"bar_chart","title":"...","x_label":"...","y_label":"...","bars":[{"label":"Senin","value":15},{"label":"Selasa","value":25}]}`
+  2) `{"type":"line_chart","title":"...","x_label":"...","y_label":"...","points":[{"label":"Jan","value":10},{"label":"Feb","value":20}]}`
+  3) `{"type":"pie_chart","title":"...","slices":[{"label":"IPA","value":40},{"label":"IPS","value":60}]}`
+  4) `{"type":"geometry","shape":"right_triangle|triangle|rectangle|square|circle|trapezoid|cube|cuboid|angle","title":"...","labels":["A","B","C"],"dimensions":{"a":"6 cm","b":"8 cm","c":"? cm"}}`
+  5) `{"type":"flowchart","layout":"linear|cycle","title":"...","steps":[{"label":"1. Evaporasi","note":"Penguapan"},{"label":"2. ?","note":"Membentuk awan"}]}`
+  6) `{"type":"science_diagram","subtype":"water_cycle|food_chain|circuit|lever|compass_map","title":"...","mode":"seri|paralel"}`"#
+    }
+}
+
 pub async fn generate_assignment(
+    pool: &sqlx::PgPool,
     topic: &str,
     grade_level: &str,
     subject_name: &str,
@@ -1565,6 +1598,7 @@ pub async fn generate_assignment(
     include_images: bool,
 ) -> Result<GeneratedAssignmentDto, ApplicationError> {
     let is_english = is_english_subject(subject_name);
+    let visual_instructions = build_visual_diagram_prompt_instructions(is_english, include_images);
     let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
     let fmt_upper = assignment_format.unwrap_or("STRUCTURED_QUESTIONS").to_uppercase();
     let is_homework = fmt_upper == "HOMEWORK_PR";
@@ -1787,6 +1821,7 @@ Create a complete English student assignment package for subject: "{subject_name
 
 STRUCTURE AND QUESTION COUNT RULES:
 {slot_instructions}
+{visual_instructions}
 
 Output MUST be strictly valid pure JSON using this schema (EVERY text field MUST be 100% in natural English, NO Indonesian words):
 {{
@@ -1844,6 +1879,7 @@ ATURAN WAJIB MATA UANG INDONESIA (RUPIAH):
 
 ATURAN STRUKTUR DAN JUMLAH SOAL:
 {slot_instructions}
+{visual_instructions}
 
 Format output HARUS berupa JSON murni dengan skema:
 {{
@@ -1912,7 +1948,7 @@ PENTING & WAJIB:
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("call_nvidia_nim failed for assignment: {e}. Utilizing pedagogical fallback.");
-            return Ok(fallback_generate_assignment(
+            let mut dto = fallback_generate_assignment(
                 topic,
                 grade_level,
                 subject_name,
@@ -1921,7 +1957,19 @@ PENTING & WAJIB:
                 effective_num_essay,
                 difficulty,
                 include_images,
-            ));
+            );
+            if include_images {
+                ensure_assignment_visual_guarantee(
+                    pool,
+                    &mut dto.questions,
+                    subject_name,
+                    topic,
+                    grade_level,
+                    is_english,
+                )
+                .await;
+            }
+            return Ok(dto);
         }
     };
     let cleaned = extract_clean_json(&raw);
@@ -1944,7 +1992,7 @@ PENTING & WAJIB:
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("Failed to parse AI Assignment JSON ({e}). Utilizing pedagogical fallback.");
-            return Ok(fallback_generate_assignment(
+            let mut dto = fallback_generate_assignment(
                 topic,
                 grade_level,
                 subject_name,
@@ -1953,11 +2001,23 @@ PENTING & WAJIB:
                 effective_num_essay,
                 difficulty,
                 include_images,
-            ));
+            );
+            if include_images {
+                ensure_assignment_visual_guarantee(
+                    pool,
+                    &mut dto.questions,
+                    subject_name,
+                    topic,
+                    grade_level,
+                    is_english,
+                )
+                .await;
+            }
+            return Ok(dto);
         }
     };
 
-    let safe_visual_url: Option<String> = None;
+    let mut diagrams_attached = 0usize;
 
     let title_str = parsed
         .title
@@ -2093,8 +2153,18 @@ PENTING & WAJIB:
             .get("explanation")
             .map(json_value_to_string)
             .unwrap_or_default();
-        let img = if include_images && idx < 2 {
-            safe_visual_url.clone()
+        let img = if include_images && diagrams_attached < 3 {
+            let resolved = crate::infrastructure::visual_diagram::resolve_visual_diagram_url(
+                pool,
+                q_val.get("diagram_spec"),
+                subject_name,
+                grade_level,
+            )
+            .await;
+            if resolved.is_some() {
+                diagrams_attached += 1;
+            }
+            resolved
         } else {
             None
         };
@@ -2114,17 +2184,12 @@ PENTING & WAJIB:
     // Fallback if questions array was empty but tasks existed
     if questions.is_empty() && !tasks_vec.is_empty() {
         for (idx, task_str) in tasks_vec.iter().enumerate() {
-            let img = if include_images && idx < 2 {
-                safe_visual_url.clone()
-            } else {
-                None
-            };
             questions.push(AssignmentQuestionDto {
                 id: format!("asg-task-{}", idx + 1),
                 question_text: task_str.clone(),
                 question_type: "ESSAY".to_string(),
                 points: 20,
-                image_url: img,
+                image_url: None,
                 choices: Vec::new(),
                 interaction_config: None,
                 explanation: rubric_str.clone(),
@@ -2260,6 +2325,18 @@ PENTING & WAJIB:
         questions.truncate(effective_num_essay);
     }
 
+    if include_images {
+        ensure_assignment_visual_guarantee(
+            pool,
+            &mut questions,
+            subject_name,
+            topic,
+            grade_level,
+            is_english,
+        )
+        .await;
+    }
+
     Ok(GeneratedAssignmentDto {
         title: title_str,
         instructions: instructions_str,
@@ -2274,6 +2351,114 @@ PENTING & WAJIB:
         tasks: tasks_vec,
         questions,
     })
+}
+
+async fn ensure_assignment_visual_guarantee(
+    pool: &sqlx::PgPool,
+    questions: &mut Vec<AssignmentQuestionDto>,
+    subject_name: &str,
+    topic: &str,
+    grade_level: &str,
+    is_english: bool,
+) {
+    if questions.is_empty() || questions.iter().any(|q| q.image_url.is_some()) {
+        return;
+    }
+
+    let (v_text, v_choices_raw, v_correct_idx, v_expl, v_spec) =
+        crate::infrastructure::visual_diagram::build_verified_visual_mcq(subject_name, topic, is_english);
+    let Some(v_url) = crate::infrastructure::visual_diagram::resolve_visual_diagram_url(
+        pool,
+        Some(&v_spec),
+        subject_name,
+        grade_level,
+    )
+    .await
+    else {
+        return;
+    };
+
+    if let Some(mcq) = questions
+        .iter_mut()
+        .find(|q| q.question_type == "MULTIPLE_CHOICE")
+    {
+        mcq.question_text = v_text;
+        mcq.choices = v_choices_raw
+            .into_iter()
+            .enumerate()
+            .map(|(i, text)| CbtQuestionChoiceDto {
+                choice_text: text,
+                is_correct: i == v_correct_idx,
+            })
+            .collect();
+        mcq.explanation = v_expl;
+        mcq.image_url = Some(v_url);
+        return;
+    }
+
+    if let Some(first_q) = questions.first_mut() {
+        first_q.image_url = Some(v_url);
+        if first_q.question_type == "ESSAY" {
+            let prefix = if is_english {
+                "Observe the visual diagram above carefully to support your analysis.\n\n"
+            } else {
+                "Perhatikan diagram visual di atas dengan cermat sebagai stimulus analisis Anda.\n\n"
+            };
+            if !first_q.question_text.contains("diagram") {
+                first_q.question_text = format!("{prefix}{}", first_q.question_text);
+            }
+        }
+    }
+}
+
+async fn ensure_quiz_visual_guarantee(
+    pool: &sqlx::PgPool,
+    questions: &mut Vec<CbtQuestionDto>,
+    subject_name: &str,
+    topic: &str,
+    grade_level: &str,
+    is_english: bool,
+) {
+    if questions.is_empty() || questions.iter().any(|q| q.image_url.is_some()) {
+        return;
+    }
+
+    let (v_text, v_choices_raw, v_correct_idx, v_expl, v_spec) =
+        crate::infrastructure::visual_diagram::build_verified_visual_mcq(subject_name, topic, is_english);
+    let Some(v_url) = crate::infrastructure::visual_diagram::resolve_visual_diagram_url(
+        pool,
+        Some(&v_spec),
+        subject_name,
+        grade_level,
+    )
+    .await
+    else {
+        return;
+    };
+
+    let key_labels = ["A", "B", "C", "D"];
+    if let Some(mcq) = questions
+        .iter_mut()
+        .find(|q| q.question_type.as_deref().unwrap_or("MULTIPLE_CHOICE") == "MULTIPLE_CHOICE")
+    {
+        mcq.question_text = v_text;
+        mcq.choices = v_choices_raw
+            .into_iter()
+            .enumerate()
+            .map(|(i, text)| CbtQuestionChoiceDto {
+                choice_text: text,
+                is_correct: i == v_correct_idx,
+            })
+            .collect();
+        mcq.correct_key = key_labels[v_correct_idx % 4].to_string();
+        mcq.explanation = v_expl;
+        mcq.image_url = Some(v_url);
+        return;
+    }
+
+    if let Some(first_q) = questions.first_mut() {
+        first_q.image_url = Some(v_url);
+    }
 }
 
 fn normalize_fill_blank_template_tokens(raw_tpl: &str) -> String {
@@ -3045,6 +3230,8 @@ pub struct CbtQuestionDto {
     pub question_text: String,
     #[serde(default)]
     pub question_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
     pub choices: Vec<CbtQuestionChoiceDto>,
     pub correct_key: String,
     pub explanation: String,
@@ -3060,6 +3247,7 @@ pub struct GeneratedCbtQuizDto {
 }
 
 pub async fn generate_cbt_quiz(
+    pool: &sqlx::PgPool,
     topic: &str,
     grade_level: &str,
     subject_name: &str,
@@ -3071,6 +3259,7 @@ pub async fn generate_cbt_quiz(
 ) -> Result<GeneratedCbtQuizDto, ApplicationError> {
     let is_english = is_english_subject(subject_name);
     let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
+    let visual_instructions = build_visual_diagram_prompt_instructions(is_english, include_images);
     let now_ts = chrono::Utc::now().timestamp_millis();
     let is_mixed = num_essay > 0
         || quiz_format
@@ -3133,6 +3322,7 @@ Create EXACTLY {total_questions} DISTINCT, DYNAMIC English questions for {grade_
 {subject_guideline}
 
 {composition_instruction}
+{visual_instructions}
 
 CRITICAL REQUIREMENTS:
 - EVERY text field (title, description, question_text, options A/B/C/D, and explanation) MUST be written 100% in natural English (ZERO Indonesian words).
@@ -3187,6 +3377,7 @@ Buatkan TEPAT {total_questions} butir soal yang BERBEDA, DINAMIS, dan BERVARIASI
 {subject_guideline}
 
 {composition_instruction}
+{visual_instructions}
 
 PENTING & WAJIB:
 - Array 'questions' HARUS BERISI TEPAT {total_questions} BUTIR SOAL LENGKAP.
@@ -3256,7 +3447,7 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("call_nvidia_nim failed for CBT quiz: {e}. Utilizing pedagogical fallback.");
-            return Ok(fallback_generate_cbt_quiz(
+            let mut dto = fallback_generate_cbt_quiz(
                 topic,
                 grade_level,
                 subject_name,
@@ -3265,7 +3456,19 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
                 num_essay,
                 difficulty,
                 include_images,
-            ));
+            );
+            if include_images {
+                ensure_quiz_visual_guarantee(
+                    pool,
+                    &mut dto.questions,
+                    subject_name,
+                    topic,
+                    grade_level,
+                    is_english,
+                )
+                .await;
+            }
+            return Ok(dto);
         }
     };
     let cleaned = extract_clean_json(&raw);
@@ -3283,7 +3486,7 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("Failed to parse AI CBT Quiz JSON ({e}). Utilizing pedagogical fallback.");
-            return Ok(fallback_generate_cbt_quiz(
+            let mut dto = fallback_generate_cbt_quiz(
                 topic,
                 grade_level,
                 subject_name,
@@ -3292,12 +3495,25 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
                 num_essay,
                 difficulty,
                 include_images,
-            ));
+            );
+            if include_images {
+                ensure_quiz_visual_guarantee(
+                    pool,
+                    &mut dto.questions,
+                    subject_name,
+                    topic,
+                    grade_level,
+                    is_english,
+                )
+                .await;
+            }
+            return Ok(dto);
         }
     };
 
     let default_pts = (100 / total_questions.max(1) as i32).max(5);
     let mut questions: Vec<CbtQuestionDto> = Vec::new();
+    let mut diagrams_attached = 0usize;
 
     for (idx, q_val) in parsed.questions.into_iter().enumerate() {
         let q_text_raw = q_val
@@ -3406,10 +3622,27 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
             .map(|p| p as i32)
             .unwrap_or(if is_essay { 20 } else { default_pts });
 
+        let img_url = if include_images && diagrams_attached < 3 {
+            let resolved = crate::infrastructure::visual_diagram::resolve_visual_diagram_url(
+                pool,
+                q_val.get("diagram_spec"),
+                subject_name,
+                grade_level,
+            )
+            .await;
+            if resolved.is_some() {
+                diagrams_attached += 1;
+            }
+            resolved
+        } else {
+            None
+        };
+
         questions.push(CbtQuestionDto {
             id: format!("gen-q-{}-{}", idx + 1, now_ts),
             question_text: q_text,
             question_type: Some(question_type),
+            image_url: img_url,
             choices,
             correct_key,
             explanation,
@@ -3458,6 +3691,7 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
                     id: format!("cbt-mcq-pad-{idx}-{now_ts}"),
                     question_text: tpl.0.clone(),
                     question_type: Some("MULTIPLE_CHOICE".to_string()),
+                    image_url: None,
                     choices,
                     correct_key: key_labels[tpl.2 % 4].to_string(),
                     explanation: tpl.3.clone(),
@@ -3477,6 +3711,7 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
                     format!("Analisis dan uraikan pemahaman Anda mengenai penerapan materi {topic} dalam kehidupan sehari-hari (Soal Uraian {idx}):")
                 },
                 question_type: Some("ESSAY".to_string()),
+                image_url: None,
                 choices: Vec::new(),
                 correct_key: String::new(),
                 explanation: if is_english {
@@ -3522,6 +3757,7 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
                     id: format!("cbt-mcq-pad-{idx}-{now_ts}"),
                     question_text: tpl.0.clone(),
                     question_type: Some("MULTIPLE_CHOICE".to_string()),
+                    image_url: None,
                     choices,
                     correct_key: key_labels[tpl.2 % 4].to_string(),
                     explanation: tpl.3.clone(),
@@ -3531,6 +3767,18 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
             }
         }
         questions.truncate(total_questions);
+    }
+
+    if include_images {
+        ensure_quiz_visual_guarantee(
+            pool,
+            &mut questions,
+            subject_name,
+            topic,
+            grade_level,
+            is_english,
+        )
+        .await;
     }
 
     let title_str = parsed
@@ -3602,6 +3850,7 @@ pub fn fallback_generate_cbt_quiz(
             id: format!("cbt-q-{}-{now_ts}", idx + 1),
             question_text: q_text,
             question_type: Some("MULTIPLE_CHOICE".to_string()),
+            image_url: None,
             choices,
             correct_key: key_labels[correct_idx % 4].to_string(),
             explanation: expl,
@@ -3640,6 +3889,7 @@ pub fn fallback_generate_cbt_quiz(
                     prompt
                 },
                 question_type: Some("ESSAY".to_string()),
+                image_url: None,
                 choices: Vec::new(),
                 correct_key: "ESSAY".to_string(),
                 explanation: if is_english {
