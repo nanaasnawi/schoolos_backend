@@ -335,6 +335,7 @@ pub fn grade_interactive_answer(
 
             let submitted_ids: Vec<String> = parsed_ans
                 .get("ordered_ids")
+                .or_else(|| parsed_ans.get("order"))
                 .and_then(|v| v.as_array())
                 .or_else(|| parsed_ans.as_array())
                 .map(|arr| {
@@ -382,6 +383,7 @@ pub fn grade_interactive_answer(
 
             let submitted_answers: Vec<String> = parsed_ans
                 .get("answers")
+                .or_else(|| parsed_ans.get("fills"))
                 .and_then(|v| v.as_array())
                 .or_else(|| parsed_ans.as_array())
                 .map(|arr| {
@@ -508,6 +510,15 @@ mod tests {
         assert_eq!(res.total_count, 4);
         assert_eq!(res.points_earned, 50);
         assert!(!res.is_fully_correct);
+
+        // Android app submits `{ "order": [...] }`
+        let android_order = json!({
+            "order": ["o1", "o2", "o3", "o4"]
+        })
+        .to_string();
+        let res_android = grade_interactive_answer("ORDERING", &config, Some(&android_order), 100);
+        assert_eq!(res_android.points_earned, 100);
+        assert!(res_android.is_fully_correct);
     }
 
     #[test]
@@ -528,6 +539,12 @@ mod tests {
         let res_full = grade_interactive_answer("FILL_BLANK", &config, Some(&full), 100);
         assert_eq!(res_full.points_earned, 100);
         assert!(res_full.is_fully_correct);
+
+        // Android app submits `{ "fills": [...] }`
+        let android_fills = json!({ "fills": ["0", "100"] }).to_string();
+        let res_android = grade_interactive_answer("FILL_BLANK", &config, Some(&android_fills), 100);
+        assert_eq!(res_android.points_earned, 100);
+        assert!(res_android.is_fully_correct);
     }
 
     #[test]
