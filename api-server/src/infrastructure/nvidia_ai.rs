@@ -1596,104 +1596,104 @@ pub async fn generate_assignment(
         r#"
 MANDATORY JSON EXAMPLES FOR THE 3 INTERACTIVE GAME TYPES (WRITE EVERY ITEM 100% IN ENGLISH):
 1) Type 'MATCHING' (4 pairs):
-{{
+{
   "id": "g-match-1",
   "question_text": "Match each English word, expression, or concept below with its accurate meaning:",
   "question_type": "MATCHING",
   "points": 20,
   "choices": [],
-  "interaction_config": {{
+  "interaction_config": {
     "pairs": [
-      {{ "id": "p1", "left": "Term A", "right": "Clear English definition A" }},
-      {{ "id": "p2", "left": "Term B", "right": "Clear English definition B" }},
-      {{ "id": "p3", "left": "Term C", "right": "Clear English definition C" }},
-      {{ "id": "p4", "left": "Term D", "right": "Clear English definition D" }}
+      { "id": "p1", "left": "Term A", "right": "Clear English definition A" },
+      { "id": "p2", "left": "Term B", "right": "Clear English definition B" },
+      { "id": "p3", "left": "Term C", "right": "Clear English definition C" },
+      { "id": "p4", "left": "Term D", "right": "Clear English definition D" }
     ]
-  }},
+  },
   "explanation": "Short English explanation..."
-}}
+}
 2) Type 'ORDERING' (4 steps in correct chronological/logical order from first to last):
-{{
+{
   "id": "g-order-1",
   "question_text": "Arrange the following steps or dialogue lines into the correct order:",
   "question_type": "ORDERING",
   "points": 20,
   "choices": [],
-  "interaction_config": {{
+  "interaction_config": {
     "items": [
-      {{ "id": "o1", "text": "Correct first step in English..." }},
-      {{ "id": "o2", "text": "Correct second step in English..." }},
-      {{ "id": "o3", "text": "Correct third step in English..." }},
-      {{ "id": "o4", "text": "Correct fourth step in English..." }}
+      { "id": "o1", "text": "Correct first step in English..." },
+      { "id": "o2", "text": "Correct second step in English..." },
+      { "id": "o3", "text": "Correct third step in English..." },
+      { "id": "o4", "text": "Correct fourth step in English..." }
     ]
-  }},
+  },
   "explanation": "Reason for the sequence..."
-}}
+}
 3) Type 'FILL_BLANK' (Cloze sentence with {{1}}, {{2}} placeholders + distractors):
-{{
+{
   "id": "g-fill-1",
   "question_text": "Complete the blanks in the English sentence using the correct words from the word bank:",
   "question_type": "FILL_BLANK",
   "points": 20,
   "choices": [],
-  "interaction_config": {{
+  "interaction_config": {
     "template": "Complete English sentence with blank {{1}} and continuation {{2}}.",
     "blanks": ["answer_1", "answer_2"],
     "distractors": ["distractor_1", "distractor_2"]
-  }},
+  },
   "explanation": "Brief grammar or vocabulary explanation..."
-}}"#
+}"#
     } else {
         r#"
 CONTOH FORMAT WAJIB UNTUK 3 TIPE GAME INTERAKTIF:
 1) Tipe 'MATCHING' (Menjodohkan 4 pasangan):
-{{
+{
   "id": "g-match-1",
   "question_text": "Jodohkan konsep berikut dengan penjelasan atau pasangannya yang tepat:",
   "question_type": "MATCHING",
   "points": 20,
   "choices": [],
-  "interaction_config": {{
+  "interaction_config": {
     "pairs": [
-      {{ "id": "p1", "left": "Istilah A", "right": "Definisi A yang tepat" }},
-      {{ "id": "p2", "left": "Istilah B", "right": "Definisi B yang tepat" }},
-      {{ "id": "p3", "left": "Istilah C", "right": "Definisi C yang tepat" }},
-      {{ "id": "p4", "left": "Istilah D", "right": "Definisi D yang tepat" }}
+      { "id": "p1", "left": "Istilah A", "right": "Definisi A yang tepat" },
+      { "id": "p2", "left": "Istilah B", "right": "Definisi B yang tepat" },
+      { "id": "p3", "left": "Istilah C", "right": "Definisi C yang tepat" },
+      { "id": "p4", "left": "Istilah D", "right": "Definisi D yang tepat" }
     ]
-  }},
+  },
   "explanation": "Pembahasan singkat..."
-}}
+}
 2) Tipe 'ORDERING' (Urutkan 4 langkah/kronologi secara berurutan dari awal hingga akhir):
-{{
+{
   "id": "g-order-1",
   "question_text": "Susunlah tahapan atau kronologi berikut sesuai urutan yang benar:",
   "question_type": "ORDERING",
   "points": 20,
   "choices": [],
-  "interaction_config": {{
+  "interaction_config": {
     "items": [
-      {{ "id": "o1", "text": "Tahap pertama yang benar..." }},
-      {{ "id": "o2", "text": "Tahap kedua yang benar..." }},
-      {{ "id": "o3", "text": "Tahap ketiga yang benar..." }},
-      {{ "id": "o4", "text": "Tahap keempat yang benar..." }}
+      { "id": "o1", "text": "Tahap pertama yang benar..." },
+      { "id": "o2", "text": "Tahap kedua yang benar..." },
+      { "id": "o3", "text": "Tahap ketiga yang benar..." },
+      { "id": "o4", "text": "Tahap keempat yang benar..." }
     ]
-  }},
+  },
   "explanation": "Alasan urutan..."
-}}
+}
 3) Tipe 'FILL_BLANK' (Kalimat rumpang dengan placeholder {{1}}, {{2}} + distraktor):
-{{
+{
   "id": "g-fill-1",
   "question_text": "Lengkapi bagian kalimat yang kosong menggunakan pilihan bank kata yang tepat:",
   "question_type": "FILL_BLANK",
   "points": 20,
   "choices": [],
-  "interaction_config": {{
+  "interaction_config": {
     "template": "Kalimat edukatif lengkap dengan bagian rumpang {{1}} serta lanjutan {{2}}.",
     "blanks": ["jawaban_1", "jawaban_2"],
     "distractors": ["pengecoh_1", "pengecoh_2"]
-  }},
+  },
   "explanation": "Penjelasan jawaban..."
-}}"#
+}"#
     };
 
     let slot_instructions = if is_english {
@@ -1706,7 +1706,7 @@ CONTOH FORMAT WAJIB UNTUK 3 TIPE GAME INTERAKTIF:
                 "Array 'questions' MUST contain EXACTLY 3 INTERACTIVE GAME TASKS IN ENGLISH (NO MULTIPLE_CHOICE & NO ESSAY):\n\
                 - Item 1: question_type = 'MATCHING' (4 pairs in English).\n\
                 - Item 2: question_type = 'ORDERING' (4 ordered steps/lines in English).\n\
-                - Item 3: question_type = 'FILL_BLANK' (template in English containing {{1}} and {{2}}, 2 blanks, 2 distractors).\n\
+                - Item 3: question_type = 'FILL_BLANK' (template in English containing {{{{1}}}} and {{{{2}}}}, 2 blanks, 2 distractors).\n\
                 - STRICTLY FORBIDDEN to include 'ESSAY' or 'MULTIPLE_CHOICE' items!\n\
                 {game_schema_hint}"
             )
@@ -1716,7 +1716,7 @@ CONTOH FORMAT WAJIB UNTUK 3 TIPE GAME INTERAKTIF:
                 - {effective_num_mcq} 'MULTIPLE_CHOICE' items (4 options, strictly 1 is_correct: true)\n\
                 - 1 'MATCHING' item (4 pairs in English)\n\
                 - 1 'ORDERING' item (4 ordered items in English)\n\
-                - 1 'FILL_BLANK' item (English template containing {{1}} and {{2}}, 2 blanks, 2 distractors)\n\
+                - 1 'FILL_BLANK' item (English template containing {{{{1}}}} and {{{{2}}}}, 2 blanks, 2 distractors)\n\
                 - STRICTLY FORBIDDEN to include 'ESSAY' items in this game format!\n\
                 {game_schema_hint}"
             )
@@ -1743,7 +1743,7 @@ CONTOH FORMAT WAJIB UNTUK 3 TIPE GAME INTERAKTIF:
             "Array 'questions' WAJIB BERISI TEPAT 3 BUTIR TUGAS GAME INTERAKTIF AKTIF (TANPA PG & TANPA ESSAY):\n\
             - Butir 1: question_type = 'MATCHING' (4 pasangan konsep).\n\
             - Butir 2: question_type = 'ORDERING' (4 langkah terurut dari awal hingga akhir).\n\
-            - Butir 3: question_type = 'FILL_BLANK' (template berisi {{1}} dan {{2}}, 2 blanks, 2 distractors).\n\
+            - Butir 3: question_type = 'FILL_BLANK' (template berisi {{{{1}}}} dan {{{{2}}}}, 2 blanks, 2 distractors).\n\
             - DILARANG menyertakan soal 'ESSAY' maupun 'MULTIPLE_CHOICE'!\n\
             {game_schema_hint}"
         )
@@ -1753,7 +1753,7 @@ CONTOH FORMAT WAJIB UNTUK 3 TIPE GAME INTERAKTIF:
             - {effective_num_mcq} butir 'MULTIPLE_CHOICE' (4 opsi A-D, tepat 1 is_correct: true)\n\
             - 1 butir 'MATCHING' (4 pairs)\n\
             - 1 butir 'ORDERING' (4 items berurutan benar)\n\
-            - 1 butir 'FILL_BLANK' (template berisi {{1}} dan {{2}}, 2 blanks, 2 distractors)\n\
+            - 1 butir 'FILL_BLANK' (template berisi {{{{1}}}} dan {{{{2}}}}, 2 blanks, 2 distractors)\n\
             - DILARANG KERAS menyertakan soal bertipe 'ESSAY' pada format Game ini!\n\
             {game_schema_hint}"
         )
@@ -2055,7 +2055,7 @@ PENTING & WAJIB:
         }
 
         let explicit_type = q_val.get("question_type").and_then(|v| v.as_str());
-        let raw_interaction = q_val.get("interaction_config").cloned();
+        let mut raw_interaction = q_val.get("interaction_config").cloned();
         let question_type = explicit_type.map(|t| t.trim().to_uppercase()).unwrap_or_else(|| {
             if raw_interaction.is_some() {
                 if raw_interaction.as_ref().and_then(|v| v.get("pairs")).is_some() {
@@ -2071,6 +2071,12 @@ PENTING & WAJIB:
                 "MULTIPLE_CHOICE".to_string()
             }
         });
+
+        if question_type == "FILL_BLANK" {
+            if let Some(cfg) = raw_interaction.as_ref() {
+                raw_interaction = Some(normalize_fill_blank_interaction_config(cfg, &q_text));
+            }
+        }
 
         let default_points = if question_type == "MULTIPLE_CHOICE" {
             10
@@ -2267,6 +2273,144 @@ PENTING & WAJIB:
         rubric: rubric_str,
         tasks: tasks_vec,
         questions,
+    })
+}
+
+fn normalize_fill_blank_template_tokens(raw_tpl: &str) -> String {
+    let mut result = String::with_capacity(raw_tpl.len() + 8);
+    let chars: Vec<char> = raw_tpl.chars().collect();
+    let len = chars.len();
+    let mut i = 0usize;
+    let mut next_idx = 1usize;
+
+    while i < len {
+        // Preserve `{{n}}` as canonical placeholder
+        if i + 4 < len && chars[i] == '{' && chars[i + 1] == '{' {
+            if let Some(end_offset) = chars[i + 2..].windows(2).position(|w| w == ['}', '}']) {
+                let inner: String = chars[i + 2..i + 2 + end_offset].iter().collect();
+                if let Ok(num) = inner.trim().parse::<usize>() {
+                    result.push_str(&format!("{{{{{num}}}}}"));
+                    if num >= next_idx {
+                        next_idx = num + 1;
+                    }
+                    i += 2 + end_offset + 2;
+                    continue;
+                }
+            }
+        }
+        // Convert `{n}` (single brace number, e.g. from unescaped format! prompts) -> `{{n}}`
+        if chars[i] == '{' {
+            if let Some(end_offset) = chars[i + 1..].iter().position(|&c| c == '}') {
+                let inner: String = chars[i + 1..i + 1 + end_offset].iter().collect();
+                let trimmed = inner.trim();
+                if let Ok(num) = trimmed.parse::<usize>() {
+                    result.push_str(&format!("{{{{{num}}}}}"));
+                    if num >= next_idx {
+                        next_idx = num + 1;
+                    }
+                    i += 1 + end_offset + 1;
+                    continue;
+                }
+                if trimmed.eq_ignore_ascii_case("blank") || trimmed.chars().all(|c| c == '_') && !trimmed.is_empty() {
+                    result.push_str(&format!("{{{{{next_idx}}}}}"));
+                    next_idx += 1;
+                    i += 1 + end_offset + 1;
+                    continue;
+                }
+            }
+        }
+        // Convert `[n]`, `[blank]`, `[___]` -> `{{k}}`
+        if chars[i] == '[' {
+            if let Some(end_offset) = chars[i + 1..].iter().position(|&c| c == ']') {
+                let inner: String = chars[i + 1..i + 1 + end_offset].iter().collect();
+                let trimmed = inner.trim();
+                if let Ok(num) = trimmed.parse::<usize>() {
+                    result.push_str(&format!("{{{{{num}}}}}"));
+                    if num >= next_idx {
+                        next_idx = num + 1;
+                    }
+                    i += 1 + end_offset + 1;
+                    continue;
+                }
+                if trimmed.eq_ignore_ascii_case("blank") || (!trimmed.is_empty() && trimmed.chars().all(|c| c == '_')) {
+                    result.push_str(&format!("{{{{{next_idx}}}}}"));
+                    next_idx += 1;
+                    i += 1 + end_offset + 1;
+                    continue;
+                }
+            }
+        }
+        // Convert runs of 2+ underscores `__`, `___` -> sequential `{{k}}`
+        if chars[i] == '_' && i + 1 < len && chars[i + 1] == '_' {
+            while i < len && chars[i] == '_' {
+                i += 1;
+            }
+            result.push_str(&format!("{{{{{next_idx}}}}}"));
+            next_idx += 1;
+            continue;
+        }
+        result.push(chars[i]);
+        i += 1;
+    }
+
+    result
+}
+
+fn extract_clean_string_list(arr_opt: Option<&serde_json::Value>) -> Vec<String> {
+    arr_opt
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    if let Some(s) = item.as_str() {
+                        let t = s.trim();
+                        if !t.is_empty() { Some(t.to_string()) } else { None }
+                    } else {
+                        item.get("word")
+                            .or_else(|| item.get("answer"))
+                            .or_else(|| item.get("text"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn normalize_fill_blank_interaction_config(cfg: &serde_json::Value, fallback_q_text: &str) -> serde_json::Value {
+    let raw_tpl = cfg
+        .get("template")
+        .or_else(|| cfg.get("sentence"))
+        .or_else(|| cfg.get("text"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+
+    let mut template = normalize_fill_blank_template_tokens(raw_tpl);
+    if !template.contains("{{") {
+        let fallback_tpl = normalize_fill_blank_template_tokens(fallback_q_text.trim());
+        if fallback_tpl.contains("{{") {
+            template = fallback_tpl;
+        }
+    }
+
+    let mut blanks = extract_clean_string_list(
+        cfg.get("blanks")
+            .or_else(|| cfg.get("answers"))
+            .or_else(|| cfg.get("correct_answers"))
+            .or_else(|| cfg.get("keys")),
+    );
+    if blanks.is_empty() {
+        blanks = extract_clean_string_list(cfg.get("word_bank"));
+    }
+    let distractors = extract_clean_string_list(cfg.get("distractors").or_else(|| cfg.get("wrong_options")));
+
+    serde_json::json!({
+        "template": template,
+        "blanks": blanks,
+        "distractors": distractors
     })
 }
 
