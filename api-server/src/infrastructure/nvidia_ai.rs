@@ -1048,12 +1048,44 @@ fn extract_json_string_until_closing_quote(after_opening_quote: &str) -> String 
 fn sanitize_article_markdown(raw_md: &str) -> String {
     let mut text = raw_md.replace("\r\n", "\n").trim().to_string();
     // Strip accidental leaked sibling JSON keys if present at tail
-    for marker in ["\", \"glossary\"", "\",\"glossary\"", "\",\n  \"glossary\"", "\",\n\"glossary\""] {
+    for marker in [
+        "\", \"glossary\"",
+        "\",\"glossary\"",
+        "\",\n  \"glossary\"",
+        "\",\n\"glossary\"",
+        "\", \"soal_essay\"",
+        "\",\"soal_essay\"",
+        "\",\n  \"soal_essay\"",
+        "\",\n\"soal_essay\"",
+        "\", \"soal_pilihan_ganda\"",
+        "\",\"soal_pilihan_ganda\"",
+        "\",\n  \"soal_pilihan_ganda\"",
+        "\",\n\"soal_pilihan_ganda\"",
+        "\", \"questions\"",
+        "\",\"questions\"",
+        "\",\n  \"questions\"",
+        "\",\n\"questions\"",
+        "\",\n  \"quiz\"",
+        "\",\n\"quiz\"",
+    ] {
         if let Some(pos) = text.find(marker) {
             text.truncate(pos);
         }
     }
-    text = text.trim_end_matches(|c| c == '}' || c == ',' || c == ' ').trim().to_string();
+    // Catch any generic `",` line followed by `"<json_key>":`
+    let mut byte_offset = 0usize;
+    let lines_snapshot: Vec<&str> = text.split('\n').collect();
+    for i in 0..lines_snapshot.len().saturating_sub(1) {
+        let cur = lines_snapshot[i].trim();
+        let next = lines_snapshot[i + 1].trim();
+        let is_json_key_line = next.starts_with('"') && next.contains("\":");
+        if (cur == "\"," || cur == "\" ,") && is_json_key_line {
+            text.truncate(byte_offset);
+            break;
+        }
+        byte_offset += lines_snapshot[i].len() + 1;
+    }
+    text = text.trim_end_matches(|c| c == '}' || c == ',' || c == ' ' || c == '"').trim().to_string();
 
     // Expand collapsed single-line Markdown tables (`| Col | | :--- | | Val |`) onto separate lines
     // and repair unclosed trailing `**` on standalone heading/label lines
@@ -1178,7 +1210,7 @@ Write a complete LEARNING ARTICLE for {grade_level} students studying "{subject_
 
 {subject_guideline}
 
-Output MUST be strictly valid JSON with ONLY these 3 keys: "title", "description", "markdown_article" (do NOT add separate JSON keys like "glossary" outside "markdown_article"). If you include Markdown tables, put EACH row on its own line separated by \n.
+Output MUST be strictly valid JSON with ONLY these 3 keys: "title", "description", "markdown_article" (do NOT add separate JSON keys like "glossary", "soal_essay", "soal_pilihan_ganda", or "questions" anywhere inside or outside "markdown_article"). If you include Markdown tables, put EACH row on its own line separated by \n.
 Every field — title, description, and the entire markdown_article — MUST be written 100% in natural English (NO Indonesian words):
 {{
   "title": "Engaging English Learning Article Title on {topic}",
@@ -1195,7 +1227,7 @@ Tuliskan naskah ARTIKEL PEMBELAJARAN lengkap untuk jenjang {grade_level} mata pe
 
 {subject_guideline}
 
-Format output HARUS berupa JSON murni dengan HANYA 3 key ini saja: "title", "description", dan "markdown_article" (DILARANG menambahkan key JSON tambahan seperti "glossary" di luar "markdown_article"; masukkan glosarium langsung di dalam markdown_article!). Jika membuat tabel perbandingan Markdown, tuliskan SETIAP baris tabel di baris baru yang dipisah \n (bukan digabung dalam satu baris).
+Format output HARUS berupa JSON murni dengan HANYA 3 key ini saja: "title", "description", dan "markdown_article" (DILARANG menambahkan key JSON tambahan seperti "glossary", "soal_essay", "soal_pilihan_ganda", atau "questions" di luar maupun di dalam "markdown_article"; masukkan glosarium langsung sebagai teks Markdown di dalam markdown_article). Jika membuat tabel perbandingan Markdown, tuliskan SETIAP baris tabel di baris baru yang dipisah \n (bukan digabung dalam satu baris).
 {{
   "title": "Judul Naskah Pembelajaran",
   "description": "Deskripsi pengantar singkat 1-2 kalimat.",
@@ -2104,7 +2136,12 @@ PENTING & WAJIB:
             let qt = q.question_type.as_str();
             if qt == "MULTIPLE_CHOICE" && !q.choices.is_empty() {
                 final_mcqs.push(q);
-            } else if matches!(qt, "MATCHING" | "ORDERING" | "FILL_BLANK") && q.interaction_config.is_some() {
+            } else if matches!(qt, "MATCHING" | "ORDERING" | "FILL_BLANK")
+                && q.interaction_config
+                    .as_ref()
+                    .map(|cfg| is_valid_game_interaction_config(qt, cfg))
+                    .unwrap_or(false)
+            {
                 final_games.push(q);
             } else {
                 final_essays.push(q);
@@ -2231,6 +2268,49 @@ PENTING & WAJIB:
         tasks: tasks_vec,
         questions,
     })
+}
+
+fn is_valid_game_interaction_config(question_type: &str, cfg: &serde_json::Value) -> bool {
+    match question_type {
+        "MATCHING" => cfg
+            .get("pairs")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter(|p| {
+                        let left = p.get("left").and_then(|v| v.as_str()).unwrap_or("").trim();
+                        let right = p.get("right").and_then(|v| v.as_str()).unwrap_or("").trim();
+                        !left.is_empty() && !right.is_empty()
+                    })
+                    .count()
+                    >= 2
+            })
+            .unwrap_or(false),
+        "ORDERING" => cfg
+            .get("items")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter(|it| !it.get("text").and_then(|v| v.as_str()).unwrap_or("").trim().is_empty())
+                    .count()
+                    >= 2
+            })
+            .unwrap_or(false),
+        "FILL_BLANK" => {
+            let tpl = cfg.get("template").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let has_slot = tpl.contains("___") || (tpl.contains("{{") && tpl.contains("}}"));
+            let has_blanks = cfg
+                .get("blanks")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .any(|b| !b.as_str().unwrap_or("").trim().is_empty())
+                })
+                .unwrap_or(false);
+            has_slot && has_blanks
+        }
+        _ => false,
+    }
 }
 
 fn build_fallback_matching_question(topic: &str, subject: &str, ts: i64) -> AssignmentQuestionDto {
