@@ -212,6 +212,7 @@ async fn generate_content(
             let include_images = payload.include_images.unwrap_or(false);
 
             let task = nvidia_ai::generate_assignment(
+                &ctx.pool,
                 topic,
                 grade,
                 subject,
@@ -261,6 +262,7 @@ async fn generate_content(
             let include_images = payload.include_images.unwrap_or(false);
 
             let quiz = nvidia_ai::generate_cbt_quiz(
+                &ctx.pool,
                 topic,
                 grade,
                 subject,

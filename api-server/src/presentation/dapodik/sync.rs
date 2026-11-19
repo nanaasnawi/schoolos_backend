@@ -3546,9 +3546,27 @@ pub async fn pull_dapodik_records(
                 .execute(&mut *tx)
                 .await;
 
-            // Cari siswa di PostgreSQL yang sudah tidak ada lagi di data aktif Dapodik (termutasi / keluar / lulus)
+            // Cari siswa di PostgreSQL yang MEMANG berasal/pernah disinkronkan dari Dapodik
+            // namun tidak lagi ada di data aktif Dapodik saat ini (termutasi/keluar/lulus).
+            // Siswa yang ditambahkan manual di SchoolOS (belum pernah tercatat di dapodik_sync_records)
+            // dilindungi agar tidak otomatis berubah menjadi 'transferred'.
             let removed_students = sqlx::query_as::<_, RemovedStudentRow>(
-                "SELECT id, user_id, full_name, nisn FROM students WHERE tenant_id = $1 AND deleted_at IS NULL AND (status = 'active' OR is_active = true) AND NOT (id = ANY($2))",
+                r#"
+                SELECT s.id, s.user_id, s.full_name, s.nisn
+                FROM students s
+                WHERE s.tenant_id = $1
+                  AND s.deleted_at IS NULL
+                  AND (s.status = 'active' OR s.is_active = true)
+                  AND NOT (s.id = ANY($2))
+                  AND EXISTS (
+                      SELECT 1 FROM dapodik_sync_records dsr
+                      WHERE dsr.tenant_id = $1
+                        AND (
+                            (NULLIF(TRIM(s.nisn), '') IS NOT NULL AND dsr.nisn = s.nisn)
+                            OR (NULLIF(TRIM(s.nik), '') IS NOT NULL AND dsr.nik = s.nik)
+                        )
+                  )
+                "#,
             )
             .bind(ctx.tenant_id)
             .bind(&active_ids_vec)
