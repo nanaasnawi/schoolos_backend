@@ -2406,10 +2406,11 @@ pub async fn serve_uploaded_file(
     if disk_path.is_file() {
         if let Ok(bytes) = tokio::fs::read(&disk_path).await {
             let mime = guess_upload_mime(&clean);
+            let out_bytes = sanitize_served_upload_bytes(mime, bytes);
             return axum::response::Response::builder()
                 .header(axum::http::header::CONTENT_TYPE, mime)
                 .header(axum::http::header::CACHE_CONTROL, "public, max-age=31536000, immutable")
-                .body(axum::body::Body::from(bytes))
+                .body(axum::body::Body::from(out_bytes))
                 .unwrap_or_else(|_| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Error building response").into_response());
         }
     }
@@ -2424,7 +2425,8 @@ pub async fn serve_uploaded_file(
 
     if let Some(r) = row {
         let mime: String = r.get("mime_type");
-        let bytes: Vec<u8> = r.get("file_data");
+        let raw_bytes: Vec<u8> = r.get("file_data");
+        let bytes = sanitize_served_upload_bytes(&mime, raw_bytes);
 
         // Write to local disk cache
         let _ = tokio::fs::create_dir_all("uploads").await;
@@ -2438,6 +2440,20 @@ pub async fn serve_uploaded_file(
     }
 
     (axum::http::StatusCode::NOT_FOUND, "File not found").into_response()
+}
+
+/// Ensures SVG uploads remain SVG 1.1 compatible with AndroidSVG (`orient="auto"` instead of SVG 2 `orient="auto-start-reverse"`).
+fn sanitize_served_upload_bytes(mime: &str, bytes: Vec<u8>) -> Vec<u8> {
+    if mime.eq_ignore_ascii_case("image/svg+xml") {
+        if let Ok(text) = std::str::from_utf8(&bytes) {
+            if text.contains("auto-start-reverse") {
+                return text
+                    .replace(r#"orient="auto-start-reverse""#, r#"orient="auto""#)
+                    .into_bytes();
+            }
+        }
+    }
+    bytes
 }
 
 fn guess_upload_mime(filename: &str) -> &'static str {

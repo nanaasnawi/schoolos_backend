@@ -56,13 +56,13 @@ fn svg_frame(badge: &str, title: &str, subtitle: Option<&str>, inner: &str) -> S
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 440" width="800" height="440" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif">
   <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto">
       <path d="M 0 1.5 L 10 5 L 0 8.5 z" fill="#475569"/>
     </marker>
-    <marker id="arrow-emerald" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <marker id="arrow-emerald" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto">
       <path d="M 0 1.5 L 10 5 L 0 8.5 z" fill="#059669"/>
     </marker>
-    <marker id="arrow-blue" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto">
       <path d="M 0 1.5 L 10 5 L 0 8.5 z" fill="#0284C7"/>
     </marker>
   </defs>
@@ -1084,5 +1084,6 @@ mod tests {
         }));
         assert!(flow.contains("2. ?"));
         assert!(flow.contains("</svg>"));
+        assert!(!flow.contains("auto-start-reverse"));
     }
 }

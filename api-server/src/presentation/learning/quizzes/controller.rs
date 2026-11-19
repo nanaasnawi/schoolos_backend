@@ -231,6 +231,7 @@ async fn create(
             let points = q.points.unwrap_or(10);
             total_pts += points;
             let order_idx = q.order_index.unwrap_or(idx as i32 + 1);
+            let stored_q_text = merge_question_image_into_text(&q.question_text, q.image_url.as_deref());
 
             let _ = sqlx::query(
                 r#"
@@ -240,7 +241,7 @@ async fn create(
             )
             .bind(q_id)
             .bind(resp.id)
-            .bind(&q.question_text)
+            .bind(&stored_q_text)
             .bind(&q_type)
             .bind(points)
             .bind(order_idx)
@@ -2378,13 +2379,14 @@ async fn get_questions(
             )
         })?;
 
+        let extracted_image = extract_embedded_image_url(&q.question_text);
         result.push(QuizQuestionResponse {
             id: q.id,
             question_text: q.question_text,
             question_type: q.question_type,
             points: q.points,
             order_index: q.order_index,
-            image_url: None,
+            image_url: extracted_image,
             choices: choices
                 .into_iter()
                 .map(|c| QuizChoiceResponse {
@@ -2450,6 +2452,8 @@ async fn add_question(
         .unwrap_or_else(|| "multiple_choice".to_string());
     let points = payload.points.unwrap_or(10);
     let order_idx = payload.order_index.unwrap_or(1);
+    let stored_question_text =
+        merge_question_image_into_text(&payload.question_text, payload.image_url.as_deref());
 
     sqlx::query(
         r#"
@@ -2459,7 +2463,7 @@ async fn add_question(
     )
     .bind(q_id)
     .bind(id)
-    .bind(&payload.question_text)
+    .bind(&stored_question_text)
     .bind(&q_type)
     .bind(points)
     .bind(order_idx)
@@ -2530,7 +2534,7 @@ async fn add_question(
     Ok(Json(ApiResponse::success(
         QuizQuestionResponse {
             id: q_id,
-            question_text: payload.question_text,
+            question_text: stored_question_text,
             question_type: q_type,
             points,
             order_index: order_idx,
@@ -2539,4 +2543,34 @@ async fn add_question(
         },
         req_ctx.request_id,
     )))
+}
+
+fn merge_question_image_into_text(question_text: &str, image_url: Option<&str>) -> String {
+    let trimmed_text = question_text.trim();
+    if let Some(raw_img) = image_url {
+        let img = raw_img.trim();
+        if !img.is_empty()
+            && !img.to_lowercase().contains("unsplash.com")
+            && !trimmed_text.contains("![")
+        {
+            if trimmed_text.is_empty() {
+                return format!("![Diagram Soal]({img})");
+            }
+            return format!("![Diagram Soal]({img})\n\n{trimmed_text}");
+        }
+    }
+    trimmed_text.to_string()
+}
+
+fn extract_embedded_image_url(question_text: &str) -> Option<String> {
+    let start = question_text.find("![")?;
+    let after_alt = question_text[start..].find("](")?;
+    let url_start = start + after_alt + 2;
+    let url_end = question_text[url_start..].find(')')?;
+    let candidate = question_text[url_start..url_start + url_end].trim();
+    if candidate.is_empty() || candidate.to_lowercase().contains("unsplash.com") {
+        None
+    } else {
+        Some(candidate.to_string())
+    }
 }

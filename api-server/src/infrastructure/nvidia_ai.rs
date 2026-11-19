@@ -1554,6 +1554,27 @@ pub fn clean_question_stem(raw: &str) -> String {
     }
 }
 
+fn strip_leaked_diagram_bracket_tag(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    let lower_prefixes = ["[diagram:", "[grafik:", "[bagan:", "[gambar:", "[chart:"];
+    while let Some(open_idx) = rest.find('[') {
+        out.push_str(&rest[..open_idx]);
+        let after_open = &rest[open_idx..];
+        let lower_slice: String = after_open.chars().take(12).collect::<String>().to_lowercase();
+        if lower_prefixes.iter().any(|p| lower_slice.starts_with(p)) {
+            if let Some(close_idx) = after_open.find(']') {
+                rest = after_open[close_idx + 1..].trim_start();
+                continue;
+            }
+        }
+        out.push('[');
+        rest = &rest[open_idx + 1..];
+    }
+    out.push_str(rest);
+    out.trim().to_string()
+}
+
 fn build_visual_diagram_prompt_instructions(is_english: bool, include_images: bool) -> &'static str {
     if !include_images {
         return "";
@@ -1562,6 +1583,7 @@ fn build_visual_diagram_prompt_instructions(is_english: bool, include_images: bo
         r#"
 VISUAL DIAGRAM / IMAGE QUESTION REQUIREMENT:
 - On 1 to 2 non-game questions (prefer MULTIPLE_CHOICE or ESSAY), include a structured `"diagram_spec"` object AND explicitly refer to that exact diagram inside `"question_text"` (for example: "Observe the bar chart/diagram below...").
+- NEVER write bracketed text placeholders like `[Diagram: ...]` or reveal the answer inside `"question_text"` — the system automatically renders `"diagram_spec"` as an actual visual image above the question.
 - EVERY number, unit, vertex letter, and step label in `"question_text"` and options MUST match `"diagram_spec"` 100%. Never ask about details that are missing from `"diagram_spec"`.
 - Allowed `"diagram_spec"` shapes:
   1) `{"type":"bar_chart","title":"...","x_label":"...","y_label":"...","bars":[{"label":"A","value":12},{"label":"B","value":18}]}`
@@ -1574,7 +1596,8 @@ VISUAL DIAGRAM / IMAGE QUESTION REQUIREMENT:
     } else {
         r#"
 ATURAN WAJIB SOAL BERGAMBAR / DIAGRAM AKURAT:
-- Pada 1 hingga 2 butir soal non-game (utamakan MULTIPLE_CHOICE atau ESSAY), sertakan properti `"diagram_spec"` terstruktur DAN referensikan gambar tersebut di `"question_text"` (misal: "Perhatikan grafik/diagram/gambar berikut ini! ...").
+- Pada 1 hingga 2 butir soal non-game (utamakan MULTIPLE_CHOICE atau ESSAY), sertakan properti `"diagram_spec"` terstruktur DAN referensikan gambar tersebut di `"question_text"` (misal: "Perhatikan grafik/diagram/gambar di atas! ...").
+- DILARANG KERAS menulis teks tag seperti `[Diagram: ...]` atau `[Grafik: ...]` serta dilarang membocorkan kunci jawaban di dalam `"question_text"`, karena sistem otomatis merender `"diagram_spec"` menjadi gambar SVG sungguhan di atas soal.
 - SELURUH angka, satuan, huruf titik sudut, maupun tahap di dalam `"question_text"` dan pilihan jawaban WAJIB SAMA PERSIS dengan isi `"diagram_spec"`. DILARANG bertanya tentang data yang tidak tergambar.
 - Pilihan format `"diagram_spec"` yang didukung sistem rendering presisi:
   1) `{"type":"bar_chart","title":"...","x_label":"...","y_label":"...","bars":[{"label":"Senin","value":15},{"label":"Selasa","value":25}]}`
@@ -2168,10 +2191,15 @@ PENTING & WAJIB:
         } else {
             None
         };
+        let clean_q_text = if img.is_some() {
+            strip_leaked_diagram_bracket_tag(&q_text)
+        } else {
+            q_text
+        };
 
         questions.push(AssignmentQuestionDto {
             id: q_id,
-            question_text: q_text,
+            question_text: clean_q_text,
             question_type,
             points,
             image_url: img,
@@ -3637,10 +3665,15 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
         } else {
             None
         };
+        let clean_q_text = if img_url.is_some() {
+            strip_leaked_diagram_bracket_tag(&q_text)
+        } else {
+            q_text
+        };
 
         questions.push(CbtQuestionDto {
             id: format!("gen-q-{}-{}", idx + 1, now_ts),
-            question_text: q_text,
+            question_text: clean_q_text,
             question_type: Some(question_type),
             image_url: img_url,
             choices,
