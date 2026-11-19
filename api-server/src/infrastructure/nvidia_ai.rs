@@ -1376,7 +1376,7 @@ pub struct CbtQuestionChoiceDto {
 pub struct AssignmentQuestionDto {
     pub id: String,
     pub question_text: String,
-    pub question_type: String, // "MULTIPLE_CHOICE" | "ESSAY" | "MATCHING" | "ORDERING" | "FILL_BLANK"
+    pub question_type: String, // "MULTIPLE_CHOICE" | "ESSAY" | "MATCHING" | "ORDERING" | "FILL_BLANK" | "CROSSWORD"
     pub points: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_url: Option<String>,
@@ -1639,7 +1639,7 @@ pub async fn generate_assignment(
     };
     let now_ts = chrono::Utc::now().timestamp_millis();
 
-    let num_games: usize = if is_pure_game || is_game_mixed { 3 } else { 0 };
+    let num_games: usize = if is_pure_game || is_game_mixed { 4 } else { 0 };
 
     let total_questions = if is_homework {
         effective_num_essay
@@ -1651,7 +1651,7 @@ pub async fn generate_assignment(
 
     let game_schema_hint = if is_english {
         r#"
-MANDATORY JSON EXAMPLES FOR THE 3 INTERACTIVE GAME TYPES (WRITE EVERY ITEM 100% IN ENGLISH):
+MANDATORY JSON EXAMPLES FOR THE 4 INTERACTIVE GAME TYPES (WRITE EVERY ITEM 100% IN ENGLISH):
 1) Type 'MATCHING' (4 pairs):
 {
   "id": "g-match-1",
@@ -1699,10 +1699,27 @@ MANDATORY JSON EXAMPLES FOR THE 3 INTERACTIVE GAME TYPES (WRITE EVERY ITEM 100% 
     "distractors": ["distractor_1", "distractor_2"]
   },
   "explanation": "Brief grammar or vocabulary explanation..."
+}
+4) Type 'CROSSWORD' (4 single-word uppercase A-Z answers without spaces + short English clues sharing common letters):
+{
+  "id": "g-crossword-1",
+  "question_text": "Complete the crossword puzzle below using key vocabulary from the lesson:",
+  "question_type": "CROSSWORD",
+  "points": 20,
+  "choices": [],
+  "interaction_config": {
+    "words": [
+      { "answer": "GRAMMAR", "clue": "System and structure of a language" },
+      { "answer": "READING", "clue": "Skill of understanding written passages" },
+      { "answer": "MEANING", "clue": "Definition or sense of a word" },
+      { "answer": "EXAMPLE", "clue": "Specific sample used to clarify a rule" }
+    ]
+  },
+  "explanation": "Vocabulary summary..."
 }"#
     } else {
         r#"
-CONTOH FORMAT WAJIB UNTUK 3 TIPE GAME INTERAKTIF:
+CONTOH FORMAT WAJIB UNTUK 4 TIPE GAME INTERAKTIF:
 1) Tipe 'MATCHING' (Menjodohkan 4 pasangan):
 {
   "id": "g-match-1",
@@ -1750,6 +1767,23 @@ CONTOH FORMAT WAJIB UNTUK 3 TIPE GAME INTERAKTIF:
     "distractors": ["pengecoh_1", "pengecoh_2"]
   },
   "explanation": "Penjelasan jawaban..."
+}
+4) Tipe 'CROSSWORD' (Teka-Teki Silang 4 kata kunci tunggal A-Z tanpa spasi + petunjuk singkat yang saling beririsan huruf):
+{
+  "id": "g-crossword-1",
+  "question_text": "Isilah Teka-Teki Silang (TTS) berikut sesuai petunjuk mendatar dan menurun:",
+  "question_type": "CROSSWORD",
+  "points": 20,
+  "choices": [],
+  "interaction_config": {
+    "words": [
+      { "answer": "EVAPORASI", "clue": "Proses penguapan air akibat panas matahari" },
+      { "answer": "KONDENSASI", "clue": "Perubahan uap air menjadi titik air di awan" },
+      { "answer": "PRESIPITASI", "clue": "Turunnya titik air hujan ke permukaan bumi" },
+      { "answer": "SIKLUS", "clue": "Rangkaian proses alam yang berulang" }
+    ]
+  },
+  "explanation": "Ringkasan istilah penting pada Teka-Teki Silang..."
 }"#
     };
 
@@ -1760,10 +1794,11 @@ CONTOH FORMAT WAJIB UNTUK 3 TIPE GAME INTERAKTIF:
             )
         } else if is_pure_game {
             format!(
-                "Array 'questions' MUST contain EXACTLY 3 INTERACTIVE GAME TASKS IN ENGLISH (NO MULTIPLE_CHOICE & NO ESSAY):\n\
+                "Array 'questions' MUST contain EXACTLY 4 INTERACTIVE GAME TASKS IN ENGLISH (NO MULTIPLE_CHOICE & NO ESSAY):\n\
                 - Item 1: question_type = 'MATCHING' (4 pairs in English).\n\
                 - Item 2: question_type = 'ORDERING' (4 ordered steps/lines in English).\n\
                 - Item 3: question_type = 'FILL_BLANK' (template in English containing {{{{1}}}} and {{{{2}}}}, 2 blanks, 2 distractors).\n\
+                - Item 4: question_type = 'CROSSWORD' (4 single uppercase A-Z words sharing common letters + clear English clues).\n\
                 - STRICTLY FORBIDDEN to include 'ESSAY' or 'MULTIPLE_CHOICE' items!\n\
                 {game_schema_hint}"
             )
@@ -1774,6 +1809,7 @@ CONTOH FORMAT WAJIB UNTUK 3 TIPE GAME INTERAKTIF:
                 - 1 'MATCHING' item (4 pairs in English)\n\
                 - 1 'ORDERING' item (4 ordered items in English)\n\
                 - 1 'FILL_BLANK' item (English template containing {{{{1}}}} and {{{{2}}}}, 2 blanks, 2 distractors)\n\
+                - 1 'CROSSWORD' item (4 single uppercase A-Z vocabulary words sharing letters + clear English clues)\n\
                 - STRICTLY FORBIDDEN to include 'ESSAY' items in this game format!\n\
                 {game_schema_hint}"
             )
@@ -1797,10 +1833,11 @@ CONTOH FORMAT WAJIB UNTUK 3 TIPE GAME INTERAKTIF:
         )
     } else if is_pure_game {
         format!(
-            "Array 'questions' WAJIB BERISI TEPAT 3 BUTIR TUGAS GAME INTERAKTIF AKTIF (TANPA PG & TANPA ESSAY):\n\
+            "Array 'questions' WAJIB BERISI TEPAT 4 BUTIR TUGAS GAME INTERAKTIF AKTIF (TANPA PG & TANPA ESSAY):\n\
             - Butir 1: question_type = 'MATCHING' (4 pasangan konsep).\n\
             - Butir 2: question_type = 'ORDERING' (4 langkah terurut dari awal hingga akhir).\n\
             - Butir 3: question_type = 'FILL_BLANK' (template berisi {{{{1}}}} dan {{{{2}}}}, 2 blanks, 2 distractors).\n\
+            - Butir 4: question_type = 'CROSSWORD' (Teka-Teki Silang berisi 4 kata tunggal huruf kapital A-Z tanpa spasi yang beririsan huruf + clue singkat).\n\
             - DILARANG menyertakan soal 'ESSAY' maupun 'MULTIPLE_CHOICE'!\n\
             {game_schema_hint}"
         )
@@ -1811,6 +1848,7 @@ CONTOH FORMAT WAJIB UNTUK 3 TIPE GAME INTERAKTIF:
             - 1 butir 'MATCHING' (4 pairs)\n\
             - 1 butir 'ORDERING' (4 items berurutan benar)\n\
             - 1 butir 'FILL_BLANK' (template berisi {{{{1}}}} dan {{{{2}}}}, 2 blanks, 2 distractors)\n\
+            - 1 butir 'CROSSWORD' (4 kata kunci A-Z + petunjuk Teka-Teki Silang)\n\
             - DILARANG KERAS menyertakan soal bertipe 'ESSAY' pada format Game ini!\n\
             {game_schema_hint}"
         )
@@ -2145,6 +2183,12 @@ PENTING & WAJIB:
                     "MATCHING".to_string()
                 } else if raw_interaction.as_ref().and_then(|v| v.get("items")).is_some() {
                     "ORDERING".to_string()
+                } else if raw_interaction
+                    .as_ref()
+                    .and_then(|v| v.get("words").or_else(|| v.get("clues")))
+                    .is_some()
+                {
+                    "CROSSWORD".to_string()
                 } else {
                     "FILL_BLANK".to_string()
                 }
@@ -2158,6 +2202,12 @@ PENTING & WAJIB:
         if question_type == "FILL_BLANK" {
             if let Some(cfg) = raw_interaction.as_ref() {
                 raw_interaction = Some(normalize_fill_blank_interaction_config(cfg, &q_text));
+            }
+        } else if question_type == "CROSSWORD" {
+            if let Some(cfg) = raw_interaction.as_ref() {
+                raw_interaction = Some(
+                    crate::presentation::learning::assignments::interactive_game::compile_crossword_interaction_config(cfg),
+                );
             }
         }
 
@@ -2235,7 +2285,7 @@ PENTING & WAJIB:
             let qt = q.question_type.as_str();
             if qt == "MULTIPLE_CHOICE" && !q.choices.is_empty() {
                 final_mcqs.push(q);
-            } else if matches!(qt, "MATCHING" | "ORDERING" | "FILL_BLANK")
+            } else if matches!(qt, "MATCHING" | "ORDERING" | "FILL_BLANK" | "CROSSWORD")
                 && q.interaction_config
                     .as_ref()
                     .map(|cfg| is_valid_game_interaction_config(qt, cfg))
@@ -2247,7 +2297,7 @@ PENTING & WAJIB:
             }
         }
 
-        if is_game_mixed {
+        if is_pure_game || is_game_mixed {
             if !final_games.iter().any(|g| g.question_type == "MATCHING") {
                 final_games.push(build_fallback_matching_question(topic, subject_name, now_ts));
             }
@@ -2256,6 +2306,9 @@ PENTING & WAJIB:
             }
             if !final_games.iter().any(|g| g.question_type == "FILL_BLANK") {
                 final_games.push(build_fallback_fill_blank_question(topic, subject_name, now_ts));
+            }
+            if !final_games.iter().any(|g| g.question_type == "CROSSWORD") {
+                final_games.push(build_fallback_crossword_question(topic, subject_name, now_ts));
             }
         }
 
@@ -2666,6 +2719,34 @@ fn is_valid_game_interaction_config(question_type: &str, cfg: &serde_json::Value
                 .unwrap_or(false);
             has_slot && has_blanks
         }
+        "CROSSWORD" => {
+            let valid_clues = cfg
+                .get("clues")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.len() >= 2)
+                .unwrap_or(false);
+            let valid_words = cfg
+                .get("words")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter(|w| {
+                            let ans_len = w
+                                .get("answer")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .chars()
+                                .filter(|c| c.is_ascii_alphabetic())
+                                .count();
+                            let clue = w.get("clue").and_then(|v| v.as_str()).unwrap_or("").trim();
+                            (2..=15).contains(&ans_len) && !clue.is_empty()
+                        })
+                        .count()
+                        >= 2
+                })
+                .unwrap_or(false);
+            valid_clues || valid_words
+        }
         _ => false,
     }
 }
@@ -2781,6 +2862,47 @@ fn build_fallback_fill_blank_question(topic: &str, subject: &str, ts: i64) -> As
             "distractors": ["hafalan pasif", "dugaan acak"]
         })),
         explanation: "Pemahaman konsep dasar dan latihan terarah adalah kunci penguasaan materi.".to_string(),
+    }
+}
+
+fn build_fallback_crossword_question(topic: &str, subject: &str, ts: i64) -> AssignmentQuestionDto {
+    let raw_cfg = if is_english_subject(subject) {
+        serde_json::json!({
+            "words": [
+                { "answer": "CONCEPT", "clue": format!("Core idea learned in {topic}") },
+                { "answer": "CONTEXT", "clue": "Situation in which an idea or phrase appears" },
+                { "answer": "PRACTICE", "clue": "Repeated exercise to improve mastery" },
+                { "answer": "EXAMPLE", "clue": "Concrete case illustrating a rule" }
+            ]
+        })
+    } else {
+        serde_json::json!({
+            "words": [
+                { "answer": "KONSEP", "clue": format!("Ide atau gagasan dasar pada materi {topic}") },
+                { "answer": "PROSES", "clue": "Rangkaian tahapan atau perubahan peristiwa" },
+                { "answer": "PRAKTIK", "clue": "Penerapan nyata konsep yang dipelajari" },
+                { "answer": "ANALISIS", "clue": "Kegiatan menguraikan masalah untuk menemukan solusi" }
+            ]
+        })
+    };
+    let compiled = crate::presentation::learning::assignments::interactive_game::compile_crossword_interaction_config(&raw_cfg);
+    AssignmentQuestionDto {
+        id: format!("asg-cw-fb-{ts}"),
+        question_text: if is_english_subject(subject) {
+            format!("Complete the crossword puzzle about '{topic}' ({subject}) using the clues below:")
+        } else {
+            format!("Isilah Teka-Teki Silang (TTS) seputar topik '{topic}' ({subject}) berikut sesuai petunjuk:")
+        },
+        question_type: "CROSSWORD".to_string(),
+        points: 20,
+        image_url: None,
+        choices: Vec::new(),
+        interaction_config: Some(compiled),
+        explanation: if is_english_subject(subject) {
+            "Reviewing key terms strengthens vocabulary and comprehension.".to_string()
+        } else {
+            "Penguasaan kosakata dan istilah kunci memperkuat pemahaman konsep.".to_string()
+        },
     }
 }
 
@@ -3161,6 +3283,7 @@ pub fn fallback_generate_assignment(
         questions.push(build_fallback_matching_question(topic, subject_name, now_ts));
         questions.push(build_fallback_ordering_question(topic, subject_name, now_ts));
         questions.push(build_fallback_fill_blank_question(topic, subject_name, now_ts));
+        questions.push(build_fallback_crossword_question(topic, subject_name, now_ts));
     }
 
     let essay_count = if is_homework {
