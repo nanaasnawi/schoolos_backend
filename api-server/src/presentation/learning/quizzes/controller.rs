@@ -28,6 +28,28 @@ use school_core::learning::application::quiz::{
     submit_attempt::SubmitAnswer, submit_attempt::SubmitAttemptCommand,
 };
 
+static QUIZ_VARIATIF_SCHEMA_READY: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+async fn ensure_quiz_variatif_schema(pool: &sqlx::PgPool) {
+    QUIZ_VARIATIF_SCHEMA_READY
+        .get_or_init(|| async {
+            let _ = sqlx::query(
+                "ALTER TABLE quiz_questions ALTER COLUMN question_type TYPE VARCHAR(40)",
+            )
+            .execute(pool)
+            .await;
+            if let Err(e) = sqlx::query(
+                "ALTER TABLE quiz_questions ADD COLUMN IF NOT EXISTS interaction_config JSONB DEFAULT NULL",
+            )
+            .execute(pool)
+            .await
+            {
+                tracing::warn!("ensure_quiz_variatif_schema failed: {e}");
+            }
+        })
+        .await;
+}
+
 pub fn quiz_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/", post(create).get(list))
@@ -232,11 +254,12 @@ async fn create(
     }
 
     if let Some(questions) = payload.questions {
+        ensure_quiz_variatif_schema(&ctx.pool).await;
         let q_count = questions.len() as i32;
         let mut total_pts = 0;
         for (idx, q) in questions.into_iter().enumerate() {
             let q_id = Uuid::new_v4();
-            let q_type = q.question_type.unwrap_or_else(|| "multiple_choice".to_string());
+            let q_type = q.question_type.unwrap_or_else(|| "MULTIPLE_CHOICE".to_string());
             let points = q.points.unwrap_or(10);
             total_pts += points;
             let order_idx = q.order_index.unwrap_or(idx as i32 + 1);
@@ -244,8 +267,8 @@ async fn create(
 
             let _ = sqlx::query(
                 r#"
-                INSERT INTO quiz_questions (id, quiz_id, question_text, question_type, points, order_index, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+                INSERT INTO quiz_questions (id, quiz_id, question_text, question_type, points, order_index, interaction_config, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
                 "#,
             )
             .bind(q_id)
@@ -254,6 +277,7 @@ async fn create(
             .bind(&q_type)
             .bind(points)
             .bind(order_idx)
+            .bind(&q.interaction_config)
             .execute(&ctx.pool)
             .await;
 
@@ -1768,6 +1792,9 @@ async fn submit_attempt(
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
+    ensure_quiz_variatif_schema(&ctx.pool).await;
+    let is_teacher_actor = actor_is_teacher_or_admin(&req_ctx);
+
     let answer_rows = sqlx::query(
         r#"
         SELECT 
@@ -1775,6 +1802,7 @@ async fn submit_attempt(
             q.question_text,
             q.question_type,
             q.points as max_points,
+            q.interaction_config,
             ans.chosen_choice_id,
             c.choice_text as chosen_choice_text,
             COALESCE(ans.is_correct, c.is_correct) as is_correct,
@@ -1796,17 +1824,29 @@ async fn submit_attempt(
 
     let answers: Vec<AttemptAnswerDetailDto> = answer_rows
         .into_iter()
-        .map(|a| AttemptAnswerDetailDto {
-            question_id: a.get("question_id"),
-            question_text: a.get("question_text"),
-            question_type: a.get("question_type"),
-            max_points: a.get("max_points"),
-            chosen_choice_id: a.get("chosen_choice_id"),
-            chosen_choice_text: a.get("chosen_choice_text"),
-            is_correct: a.get("is_correct"),
-            text_answer: a.get("text_answer"),
-            points_earned: a.get::<Option<i32>, _>("points_earned").unwrap_or(0),
-            teacher_feedback: None,
+        .map(|a| {
+            let q_id: Uuid = a.get("question_id");
+            let q_type: String = a.get("question_type");
+            let raw_cfg: Option<serde_json::Value> =
+                a.try_get("interaction_config").ok().flatten();
+            let safe_cfg = if is_teacher_actor {
+                raw_cfg
+            } else {
+                sanitize_interaction_config_for_student(&q_type, q_id, raw_cfg)
+            };
+            AttemptAnswerDetailDto {
+                question_id: q_id,
+                question_text: a.get("question_text"),
+                question_type: q_type,
+                max_points: a.get("max_points"),
+                chosen_choice_id: a.get("chosen_choice_id"),
+                chosen_choice_text: a.get("chosen_choice_text"),
+                is_correct: a.get("is_correct"),
+                text_answer: a.get("text_answer"),
+                points_earned: a.get::<Option<i32>, _>("points_earned").unwrap_or(0),
+                teacher_feedback: None,
+                interaction_config: safe_cfg,
+            }
         })
         .collect();
 
@@ -2131,6 +2171,8 @@ async fn auto_grade_attempts(
     .await
     .unwrap_or_default();
 
+    ensure_quiz_variatif_schema(&ctx.pool).await;
+
     let mut graded_count = 0usize;
     for att in pending_attempts {
         let attempt_id: Uuid = att.get("id");
@@ -2138,7 +2180,7 @@ async fn auto_grade_attempts(
         let total_points: i32 = att.try_get::<Option<i32>, _>("total_points").ok().flatten().unwrap_or(0);
         let user_id: Option<Uuid> = att.try_get("user_id").ok();
 
-        // Auto-score PG answers from official quiz_choices keys
+        // Auto-score single-choice PG answers from official quiz_choices keys
         let _ = sqlx::query(
             r#"
             UPDATE attempt_answers ans
@@ -2148,12 +2190,15 @@ async fn auto_grade_attempts(
             LEFT JOIN quiz_choices c ON c.id = ans.chosen_choice_id
             WHERE ans.attempt_id = $1
               AND q.id = ans.question_id
-              AND (UPPER(COALESCE(q.question_type, '')) LIKE '%CHOICE%' OR UPPER(COALESCE(q.question_type, '')) = 'PG')
+              AND UPPER(COALESCE(q.question_type, 'MULTIPLE_CHOICE')) IN ('MULTIPLE_CHOICE', 'PG')
             "#,
         )
         .bind(attempt_id)
         .execute(&ctx.pool)
         .await;
+
+        // Auto-score variatif objective formats (TRUE_FALSE_MATRIX, MULTIPLE_SELECT, SHORT_ANSWER, MATCHING, ORDERING)
+        score_variatif_objective_answers(&ctx.pool, attempt_id).await;
 
         let new_score: i32 = sqlx::query_scalar::<_, i32>(
             "SELECT COALESCE(SUM(points_earned), 0)::int FROM attempt_answers WHERE attempt_id = $1",
@@ -2448,6 +2493,9 @@ async fn get_attempt_by_id(
         )
     })?;
 
+    ensure_quiz_variatif_schema(&ctx.pool).await;
+    let is_teacher_actor = actor_is_teacher_or_admin(&req_ctx);
+
     let answer_rows = sqlx::query(
         r#"
         SELECT 
@@ -2455,6 +2503,7 @@ async fn get_attempt_by_id(
             q.question_text,
             q.question_type,
             q.points as max_points,
+            q.interaction_config,
             ans.chosen_choice_id,
             c.choice_text as chosen_choice_text,
             COALESCE(ans.is_correct, c.is_correct) as is_correct,
@@ -2476,17 +2525,29 @@ async fn get_attempt_by_id(
 
     let answers: Vec<AttemptAnswerDetailDto> = answer_rows
         .into_iter()
-        .map(|a| AttemptAnswerDetailDto {
-            question_id: a.get("question_id"),
-            question_text: a.get("question_text"),
-            question_type: a.get("question_type"),
-            max_points: a.get("max_points"),
-            chosen_choice_id: a.get("chosen_choice_id"),
-            chosen_choice_text: a.get("chosen_choice_text"),
-            is_correct: a.get("is_correct"),
-            text_answer: a.get("text_answer"),
-            points_earned: a.get::<Option<i32>, _>("points_earned").unwrap_or(0),
-            teacher_feedback: None,
+        .map(|a| {
+            let q_id: Uuid = a.get("question_id");
+            let q_type: String = a.get("question_type");
+            let raw_cfg: Option<serde_json::Value> =
+                a.try_get("interaction_config").ok().flatten();
+            let safe_cfg = if is_teacher_actor {
+                raw_cfg
+            } else {
+                sanitize_interaction_config_for_student(&q_type, q_id, raw_cfg)
+            };
+            AttemptAnswerDetailDto {
+                question_id: q_id,
+                question_text: a.get("question_text"),
+                question_type: q_type,
+                max_points: a.get("max_points"),
+                chosen_choice_id: a.get("chosen_choice_id"),
+                chosen_choice_text: a.get("chosen_choice_text"),
+                is_correct: a.get("is_correct"),
+                text_answer: a.get("text_answer"),
+                points_earned: a.get::<Option<i32>, _>("points_earned").unwrap_or(0),
+                teacher_feedback: None,
+                interaction_config: safe_cfg,
+            }
         })
         .collect();
 
@@ -2545,16 +2606,9 @@ async fn get_questions(
     })?;
 
     crate::presentation::learning::grade_sync::ensure_grade_sync_schema(&ctx.pool).await;
+    ensure_quiz_variatif_schema(&ctx.pool).await;
 
-    let is_teacher = req_ctx
-        .actor
-        .as_ref()
-        .map(|a| {
-            a.roles.iter().any(|r| {
-                r.name == "Guru" || r.name == "Kepala Sekolah" || r.name == "Administrator"
-            })
-        })
-        .unwrap_or(false);
+    let is_teacher = actor_is_teacher_or_admin(&req_ctx);
 
     #[derive(sqlx::FromRow)]
     struct QuestionRow {
@@ -2563,6 +2617,7 @@ async fn get_questions(
         question_type: String,
         points: i32,
         order_index: i32,
+        interaction_config: Option<serde_json::Value>,
     }
 
     #[derive(sqlx::FromRow)]
@@ -2575,7 +2630,7 @@ async fn get_questions(
 
     let questions: Vec<QuestionRow> = sqlx::query_as(
         r#"
-        SELECT q.id, q.question_text, q.question_type, q.points, q.order_index
+        SELECT q.id, q.question_text, q.question_type, q.points, q.order_index, q.interaction_config
         FROM quiz_questions q
         JOIN quizzes qz ON qz.id = q.quiz_id
         WHERE q.quiz_id = $1 AND qz.tenant_id = $2
@@ -2618,6 +2673,11 @@ async fn get_questions(
         })?;
 
         let extracted_image = extract_embedded_image_url(&q.question_text);
+        let safe_config = if is_teacher {
+            q.interaction_config
+        } else {
+            sanitize_interaction_config_for_student(&q.question_type, q.id, q.interaction_config)
+        };
         result.push(QuizQuestionResponse {
             id: q.id,
             question_text: q.question_text,
@@ -2634,6 +2694,7 @@ async fn get_questions(
                     is_correct: if is_teacher { Some(c.is_correct) } else { None },
                 })
                 .collect(),
+            interaction_config: safe_config,
         });
     }
 
@@ -2684,10 +2745,12 @@ async fn add_question(
         ));
     }
 
+    ensure_quiz_variatif_schema(&ctx.pool).await;
+
     let q_id = Uuid::now_v7();
     let q_type = payload
         .question_type
-        .unwrap_or_else(|| "multiple_choice".to_string());
+        .unwrap_or_else(|| "MULTIPLE_CHOICE".to_string());
     let points = payload.points.unwrap_or(10);
     let order_idx = payload.order_index.unwrap_or(1);
     let stored_question_text =
@@ -2695,8 +2758,8 @@ async fn add_question(
 
     sqlx::query(
         r#"
-        INSERT INTO quiz_questions (id, quiz_id, question_text, question_type, points, order_index, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+        INSERT INTO quiz_questions (id, quiz_id, question_text, question_type, points, order_index, interaction_config, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
         "#,
     )
     .bind(q_id)
@@ -2705,6 +2768,7 @@ async fn add_question(
     .bind(&q_type)
     .bind(points)
     .bind(order_idx)
+    .bind(&payload.interaction_config)
     .execute(&ctx.pool)
     .await
     .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
@@ -2713,46 +2777,48 @@ async fn add_question(
 
     let mut choice_responses = Vec::new();
     if let Some(choices) = payload.choices {
-        let choice_count = choices.len();
-        let mut choice_ids = Vec::with_capacity(choice_count);
-        let mut choice_texts = Vec::with_capacity(choice_count);
-        let mut is_corrects = Vec::with_capacity(choice_count);
-        let mut order_indexes = Vec::with_capacity(choice_count);
+        if !choices.is_empty() {
+            let choice_count = choices.len();
+            let mut choice_ids = Vec::with_capacity(choice_count);
+            let mut choice_texts = Vec::with_capacity(choice_count);
+            let mut is_corrects = Vec::with_capacity(choice_count);
+            let mut order_indexes = Vec::with_capacity(choice_count);
 
-        for (idx, c) in choices.into_iter().enumerate() {
-            choice_ids.push(Uuid::now_v7());
-            choice_texts.push(c.choice_text);
-            is_corrects.push(c.is_correct.unwrap_or(false));
-            order_indexes.push(c.order_index.unwrap_or(idx as i32 + 1));
-        }
+            for (idx, c) in choices.into_iter().enumerate() {
+                choice_ids.push(Uuid::now_v7());
+                choice_texts.push(c.choice_text);
+                is_corrects.push(c.is_correct.unwrap_or(false));
+                order_indexes.push(c.order_index.unwrap_or(idx as i32 + 1));
+            }
 
-        let q_ids = vec![q_id; choice_count];
-        sqlx::query(
-            r#"
-            INSERT INTO quiz_choices (id, question_id, choice_text, is_correct, order_index, created_at, updated_at)
-            SELECT u.id, u.question_id, u.choice_text, u.is_correct, u.order_index, NOW(), NOW()
-            FROM UNNEST($1::uuid[], $2::uuid[], $3::text[], $4::boolean[], $5::int[])
-                AS u(id, question_id, choice_text, is_correct, order_index)
-            "#
-        )
-        .bind(&choice_ids as &[Uuid])
-        .bind(&q_ids as &[Uuid])
-        .bind(&choice_texts as &[String])
-        .bind(&is_corrects as &[bool])
-        .bind(&order_indexes as &[i32])
-        .execute(&ctx.pool)
-        .await
-        .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
-            school_core::common::error::InfrastructureError::Database(e)
-        ), &req_ctx.request_id))?;
+            let q_ids = vec![q_id; choice_count];
+            sqlx::query(
+                r#"
+                INSERT INTO quiz_choices (id, question_id, choice_text, is_correct, order_index, created_at, updated_at)
+                SELECT u.id, u.question_id, u.choice_text, u.is_correct, u.order_index, NOW(), NOW()
+                FROM UNNEST($1::uuid[], $2::uuid[], $3::text[], $4::boolean[], $5::int[])
+                    AS u(id, question_id, choice_text, is_correct, order_index)
+                "#
+            )
+            .bind(&choice_ids as &[Uuid])
+            .bind(&q_ids as &[Uuid])
+            .bind(&choice_texts as &[String])
+            .bind(&is_corrects as &[bool])
+            .bind(&order_indexes as &[i32])
+            .execute(&ctx.pool)
+            .await
+            .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e)
+            ), &req_ctx.request_id))?;
 
-        for (idx, c_id) in choice_ids.into_iter().enumerate() {
-            choice_responses.push(QuizChoiceResponse {
-                id: c_id,
-                choice_text: choice_texts[idx].clone(),
-                order_index: order_indexes[idx],
-                is_correct: Some(is_corrects[idx]),
-            });
+            for (idx, c_id) in choice_ids.into_iter().enumerate() {
+                choice_responses.push(QuizChoiceResponse {
+                    id: c_id,
+                    choice_text: choice_texts[idx].clone(),
+                    order_index: order_indexes[idx],
+                    is_correct: Some(is_corrects[idx]),
+                });
+            }
         }
     }
 
@@ -2778,9 +2844,27 @@ async fn add_question(
             order_index: order_idx,
             image_url: payload.image_url,
             choices: choice_responses,
+            interaction_config: payload.interaction_config,
         },
         req_ctx.request_id,
     )))
+}
+
+fn actor_is_teacher_or_admin(req_ctx: &RequestContext) -> bool {
+    req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                r.name == "Guru" || r.name == "Kepala Sekolah" || r.name == "Administrator"
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn is_disallowed_svg_or_placeholder(url: &str) -> bool {
+    let lower = url.to_lowercase();
+    lower.contains("unsplash.com") || lower.contains(".svg") || lower.contains("/ai_diagram_")
 }
 
 fn merge_question_image_into_text(question_text: &str, image_url: Option<&str>) -> String {
@@ -2788,13 +2872,13 @@ fn merge_question_image_into_text(question_text: &str, image_url: Option<&str>) 
     if let Some(raw_img) = image_url {
         let img = raw_img.trim();
         if !img.is_empty()
-            && !img.to_lowercase().contains("unsplash.com")
+            && !is_disallowed_svg_or_placeholder(img)
             && !trimmed_text.contains("![")
         {
             if trimmed_text.is_empty() {
-                return format!("![Diagram Soal]({img})");
+                return format!("![Stimulus Gambar]({img})");
             }
-            return format!("![Diagram Soal]({img})\n\n{trimmed_text}");
+            return format!("![Stimulus Gambar]({img})\n\n{trimmed_text}");
         }
     }
     trimmed_text.to_string()
@@ -2806,9 +2890,423 @@ fn extract_embedded_image_url(question_text: &str) -> Option<String> {
     let url_start = start + after_alt + 2;
     let url_end = question_text[url_start..].find(')')?;
     let candidate = question_text[url_start..url_start + url_end].trim();
-    if candidate.is_empty() || candidate.to_lowercase().contains("unsplash.com") {
+    if candidate.is_empty() || is_disallowed_svg_or_placeholder(candidate) {
         None
     } else {
         Some(candidate.to_string())
+    }
+}
+
+fn deterministic_shuffle_with_seed<T>(mut items: Vec<T>, seed_str: &str) -> Vec<T> {
+    if items.len() <= 1 {
+        return items;
+    }
+    let mut seed: u64 = 14695981039346656037;
+    for b in seed_str.as_bytes() {
+        seed ^= u64::from(*b);
+        seed = seed.wrapping_mul(1099511628211);
+    }
+    for i in (1..items.len()).rev() {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let j = ((seed >> 33) as usize) % (i + 1);
+        items.swap(i, j);
+    }
+    items
+}
+
+fn sanitize_interaction_config_for_student(
+    question_type: &str,
+    question_id: Uuid,
+    raw: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let cfg = raw?;
+    let obj = cfg.as_object()?;
+    let norm = question_type.trim().to_uppercase();
+
+    if norm == "SHORT_ANSWER" || norm == "ISIAN_SINGKAT" || norm == "FILL_BLANK" {
+        let mut out = serde_json::Map::new();
+        out.insert("has_answer_key".to_string(), serde_json::Value::Bool(true));
+        if let Some(ph) = obj.get("placeholder") {
+            out.insert("placeholder".to_string(), ph.clone());
+        }
+        return Some(serde_json::Value::Object(out));
+    }
+
+    if norm == "MATCHING" || norm == "MENJODOHKAN" {
+        let pairs = obj
+            .get("pairs")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let left_items: Vec<serde_json::Value> = pairs
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, p)| {
+                let id = p
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("pair-{}", idx + 1));
+                let left = p.get("left").and_then(|v| v.as_str())?.trim();
+                if left.is_empty() {
+                    return None;
+                }
+                Some(serde_json::json!({ "id": id, "text": left }))
+            })
+            .collect();
+
+        let mut rights: Vec<String> = pairs
+            .iter()
+            .filter_map(|p| p.get("right").and_then(|v| v.as_str()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if let Some(distractors) = obj.get("distractors").and_then(|v| v.as_array()) {
+            for d in distractors {
+                if let Some(s) = d.as_str() {
+                    let clean = s.trim().to_string();
+                    if !clean.is_empty() && !rights.contains(&clean) {
+                        rights.push(clean);
+                    }
+                }
+            }
+        }
+        let shuffled_rights =
+            deterministic_shuffle_with_seed(rights, &format!("match:{question_id}"));
+        return Some(serde_json::json!({
+            "left_items": left_items,
+            "right_options": shuffled_rights
+        }));
+    }
+
+    if norm == "ORDERING" || norm == "URUTAN" || norm == "SEQUENCE" {
+        let items: Vec<serde_json::Value> = obj
+            .get("items")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .enumerate()
+                    .filter_map(|(idx, item)| {
+                        let id = item
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| format!("step-{}", idx + 1));
+                        let text = item.get("text").and_then(|v| v.as_str())?.trim();
+                        if text.is_empty() {
+                            return None;
+                        }
+                        Some(serde_json::json!({ "id": id, "text": text }))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let shuffled =
+            deterministic_shuffle_with_seed(items, &format!("order:{question_id}"));
+        let mut out = serde_json::Map::new();
+        out.insert("items".to_string(), serde_json::Value::Array(shuffled));
+        if let Some(inst) = obj.get("instruction") {
+            out.insert("instruction".to_string(), inst.clone());
+        }
+        return Some(serde_json::Value::Object(out));
+    }
+
+    if norm == "TRUE_FALSE_MATRIX" || norm == "TRUE_FALSE" || norm == "BENAR_SALAH" {
+        let mut out = serde_json::Map::new();
+        for key in ["statement_label", "true_label", "false_label"] {
+            if let Some(val) = obj.get(key) {
+                out.insert(key.to_string(), val.clone());
+            }
+        }
+        return Some(serde_json::Value::Object(out));
+    }
+
+    if norm == "ESSAY" || norm == "URAIAN" {
+        return None;
+    }
+
+    Some(cfg)
+}
+
+async fn score_variatif_objective_answers(pool: &sqlx::PgPool, attempt_id: Uuid) {
+    let rows = match sqlx::query(
+        r#"
+        SELECT
+            ans.question_id,
+            q.question_type,
+            COALESCE(q.points, 10) AS max_points,
+            q.interaction_config,
+            ans.text_answer
+        FROM attempt_answers ans
+        JOIN quiz_questions q ON q.id = ans.question_id
+        WHERE ans.attempt_id = $1
+          AND UPPER(COALESCE(q.question_type, 'MULTIPLE_CHOICE')) NOT IN ('MULTIPLE_CHOICE', 'PG', 'ESSAY', 'URAIAN')
+        "#,
+    )
+    .bind(attempt_id)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    for row in rows {
+        let question_id: Uuid = row.get("question_id");
+        let q_type: String = row.get("question_type");
+        let max_points: i32 = row.get("max_points");
+        let interaction_cfg: Option<serde_json::Value> =
+            row.try_get("interaction_config").ok().flatten();
+        let text_answer: String = row
+            .try_get::<Option<String>, _>("text_answer")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+
+        let norm = q_type.trim().to_uppercase();
+        let mut computed: Option<(i32, bool)> = None;
+
+        if matches!(
+            norm.as_str(),
+            "TRUE_FALSE_MATRIX" | "TRUE_FALSE" | "BENAR_SALAH" | "MATRIX_TF"
+        ) {
+            if let Ok(choice_rows) = sqlx::query(
+                "SELECT id, is_correct FROM quiz_choices WHERE question_id = $1 ORDER BY order_index ASC",
+            )
+            .bind(question_id)
+            .fetch_all(pool)
+            .await
+            {
+                if !choice_rows.is_empty() {
+                    let parsed = serde_json::from_str::<serde_json::Value>(&text_answer).ok();
+                    let row_map = parsed
+                        .as_ref()
+                        .and_then(|v| v.get("rows").or(Some(v)))
+                        .and_then(|v| v.as_object());
+                    let mut correct_rows = 0usize;
+                    for (idx, cr) in choice_rows.iter().enumerate() {
+                        let cid: Uuid = cr.get("id");
+                        let expected: bool = cr.get("is_correct");
+                        let cid_str = cid.to_string();
+                        let alt_idx = (idx + 1).to_string();
+                        let pick = row_map.and_then(|m| {
+                            m.get(&cid_str)
+                                .or_else(|| m.get(&alt_idx))
+                                .and_then(|v| v.as_bool())
+                        });
+                        if pick == Some(expected) {
+                            correct_rows += 1;
+                        }
+                    }
+                    let ratio = (correct_rows as f64) / (choice_rows.len() as f64);
+                    let pts = ((max_points as f64) * ratio).round() as i32;
+                    computed = Some((pts, correct_rows == choice_rows.len()));
+                }
+            }
+        } else if matches!(
+            norm.as_str(),
+            "MULTIPLE_SELECT" | "MULTI_SELECT" | "PG_KOMPLEKS" | "CHECKBOX"
+        ) {
+            if let Ok(choice_rows) =
+                sqlx::query("SELECT id, is_correct FROM quiz_choices WHERE question_id = $1")
+                    .bind(question_id)
+                    .fetch_all(pool)
+                    .await
+            {
+                let correct_ids: std::collections::HashSet<String> = choice_rows
+                    .iter()
+                    .filter(|r| r.get::<bool, _>("is_correct"))
+                    .map(|r| r.get::<Uuid, _>("id").to_string())
+                    .collect();
+
+                if !correct_ids.is_empty() {
+                    let parsed = serde_json::from_str::<serde_json::Value>(&text_answer).ok();
+                    let picks: std::collections::HashSet<String> = parsed
+                        .as_ref()
+                        .and_then(|v| v.get("choice_ids").or(Some(v)))
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    let mut tp = 0i32;
+                    let mut fp = 0i32;
+                    for id in &picks {
+                        if correct_ids.contains(id) {
+                            tp += 1;
+                        } else {
+                            fp += 1;
+                        }
+                    }
+                    let ratio = ((tp - fp) as f64 / (correct_ids.len() as f64)).clamp(0.0, 1.0);
+                    let pts = ((max_points as f64) * ratio).round() as i32;
+                    computed = Some((pts, tp as usize == correct_ids.len() && fp == 0));
+                }
+            }
+        } else if matches!(norm.as_str(), "SHORT_ANSWER" | "ISIAN_SINGKAT" | "FILL_BLANK") {
+            if let Some(obj) = interaction_cfg.as_ref().and_then(|v| v.as_object()) {
+                let accepted: Vec<String> = obj
+                    .get("accepted_answers")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !accepted.is_empty() {
+                    let case_sensitive = obj
+                        .get("case_sensitive")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let tolerance = obj
+                        .get("numeric_tolerance")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0001)
+                        .max(0.0);
+
+                    let normalize = |raw: &str| -> String {
+                        let collapsed = raw
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                            .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+                            .to_string();
+                        if case_sensitive {
+                            collapsed
+                        } else {
+                            collapsed.to_lowercase()
+                        }
+                    };
+                    let student_norm = normalize(&text_answer);
+                    let student_num = text_answer.trim().replace(',', ".").parse::<f64>().ok();
+
+                    let matched = !student_norm.is_empty()
+                        && accepted.iter().any(|ans| {
+                            if normalize(ans) == student_norm {
+                                return true;
+                            }
+                            if let Some(sn) = student_num {
+                                if let Ok(an) = ans.trim().replace(',', ".").parse::<f64>() {
+                                    return (sn - an).abs() <= tolerance;
+                                }
+                            }
+                            false
+                        });
+                    computed = Some((if matched { max_points } else { 0 }, matched));
+                }
+            }
+        } else if matches!(norm.as_str(), "MATCHING" | "MENJODOHKAN") {
+            if let Some(pairs) = interaction_cfg
+                .as_ref()
+                .and_then(|v| v.get("pairs"))
+                .and_then(|v| v.as_array())
+            {
+                if !pairs.is_empty() {
+                    let parsed = serde_json::from_str::<serde_json::Value>(&text_answer).ok();
+                    let student_map = parsed
+                        .as_ref()
+                        .and_then(|v| v.get("pairs").or(Some(v)))
+                        .and_then(|v| v.as_object());
+
+                    let mut matched = 0usize;
+                    for (idx, p) in pairs.iter().enumerate() {
+                        let pid = p
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| format!("pair-{}", idx + 1));
+                        let expected_right = p
+                            .get("right")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim()
+                            .to_lowercase();
+                        let student_right = student_map
+                            .and_then(|m| m.get(&pid))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim()
+                            .to_lowercase();
+                        if !student_right.is_empty() && student_right == expected_right {
+                            matched += 1;
+                        }
+                    }
+                    let ratio = (matched as f64) / (pairs.len() as f64);
+                    let pts = ((max_points as f64) * ratio).round() as i32;
+                    computed = Some((pts, matched == pairs.len()));
+                }
+            }
+        } else if matches!(norm.as_str(), "ORDERING" | "URUTAN" | "SEQUENCE") {
+            if let Some(items) = interaction_cfg
+                .as_ref()
+                .and_then(|v| v.get("items"))
+                .and_then(|v| v.as_array())
+            {
+                if !items.is_empty() {
+                    let mut canonical: Vec<(i64, String)> = items
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, it)| {
+                            let order = it
+                                .get("correct_order")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or((idx + 1) as i64);
+                            let id = it
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| format!("step-{}", idx + 1));
+                            (order, id)
+                        })
+                        .collect();
+                    canonical.sort_by_key(|(o, _)| *o);
+
+                    let parsed = serde_json::from_str::<serde_json::Value>(&text_answer).ok();
+                    let student_order: Vec<String> = parsed
+                        .as_ref()
+                        .and_then(|v| v.get("order").or(Some(v)))
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    let matched = canonical
+                        .iter()
+                        .enumerate()
+                        .filter(|(idx, (_, expected_id))| {
+                            student_order.get(*idx) == Some(expected_id)
+                        })
+                        .count();
+                    let ratio = (matched as f64) / (canonical.len() as f64);
+                    let pts = ((max_points as f64) * ratio).round() as i32;
+                    computed = Some((pts, matched == canonical.len()));
+                }
+            }
+        }
+
+        if let Some((pts, is_ok)) = computed {
+            let _ = sqlx::query(
+                r#"
+                UPDATE attempt_answers
+                SET points_earned = $1, is_correct = $2
+                WHERE attempt_id = $3 AND question_id = $4
+                "#,
+            )
+            .bind(pts)
+            .bind(is_ok)
+            .bind(attempt_id)
+            .bind(question_id)
+            .execute(pool)
+            .await;
+        }
     }
 }

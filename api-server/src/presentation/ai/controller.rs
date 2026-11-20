@@ -41,6 +41,14 @@ pub struct GenerateAiContentRequest {
     pub assignment_format: Option<String>,
     pub quiz_format: Option<String>,
     pub include_images: Option<bool>,
+    #[serde(default)]
+    pub question_types: Option<Vec<String>>,
+    #[serde(default)]
+    pub exam_scope: Option<String>,
+    #[serde(default)]
+    pub period_label: Option<String>,
+    #[serde(default)]
+    pub source_materials: Option<Vec<String>>,
 }
 
 
@@ -272,9 +280,22 @@ async fn generate_content(
         }
         "QUIZ" => {
             let quiz_format = payload.quiz_format.as_deref();
-            let is_mixed = quiz_format
-                .map(|f| f.to_uppercase() == "MIXED" || f.to_uppercase().contains("CAMPURAN"))
-                .unwrap_or_else(|| payload.num_essay.map(|e| e > 0).unwrap_or(false));
+            let requested_types = payload.question_types.as_deref();
+            let has_variatif_types = requested_types
+                .map(|ts| {
+                    ts.iter().any(|t| {
+                        let u = t.trim().to_uppercase();
+                        u != "MULTIPLE_CHOICE" && u != "PG" && u != "ESSAY" && u != "URAIAN"
+                    })
+                })
+                .unwrap_or(false)
+                || quiz_format
+                    .map(|f| f.to_uppercase().contains("VARIATIF"))
+                    .unwrap_or(false);
+            let is_mixed = has_variatif_types
+                || quiz_format
+                    .map(|f| f.to_uppercase() == "MIXED" || f.to_uppercase().contains("CAMPURAN"))
+                    .unwrap_or_else(|| payload.num_essay.map(|e| e > 0).unwrap_or(false));
             let num_mcq = payload.num_mcq
                 .or_else(|| {
                     if is_mixed {
@@ -284,23 +305,44 @@ async fn generate_content(
                     }
                 })
                 .unwrap_or(if is_mixed { 10 } else { num_q })
-                .clamp(0, 30);
+                .clamp(0, 50);
             let num_essay = if is_mixed {
                 payload.num_essay
-                    .or_else(|| payload.num_questions.map(|q| q.saturating_sub(num_mcq).max(1)))
-                    .unwrap_or(5)
-                    .clamp(0, 20)
+                    .or_else(|| payload.num_questions.map(|q| q.saturating_sub(num_mcq)))
+                    .unwrap_or(2)
+                    .clamp(0, 25)
             } else {
                 0
             };
             let include_images = payload.include_images.unwrap_or(false);
+            let enriched_topic = {
+                let mut context_parts: Vec<String> = vec![topic.to_string()];
+                if let Some(scope) = payload.exam_scope.as_deref().filter(|s| !s.trim().is_empty()) {
+                    if !topic.to_lowercase().contains(&scope.trim().to_lowercase()) {
+                        context_parts.push(format!("Cakupan: {}", scope.trim()));
+                    }
+                }
+                if let Some(period) = payload.period_label.as_deref().filter(|p| !p.trim().is_empty()) {
+                    if !topic.to_lowercase().contains(&period.trim().to_lowercase()) {
+                        context_parts.push(format!("Periode: {}", period.trim()));
+                    }
+                }
+                if let Some(mats) = payload.source_materials.as_ref().filter(|m| !m.is_empty()) {
+                    let joined = mats.iter().take(12).map(|m| m.trim()).filter(|m| !m.is_empty()).collect::<Vec<_>>().join("; ");
+                    if !joined.is_empty() && !topic.contains(&joined) {
+                        context_parts.push(format!("Rangkuman Materi: {joined}"));
+                    }
+                }
+                context_parts.join(" | ")
+            };
 
             let quiz = nvidia_ai::generate_cbt_quiz(
                 &ctx.pool,
-                topic,
+                &enriched_topic,
                 grade,
                 subject,
                 quiz_format,
+                requested_types,
                 num_mcq,
                 num_essay,
                 diff,

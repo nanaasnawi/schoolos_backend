@@ -17,6 +17,8 @@ pub struct CreateQuizQuestionRequest {
     pub order_index: Option<i32>,
     pub image_url: Option<String>,
     pub choices: Option<Vec<CreateQuizOptionInput>>,
+    #[serde(default)]
+    pub interaction_config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -38,6 +40,8 @@ pub struct QuizQuestionResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_url: Option<String>,
     pub choices: Vec<QuizChoiceResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interaction_config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -52,6 +56,8 @@ pub struct AttemptAnswerDetailDto {
     pub text_answer: Option<String>,
     pub points_earned: i32,
     pub teacher_feedback: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interaction_config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, ToSchema)]
