@@ -395,10 +395,17 @@ async fn create(
         payload.release_at
     };
 
+    crate::presentation::learning::grade_sync::ensure_grade_sync_schema(&ctx.pool).await;
+    let assessment_category = crate::presentation::learning::grade_sync::normalize_assessment_category(
+        payload.assessment_category.as_deref(),
+        Some(&assignment_title_for_notif),
+    );
+
     if let Err(e) = sqlx::query(
         r#"UPDATE assignments 
            SET class_id = $1, subject_id = $2, teacher_id = $3, created_by = $4, 
-               status = $5, release_at = $6, notification_dispatched = $7, is_active = $8 
+               status = $5, release_at = $6, notification_dispatched = $7, is_active = $8,
+               assessment_category = $10
            WHERE id = $9"#,
     )
     .bind(target_class_id)
@@ -410,6 +417,7 @@ async fn create(
     .bind(notification_dispatched)
     .bind(!is_archived)
     .bind(assignment.id)
+    .bind(&assessment_category)
     .execute(&ctx.pool)
     .await {
         tracing::error!("Failed to update assignment metadata: {:?}", e);
@@ -490,6 +498,7 @@ async fn create(
     resp.class_name = class_name;
     resp.subject_name = subject_name;
     resp.teacher_name = teacher_name;
+    resp.assessment_category = Some(assessment_category);
     resp.has_game_questions = questions_to_return
         .iter()
         .any(|q| is_interactive_game_type(&q.question_type));
@@ -574,6 +583,8 @@ async fn list(
         )
     })?;
 
+    crate::presentation::learning::grade_sync::ensure_grade_sync_schema(&ctx.pool).await;
+
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
     let is_teacher = req_ctx
         .actor
@@ -624,7 +635,7 @@ async fn list(
                 CASE WHEN a.release_at > NOW() THEN 'draft' WHEN a.release_at <= NOW() AND a.status = 'draft' THEN 'published' ELSE a.status END as status,
                 a.is_active,
                 a.created_at, a.updated_at,
-                a.class_id, a.session_id, a.release_at, a.allow_late_submission,
+                a.class_id, a.session_id, a.release_at, a.allow_late_submission, a.assessment_category,
                 c.name as class_name,
                 sub.name as subject_name,
                 COALESCE(
@@ -713,6 +724,7 @@ async fn list(
                 total_students: r.try_get::<Option<i64>, _>("total_students").ok().flatten(),
                 submitted_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
                 submission_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
+                assessment_category: r.try_get::<Option<String>, _>("assessment_category").ok().flatten(),
                 has_game_questions: false,
                 questions: Vec::new(),
             })
@@ -743,7 +755,7 @@ async fn list(
                 ) as status,
                 a.is_active,
                 a.created_at, a.updated_at,
-                a.class_id, a.session_id, a.release_at, a.allow_late_submission,
+                a.class_id, a.session_id, a.release_at, a.allow_late_submission, a.assessment_category,
                 c.name as class_name,
                 sub.name as subject_name,
                 COALESCE(
@@ -845,6 +857,7 @@ async fn list(
                 total_students: r.try_get::<Option<i64>, _>("total_students").ok().flatten(),
                 submitted_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
                 submission_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
+                assessment_category: r.try_get::<Option<String>, _>("assessment_category").ok().flatten(),
                 has_game_questions: false,
                 questions: Vec::new(),
             })
@@ -858,7 +871,7 @@ async fn list(
                 CASE WHEN a.release_at > NOW() THEN 'draft' WHEN a.release_at <= NOW() AND a.status = 'draft' THEN 'published' ELSE a.status END as status,
                 a.is_active,
                 a.created_at, a.updated_at,
-                a.class_id, a.session_id, a.release_at, a.allow_late_submission,
+                a.class_id, a.session_id, a.release_at, a.allow_late_submission, a.assessment_category,
                 c.name as class_name,
                 sub.name as subject_name,
                 COALESCE(
@@ -943,6 +956,7 @@ async fn list(
                 total_students: r.try_get::<Option<i64>, _>("total_students").ok().flatten(),
                 submitted_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
                 submission_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
+                assessment_category: r.try_get::<Option<String>, _>("assessment_category").ok().flatten(),
                 has_game_questions: false,
                 questions: Vec::new(),
             })
@@ -989,6 +1003,8 @@ async fn get_by_id(
         )
     })?;
 
+    crate::presentation::learning::grade_sync::ensure_grade_sync_schema(&ctx.pool).await;
+
     let _ = sqlx::query(
         r#"
         UPDATE assignments a
@@ -1032,7 +1048,7 @@ async fn get_by_id(
             ) as status,
             a.is_active,
             a.created_at, a.updated_at,
-            a.class_id, a.teacher_id, a.created_by, a.session_id, a.release_at, a.allow_late_submission,
+            a.class_id, a.teacher_id, a.created_by, a.session_id, a.release_at, a.allow_late_submission, a.assessment_category,
             c.name as class_name,
             sub.name as subject_name,
             COALESCE(
@@ -1149,6 +1165,7 @@ async fn get_by_id(
                 total_students: r.try_get::<Option<i64>, _>("total_students").ok().flatten(),
                 submitted_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
                 submission_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
+                assessment_category: r.try_get::<Option<String>, _>("assessment_category").ok().flatten(),
                 has_game_questions: questions.iter().any(|q| is_interactive_game_type(&q.question_type)),
                 questions,
             };
@@ -1201,7 +1218,20 @@ async fn update(
     let target_status = payload.status.as_deref();
     let is_activating = target_status == Some("published") || target_status == Some("active");
 
-    if payload.release_at.is_some() || target_status.is_some() || payload.subject_id.is_some() || payload.teacher_id.is_some() || payload.class_id.is_some() {
+    if payload.release_at.is_some()
+        || target_status.is_some()
+        || payload.subject_id.is_some()
+        || payload.teacher_id.is_some()
+        || payload.class_id.is_some()
+        || payload.assessment_category.is_some()
+    {
+        crate::presentation::learning::grade_sync::ensure_grade_sync_schema(&ctx.pool).await;
+        let norm_cat = payload.assessment_category.as_deref().map(|c| {
+            crate::presentation::learning::grade_sync::normalize_assessment_category(
+                Some(c),
+                Some(&assignment.title),
+            )
+        });
         let (new_status, new_release_at, mark_dispatched) = if is_activating {
             (Some("published"), Some(chrono::Utc::now()), true)
         } else if let Some(release_at) = payload.release_at {
@@ -1222,6 +1252,7 @@ async fn update(
                    subject_id = COALESCE($5, subject_id),
                    teacher_id = COALESCE($6, teacher_id),
                    class_id = COALESCE($7, class_id),
+                   assessment_category = COALESCE($8, assessment_category),
                    is_active = true,
                    updated_at = NOW() 
                WHERE id = $4"#
@@ -1233,6 +1264,7 @@ async fn update(
         .bind(payload.subject_id)
         .bind(payload.teacher_id)
         .bind(payload.class_id)
+        .bind(norm_cat)
         .execute(&ctx.pool)
         .await;
 
@@ -1712,6 +1744,13 @@ async fn submit(
             &xp_desc,
         )
         .await;
+
+        crate::presentation::learning::grade_sync::sync_assignment_submission_to_gradebook(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            final_submission.id,
+        )
+        .await;
     }
 
     let mut resp = SubmissionResponse::from(final_submission);
@@ -1778,6 +1817,8 @@ async fn get_submissions(
             &req_ctx.request_id,
         )
     })?;
+
+    crate::presentation::learning::grade_sync::ensure_grade_sync_schema(&ctx.pool).await;
 
     let asg_row = sqlx::query(
         "SELECT tenant_id, class_id, teacher_id, created_by, description FROM assignments WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
@@ -2328,6 +2369,13 @@ async fn grade(
         submission_id,
         earned_xp,
         &xp_desc,
+    )
+    .await;
+
+    crate::presentation::learning::grade_sync::sync_assignment_submission_to_gradebook(
+        &ctx.pool,
+        req_ctx.tenant_id,
+        submission_id,
     )
     .await;
 

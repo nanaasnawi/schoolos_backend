@@ -3,6 +3,7 @@ pub mod assessment;
 pub mod assignments;
 pub mod curricula;
 pub mod feed;
+pub mod grade_sync;
 pub mod inquiries;
 pub mod lessons;
 pub mod library;

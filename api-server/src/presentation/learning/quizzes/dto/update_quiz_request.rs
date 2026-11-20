@@ -18,6 +18,7 @@ pub struct UpdateQuizRequest {
     pub class_id: Option<String>,
     pub session_id: Option<Uuid>,
     pub exam_mode: Option<String>,
+    pub assessment_category: Option<String>,
     pub exam_token: Option<String>,
     pub token_expires_at: Option<DateTime<Utc>>,
     pub max_token_attempts: Option<i32>,

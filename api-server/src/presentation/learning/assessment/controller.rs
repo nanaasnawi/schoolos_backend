@@ -28,6 +28,7 @@ pub fn assessment_routes() -> Router<ApplicationContext> {
         .route("/gradebook", get(get_gradebook))
         .route("/gradebook/summary", get(get_gradebook_summary))
         .route("/gradebook/save", post(save_gradebook))
+        .route("/gradebook/sync", post(sync_gradebook_sources))
 }
 
 async fn configure_rules(
@@ -837,6 +838,61 @@ async fn save_gradebook(
         ), &req_ctx.request_id))?;
     }
 
+    // Also keep materialized `gradebook_snapshots` synced for e-Rapor & Nilai Akhir (/dashboard/grading/final-grades & /reports/cards)
+    {
+        let academic_ctx = crate::presentation::learning::grade_sync::resolve_active_academic_context(
+            &ctx.pool,
+            req_ctx.tenant_id,
+        )
+        .await;
+        let sub_row = sqlx::query(
+            "SELECT COALESCE(NULLIF(TRIM(code), ''), id::text) AS code, name FROM subjects WHERE id = $1 LIMIT 1",
+        )
+        .bind(subject_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten();
+        let subject_code = sub_row
+            .as_ref()
+            .map(|r| r.get::<String, _>("code"))
+            .unwrap_or_else(|| subject_id.to_string());
+        let resolved_sub_name = sub_row
+            .as_ref()
+            .map(|r| r.get::<String, _>("name"))
+            .unwrap_or_else(|| subject_label.clone());
+
+        for idx in 0..gb_student_ids.len() {
+            let sid = gb_student_ids[idx];
+            let cid = gb_class_ids[idx];
+            let avg_s = gb_avg_sumatifs[idx].as_deref().and_then(|s| s.parse::<f64>().ok());
+            let ats_s = gb_ats_scores[idx].as_deref().and_then(|s| s.parse::<f64>().ok());
+            let sas_s = gb_sas_scores[idx].as_deref().and_then(|s| s.parse::<f64>().ok());
+            let fin_s = gb_final_scores[idx].as_deref().and_then(|s| s.parse::<f64>().ok());
+            let h_desc = gb_highest_descs[idx].as_deref().unwrap_or("");
+            let l_desc = gb_lowest_descs[idx].as_deref().unwrap_or("");
+
+            crate::presentation::learning::grade_sync::upsert_gradebook_snapshot(
+                &ctx.pool,
+                req_ctx.tenant_id,
+                &academic_ctx.academic_year_name,
+                &academic_ctx.semester_code,
+                cid,
+                sid,
+                &subject_code,
+                &resolved_sub_name,
+                avg_s,
+                ats_s,
+                sas_s,
+                fin_s,
+                target_kktp,
+                h_desc,
+                l_desc,
+            )
+            .await;
+        }
+    }
+
     // FCM update NILAI ke siswa
     {
         let t = format!("🏆 Update Nilai: {}", subject_label);
@@ -923,6 +979,55 @@ async fn get_gradebook_summary(
             })
             .unwrap_or(false);
 
+    // Scope student/guardian requests to their own student_id so students never read peer summaries.
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
+    let target_student_id = match params.student_id {
+        Some(sid) => Some(sid),
+        None => {
+            if !is_admin_or_staff && !is_teacher {
+                if let Some(aid) = actor_id {
+                    let sid = sqlx::query_scalar::<_, Uuid>(
+                        "SELECT id FROM students WHERE user_id = $1 AND tenant_id = $2 LIMIT 1",
+                    )
+                    .bind(aid)
+                    .bind(req_ctx.tenant_id)
+                    .fetch_optional(&ctx.pool)
+                    .await
+                    .ok()
+                    .flatten();
+
+                    if sid.is_some() {
+                        sid
+                    } else {
+                        sqlx::query_scalar::<_, Uuid>(
+                            r#"
+                            SELECT s.id
+                            FROM guardians g
+                            JOIN students s ON s.guardian_id = g.id
+                            WHERE g.user_id = $1 AND g.tenant_id = $2
+                            LIMIT 1
+                            "#,
+                        )
+                        .bind(aid)
+                        .bind(req_ctx.tenant_id)
+                        .fetch_optional(&ctx.pool)
+                        .await
+                        .ok()
+                        .flatten()
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+    };
+
+    if !is_admin_or_staff && !is_teacher && target_student_id.is_none() {
+        return Ok(Json(ApiResponse::success(Vec::new(), req_ctx.request_id)));
+    }
+
     let teacher_id_opt: Option<Uuid> = if is_teacher {
         let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
         sqlx::query_scalar::<_, Uuid>(
@@ -986,7 +1091,7 @@ async fn get_gradebook_summary(
     .bind(req_ctx.tenant_id)
     .bind(params.class_id)
     .bind(params.subject_id)
-    .bind(params.student_id)
+    .bind(target_student_id)
     .bind(teacher_id_opt)
     .fetch_all(&ctx.pool)
     .await
@@ -1007,6 +1112,7 @@ async fn get_gradebook_summary(
         WHERE tenant_id = $1
           AND ($2::uuid IS NULL OR class_id = $2)
           AND ($3::uuid IS NULL OR subject_id = $3)
+          AND ($5::uuid IS NULL OR student_id = $5)
           AND (
               $4::uuid IS NULL OR
               EXISTS (
@@ -1029,6 +1135,7 @@ async fn get_gradebook_summary(
     .bind(params.class_id)
     .bind(params.subject_id)
     .bind(teacher_id_opt)
+    .bind(target_student_id)
     .fetch_all(&ctx.pool)
     .await
     .unwrap_or_default();
@@ -1276,6 +1383,51 @@ async fn get_gradebook(
         .collect();
 
     Ok(Json(ApiResponse::success(items, req_ctx.request_id)))
+}
+
+#[derive(serde::Deserialize, Default)]
+pub struct SyncGradebookRequest {
+    pub class_id: Option<Uuid>,
+    pub subject_id: Option<Uuid>,
+}
+
+async fn sync_gradebook_sources(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    payload: Option<Json<SyncGradebookRequest>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    use crate::middleware::require_permission;
+    use school_core::permission::domain::permission_registry::Permission;
+    require_permission(&req_ctx.actor, Permission::LearningAssessmentConfigure)
+        .or_else(|_| require_permission(&req_ctx.actor, Permission::TeacherRead))
+        .or_else(|_| require_permission(&req_ctx.actor, Permission::TeacherCreate))
+        .or_else(|_| require_permission(&req_ctx.actor, Permission::AcademicManage))
+        .or_else(|_| require_permission(&req_ctx.actor, Permission::StaffRead))
+        .map_err(|_| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Insufficient permissions to sync grades".to_string(),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+
+    let body = payload.map(|Json(p)| p).unwrap_or_default();
+    let synced_count = crate::presentation::learning::grade_sync::sync_all_graded_sources(
+        &ctx.pool,
+        req_ctx.tenant_id,
+        body.class_id,
+        body.subject_id,
+    )
+    .await;
+
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({
+            "synced_count": synced_count
+        }),
+        req_ctx.request_id,
+    )))
 }
 
 #[derive(serde::Deserialize)]

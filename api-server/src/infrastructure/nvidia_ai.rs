@@ -4158,3 +4158,175 @@ Output HANYA JSON tanpa teks lain."#
         risk_level: parsed.risk_level.to_uppercase(),
     })
 }
+
+/// Parses raw exam text (extracted from PDF / Word / TXT) into structured CBT quiz questions & answer keys.
+pub async fn parse_quiz_document_from_text(
+    raw_text: &str,
+    file_name: Option<&str>,
+    subject_hint: Option<&str>,
+    grade_level_hint: Option<&str>,
+) -> Result<GeneratedCbtQuizDto, ApplicationError> {
+    let trimmed = raw_text.trim();
+    if trimmed.is_empty() {
+        return Err(ApplicationError::Domain(DomainError::Validation(
+            "Teks naskah soal kosong".to_string(),
+        )));
+    }
+
+    // Safely truncate at valid UTF-8 boundary around 22,000 bytes so request stays within model context.
+    let truncated = if trimmed.len() > 22_000 {
+        let mut end = 22_000;
+        while end > 0 && !trimmed.is_char_boundary(end) {
+            end -= 1;
+        }
+        &trimmed[..end]
+    } else {
+        trimmed
+    };
+
+    let fn_hint = file_name.unwrap_or("naskah-ujian");
+    let sub_hint = subject_hint.unwrap_or("Umum");
+    let grade_hint = grade_level_hint.unwrap_or("Semua Jenjang");
+
+    let prompt = format!(
+        r#"Anda adalah parser naskah soal ujian CBT profesional Indonesia.
+Tugas Anda: ekstrak seluruh butir soal beserta pilihan jawaban (jika pilihan ganda) dan KUNCI JAWABAN secara akurat dari teks dokumen berikut.
+
+Metadata opsional:
+- Nama file: {fn_hint}
+- Mata pelajaran: {sub_hint}
+- Jenjang/Kelas: {grade_hint}
+
+ATURAN EKSTRAKSI KETAT:
+1. Jangan mengarang soal baru; ekstrak hanya soal yang benar-benar ada di teks dokumen!
+2. Jika ada bagian "KUNCI JAWABAN" di awal/tengah/akhir dokumen atau tabel kunci, cocokkan kunci tersebut ke nomor soal yang sesuai, lalu jangan masukkan blok daftar kunci menjadi teks soal.
+3. Jika ada penanda seperti `[CORRECT_HINT]`, `(BENAR)`, `Kunci: A`, `Jawaban: C`, atau `*A.` pada opsi, tandai pilihan yang sesuai dengan `is_correct: true` dan isi `correct_key` (mis. "A", "B", "C", "D", atau "E"), lalu bersihkan penanda tersebut dari teks opsi/soal.
+4. Bersihkan awalan huruf opsi ("A. ", "B) ") dari `choice_text`.
+5. Untuk soal Uraian/Essay (tanpa opsi A-E), isi `question_type: "ESSAY"`, `choices: []`, dan isi `correct_key` dengan ringkasan kunci/pedoman penskoran jika tersedia.
+6. Bagi poin secara wajar atau gunakan bobot dari naskah jika tertulis (mis. total mendekati 100 atau default 10).
+
+Format output WAJIB berupa JSON murni tanpa markdown/komentar tambahan:
+{{
+  "title": "Judul ujian dari dokumen atau nama file",
+  "description": "Deskripsi singkat mata pelajaran ujian",
+  "questions": [
+    {{
+      "id": "q-doc-1",
+      "question_text": "Pertanyaan lengkap soal",
+      "question_type": "MULTIPLE_CHOICE",
+      "choices": [
+        {{ "choice_text": "Pilihan A", "is_correct": false }},
+        {{ "choice_text": "Pilihan B", "is_correct": true }}
+      ],
+      "correct_key": "B",
+      "explanation": "Pembahasan/kunci jika tertulis di dokumen atau kosong",
+      "bloom_level": "C2",
+      "points": 10
+    }}
+  ]
+}}
+
+TEKS DOKUMEN NASKAH SOAL:
+\"\"\"
+{truncated}
+\"\"\"
+
+Output HANYA JSON valid."#
+    );
+
+    let messages = vec![
+        ChatMessage {
+            role: "system",
+            content: "You are a precise exam document parser that extracts existing Indonesian school questions, options, and answer keys into strict valid JSON.",
+        },
+        ChatMessage {
+            role: "user",
+            content: &prompt,
+        },
+    ];
+
+    let raw = call_nvidia_nim(messages, 0.1, 4500).await?;
+    let cleaned = extract_clean_json(&raw);
+
+    let json_candidate = if let Ok(v) = serde_json::from_str::<GeneratedCbtQuizDto>(cleaned) {
+        v
+    } else if let (Some(start), Some(end)) = (cleaned.find('{'), cleaned.rfind('}')) {
+        serde_json::from_str::<GeneratedCbtQuizDto>(&cleaned[start..=end]).map_err(|e| {
+            ApplicationError::Domain(DomainError::Validation(format!(
+                "AI mengembalikan struktur JSON parser soal tidak valid: {e}"
+            )))
+        })?
+    } else {
+        return Err(ApplicationError::Domain(DomainError::Validation(
+            "AI tidak menghasilkan JSON hasil ekstraksi soal.".to_string(),
+        )));
+    };
+
+    let now_ts = chrono::Utc::now().timestamp_millis();
+    let total_q = json_candidate.questions.len().max(1);
+    let default_pts = ((100.0 / total_q as f64).round() as i32).max(1);
+
+    let normalized_questions: Vec<CbtQuestionDto> = json_candidate
+        .questions
+        .into_iter()
+        .enumerate()
+        .filter(|(_, q)| !q.question_text.trim().is_empty())
+        .map(|(idx, mut q)| {
+            if q.id.trim().is_empty() {
+                q.id = format!("q-doc-{}-{now_ts}", idx + 1);
+            }
+            if q.points <= 0 {
+                q.points = default_pts;
+            }
+            if q.bloom_level.trim().is_empty() {
+                q.bloom_level = "C2".to_string();
+            }
+            let is_essay = q.choices.is_empty()
+                || q.question_type
+                    .as_deref()
+                    .map(|t| t.eq_ignore_ascii_case("ESSAY"))
+                    .unwrap_or(false);
+            if is_essay {
+                q.question_type = Some("ESSAY".to_string());
+                q.choices.clear();
+            } else {
+                q.question_type = Some("MULTIPLE_CHOICE".to_string());
+                let key_upper = q.correct_key.trim().to_uppercase();
+                let key_idx = key_upper
+                    .chars()
+                    .next()
+                    .and_then(|c| ('A'..='E').position(|letter| letter == c));
+
+                let already_has_true = q.choices.iter().any(|c| c.is_correct);
+                if !already_has_true {
+                    if let Some(k_idx) = key_idx {
+                        if let Some(choice) = q.choices.get_mut(k_idx) {
+                            choice.is_correct = true;
+                        }
+                    }
+                } else if q.correct_key.trim().is_empty() {
+                    if let Some(pos) = q.choices.iter().position(|c| c.is_correct) {
+                        if let Some(letter) = ['A', 'B', 'C', 'D', 'E'].get(pos) {
+                            q.correct_key = letter.to_string();
+                        }
+                    }
+                }
+            }
+            q
+        })
+        .collect();
+
+    Ok(GeneratedCbtQuizDto {
+        title: if json_candidate.title.trim().is_empty() {
+            format!("Ujian Impor: {fn_hint}")
+        } else {
+            json_candidate.title
+        },
+        description: if json_candidate.description.trim().is_empty() {
+            format!("Hasil ekstraksi otomatis dari dokumen {fn_hint}")
+        } else {
+            json_candidate.description
+        },
+        questions: normalized_questions,
+    })
+}
