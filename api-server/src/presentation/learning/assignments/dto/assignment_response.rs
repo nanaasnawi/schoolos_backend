@@ -40,6 +40,8 @@ pub struct AssignmentResponse {
     pub submitted_count: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub submission_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assessment_category: Option<String>,
     #[serde(default)]
     pub has_game_questions: bool,
     #[serde(default)]
@@ -72,6 +74,7 @@ impl From<Assignment> for AssignmentResponse {
             total_students: None,
             submitted_count: None,
             submission_count: None,
+            assessment_category: None,
             has_game_questions: false,
             questions: Vec::new(),
         }

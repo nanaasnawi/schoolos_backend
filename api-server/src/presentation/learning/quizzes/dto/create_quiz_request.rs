@@ -29,6 +29,8 @@ pub struct CreateQuizRequest {
     #[serde(default = "default_exam_mode")]
     pub exam_mode: Option<String>,
     #[serde(default)]
+    pub assessment_category: Option<String>,
+    #[serde(default)]
     pub exam_token: Option<String>,
     #[serde(default)]
     pub token_expires_at: Option<DateTime<Utc>>,

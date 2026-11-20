@@ -58,6 +58,39 @@ pub struct GenerateAiContentResponse {
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct ParseQuizDocumentRequest {
+    pub raw_text: String,
+    pub file_name: Option<String>,
+    pub subject_name: Option<String>,
+    pub grade_level: Option<String>,
+}
+
+async fn parse_quiz_document(
+    req_ctx: RequestContext,
+    Json(payload): Json<ParseQuizDocumentRequest>,
+) -> Result<Json<ApiResponse<GeneratedCbtQuizDto>>, ApiError> {
+    if payload.raw_text.trim().is_empty() {
+        return Err(ApiError::new(
+            ApplicationError::Domain(DomainError::Validation(
+                "Teks hasil ekstraksi dokumen tidak boleh kosong".to_string(),
+            )),
+            &req_ctx.request_id,
+        ));
+    }
+
+    let quiz = nvidia_ai::parse_quiz_document_from_text(
+        &payload.raw_text,
+        payload.file_name.as_deref(),
+        payload.subject_name.as_deref(),
+        payload.grade_level.as_deref(),
+    )
+    .await
+    .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
+
+    Ok(Json(ApiResponse::success(quiz, req_ctx.request_id)))
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct AnalyzeStudentRequest {
     pub student_id: Uuid,
 }
@@ -106,6 +139,7 @@ pub struct AiFeedbackResponse {
 pub fn ai_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/generate-content", post(generate_content))
+        .route("/parse-quiz-document", post(parse_quiz_document))
         .route("/analytics/student", post(analyze_student))
         .route("/tanya-ai", post(tanya_ai))
         .route("/tanya-ai/stream", post(tanya_ai_stream))

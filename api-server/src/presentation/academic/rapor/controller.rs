@@ -592,6 +592,55 @@ pub async fn get_report_cards(
     let mut snapshots_by_student: std::collections::HashMap<Uuid, Vec<SubjectCompetencyDto>> =
         std::collections::HashMap::new();
 
+    fn build_subject_competency_dto(
+        subject_name: String,
+        final_score: f64,
+        highest_desc: Option<String>,
+    ) -> SubjectCompetencyDto {
+        let predicate = if final_score >= 88.0 {
+            "A".to_string()
+        } else if final_score >= 78.0 {
+            "B".to_string()
+        } else if final_score >= 70.0 {
+            "C".to_string()
+        } else {
+            "D".to_string()
+        };
+
+        let desc = highest_desc
+            .filter(|d| !d.trim().is_empty())
+            .unwrap_or_else(|| {
+                format!(
+                    "Menunjukkan pemahaman yang baik dalam mata pelajaran {}.",
+                    subject_name
+                )
+            });
+
+        let subj_lower = subject_name.to_lowercase();
+        let group = if subj_lower.contains("pilihan")
+            || subj_lower.contains("sosiologi")
+            || subj_lower.contains("ekonomi")
+            || subj_lower.contains("geografi")
+        {
+            "PILIHAN".to_string()
+        } else if subj_lower.contains("muatan lokal")
+            || subj_lower.contains("daerah")
+            || subj_lower.contains("cirebon")
+        {
+            "MUATAN_LOKAL".to_string()
+        } else {
+            "UMUM".to_string()
+        };
+
+        SubjectCompetencyDto {
+            subject_name,
+            final_score,
+            predicate,
+            description: desc,
+            group,
+        }
+    }
+
     for row in snapshot_rows {
         let st_id: Option<Uuid> = row.try_get::<Option<Uuid>, _>("student_id").unwrap_or(None);
         let subj_name: String = row.try_get::<String, _>("subject_name").unwrap_or_default();
@@ -599,50 +648,50 @@ pub async fn get_report_cards(
         let final_sc: f64 = row.try_get::<f64, _>("final_score").unwrap_or(80.0);
 
         if let Some(student_id) = st_id {
-            let predicate = if final_sc >= 88.0 {
-                "A".to_string()
-            } else if final_sc >= 78.0 {
-                "B".to_string()
-            } else if final_sc >= 70.0 {
-                "C".to_string()
-            } else {
-                "D".to_string()
-            };
-
-            let desc = highest_desc
-                .filter(|d| !d.trim().is_empty())
-                .unwrap_or_else(|| {
-                    format!(
-                        "Menunjukkan pemahaman yang baik dalam mata pelajaran {}.",
-                        subj_name
-                    )
-                });
-
-            let group = if subj_name.to_lowercase().contains("pilihan")
-                || subj_name.to_lowercase().contains("sosiologi")
-                || subj_name.to_lowercase().contains("ekonomi")
-                || subj_name.to_lowercase().contains("geografi")
-            {
-                "PILIHAN".to_string()
-            } else if subj_name.to_lowercase().contains("muatan lokal")
-                || subj_name.to_lowercase().contains("daerah")
-                || subj_name.to_lowercase().contains("cirebon")
-            {
-                "MUATAN_LOKAL".to_string()
-            } else {
-                "UMUM".to_string()
-            };
-
             snapshots_by_student
                 .entry(student_id)
                 .or_default()
-                .push(SubjectCompetencyDto {
-                    subject_name: subj_name,
-                    final_score: final_sc,
-                    predicate,
-                    description: desc,
-                    group,
-                });
+                .push(build_subject_competency_dto(subj_name, final_sc, highest_desc));
+        }
+    }
+
+    // 4b. Fallback merge from live `gradebooks` table so recent Buku Nilai / Tugas / CBT updates
+    // are always visible in e-Rapor even before manual snapshot ratification.
+    let live_gradebook_rows = sqlx::query(
+        r#"
+        SELECT
+            gb.student_id,
+            sub.name AS subject_name,
+            gb.final_score::float8 AS final_score,
+            gb.highest_competency_desc
+        FROM gradebooks gb
+        JOIN subjects sub ON sub.id = gb.subject_id
+        WHERE gb.tenant_id = $1
+          AND gb.final_score IS NOT NULL
+        ORDER BY sub.name ASC
+        "#,
+    )
+    .bind(req_ctx.tenant_id)
+    .fetch_all(&ctx.pool)
+    .await
+    .unwrap_or_default();
+
+    for row in live_gradebook_rows {
+        let st_id: Option<Uuid> = row.try_get::<Option<Uuid>, _>("student_id").unwrap_or(None);
+        let subj_name: String = row.try_get::<String, _>("subject_name").unwrap_or_default();
+        let final_sc: Option<f64> = row.try_get::<Option<f64>, _>("final_score").unwrap_or(None);
+        let highest_desc: Option<String> = row
+            .try_get::<Option<String>, _>("highest_competency_desc")
+            .unwrap_or(None);
+
+        if let (Some(student_id), Some(score)) = (st_id, final_sc) {
+            let entry = snapshots_by_student.entry(student_id).or_default();
+            let already_present = entry
+                .iter()
+                .any(|s| s.subject_name.eq_ignore_ascii_case(subj_name.trim()));
+            if !already_present {
+                entry.push(build_subject_competency_dto(subj_name, score, highest_desc));
+            }
         }
     }
 

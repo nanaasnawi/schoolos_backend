@@ -3170,16 +3170,96 @@ pub async fn approve_rapor(
 
     let class_name: String = class_row.get("name");
 
+    // Ensure all graded assignment & CBT quiz sources for this class are synced into gradebooks & snapshots first.
+    let _ = crate::presentation::learning::grade_sync::sync_all_graded_sources(
+        &ctx.pool,
+        req_ctx.tenant_id,
+        Some(payload.class_id),
+        None,
+    )
+    .await;
+
+    let normalized_sem = if semester.contains("EVEN") || semester.contains("GENAP") || semester == "2" {
+        "EVEN"
+    } else {
+        "ODD"
+    };
+
+    // Materialize any existing gradebooks rows for this class into gradebook_snapshots before ratification.
+    let existing_gb_rows = sqlx::query(
+        r#"
+        SELECT gb.student_id,
+               COALESCE(NULLIF(TRIM(sub.code), ''), sub.id::text) AS subject_code,
+               sub.name AS subject_name,
+               gb.avg_sumatif::float8 AS avg_sumatif,
+               gb.ats_score::float8 AS ats_score,
+               gb.sas_score::float8 AS sas_score,
+               gb.final_score::float8 AS final_score,
+               COALESCE(gb.kktp, 75)::float8 AS kktp_value,
+               gb.highest_competency_desc,
+               gb.lowest_competency_desc
+        FROM gradebooks gb
+        JOIN subjects sub ON sub.id = gb.subject_id
+        WHERE gb.tenant_id = $1
+          AND gb.class_id = $2
+          AND gb.final_score IS NOT NULL
+        "#,
+    )
+    .bind(req_ctx.tenant_id)
+    .bind(payload.class_id)
+    .fetch_all(&ctx.pool)
+    .await
+    .unwrap_or_default();
+
+    for r in existing_gb_rows {
+        let student_id: Uuid = r.get("student_id");
+        let subject_code: String = r.get("subject_code");
+        let subject_name: String = r.get("subject_name");
+        let avg_s: Option<f64> = r.try_get("avg_sumatif").ok();
+        let ats_s: Option<f64> = r.try_get("ats_score").ok();
+        let sas_s: Option<f64> = r.try_get("sas_score").ok();
+        let fin_s: Option<f64> = r.try_get("final_score").ok();
+        let kktp: f64 = r.try_get("kktp_value").unwrap_or(75.0);
+        let h_desc: String = r
+            .try_get::<Option<String>, _>("highest_competency_desc")
+            .unwrap_or(None)
+            .unwrap_or_else(|| format!("Menunjukkan penguasaan kompetensi yang baik pada mata pelajaran {}.", subject_name));
+        let l_desc: String = r
+            .try_get::<Option<String>, _>("lowest_competency_desc")
+            .unwrap_or(None)
+            .unwrap_or_else(|| format!("Perlu penguatan lanjutan pada sebagian materi {}.", subject_name));
+
+        crate::presentation::learning::grade_sync::upsert_gradebook_snapshot(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            &academic_year,
+            normalized_sem,
+            payload.class_id,
+            student_id,
+            &subject_code,
+            &subject_name,
+            avg_s,
+            ats_s,
+            sas_s,
+            fin_s,
+            kktp,
+            &h_desc,
+            &l_desc,
+        )
+        .await;
+    }
+
     let _ = sqlx::query(
         r#"
         UPDATE gradebook_snapshots
         SET is_stale = false, updated_at = NOW()
-        WHERE class_id = $1 AND academic_year = $2 AND semester = $3
+        WHERE class_id = $1 AND academic_year = $2 AND (semester = $3 OR UPPER(semester) = $4)
         "#,
     )
     .bind(payload.class_id)
     .bind(&academic_year)
     .bind(&semester)
+    .bind(normalized_sem)
     .execute(&ctx.pool)
     .await;
 

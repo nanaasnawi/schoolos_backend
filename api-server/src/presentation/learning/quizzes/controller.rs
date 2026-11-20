@@ -39,6 +39,7 @@ pub fn quiz_routes() -> Router<ApplicationContext> {
         .route("/{id}/attempts/{attempt_id}", get(get_attempt_by_id))
         .route("/{id}/attempts/{attempt_id}/submit", post(submit_attempt))
         .route("/{id}/attempts/{attempt_id}/grade", post(grade_attempt))
+        .route("/{id}/auto-grade", post(auto_grade_attempts))
 }
 
 async fn create(
@@ -154,7 +155,12 @@ async fn create(
         None
     };
 
+    crate::presentation::learning::grade_sync::ensure_grade_sync_schema(&ctx.pool).await;
     let exam_mode = payload.exam_mode.unwrap_or_else(|| "HOMEWORK_QUIZ".to_string());
+    let assessment_category = crate::presentation::learning::grade_sync::normalize_assessment_category(
+        payload.assessment_category.as_deref(),
+        Some(&quiz.title),
+    );
     let exam_token = payload.exam_token.filter(|t| !t.trim().is_empty());
     let max_token_attempts = payload.max_token_attempts.unwrap_or(5);
     let session_id = payload.session_id;
@@ -171,7 +177,8 @@ async fn create(
         r#"UPDATE quizzes 
            SET class_id = $1, subject_id = $2, teacher_id = $3, created_by = $4,
                exam_mode = $5, exam_token = $6, max_token_attempts = $7, session_id = $8, token_expires_at = $9,
-               status = $10, release_at = COALESCE($11, start_at, NOW()), notification_dispatched = $12
+               status = $10, release_at = COALESCE($11, start_at, NOW()), notification_dispatched = $12,
+               assessment_category = $14
            WHERE id = $13"#,
     )
     .bind(target_class_id)
@@ -187,6 +194,7 @@ async fn create(
     .bind(release_date)
     .bind(!is_scheduled)
     .bind(quiz.id)
+    .bind(&assessment_category)
     .execute(&ctx.pool)
     .await;
 
@@ -196,6 +204,7 @@ async fn create(
     resp.class_id = target_class_id;
     resp.session_id = session_id;
     resp.exam_mode = Some(exam_mode);
+    resp.assessment_category = Some(assessment_category);
     resp.exam_token = exam_token;
     resp.token_expires_at = payload.token_expires_at;
     resp.max_token_attempts = Some(max_token_attempts);
@@ -354,6 +363,8 @@ async fn list(
         )
     })?;
 
+    crate::presentation::learning::grade_sync::ensure_grade_sync_schema(&ctx.pool).await;
+
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
     let is_admin = req_ctx
         .actor
@@ -439,7 +450,7 @@ async fn list(
                 q.questions_count, q.is_active,
                 q.created_at, q.updated_at,
                 q.class_id,
-                q.session_id, q.exam_mode, q.exam_token, q.token_expires_at, q.max_token_attempts,
+                q.session_id, q.exam_mode, q.assessment_category, q.exam_token, q.token_expires_at, q.max_token_attempts,
                 q.release_at,
                 c.name as class_name,
                 sub.name as subject_name,
@@ -496,6 +507,7 @@ async fn list(
                     session_id: r.get("session_id"),
                     release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
                     exam_mode: r.get::<Option<String>, _>("exam_mode").or_else(|| Some("HOMEWORK_QUIZ".to_string())),
+                    assessment_category: r.try_get::<Option<String>, _>("assessment_category").ok().flatten().or_else(|| Some("FORMATIVE".to_string())),
                     exam_token: r.get("exam_token"),
                     token_expires_at: r.get("token_expires_at"),
                     max_token_attempts: r.get::<Option<i32>, _>("max_token_attempts").or(Some(5)),
@@ -516,7 +528,7 @@ async fn list(
                 q.start_at, q.end_at, q.status, q.questions_count, q.is_active,
                 q.created_at, q.updated_at,
                 q.class_id,
-                q.session_id, q.exam_mode, q.exam_token, q.token_expires_at, q.max_token_attempts,
+                q.session_id, q.exam_mode, q.assessment_category, q.exam_token, q.token_expires_at, q.max_token_attempts,
                 q.release_at,
                 c.name as class_name,
                 sub.name as subject_name,
@@ -664,6 +676,7 @@ async fn list(
                     session_id: r.get("session_id"),
                     release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
                     exam_mode: r.get::<Option<String>, _>("exam_mode").or_else(|| Some("HOMEWORK_QUIZ".to_string())),
+                    assessment_category: r.try_get::<Option<String>, _>("assessment_category").ok().flatten().or_else(|| Some("FORMATIVE".to_string())),
                     exam_token: None,
                     token_expires_at: r.get("token_expires_at"),
                     max_token_attempts: r.get::<Option<i32>, _>("max_token_attempts").or(Some(5)),
@@ -686,7 +699,7 @@ async fn list(
                 q.questions_count, q.is_active,
                 q.created_at, q.updated_at,
                 q.class_id,
-                q.session_id, q.exam_mode, q.exam_token, q.token_expires_at, q.max_token_attempts,
+                q.session_id, q.exam_mode, q.assessment_category, q.exam_token, q.token_expires_at, q.max_token_attempts,
                 q.release_at,
                 c.name as class_name,
                 sub.name as subject_name,
@@ -736,6 +749,7 @@ async fn list(
                     session_id: r.get("session_id"),
                     release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
                     exam_mode: r.get::<Option<String>, _>("exam_mode").or_else(|| Some("HOMEWORK_QUIZ".to_string())),
+                    assessment_category: r.try_get::<Option<String>, _>("assessment_category").ok().flatten().or_else(|| Some("FORMATIVE".to_string())),
                     exam_token: r.get("exam_token"),
                     token_expires_at: r.get("token_expires_at"),
                     max_token_attempts: r.get::<Option<i32>, _>("max_token_attempts").or(Some(5)),
@@ -769,8 +783,10 @@ async fn get_by_id(
         )
     })?;
 
+    crate::presentation::learning::grade_sync::ensure_grade_sync_schema(&ctx.pool).await;
+
     let meta = sqlx::query(
-        "SELECT tenant_id, class_id, teacher_id, created_by, session_id, exam_mode, exam_token, token_expires_at, max_token_attempts FROM quizzes WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+        "SELECT tenant_id, class_id, teacher_id, created_by, session_id, exam_mode, assessment_category, exam_token, token_expires_at, max_token_attempts FROM quizzes WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
     )
     .bind(id)
     .bind(req_ctx.tenant_id)
@@ -845,6 +861,7 @@ async fn get_by_id(
     let mut resp = QuizResponse::from(quiz);
     resp.session_id = meta.get("session_id");
     resp.exam_mode = meta.get::<Option<String>, _>("exam_mode").or_else(|| Some("HOMEWORK_QUIZ".to_string()));
+    resp.assessment_category = meta.try_get::<Option<String>, _>("assessment_category").ok().flatten().or_else(|| Some("FORMATIVE".to_string()));
     resp.exam_token = if is_student_or_parent {
         None
     } else {
@@ -983,6 +1000,14 @@ async fn update(
         .map(|s| s.eq_ignore_ascii_case("Published"))
         .unwrap_or(false);
 
+    crate::presentation::learning::grade_sync::ensure_grade_sync_schema(&ctx.pool).await;
+    let normalized_cat = payload.assessment_category.as_deref().map(|c| {
+        crate::presentation::learning::grade_sync::normalize_assessment_category(
+            Some(c),
+            payload.title.as_deref(),
+        )
+    });
+
     let _ = sqlx::query(
         r#"
         UPDATE quizzes
@@ -1002,6 +1027,7 @@ async fn update(
             token_expires_at = COALESCE($16, token_expires_at),
             max_token_attempts = COALESCE($17, max_token_attempts),
             status = COALESCE($18, status),
+            assessment_category = COALESCE($21, assessment_category),
             updated_at = NOW()
         WHERE id = $19 AND tenant_id = $20 AND deleted_at IS NULL
         "#
@@ -1026,6 +1052,7 @@ async fn update(
     .bind(payload.status)
     .bind(id)
     .bind(req_ctx.tenant_id)
+    .bind(normalized_cat)
     .execute(&ctx.pool)
     .await
     .map_err(|e| {
@@ -1282,6 +1309,8 @@ async fn verify_token(
         )
     })?;
 
+    crate::presentation::learning::grade_sync::ensure_grade_sync_schema(&ctx.pool).await;
+
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
     let student_id = crate::authorization_helpers::AuthorizationScope::resolve_student_id(
         &ctx.pool,
@@ -1451,6 +1480,8 @@ async fn start_attempt(
             &req_ctx.request_id,
         )
     })?;
+
+    crate::presentation::learning::grade_sync::ensure_grade_sync_schema(&ctx.pool).await;
 
     let meta = sqlx::query(
         "SELECT tenant_id, class_id, teacher_id, created_by, exam_token, token_expires_at FROM quizzes WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
@@ -1641,6 +1672,8 @@ async fn submit_attempt(
         )
     })?;
 
+    crate::presentation::learning::grade_sync::ensure_grade_sync_schema(&ctx.pool).await;
+
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
     let is_student = req_ctx
         .actor
@@ -1779,6 +1812,15 @@ async fn submit_attempt(
 
     let mut resp = AttemptResponse::from(attempt);
     resp.answers = answers;
+
+    if resp.status.eq_ignore_ascii_case("graded") && resp.score.is_some() {
+        crate::presentation::learning::grade_sync::sync_quiz_attempt_to_gradebook(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            resp.id,
+        )
+        .await;
+    }
 
     Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
 }
@@ -1947,6 +1989,13 @@ async fn grade_attempt(
         }
     }
 
+    crate::presentation::learning::grade_sync::sync_quiz_attempt_to_gradebook(
+        &ctx.pool,
+        req_ctx.tenant_id,
+        attempt_id,
+    )
+    .await;
+
     let updated_attempt = sqlx::query(
         r#"
         SELECT 
@@ -2009,6 +2058,189 @@ async fn grade_attempt(
     )))
 }
 
+async fn auto_grade_attempts(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Path(quiz_id): Path<Uuid>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    use crate::middleware::require_permission;
+    use school_core::permission::domain::permission_registry::Permission;
+    require_permission(&req_ctx.actor, Permission::LearningQuizUpdate).map_err(|_| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Insufficient permissions".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let quiz_meta = sqlx::query(
+        "SELECT tenant_id, class_id, teacher_id, created_by, title, passing_score, max_score FROM quizzes WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(quiz_id)
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?
+    .ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::NotFound(
+                school_core::common::error_code::ErrorCode::QuizNotFound,
+                format!("Quiz {quiz_id} not found"),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    crate::authorization_helpers::AuthorizationScope::verify_learning_resource_access(
+        &ctx.pool,
+        &req_ctx,
+        quiz_meta.get("tenant_id"),
+        quiz_meta.get("class_id"),
+        quiz_meta.get("teacher_id"),
+        quiz_meta.get("created_by"),
+    )
+    .await?;
+
+    let qtitle: String = quiz_meta.get("title");
+    let passing_score: i32 = quiz_meta.try_get("passing_score").unwrap_or(75);
+    let max_score: i32 = quiz_meta.try_get("max_score").unwrap_or(100);
+
+    let pending_attempts = sqlx::query(
+        r#"
+        SELECT qa.id, qa.student_id, qa.total_points,
+               COALESCE(s.user_id, qa.student_id) AS user_id
+        FROM quiz_attempts qa
+        LEFT JOIN students s ON s.id = qa.student_id OR s.user_id = qa.student_id
+        WHERE qa.quiz_id = $1
+          AND qa.tenant_id = $2
+          AND LOWER(qa.status) IN ('completed', 'submitted')
+        "#,
+    )
+    .bind(quiz_id)
+    .bind(req_ctx.tenant_id)
+    .fetch_all(&ctx.pool)
+    .await
+    .unwrap_or_default();
+
+    let mut graded_count = 0usize;
+    for att in pending_attempts {
+        let attempt_id: Uuid = att.get("id");
+        let student_id: Uuid = att.get("student_id");
+        let total_points: i32 = att.try_get::<Option<i32>, _>("total_points").ok().flatten().unwrap_or(0);
+        let user_id: Option<Uuid> = att.try_get("user_id").ok();
+
+        // Auto-score PG answers from official quiz_choices keys
+        let _ = sqlx::query(
+            r#"
+            UPDATE attempt_answers ans
+            SET points_earned = CASE WHEN COALESCE(c.is_correct, false) THEN COALESCE(q.points, 10) ELSE 0 END,
+                is_correct = COALESCE(c.is_correct, false)
+            FROM quiz_questions q
+            LEFT JOIN quiz_choices c ON c.id = ans.chosen_choice_id
+            WHERE ans.attempt_id = $1
+              AND q.id = ans.question_id
+              AND (UPPER(COALESCE(q.question_type, '')) LIKE '%CHOICE%' OR UPPER(COALESCE(q.question_type, '')) = 'PG')
+            "#,
+        )
+        .bind(attempt_id)
+        .execute(&ctx.pool)
+        .await;
+
+        let new_score: i32 = sqlx::query_scalar::<_, i32>(
+            "SELECT COALESCE(SUM(points_earned), 0)::int FROM attempt_answers WHERE attempt_id = $1",
+        )
+        .bind(attempt_id)
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap_or(0);
+
+        let eff_max = if total_points > 0 {
+            total_points
+        } else if max_score > 0 {
+            max_score
+        } else {
+            100
+        };
+        let percentage = ((new_score * 100) / eff_max.max(1)).clamp(0, 100);
+        let is_passed = percentage >= passing_score;
+
+        let _ = sqlx::query(
+            r#"
+            UPDATE quiz_attempts
+            SET score = $1, passed = $2, status = 'graded', completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
+            WHERE id = $3 AND tenant_id = $4
+            "#,
+        )
+        .bind(new_score)
+        .bind(is_passed)
+        .bind(attempt_id)
+        .bind(req_ctx.tenant_id)
+        .execute(&ctx.pool)
+        .await;
+
+        let xp_desc = format!("Poin Kuis: {} ({} Poin)", qtitle, new_score.max(0));
+        let _ = crate::presentation::gamification::controller::sync_scored_xp_for_student(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            student_id,
+            "QUIZ_SCORE",
+            attempt_id,
+            new_score.max(0),
+            &xp_desc,
+        )
+        .await;
+
+        if let Some(uid) = user_id {
+            let notif_title = format!("🏆 Nilai Keluar: {}", qtitle);
+            let notif_body = format!("Hasil CBT kamu telah dinilai: {} / 100.", percentage);
+            let _ = sqlx::query(
+                "INSERT INTO notifications (id, tenant_id, user_id, title, body, notification_type, channel, reference_type, reference_id, is_read, created_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, 'GRADE_UPDATE', 'in_app', 'grade', $5, FALSE, NOW())",
+            )
+            .bind(req_ctx.tenant_id)
+            .bind(uid)
+            .bind(&notif_title)
+            .bind(&notif_body)
+            .bind(attempt_id)
+            .execute(&ctx.pool)
+            .await;
+
+            crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                notif_title,
+                notif_body,
+                crate::infrastructure::fcm::FcmCategory::Grade,
+                attempt_id,
+                crate::infrastructure::fcm::FcmTarget::User(uid),
+            );
+        }
+
+        crate::presentation::learning::grade_sync::sync_quiz_attempt_to_gradebook(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            attempt_id,
+        )
+        .await;
+
+        graded_count += 1;
+    }
+
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({
+            "quiz_id": quiz_id,
+            "graded_count": graded_count
+        }),
+        req_ctx.request_id,
+    )))
+}
+
 async fn get_attempts(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
@@ -2025,6 +2257,8 @@ async fn get_attempts(
             &req_ctx.request_id,
         )
     })?;
+
+    crate::presentation::learning::grade_sync::ensure_grade_sync_schema(&ctx.pool).await;
 
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
     let is_student = req_ctx
@@ -2173,6 +2407,8 @@ async fn get_attempt_by_id(
         )
     })?;
 
+    crate::presentation::learning::grade_sync::ensure_grade_sync_schema(&ctx.pool).await;
+
     let row = sqlx::query(
         r#"
         SELECT 
@@ -2307,6 +2543,8 @@ async fn get_questions(
             &req_ctx.request_id,
         )
     })?;
+
+    crate::presentation::learning::grade_sync::ensure_grade_sync_schema(&ctx.pool).await;
 
     let is_teacher = req_ctx
         .actor

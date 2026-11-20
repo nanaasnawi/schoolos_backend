@@ -24,4 +24,6 @@ pub struct UpdateAssignmentRequest {
     pub teacher_id: Option<Uuid>,
     #[serde(default)]
     pub class_id: Option<Uuid>,
+    #[serde(default)]
+    pub assessment_category: Option<String>,
 }

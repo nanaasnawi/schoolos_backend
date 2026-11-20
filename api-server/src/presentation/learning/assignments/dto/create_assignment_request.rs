@@ -23,6 +23,8 @@ pub struct CreateAssignmentRequest {
     pub replace_previous: Option<bool>,
     #[serde(default = "default_allow_late")]
     pub allow_late_submission: Option<bool>,
+    #[serde(default)]
+    pub assessment_category: Option<String>,
     pub questions: Option<Vec<super::assignment_question_dto::AssignmentQuestionDto>>,
 }
 
