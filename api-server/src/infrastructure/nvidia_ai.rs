@@ -512,6 +512,38 @@ fn url_encode_wiki(input: &str) -> String {
     encoded
 }
 
+fn is_valid_educational_raster_url(url: &str) -> bool {
+    let lower = url.to_lowercase();
+    if !lower.starts_with("http") || lower.contains(".svg") {
+        return false;
+    }
+    let has_raster_ext = lower.contains(".jpg")
+        || lower.contains(".jpeg")
+        || lower.contains(".png")
+        || lower.contains(".webp");
+    if !has_raster_ext {
+        return false;
+    }
+    const BLOCKED_TERMS: &[&str] = &[
+        "flag_of_",
+        "coat_of_arms",
+        "ambox",
+        "question_book",
+        "commons-logo",
+        "wiki-logo",
+        "crystal_clear",
+        "nuvola_",
+        "disambig",
+        "signature",
+        "autograph",
+        "pictogram",
+        "placeholder",
+        "_icon.",
+        "_logo.",
+    ];
+    !BLOCKED_TERMS.iter().any(|term| lower.contains(term))
+}
+
 async fn fetch_wikipedia_educational_image(query: &str) -> Option<String> {
     let clean_query = query.trim();
     if clean_query.is_empty() {
@@ -524,14 +556,14 @@ async fn fetch_wikipedia_educational_image(query: &str) -> Option<String> {
     for lang in langs {
         // Step 1: Search Wikipedia for closest educational article title
         let search_url = format!(
-            "https://{lang}.wikipedia.org/w/api.php?action=query&list=search&srsearch={}&format=json&utf8=1&srlimit=1",
+            "https://{lang}.wikipedia.org/w/api.php?action=query&list=search&srsearch={}&format=json&utf8=1&srlimit=3",
             url_encode_wiki(clean_query)
         );
 
         let search_resp = match client
             .get(&search_url)
             .header("User-Agent", "SchoolOS-EducationPlatform/1.0 (admin@akselerasi.edu; child-safe-pedagogy)")
-            .timeout(Duration::from_millis(2500))
+            .timeout(Duration::from_millis(3000))
             .send()
             .await
         {
@@ -544,67 +576,104 @@ async fn fetch_wikipedia_educational_image(query: &str) -> Option<String> {
             _ => continue,
         };
 
-        let title = match search_json
+        let items = search_json
             .get("query")
             .and_then(|q| q.get("search"))
             .and_then(|s| s.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|item| item.get("title"))
-            .and_then(|t| t.as_str())
-        {
-            Some(t) if !t.trim().is_empty() => t,
-            _ => continue,
-        };
+            .cloned()
+            .unwrap_or_default();
 
-        // Step 2: Fetch page summary with image thumbnail/originalimage
-        let summary_url = format!(
-            "https://{lang}.wikipedia.org/api/rest_v1/page/summary/{}",
-            url_encode_wiki(title)
-        );
+        for item in items {
+            let Some(title) = item.get("title").and_then(|t| t.as_str()).filter(|t| !t.trim().is_empty()) else {
+                continue;
+            };
 
-        let summary_resp = match client
-            .get(&summary_url)
-            .header("User-Agent", "SchoolOS-EducationPlatform/1.0 (admin@akselerasi.edu; child-safe-pedagogy)")
-            .timeout(Duration::from_millis(2500))
-            .send()
-            .await
-        {
-            Ok(r) if r.status().is_success() => r,
-            _ => continue,
-        };
+            let summary_url = format!(
+                "https://{lang}.wikipedia.org/api/rest_v1/page/summary/{}",
+                url_encode_wiki(title)
+            );
 
-        let summary_json: serde_json::Value = match summary_resp.json().await {
-            Ok(j) => j,
-            _ => continue,
-        };
-
-        let image_url = summary_json
-            .get("thumbnail")
-            .and_then(|img| img.get("source"))
-            .and_then(|s| s.as_str())
-            .or_else(|| {
-                summary_json
-                    .get("originalimage")
-                    .and_then(|img| img.get("source"))
-                    .and_then(|s| s.as_str())
-            });
-
-        if let Some(url) = image_url {
-            let lower = url.to_lowercase();
-            if lower.starts_with("http")
-                && (lower.contains(".jpg")
-                    || lower.contains(".jpeg")
-                    || lower.contains(".png")
-                    || lower.contains(".svg")
-                    || lower.contains(".webp"))
+            let summary_resp = match client
+                .get(&summary_url)
+                .header("User-Agent", "SchoolOS-EducationPlatform/1.0 (admin@akselerasi.edu; child-safe-pedagogy)")
+                .timeout(Duration::from_millis(2500))
+                .send()
+                .await
             {
-                tracing::info!(
-                    "Found Wikipedia educational image for '{}' on [{}]: {}",
-                    clean_query,
-                    lang,
-                    url
-                );
-                return Some(url.to_string());
+                Ok(r) if r.status().is_success() => r,
+                _ => continue,
+            };
+
+            let summary_json: serde_json::Value = match summary_resp.json().await {
+                Ok(j) => j,
+                _ => continue,
+            };
+
+            let image_url = summary_json
+                .get("thumbnail")
+                .and_then(|img| img.get("source"))
+                .and_then(|s| s.as_str())
+                .or_else(|| {
+                    summary_json
+                        .get("originalimage")
+                        .and_then(|img| img.get("source"))
+                        .and_then(|s| s.as_str())
+                });
+
+            if let Some(url) = image_url {
+                if is_valid_educational_raster_url(url) {
+                    tracing::info!(
+                        "Found Wikipedia raster educational image for '{}' on [{}]: {}",
+                        clean_query,
+                        lang,
+                        url
+                    );
+                    return Some(url.to_string());
+                }
+            }
+        }
+    }
+
+    // Fallback: Wikimedia Commons non-SVG raster file search
+    let commons_search = format!("{clean_query} -filetype:svg");
+    let commons_url = format!(
+        "https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrnamespace=6&gsrsearch={}&gsrlimit=6&prop=imageinfo&iiprop=url|mime|size&iiurlwidth=960&format=json",
+        url_encode_wiki(&commons_search)
+    );
+    if let Ok(resp) = client
+        .get(&commons_url)
+        .header("User-Agent", "SchoolOS-EducationPlatform/1.0 (admin@akselerasi.edu; child-safe-pedagogy)")
+        .timeout(Duration::from_millis(3500))
+        .send()
+        .await
+    {
+        if resp.status().is_success() {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(pages) = json
+                    .get("query")
+                    .and_then(|q| q.get("pages"))
+                    .and_then(|p| p.as_object())
+                {
+                    for page in pages.values() {
+                        let Some(info) = page.get("imageinfo").and_then(|arr| arr.as_array()).and_then(|a| a.first()) else {
+                            continue;
+                        };
+                        let width = info.get("thumbwidth").or_else(|| info.get("width")).and_then(|w| w.as_i64()).unwrap_or(0);
+                        if width > 0 && width < 260 {
+                            continue;
+                        }
+                        if let Some(url) = info.get("thumburl").or_else(|| info.get("url")).and_then(|u| u.as_str()) {
+                            if is_valid_educational_raster_url(url) {
+                                tracing::info!(
+                                    "Found Wikimedia Commons raster educational image for '{}': {}",
+                                    clean_query,
+                                    url
+                                );
+                                return Some(url.to_string());
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1581,31 +1650,14 @@ fn build_visual_diagram_prompt_instructions(is_english: bool, include_images: bo
     }
     if is_english {
         r#"
-VISUAL DIAGRAM / IMAGE QUESTION REQUIREMENT:
-- On 1 to 2 non-game questions (prefer MULTIPLE_CHOICE or ESSAY), include a structured `"diagram_spec"` object AND explicitly refer to that exact diagram inside `"question_text"` (for example: "Observe the bar chart/diagram below...").
-- NEVER write bracketed text placeholders like `[Diagram: ...]` or reveal the answer inside `"question_text"` — the system automatically renders `"diagram_spec"` as an actual visual image above the question.
-- EVERY number, unit, vertex letter, and step label in `"question_text"` and options MUST match `"diagram_spec"` 100%. Never ask about details that are missing from `"diagram_spec"`.
-- Allowed `"diagram_spec"` shapes:
-  1) `{"type":"bar_chart","title":"...","x_label":"...","y_label":"...","bars":[{"label":"A","value":12},{"label":"B","value":18}]}`
-  2) `{"type":"line_chart","title":"...","x_label":"...","y_label":"...","points":[{"label":"Mon","value":10},{"label":"Tue","value":16}]}`
-  3) `{"type":"pie_chart","title":"...","slices":[{"label":"Math","value":40},{"label":"Science","value":60}]}`
-  4) `{"type":"geometry","shape":"right_triangle|triangle|rectangle|square|circle|trapezoid|cube|cuboid|angle","title":"...","labels":["A","B","C"],"dimensions":{"a":"6 cm","b":"8 cm","c":"? cm"}}`
-  5) `{"type":"flowchart","layout":"linear|cycle","title":"...","steps":[{"label":"1. Step","note":"..."},{"label":"2. ?","note":"..."}]}`
-  6) `{"type":"science_diagram","subtype":"water_cycle|food_chain|circuit|lever|compass_map","title":"...","mode":"seri|paralel"}`
-  7) `{"type":"illustration","prompt":"Wordless visual scene description for English picture comprehension"}`"#
+ACCURATE EDUCATIONAL IMAGE REQUIREMENT:
+- On 20-35% of questions that genuinely benefit from observing real-world photos, anatomy, geography maps, laboratory apparatus, historical landmarks, or named natural phenomena, include `"image_query"` (2-4 specific Wikimedia/Wikipedia searchable nouns, e.g. "Human heart anatomy", "Volcano eruption lava", "Chloroplast photosynthesis diagram") or `"diagram_spec": {"type":"illustration","prompt":"clean educational photograph/illustration of ..."}`.
+- NEVER use SVG placeholders, NEVER output `[Diagram: ...]`, and NEVER force an unrelated chart onto pure algebra/grammar items."#
     } else {
         r#"
-ATURAN WAJIB SOAL BERGAMBAR / DIAGRAM AKURAT:
-- Pada 1 hingga 2 butir soal non-game (utamakan MULTIPLE_CHOICE atau ESSAY), sertakan properti `"diagram_spec"` terstruktur DAN referensikan gambar tersebut di `"question_text"` (misal: "Perhatikan grafik/diagram/gambar di atas! ...").
-- DILARANG KERAS menulis teks tag seperti `[Diagram: ...]` atau `[Grafik: ...]` serta dilarang membocorkan kunci jawaban di dalam `"question_text"`, karena sistem otomatis merender `"diagram_spec"` menjadi gambar SVG sungguhan di atas soal.
-- SELURUH angka, satuan, huruf titik sudut, maupun tahap di dalam `"question_text"` dan pilihan jawaban WAJIB SAMA PERSIS dengan isi `"diagram_spec"`. DILARANG bertanya tentang data yang tidak tergambar.
-- Pilihan format `"diagram_spec"` yang didukung sistem rendering presisi:
-  1) `{"type":"bar_chart","title":"...","x_label":"...","y_label":"...","bars":[{"label":"Senin","value":15},{"label":"Selasa","value":25}]}`
-  2) `{"type":"line_chart","title":"...","x_label":"...","y_label":"...","points":[{"label":"Jan","value":10},{"label":"Feb","value":20}]}`
-  3) `{"type":"pie_chart","title":"...","slices":[{"label":"IPA","value":40},{"label":"IPS","value":60}]}`
-  4) `{"type":"geometry","shape":"right_triangle|triangle|rectangle|square|circle|trapezoid|cube|cuboid|angle","title":"...","labels":["A","B","C"],"dimensions":{"a":"6 cm","b":"8 cm","c":"? cm"}}`
-  5) `{"type":"flowchart","layout":"linear|cycle","title":"...","steps":[{"label":"1. Evaporasi","note":"Penguapan"},{"label":"2. ?","note":"Membentuk awan"}]}`
-  6) `{"type":"science_diagram","subtype":"water_cycle|food_chain|circuit|lever|compass_map","title":"...","mode":"seri|paralel"}`"#
+ATURAN SOAL BERGAMBAR EDUKASI AKURAT:
+- Pada 20-35% butir soal yang relevan dengan objek nyata, anatomi, fenomena alam, sejarah/budaya, peta geografi, atau alat praktikum, sertakan properti `"image_query"` (2-4 kata kunci bahasa Inggris spesifik untuk foto/ilustrasi nyata Wikipedia/Wikimedia Commons, misal: "Plant cell organelles diagram", "Borobudur temple Java", "Human heart anatomy") atau `"diagram_spec": {"type":"illustration","prompt":"ilustrasi fotografi edukasi jelas tentang ..."}`.
+- DILARANG KERAS menghasilkan gambar SVG acak atau menulis tag `[Diagram: ...]`. Jangan paksakan gambar jika soal berupa hitungan aljabar atau tata bahasa murni."#
     }
 }
 
@@ -2492,53 +2544,97 @@ async fn ensure_assignment_visual_guarantee(
     }
 }
 
+async fn resolve_accurate_question_raster_image(
+    pool: &sqlx::PgPool,
+    q_val: &serde_json::Value,
+    subject_name: &str,
+    grade_level: &str,
+) -> Option<String> {
+    if let Some(query) = q_val
+        .get("image_query")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| s.len() >= 3)
+    {
+        if let Some(real_url) = fetch_wikipedia_educational_image(query).await {
+            return Some(real_url);
+        }
+    }
+
+    if let Some(spec) = q_val.get("diagram_spec").filter(|v| v.is_object()) {
+        let kind = spec
+            .get("type")
+            .or_else(|| spec.get("kind"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        let prompt = spec
+            .get("prompt")
+            .or_else(|| spec.get("title"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if kind == "illustration" && !prompt.is_empty() {
+            if let Some(scene_url) =
+                crate::infrastructure::cloudflare_ai::try_generate_scene_image(
+                    pool,
+                    prompt,
+                    subject_name,
+                    grade_level,
+                )
+                .await
+            {
+                if !scene_url.to_lowercase().contains(".svg") {
+                    return Some(scene_url);
+                }
+            }
+        }
+        if !prompt.is_empty() {
+            if let Some(wiki_url) = fetch_wikipedia_educational_image(prompt).await {
+                return Some(wiki_url);
+            }
+        }
+    }
+
+    None
+}
+
 async fn ensure_quiz_visual_guarantee(
     pool: &sqlx::PgPool,
     questions: &mut Vec<CbtQuestionDto>,
     subject_name: &str,
     topic: &str,
     grade_level: &str,
-    is_english: bool,
+    _is_english: bool,
 ) {
     if questions.is_empty() || questions.iter().any(|q| q.image_url.is_some()) {
         return;
     }
 
-    let (v_text, v_choices_raw, v_correct_idx, v_expl, v_spec) =
-        crate::infrastructure::visual_diagram::build_verified_visual_mcq(subject_name, topic, is_english);
-    let Some(v_url) = crate::infrastructure::visual_diagram::resolve_visual_diagram_url(
-        pool,
-        Some(&v_spec),
-        subject_name,
-        grade_level,
-    )
-    .await
-    else {
-        return;
-    };
-
-    let key_labels = ["A", "B", "C", "D"];
-    if let Some(mcq) = questions
-        .iter_mut()
-        .find(|q| q.question_type.as_deref().unwrap_or("MULTIPLE_CHOICE") == "MULTIPLE_CHOICE")
-    {
-        mcq.question_text = v_text;
-        mcq.choices = v_choices_raw
-            .into_iter()
-            .enumerate()
-            .map(|(i, text)| CbtQuestionChoiceDto {
-                choice_text: text,
-                is_correct: i == v_correct_idx,
-            })
-            .collect();
-        mcq.correct_key = key_labels[v_correct_idx % 4].to_string();
-        mcq.explanation = v_expl;
-        mcq.image_url = Some(v_url);
+    let clean_topic = topic.split('|').next().unwrap_or(topic).trim();
+    if clean_topic.len() < 3 {
         return;
     }
 
-    if let Some(first_q) = questions.first_mut() {
-        first_q.image_url = Some(v_url);
+    let real_url = match fetch_wikipedia_educational_image(clean_topic).await {
+        Some(url) => Some(url),
+        None => {
+            crate::infrastructure::cloudflare_ai::try_generate_scene_image(
+                pool,
+                clean_topic,
+                subject_name,
+                grade_level,
+            )
+            .await
+            .filter(|u| !u.to_lowercase().contains(".svg"))
+        }
+    };
+
+    if let Some(url) = real_url {
+        if let Some(first_q) = questions.first_mut() {
+            first_q.image_url = Some(url);
+        }
     }
 }
 
@@ -3388,6 +3484,8 @@ pub struct CbtQuestionDto {
     pub explanation: String,
     pub bloom_level: String,
     pub points: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction_config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -3403,6 +3501,7 @@ pub async fn generate_cbt_quiz(
     grade_level: &str,
     subject_name: &str,
     quiz_format: Option<&str>,
+    question_types: Option<&[String]>,
     num_mcq: usize,
     num_essay: usize,
     difficulty: &str,
@@ -3412,17 +3511,63 @@ pub async fn generate_cbt_quiz(
     let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
     let visual_instructions = build_visual_diagram_prompt_instructions(is_english, include_images);
     let now_ts = chrono::Utc::now().timestamp_millis();
-    let is_mixed = num_essay > 0
+
+    let variatif_list: Vec<String> = question_types
+        .map(|ts| {
+            ts.iter()
+                .map(|s| s.trim().to_uppercase())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let wants_variatif = !variatif_list.is_empty()
+        && variatif_list.iter().any(|t| t != "MULTIPLE_CHOICE" && t != "ESSAY")
+        || quiz_format
+            .map(|f| f.to_uppercase().contains("VARIATIF"))
+            .unwrap_or(false);
+
+    let is_mixed = wants_variatif
+        || num_essay > 0
         || quiz_format
             .map(|f| f.to_uppercase() == "MIXED" || f.to_uppercase().contains("CAMPURAN"))
             .unwrap_or(false);
     let total_questions = if is_mixed {
-        num_mcq + num_essay
+        (num_mcq + num_essay).max(1)
     } else {
-        num_mcq
+        num_mcq.max(1)
     };
 
-    let composition_instruction = if is_english {
+    let variatif_schema_rules = if wants_variatif {
+        let active_types_str = if variatif_list.is_empty() {
+            "MULTIPLE_CHOICE, TRUE_FALSE_MATRIX, MULTIPLE_SELECT, SHORT_ANSWER, MATCHING, ORDERING, ESSAY".to_string()
+        } else {
+            variatif_list.join(", ")
+        };
+        let tf_true = if is_english { "True" } else { "Benar" };
+        let tf_false = if is_english { "False" } else { "Salah" };
+        format!(
+            r#"
+VARIATIF AKM ASSESSMENT MODE (WAJIB MENGGUNAKAN BERBAGAI FORMAT BERVARIASI):
+- Gunakan kombinasi merata dari tipe-tipe berikut: [{active_types_str}] hingga total {total_questions} butir.
+- Skema WAJIB per question_type:
+  1) MULTIPLE_CHOICE: 'options' 4 item (A-D) atau 'choices' 4 item, tepat 1 benar, 'interaction_config': {{}}
+  2) TRUE_FALSE_MATRIX: Sajikan stimulus di 'question_text', lalu isi array 'choices' dengan 3 atau 4 pernyataan: [{{ "choice_text": "Pernyataan 1...", "is_correct": true }}, ...]. Isi 'interaction_config': {{ "statement_label": "Pernyataan", "true_label": "{tf_true}", "false_label": "{tf_false}" }}
+  3) MULTIPLE_SELECT: Soal PG Kompleks dengan 'choices' 4-5 opsi dimana 2 atau 3 memiliki "is_correct": true.
+  4) SHORT_ANSWER: Isian singkat 1-3 kata atau angka pasti. 'choices': [], 'interaction_config': {{ "accepted_answers": ["kunci utama", "sinonim"], "case_sensitive": false, "placeholder": "Ketik jawaban singkat..." }}
+  5) MATCHING: Menjodohkan 3 pasangan kiri-kanan. 'choices': [], 'interaction_config': {{ "pairs": [{{"id":"p1","left":"...","right":"..."}}, ...], "distractors": ["1 pengecoh opsional"] }}
+  6) ORDERING: Urutkan 4 tahapan kronologi/algoritma secara tepat. 'choices': [], 'interaction_config': {{ "instruction": "Urutkan tahapan secara tepat.", "items": [{{"id":"s1","text":"Tahap 1","correct_order":1}}, ...] }}
+  7) ESSAY: Uraian analitis HOTS. 'choices': [], 'interaction_config': {{ "rubric": "..." }}"#
+        )
+    } else {
+        String::new()
+    };
+
+    let composition_instruction = if wants_variatif {
+        format!(
+            "Susun TEPAT {total_questions} butir soal CBT AKM variatif (sertakan proporsi objektif ~{num_mcq} butir dan uraian/HOTS ~{num_essay} butir).\n{variatif_schema_rules}"
+        )
+    } else if is_english {
         if is_mixed {
             format!(
                 r#"CBT EXAM COMPOSITION RULES (MIXED MULTIPLE CHOICE & ESSAY — ALL IN ENGLISH):
@@ -3733,8 +3878,25 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
             }
         }
 
-        // Ensure at least one choice is marked correct if multiple choice
-        if !choices.is_empty() && !choices.iter().any(|c| c.is_correct) {
+        let norm_explicit = explicit_type.as_deref().unwrap_or("MULTIPLE_CHOICE");
+        let resolved_qtype = match norm_explicit {
+            "TRUE_FALSE_MATRIX" | "TRUE_FALSE" | "BENAR_SALAH" | "MATRIX_TF" => "TRUE_FALSE_MATRIX",
+            "MULTIPLE_SELECT" | "MULTI_SELECT" | "PG_KOMPLEKS" | "CHECKBOX" => "MULTIPLE_SELECT",
+            "SHORT_ANSWER" | "ISIAN_SINGKAT" | "FILL_BLANK" => "SHORT_ANSWER",
+            "MATCHING" | "MENJODOHKAN" => "MATCHING",
+            "ORDERING" | "URUTAN" | "SEQUENCE" => "ORDERING",
+            "ESSAY" | "URAIAN" => "ESSAY",
+            _ => {
+                if !choices.is_empty() {
+                    "MULTIPLE_CHOICE"
+                } else {
+                    "ESSAY"
+                }
+            }
+        };
+
+        // Ensure single-choice PG has a key if choices exist; preserve multi-key for TRUE_FALSE_MATRIX / MULTIPLE_SELECT
+        if resolved_qtype == "MULTIPLE_CHOICE" && !choices.is_empty() && !choices.iter().any(|c| c.is_correct) {
             let target_idx = match correct_key.as_str() {
                 "B" if choices.len() > 1 => 1,
                 "C" if choices.len() > 2 => 2,
@@ -3744,19 +3906,17 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
             if let Some(c) = choices.get_mut(target_idx) {
                 c.is_correct = true;
             }
-        }
-
-        let is_essay = explicit_type.as_deref() == Some("ESSAY")
-            || (is_mixed && idx >= num_mcq)
-            || choices.is_empty();
-
-        let question_type = if is_essay {
+        } else if matches!(resolved_qtype, "SHORT_ANSWER" | "MATCHING" | "ORDERING" | "ESSAY") {
             choices.clear();
             correct_key = String::new();
-            "ESSAY".to_string()
-        } else {
-            "MULTIPLE_CHOICE".to_string()
-        };
+        }
+
+        let is_essay = resolved_qtype == "ESSAY";
+        let question_type = resolved_qtype.to_string();
+        let interaction_config = q_val
+            .get("interaction_config")
+            .filter(|v| v.is_object())
+            .cloned();
 
         let explanation = q_val
             .get("explanation")
@@ -3773,10 +3933,10 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
             .map(|p| p as i32)
             .unwrap_or(if is_essay { 20 } else { default_pts });
 
-        let img_url = if include_images && diagrams_attached < 3 {
-            let resolved = crate::infrastructure::visual_diagram::resolve_visual_diagram_url(
+        let img_url = if include_images && diagrams_attached < 4 {
+            let resolved = resolve_accurate_question_raster_image(
                 pool,
-                q_val.get("diagram_spec"),
+                &q_val,
                 subject_name,
                 grade_level,
             )
@@ -3804,16 +3964,19 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
             explanation,
             bloom_level,
             points,
+            interaction_config,
         });
     }
 
     // ── Enforce Exact Counts for CBT Quiz ──
-    if is_mixed {
+    if wants_variatif {
+        questions.truncate(total_questions);
+    } else if is_mixed {
         let mut final_mcqs: Vec<CbtQuestionDto> = Vec::new();
         let mut final_essays: Vec<CbtQuestionDto> = Vec::new();
 
         for q in questions {
-            if q.question_type.as_deref() == Some("MULTIPLE_CHOICE") && !q.choices.is_empty() {
+            if q.question_type.as_deref() != Some("ESSAY") {
                 final_mcqs.push(q);
             } else {
                 final_essays.push(q);
@@ -3853,6 +4016,7 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
                     explanation: tpl.3.clone(),
                     bloom_level: "C3".to_string(),
                     points: default_pts,
+                    interaction_config: None,
                 });
             }
         }
@@ -3877,6 +4041,7 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
                 },
                 bloom_level: "C4".to_string(),
                 points: 20,
+                interaction_config: None,
             });
         }
 
@@ -3919,6 +4084,7 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
                     explanation: tpl.3.clone(),
                     bloom_level: "C3".to_string(),
                     points: default_pts,
+                    interaction_config: None,
                 });
             }
         }
@@ -4012,6 +4178,7 @@ pub fn fallback_generate_cbt_quiz(
             explanation: expl,
             bloom_level: bloom_levels[idx % bloom_levels.len()].to_string(),
             points: default_pts,
+            interaction_config: None,
         });
     }
 
@@ -4055,6 +4222,7 @@ pub fn fallback_generate_cbt_quiz(
                 },
                 bloom_level: "C4".to_string(),
                 points: 20,
+                interaction_config: None,
             });
         }
     }
