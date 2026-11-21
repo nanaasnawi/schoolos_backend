@@ -57,16 +57,37 @@ async fn create(
     req_ctx: RequestContext,
     Json(payload): Json<CreateLearningMaterialRequest>,
 ) -> Result<Json<ApiResponse<LearningMaterialResponse>>, ApiError> {
-    let is_teacher = req_ctx
+    let is_admin = req_ctx
         .actor
         .as_ref()
         .map(|a| {
-            a.roles
-                .iter()
-                .any(|r| r.name == "Guru" || r.name == "Teacher")
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("admin")
+                    || n.contains("kepala")
+                    || n.contains("principal")
+                    || n.contains("operator")
+                    || n.contains("staff")
+                    || n.contains("staf")
+                    || n.contains("super")
+                    || n.contains("tu")
+            })
         })
         .unwrap_or(false);
-    if !is_teacher {
+
+    let is_teacher = !is_admin
+        && req_ctx
+            .actor
+            .as_ref()
+            .map(|a| {
+                a.roles.iter().any(|r| {
+                    let n = r.name.to_lowercase();
+                    n.contains("guru") || n.contains("teacher") || n.contains("pengajar")
+                })
+            })
+            .unwrap_or(false);
+
+    if !is_teacher && !is_admin {
         use crate::middleware::require_permission;
         use school_core::permission::domain::permission_registry::Permission;
         require_permission(&req_ctx.actor, Permission::LearningMaterialCreate).map_err(|_| {
@@ -125,7 +146,7 @@ async fn create(
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
     let resolved_actor_teacher_id = if let Some(aid) = actor_id {
         sqlx::query_scalar::<_, Uuid>(
-            r#"SELECT id FROM teachers WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 LIMIT 1"#
+            r#"SELECT id FROM teachers WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 AND deleted_at IS NULL LIMIT 1"#
         )
         .bind(aid)
         .bind(req_ctx.tenant_id)
@@ -136,7 +157,28 @@ async fn create(
     } else {
         None
     };
-    let teacher_id = resolved_actor_teacher_id.or(payload.teacher_id);
+
+    let validated_payload_teacher_id = if let Some(pid) = payload.teacher_id {
+        sqlx::query_scalar::<_, Uuid>(
+            r#"SELECT id FROM teachers WHERE (id = $1 OR user_id = $1) AND tenant_id = $2 AND deleted_at IS NULL LIMIT 1"#
+        )
+        .bind(pid)
+        .bind(req_ctx.tenant_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten()
+        .or(Some(pid))
+    } else {
+        None
+    };
+
+    // Only strict teacher accounts default to themselves; principals/admins/staff assign the chosen payload.teacher_id.
+    let teacher_id = if is_teacher && !is_admin {
+        resolved_actor_teacher_id.or(validated_payload_teacher_id)
+    } else {
+        validated_payload_teacher_id.or(resolved_actor_teacher_id)
+    };
 
     // Resolve target_class_id from UUID or class name string (e.g. "PAKET C10" or "Kelas 5")
     let target_class_id: Option<Uuid> = match payload.class_id {
@@ -291,7 +333,7 @@ async fn create(
     if !is_scheduled {
         let teacher_name = if let Some(tid) = teacher_id {
             sqlx::query_scalar::<_, String>(
-                "SELECT u.full_name FROM teachers t JOIN users u ON u.id = t.user_id WHERE t.id = $1",
+                "SELECT COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(u.full_name), ''), 'Guru Pengampu') FROM teachers t LEFT JOIN users u ON u.id = t.user_id WHERE t.id = $1",
             )
             .bind(tid)
             .fetch_optional(&ctx.pool)
@@ -420,7 +462,7 @@ async fn create(
             m.created_at, m.updated_at,
             m.class_id, c.name as class_name,
             m.teacher_id,
-            COALESCE(ut.full_name, uc.full_name, 'Guru Pengampu') as teacher_name,
+            COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(ut.full_name), ''), uc.full_name, 'Guru Pengampu') as teacher_name,
             COALESCE(s.name, lb.subject_name, t.subject, 'Umum') as subject_name,
             m.start_page, m.end_page,
             m.session_id, m.release_at
@@ -573,7 +615,7 @@ async fn list(
                 m.created_at, m.updated_at,
                 m.class_id, c.name as class_name,
                 m.teacher_id,
-                COALESCE(ut.full_name, uc.full_name, 'Guru Pengampu') as teacher_name,
+                COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(ut.full_name), ''), uc.full_name, 'Guru Pengampu') as teacher_name,
                 COALESCE(s.name, lb.subject_name, t.subject, 'Umum') as subject_name,
                 m.start_page, m.end_page,
                 m.session_id, m.release_at,
@@ -670,7 +712,7 @@ async fn list(
                 m.created_at, m.updated_at,
                 m.class_id, c.name as class_name,
                 m.teacher_id,
-                COALESCE(ut.full_name, uc.full_name, 'Guru Pengampu') as teacher_name,
+                COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(ut.full_name), ''), uc.full_name, 'Guru Pengampu') as teacher_name,
                 COALESCE(s.name, lb.subject_name, t.subject, 'Umum') as subject_name,
                 m.start_page, m.end_page,
                 m.session_id, m.release_at,
@@ -772,7 +814,7 @@ async fn list(
                 m.created_at, m.updated_at,
                 m.class_id, c.name as class_name,
                 m.teacher_id,
-                COALESCE(ut.full_name, uc.full_name, 'Guru Pengampu') as teacher_name,
+                COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(ut.full_name), ''), uc.full_name, 'Guru Pengampu') as teacher_name,
                 COALESCE(s.name, lb.subject_name, t.subject, 'Umum') as subject_name,
                 m.start_page, m.end_page,
                 m.session_id, m.release_at,
@@ -992,7 +1034,7 @@ async fn get_by_id(
             m.created_at, m.updated_at,
             m.class_id, c.name as class_name,
             m.teacher_id,
-            COALESCE(ut.full_name, uc.full_name, 'Guru Pengampu') as teacher_name,
+            COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(ut.full_name), ''), uc.full_name, 'Guru Pengampu') as teacher_name,
             COALESCE(s.name, lb.subject_name, t.subject, 'Umum') as subject_name,
             m.start_page, m.end_page,
             m.session_id, m.release_at
@@ -1796,7 +1838,7 @@ async fn update(
             let notif_info = sqlx::query(
                 r#"
                 SELECT m.title, m.class_id, c.name as class_name,
-                       COALESCE(ut.full_name, uc.full_name, 'Guru Pengampu') as teacher_name
+                       COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(ut.full_name), ''), uc.full_name, 'Guru Pengampu') as teacher_name
                 FROM learning_materials m
                 LEFT JOIN classes c ON c.id = m.class_id
                 LEFT JOIN teachers t ON t.id = m.teacher_id
