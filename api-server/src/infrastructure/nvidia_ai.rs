@@ -3502,6 +3502,7 @@ pub async fn generate_cbt_quiz(
     subject_name: &str,
     quiz_format: Option<&str>,
     question_types: Option<&[String]>,
+    type_counts: Option<&std::collections::HashMap<String, usize>>,
     num_mcq: usize,
     num_essay: usize,
     difficulty: &str,
@@ -3514,10 +3515,14 @@ pub async fn generate_cbt_quiz(
 
     let variatif_list: Vec<String> = question_types
         .map(|ts| {
-            ts.iter()
-                .map(|s| s.trim().to_uppercase())
-                .filter(|s| !s.is_empty())
-                .collect()
+            let mut deduped = Vec::new();
+            for s in ts {
+                let norm = s.trim().to_uppercase();
+                if !norm.is_empty() && !deduped.contains(&norm) {
+                    deduped.push(norm);
+                }
+            }
+            deduped
         })
         .unwrap_or_default();
 
@@ -3539,25 +3544,78 @@ pub async fn generate_cbt_quiz(
     };
 
     let variatif_schema_rules = if wants_variatif {
-        let active_types_str = if variatif_list.is_empty() {
-            "MULTIPLE_CHOICE, TRUE_FALSE_MATRIX, MULTIPLE_SELECT, SHORT_ANSWER, MATCHING, ORDERING, ESSAY".to_string()
+        let active_types: Vec<String> = if variatif_list.is_empty() {
+            vec![
+                "MULTIPLE_CHOICE",
+                "TRUE_FALSE_MATRIX",
+                "MULTIPLE_SELECT",
+                "SHORT_ANSWER",
+                "MATCHING",
+                "ORDERING",
+                "ESSAY",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect()
         } else {
-            variatif_list.join(", ")
+            variatif_list.clone()
         };
+        let active_types_str = active_types.join(", ");
         let tf_true = if is_english { "True" } else { "Benar" };
         let tf_false = if is_english { "False" } else { "Salah" };
+
+        let mut schema_lines = Vec::new();
+        for t in &active_types {
+            match t.as_str() {
+                "MULTIPLE_CHOICE" => schema_lines.push(
+                    "  - MULTIPLE_CHOICE: 'options' 4 item (A-D) atau 'choices' 4 item, tepat 1 benar, 'interaction_config': {}".to_string(),
+                ),
+                "TRUE_FALSE_MATRIX" => schema_lines.push(format!(
+                    "  - TRUE_FALSE_MATRIX: Sajikan stimulus di 'question_text', lalu isi array 'choices' dengan 3 atau 4 pernyataan: [{{ \"choice_text\": \"Pernyataan 1...\", \"is_correct\": true }}, ...]. Isi 'interaction_config': {{ \"statement_label\": \"Pernyataan\", \"true_label\": \"{tf_true}\", \"false_label\": \"{tf_false}\" }}"
+                )),
+                "MULTIPLE_SELECT" => schema_lines.push(
+                    "  - MULTIPLE_SELECT: Soal PG Kompleks dengan 'choices' 4-5 opsi dimana 2 atau 3 memiliki \"is_correct\": true.".to_string(),
+                ),
+                "SHORT_ANSWER" => schema_lines.push(
+                    "  - SHORT_ANSWER: Isian singkat 1-3 kata atau angka pasti. 'choices': []. WAJIB isi 'interaction_config': {{ \"accepted_answers\": [\"kunci utama\", \"sinonim\"], \"case_sensitive\": false, \"placeholder\": \"Ketik jawaban singkat...\" }}".to_string(),
+                ),
+                "MATCHING" => schema_lines.push(
+                    "  - MATCHING: Menjodohkan. 'question_text' HANYA instruksi singkat (contoh: \"Pasangkan setiap istilah di kiri dengan jawaban yang sesuai di kanan.\"), DILARANG menulis soal PG bertitik-titik \"...\". 'choices': []. WAJIB isi minimal 3 pasangan di 'interaction_config': {{ \"pairs\": [{{\"id\":\"p1\",\"left\":\"Konsep 1\",\"right\":\"Pasangan 1\"}},{{\"id\":\"p2\",\"left\":\"Konsep 2\",\"right\":\"Pasangan 2\"}},{{\"id\":\"p3\",\"left\":\"Konsep 3\",\"right\":\"Pasangan 3\"}}], \"distractors\": [\"1 pengecoh opsional\"] }}".to_string(),
+                ),
+                "ORDERING" => schema_lines.push(
+                    "  - ORDERING: Urutkan 4 tahapan kronologi/algoritma secara tepat. 'question_text' HANYA instruksi tugas, DILARANG KERAS menulis daftar bernomor \"1. ... 2. ...\" di 'question_text'! Masukkan langkah HANYA di 'interaction_config': {{ \"instruction\": \"Urutkan tahapan secara tepat.\", \"items\": [{{\"id\":\"s1\",\"text\":\"Tahap 1\",\"correct_order\":1}},{{\"id\":\"s2\",\"text\":\"Tahap 2\",\"correct_order\":2}},{{\"id\":\"s3\",\"text\":\"Tahap 3\",\"correct_order\":3}},{{\"id\":\"s4\",\"text\":\"Tahap 4\",\"correct_order\":4}}] }}".to_string(),
+                ),
+                "ESSAY" => schema_lines.push(
+                    "  - ESSAY: Uraian analitis HOTS. 'choices': [], 'interaction_config': {{ \"rubric\": \"...\" }}".to_string(),
+                ),
+                _ => {}
+            }
+        }
+
+        let per_type_quota_text = if let Some(tc) = type_counts {
+            let lines: Vec<String> = active_types
+                .iter()
+                .filter_map(|t| {
+                    let cnt = tc.get(t).copied().unwrap_or(0);
+                    if cnt > 0 {
+                        Some(format!("  * {t}: TEPAT {cnt} butir"))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if lines.is_empty() {
+                format!("- Distribusi seimbang untuk: [{active_types_str}] hingga total {total_questions} butir.")
+            } else {
+                format!("Kuota TEPAT per jenis soal:\n{}", lines.join("\n"))
+            }
+        } else {
+            format!("- Distribusi merata dari tipe-tipe berikut: [{active_types_str}] hingga total {total_questions} butir.")
+        };
+
         format!(
-            r#"
-VARIATIF AKM ASSESSMENT MODE (WAJIB MENGGUNAKAN BERBAGAI FORMAT BERVARIASI):
-- Gunakan kombinasi merata dari tipe-tipe berikut: [{active_types_str}] hingga total {total_questions} butir.
-- Skema WAJIB per question_type:
-  1) MULTIPLE_CHOICE: 'options' 4 item (A-D) atau 'choices' 4 item, tepat 1 benar, 'interaction_config': {{}}
-  2) TRUE_FALSE_MATRIX: Sajikan stimulus di 'question_text', lalu isi array 'choices' dengan 3 atau 4 pernyataan: [{{ "choice_text": "Pernyataan 1...", "is_correct": true }}, ...]. Isi 'interaction_config': {{ "statement_label": "Pernyataan", "true_label": "{tf_true}", "false_label": "{tf_false}" }}
-  3) MULTIPLE_SELECT: Soal PG Kompleks dengan 'choices' 4-5 opsi dimana 2 atau 3 memiliki "is_correct": true.
-  4) SHORT_ANSWER: Isian singkat 1-3 kata atau angka pasti. 'choices': [], 'interaction_config': {{ "accepted_answers": ["kunci utama", "sinonim"], "case_sensitive": false, "placeholder": "Ketik jawaban singkat..." }}
-  5) MATCHING: Menjodohkan 3 pasangan kiri-kanan. 'choices': [], 'interaction_config': {{ "pairs": [{{"id":"p1","left":"...","right":"..."}}, ...], "distractors": ["1 pengecoh opsional"] }}
-  6) ORDERING: Urutkan 4 tahapan kronologi/algoritma secara tepat. 'choices': [], 'interaction_config': {{ "instruction": "Urutkan tahapan secara tepat.", "items": [{{"id":"s1","text":"Tahap 1","correct_order":1}}, ...] }}
-  7) ESSAY: Uraian analitis HOTS. 'choices': [], 'interaction_config': {{ "rubric": "..." }}"#
+            "\nVARIATIF AKM ASSESSMENT MODE (WAJIB PATUH TIPE & JUMLAH):\n{per_type_quota_text}\n- ATURAN KETAT: DILARANG menyertakan question_type di luar [{active_types_str}].\n- Skema WAJIB per question_type terpilih:\n{}",
+            schema_lines.join("\n")
         )
     } else {
         String::new()
@@ -3879,7 +3937,7 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
         }
 
         let norm_explicit = explicit_type.as_deref().unwrap_or("MULTIPLE_CHOICE");
-        let resolved_qtype = match norm_explicit {
+        let mut resolved_qtype = match norm_explicit {
             "TRUE_FALSE_MATRIX" | "TRUE_FALSE" | "BENAR_SALAH" | "MATRIX_TF" => "TRUE_FALSE_MATRIX",
             "MULTIPLE_SELECT" | "MULTI_SELECT" | "PG_KOMPLEKS" | "CHECKBOX" => "MULTIPLE_SELECT",
             "SHORT_ANSWER" | "ISIAN_SINGKAT" | "FILL_BLANK" => "SHORT_ANSWER",
@@ -3895,6 +3953,219 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
             }
         };
 
+        let mut clean_q_text_base = q_text.clone();
+        let mut cfg_map: serde_json::Map<String, serde_json::Value> = q_val
+            .get("interaction_config")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+
+        if resolved_qtype == "ORDERING" {
+            let mut items_vec: Vec<serde_json::Value> = cfg_map
+                .get("items")
+                .or_else(|| q_val.get("items"))
+                .or_else(|| q_val.get("steps"))
+                .or_else(|| cfg_map.get("steps"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .enumerate()
+                        .filter_map(|(s_idx, item)| {
+                            let step_text = if let Some(s) = item.as_str() {
+                                s.trim().to_string()
+                            } else {
+                                item.get("text")
+                                    .or_else(|| item.get("step"))
+                                    .or_else(|| item.get("label"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .trim()
+                                    .to_string()
+                            };
+                            if step_text.is_empty() {
+                                return None;
+                            }
+                            let id = item
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| format!("s-{idx}-{}", s_idx + 1));
+                            let order = item
+                                .get("correct_order")
+                                .or_else(|| item.get("order"))
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or((s_idx + 1) as i64);
+                            Some(serde_json::json!({
+                                "id": id,
+                                "text": step_text,
+                                "correct_order": order
+                            }))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let mut extracted_numbered: Vec<String> = Vec::new();
+            let mut lead_lines: Vec<String> = Vec::new();
+            for line in clean_q_text_base.lines() {
+                let t = line.trim();
+                let maybe_step = t
+                    .strip_prefix("- ")
+                    .or_else(|| t.strip_prefix("• "))
+                    .or_else(|| {
+                        let dot_pos = t.find('.').or_else(|| t.find(')'))?;
+                        if dot_pos > 0 && dot_pos <= 2 && t[..dot_pos].chars().all(|c| c.is_ascii_digit()) {
+                            Some(t[dot_pos + 1..].trim())
+                        } else {
+                            None
+                        }
+                    });
+                if let Some(step_s) = maybe_step.map(str::trim).filter(|s| !s.is_empty()) {
+                    extracted_numbered.push(step_s.to_string());
+                } else {
+                    lead_lines.push(line.to_string());
+                }
+            }
+
+            if items_vec.len() < 2 && extracted_numbered.len() >= 2 {
+                items_vec = extracted_numbered
+                    .iter()
+                    .enumerate()
+                    .map(|(s_idx, text)| {
+                        serde_json::json!({
+                            "id": format!("s-{idx}-{}", s_idx + 1),
+                            "text": text,
+                            "correct_order": s_idx + 1
+                        })
+                    })
+                    .collect();
+            }
+            if items_vec.len() >= 2 && extracted_numbered.len() >= 2 {
+                let stripped = lead_lines.join("\n").trim().to_string();
+                if stripped.len() >= 8 {
+                    clean_q_text_base = stripped;
+                }
+            }
+            if items_vec.len() >= 2 {
+                cfg_map.insert("items".to_string(), serde_json::Value::Array(items_vec));
+                choices.clear();
+                correct_key = String::new();
+            } else {
+                resolved_qtype = "ESSAY";
+                cfg_map.remove("items");
+            }
+        } else if resolved_qtype == "MATCHING" {
+            let mut pairs_vec: Vec<serde_json::Value> = cfg_map
+                .get("pairs")
+                .or_else(|| q_val.get("pairs"))
+                .or_else(|| q_val.get("matches"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .enumerate()
+                        .filter_map(|(p_idx, p)| {
+                            let left = p
+                                .get("left")
+                                .or_else(|| p.get("premise"))
+                                .or_else(|| p.get("term"))
+                                .or_else(|| p.get("question"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .trim();
+                            let right = p
+                                .get("right")
+                                .or_else(|| p.get("match"))
+                                .or_else(|| p.get("definition"))
+                                .or_else(|| p.get("answer"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .trim();
+                            if left.is_empty() || right.is_empty() {
+                                return None;
+                            }
+                            let id = p
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| format!("p-{idx}-{}", p_idx + 1));
+                            Some(serde_json::json!({ "id": id, "left": left, "right": right }))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if pairs_vec.len() < 2 && choices.len() >= 2 {
+                let recovered: Vec<serde_json::Value> = choices
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(c_idx, c)| {
+                        let sep = ["->", "→", "=>", "::", ":"]
+                            .iter()
+                            .find_map(|d| c.choice_text.split_once(d));
+                        let (l, r) = sep?;
+                        let lt = l.trim();
+                        let rt = r.trim();
+                        if lt.is_empty() || rt.is_empty() {
+                            return None;
+                        }
+                        Some(serde_json::json!({
+                            "id": format!("p-{idx}-{}", c_idx + 1),
+                            "left": lt,
+                            "right": rt
+                        }))
+                    })
+                    .collect();
+                if recovered.len() >= 2 {
+                    pairs_vec = recovered;
+                }
+            }
+
+            if pairs_vec.len() >= 2 {
+                cfg_map.insert("pairs".to_string(), serde_json::Value::Array(pairs_vec));
+                choices.clear();
+                correct_key = String::new();
+            } else if choices.len() >= 2 {
+                resolved_qtype = if choices.iter().filter(|c| c.is_correct).count() > 1 {
+                    "MULTIPLE_SELECT"
+                } else {
+                    "MULTIPLE_CHOICE"
+                };
+            } else {
+                resolved_qtype = "ESSAY";
+                cfg_map.remove("pairs");
+            }
+        } else if resolved_qtype == "SHORT_ANSWER" {
+            let mut accepted: Vec<String> = cfg_map
+                .get("accepted_answers")
+                .or_else(|| q_val.get("accepted_answers"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if accepted.is_empty() {
+                for key in ["answer", "correct_answer"] {
+                    if let Some(s) = q_val.get(key).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+                        accepted.push(s.to_string());
+                        break;
+                    }
+                }
+            }
+            if !accepted.is_empty() {
+                cfg_map.insert(
+                    "accepted_answers".to_string(),
+                    serde_json::Value::Array(accepted.into_iter().map(serde_json::Value::String).collect()),
+                );
+                choices.clear();
+                correct_key = String::new();
+            } else {
+                resolved_qtype = "ESSAY";
+                cfg_map.remove("accepted_answers");
+            }
+        }
+
         // Ensure single-choice PG has a key if choices exist; preserve multi-key for TRUE_FALSE_MATRIX / MULTIPLE_SELECT
         if resolved_qtype == "MULTIPLE_CHOICE" && !choices.is_empty() && !choices.iter().any(|c| c.is_correct) {
             let target_idx = match correct_key.as_str() {
@@ -3906,17 +4177,18 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
             if let Some(c) = choices.get_mut(target_idx) {
                 c.is_correct = true;
             }
-        } else if matches!(resolved_qtype, "SHORT_ANSWER" | "MATCHING" | "ORDERING" | "ESSAY") {
+        } else if resolved_qtype == "ESSAY" {
             choices.clear();
             correct_key = String::new();
         }
 
         let is_essay = resolved_qtype == "ESSAY";
         let question_type = resolved_qtype.to_string();
-        let interaction_config = q_val
-            .get("interaction_config")
-            .filter(|v| v.is_object())
-            .cloned();
+        let interaction_config = if cfg_map.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Object(cfg_map))
+        };
 
         let explanation = q_val
             .get("explanation")
@@ -3949,9 +4221,9 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
             None
         };
         let clean_q_text = if img_url.is_some() {
-            strip_leaked_diagram_bracket_tag(&q_text)
+            strip_leaked_diagram_bracket_tag(&clean_q_text_base)
         } else {
-            q_text
+            clean_q_text_base
         };
 
         questions.push(CbtQuestionDto {
@@ -3968,8 +4240,39 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
         });
     }
 
-    // ── Enforce Exact Counts for CBT Quiz ──
+    // ── Enforce Exact Allowed Types & Requested Counts for CBT Quiz ──
+    if !variatif_list.is_empty() {
+        questions.retain(|q| {
+            let qt = q
+                .question_type
+                .as_deref()
+                .unwrap_or("MULTIPLE_CHOICE")
+                .trim()
+                .to_uppercase();
+            variatif_list.contains(&qt)
+        });
+    }
+
     if wants_variatif {
+        if let Some(tc) = type_counts {
+            let mut kept = Vec::new();
+            let mut per_type_counts: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for q in questions {
+                let qt = q
+                    .question_type
+                    .clone()
+                    .unwrap_or_else(|| "MULTIPLE_CHOICE".to_string())
+                    .to_uppercase();
+                let limit = tc.get(&qt).copied().unwrap_or(0);
+                let cur = per_type_counts.get(&qt).copied().unwrap_or(0);
+                if limit == 0 || cur < limit {
+                    per_type_counts.insert(qt, cur + 1);
+                    kept.push(q);
+                }
+            }
+            questions = kept;
+        }
         questions.truncate(total_questions);
     } else if is_mixed {
         let mut final_mcqs: Vec<CbtQuestionDto> = Vec::new();

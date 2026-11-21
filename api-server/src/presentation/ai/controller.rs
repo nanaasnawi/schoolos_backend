@@ -44,6 +44,8 @@ pub struct GenerateAiContentRequest {
     #[serde(default)]
     pub question_types: Option<Vec<String>>,
     #[serde(default)]
+    pub type_counts: Option<std::collections::HashMap<String, usize>>,
+    #[serde(default)]
     pub exam_scope: Option<String>,
     #[serde(default)]
     pub period_label: Option<String>,
@@ -343,6 +345,7 @@ async fn generate_content(
                 subject,
                 quiz_format,
                 requested_types,
+                payload.type_counts.as_ref(),
                 num_mcq,
                 num_essay,
                 diff,
