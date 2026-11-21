@@ -934,7 +934,7 @@ async fn assign_reading_material(
     if !is_scheduled {
         let teacher_name = if let Some(tid) = teacher_id {
             sqlx::query_scalar::<_, String>(
-                "SELECT u.full_name FROM teachers t JOIN users u ON u.id = t.user_id WHERE t.id = $1",
+                "SELECT COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(u.full_name), ''), 'Guru Pengampu') FROM teachers t LEFT JOIN users u ON u.id = t.user_id WHERE t.id = $1",
             )
             .bind(tid)
             .fetch_optional(&ctx.pool)
