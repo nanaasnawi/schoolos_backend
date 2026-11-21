@@ -19,10 +19,40 @@ use crate::{
 };
 use school_core::common::error::ApplicationError;
 
+fn deserialize_flexible_semester<'de, D>(deserializer: D) -> Result<Option<i16>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<String>::deserialize(deserializer)?;
+    let Some(raw) = opt else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if let Ok(num) = trimmed.parse::<i16>() {
+        return Ok(Some(if num == 2 { 2 } else { 1 }));
+    }
+    let lower = trimmed.to_lowercase();
+    if lower.contains("2") || lower.contains("genap") || lower.contains("even") {
+        Ok(Some(2))
+    } else if lower.contains("1")
+        || lower.contains("gasal")
+        || lower.contains("ganjil")
+        || lower.contains("odd")
+    {
+        Ok(Some(1))
+    } else {
+        Ok(None)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ReportCardsQuery {
     pub class_id: Option<Uuid>,
     pub academic_year_id: Option<Uuid>,
+    #[serde(default, deserialize_with = "deserialize_flexible_semester")]
     pub semester: Option<i16>,
 }
 
@@ -206,6 +236,76 @@ fn build_empty_curriculum_subjects(
     list
 }
 
+fn normalize_subject_key(name: &str) -> String {
+    name.to_lowercase()
+        .replace("(umum)", "")
+        .replace("(seni rupa)", "")
+        .replace("(bahasa daerah)", "")
+        .replace("(pjok)", "")
+        .replace("(ipas)", "")
+        .replace("(ipa)", "")
+        .replace("(ips)", "")
+        .replace(&['(', ')', ',', '.', '-', ':'][..], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn subjects_match(template_name: &str, graded_name: &str) -> bool {
+    let t = normalize_subject_key(template_name);
+    let g = normalize_subject_key(graded_name);
+    if t.is_empty() || g.is_empty() {
+        return false;
+    }
+    if t == g || t.contains(&g) || g.contains(&t) {
+        return true;
+    }
+    if (t.contains("agama") || t == "pai") && (g.contains("agama") || g == "pai") {
+        return true;
+    }
+    if t.contains("jasmani") && (g.contains("jasmani") || g.contains("pjok") || g.contains("olahraga")) {
+        return true;
+    }
+    if t.contains("muatan lokal") && (g.contains("muatan lokal") || g.contains("bahasa daerah") || g.contains("sunda") || g.contains("jawa") || g.contains("cirebon")) {
+        return true;
+    }
+    false
+}
+
+fn merge_subjects_with_curriculum_template(
+    class_name: &str,
+    phase: &str,
+    religion: Option<&str>,
+    graded_subjects: Vec<SubjectCompetencyDto>,
+) -> Vec<SubjectCompetencyDto> {
+    let mut base = build_empty_curriculum_subjects(class_name, phase, religion);
+    if graded_subjects.is_empty() {
+        return base;
+    }
+
+    let mut matched_indices = std::collections::HashSet::new();
+    for item in &mut base {
+        if let Some((idx, graded)) = graded_subjects
+            .iter()
+            .enumerate()
+            .find(|(idx, g)| !matched_indices.contains(idx) && subjects_match(&item.subject_name, &g.subject_name))
+        {
+            item.final_score = graded.final_score;
+            item.predicate = graded.predicate.clone();
+            item.description = graded.description.clone();
+            matched_indices.insert(idx);
+        }
+    }
+
+    for (idx, extra) in graded_subjects.into_iter().enumerate() {
+        if !matched_indices.contains(&idx) {
+            base.push(extra);
+        }
+    }
+
+    base
+}
+
 struct PromotionEvaluation {
     is_passed: bool,
     decision_text: String,
@@ -336,9 +436,33 @@ struct StudentRow {
     religion: Option<String>,
     address: Option<String>,
     parent_phone: Option<String>,
+    father_name: Option<String>,
+    mother_name: Option<String>,
     class_name: Option<String>,
     homeroom_teacher_name: Option<String>,
     guardian_name: Option<String>,
+}
+
+fn is_admin_or_staff_role(role_name: &str) -> bool {
+    let lower = role_name.to_lowercase();
+    lower.contains("kepala")
+        || lower.contains("principal")
+        || lower.contains("operator")
+        || lower.contains("staff")
+        || lower.contains("admin")
+        || lower.contains("super")
+        || lower.contains("bendahara")
+        || lower.contains("tata usaha")
+        || lower.contains("wakil")
+}
+
+fn is_teacher_role(role_name: &str) -> bool {
+    let lower = role_name.to_lowercase();
+    lower.contains("guru")
+        || lower.contains("teacher")
+        || lower.contains("wali")
+        || lower.contains("tutor")
+        || lower.contains("pengajar")
 }
 
 /// Retrieve unified e-Rapor cards for students in the active academic context.
@@ -383,20 +507,24 @@ pub async fn get_report_cards(
     }
     .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
 
-    let (active_year_name, active_semester, report_date_str) = match year_row {
+    let (active_year_name, db_active_semester, active_semester, report_date_str) = match year_row {
         Some(ref y) => {
             let name: String = y.get("name");
             let db_sem: i16 = y.try_get::<i16, _>("current_semester").unwrap_or(1);
             let sem = params.semester.unwrap_or(db_sem);
             let rd: Option<chrono::NaiveDate> = y.try_get::<Option<chrono::NaiveDate>, _>("report_date").unwrap_or(None);
             let rd_str = rd.map(|d| d.format("%Y-%m-%d").to_string());
-            (name, sem, rd_str)
+            (name, db_sem, sem, rd_str)
         }
-        None => (
-            "2026/2027".to_string(),
-            params.semester.unwrap_or(1),
-            Some("2026-12-19".to_string()),
-        ),
+        None => {
+            let sem = params.semester.unwrap_or(1);
+            (
+                "2026/2027".to_string(),
+                sem,
+                sem,
+                Some("2026-12-19".to_string()),
+            )
+        }
     };
 
     let semester_label = if active_semester == 2 {
@@ -439,26 +567,14 @@ pub async fn get_report_cards(
     let is_admin_or_staff = req_ctx
         .actor
         .as_ref()
-        .map(|a| {
-            a.roles.iter().any(|r| {
-                r.name == "Kepala Sekolah"
-                    || r.name == "Operator/Staff"
-                    || r.name == "Admin"
-                    || r.name == "SuperAdmin"
-                    || r.name == "Bendahara"
-            })
-        })
+        .map(|a| a.roles.iter().any(|r| is_admin_or_staff_role(&r.name)))
         .unwrap_or(false);
 
     let is_teacher = !is_admin_or_staff
         && req_ctx
             .actor
             .as_ref()
-            .map(|a| {
-                a.roles
-                    .iter()
-                    .any(|r| r.name == "Guru" || r.name == "Teacher")
-            })
+            .map(|a| a.roles.iter().any(|r| is_teacher_role(&r.name)))
             .unwrap_or(false);
 
     let mut teacher_id_opt: Option<Uuid> = None;
@@ -483,7 +599,7 @@ pub async fn get_report_cards(
         .unwrap_or(None);
     }
 
-    // 3. Query Students with Class, Teacher, and Guardian (Strictly Scoped for Teachers)
+    // 3. Query Students with Class, Teacher, and Guardian (Case-Insensitive Active Filter & Valid Join Columns)
     let student_rows = sqlx::query(
         r#"
         WITH active_student_roster AS (
@@ -498,18 +614,31 @@ pub async fn get_report_cards(
                 s.religion,
                 s.alamat_jalan AS address,
                 s.no_hp AS parent_phone,
+                s.nama_ayah AS father_name,
+                s.nama_ibu AS mother_name,
                 c.id AS class_id,
-                c.name AS class_name,
+                COALESCE(NULLIF(TRIM(c.name), ''), NULLIF(TRIM(s.rombel), '')) AS class_name,
                 t.full_name AS homeroom_teacher_name,
                 g.full_name AS guardian_name
             FROM students s
-            LEFT JOIN enrollments e ON e.student_id = s.id AND e.tenant_id = s.tenant_id AND (e.status = 'Active' OR e.status = 'active')
-            LEFT JOIN classes c ON c.id = e.class_id AND c.tenant_id = s.tenant_id
-            LEFT JOIN teachers t ON t.id = c.homeroom_teacher_id AND t.tenant_id = s.tenant_id
-            LEFT JOIN guardians g ON g.id = s.guardian_id AND g.tenant_id = s.tenant_id
+            LEFT JOIN enrollments e
+              ON e.student_id = s.id
+             AND e.tenant_id = s.tenant_id
+             AND (e.status IS NULL OR TRIM(e.status) = '' OR LOWER(TRIM(e.status)) IN ('active', 'aktif'))
+            LEFT JOIN classes c
+              ON c.id = e.class_id
+             AND c.tenant_id = s.tenant_id
+             AND c.deleted_at IS NULL
+            LEFT JOIN teachers t
+              ON t.id = c.homeroom_teacher_id
+             AND t.tenant_id = s.tenant_id
+            LEFT JOIN guardians g
+              ON g.id = s.guardian_id
+             AND g.tenant_id = s.tenant_id
             WHERE s.tenant_id = $1 
               AND s.deleted_at IS NULL
-              AND (s.status = 'active' OR (s.status IS NULL AND s.is_active = true))
+              AND COALESCE(s.is_active, true) = true
+              AND (s.status IS NULL OR TRIM(s.status) = '' OR LOWER(TRIM(s.status)) IN ('active', 'aktif'))
               AND ($2::uuid IS NULL OR c.id = $2)
               AND (
                   $3::uuid IS NULL OR
@@ -523,12 +652,20 @@ pub async fn get_report_cards(
                   OR EXISTS (
                       SELECT 1 FROM learning_sessions ls
                       WHERE ls.class_id = c.id
-                        AND (ls.teacher_id = $3 OR lower(trim(ls.teacher_name)) = (SELECT lower(trim(full_name)) FROM teachers WHERE id = $3))
+                        AND ls.teacher_id = $3
+                        AND ls.deleted_at IS NULL
                   )
                   OR EXISTS (
                       SELECT 1 FROM assignments asg
                       WHERE asg.class_id = c.id
-                        AND (asg.teacher_id = $3 OR lower(trim(asg.teacher_name)) = (SELECT lower(trim(full_name)) FROM teachers WHERE id = $3))
+                        AND asg.teacher_id = $3
+                        AND asg.deleted_at IS NULL
+                  )
+                  OR EXISTS (
+                      SELECT 1 FROM quizzes q
+                      WHERE q.class_id = c.id
+                        AND q.teacher_id = $3
+                        AND q.deleted_at IS NULL
                   )
               )
             ORDER BY s.id, e.enrolled_at DESC NULLS LAST
@@ -557,13 +694,15 @@ pub async fn get_report_cards(
             religion: row.try_get::<Option<String>, _>("religion").unwrap_or(None),
             address: row.try_get::<Option<String>, _>("address").unwrap_or(None),
             parent_phone: row.try_get::<Option<String>, _>("parent_phone").unwrap_or(None),
+            father_name: row.try_get::<Option<String>, _>("father_name").unwrap_or(None),
+            mother_name: row.try_get::<Option<String>, _>("mother_name").unwrap_or(None),
             class_name: row.try_get::<Option<String>, _>("class_name").unwrap_or(None),
             homeroom_teacher_name: row.try_get::<Option<String>, _>("homeroom_teacher_name").unwrap_or(None),
             guardian_name: row.try_get::<Option<String>, _>("guardian_name").unwrap_or(None),
         })
         .collect();
 
-    // 4. Query Gradebook Snapshots (Cast final_score to float8 for direct native f64 decoding)
+    // 4. Query Gradebook Snapshots (non-fatal so student list still loads cleanly on schema mismatch)
     let snapshot_rows = sqlx::query(
         r#"
         SELECT 
@@ -586,7 +725,10 @@ pub async fn get_report_cards(
     .bind(if active_semester == 2 { "EVEN" } else { "ODD" })
     .fetch_all(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
+    .unwrap_or_else(|e| {
+        tracing::warn!("gradebook_snapshots query failed for rapor/cards: {e}");
+        Vec::new()
+    });
 
     // Map snapshots by student_id
     let mut snapshots_by_student: std::collections::HashMap<Uuid, Vec<SubjectCompetencyDto>> =
@@ -656,25 +798,29 @@ pub async fn get_report_cards(
     }
 
     // 4b. Fallback merge from live `gradebooks` table so recent Buku Nilai / Tugas / CBT updates
-    // are always visible in e-Rapor even before manual snapshot ratification.
-    let live_gradebook_rows = sqlx::query(
-        r#"
-        SELECT
-            gb.student_id,
-            sub.name AS subject_name,
-            gb.final_score::float8 AS final_score,
-            gb.highest_competency_desc
-        FROM gradebooks gb
-        JOIN subjects sub ON sub.id = gb.subject_id
-        WHERE gb.tenant_id = $1
-          AND gb.final_score IS NOT NULL
-        ORDER BY sub.name ASC
-        "#,
-    )
-    .bind(req_ctx.tenant_id)
-    .fetch_all(&ctx.pool)
-    .await
-    .unwrap_or_default();
+    // are always visible for the currently active semester even before manual snapshot ratification.
+    let live_gradebook_rows = if active_semester == db_active_semester {
+        sqlx::query(
+            r#"
+            SELECT
+                gb.student_id,
+                sub.name AS subject_name,
+                gb.final_score::float8 AS final_score,
+                gb.highest_competency_desc
+            FROM gradebooks gb
+            JOIN subjects sub ON sub.id = gb.subject_id
+            WHERE gb.tenant_id = $1
+              AND gb.final_score IS NOT NULL
+            ORDER BY sub.name ASC
+            "#,
+        )
+        .bind(req_ctx.tenant_id)
+        .fetch_all(&ctx.pool)
+        .await
+        .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     for row in live_gradebook_rows {
         let st_id: Option<Uuid> = row.try_get::<Option<Uuid>, _>("student_id").unwrap_or(None);
@@ -688,14 +834,14 @@ pub async fn get_report_cards(
             let entry = snapshots_by_student.entry(student_id).or_default();
             let already_present = entry
                 .iter()
-                .any(|s| s.subject_name.eq_ignore_ascii_case(subj_name.trim()));
+                .any(|s| subjects_match(&s.subject_name, &subj_name));
             if !already_present {
                 entry.push(build_subject_competency_dto(subj_name, score, highest_desc));
             }
         }
     }
 
-    // 5. Query Attendance Summary
+    // 5. Query Attendance Summary (non-fatal)
     let attendance_rows = sqlx::query(
         r#"
         SELECT 
@@ -710,7 +856,10 @@ pub async fn get_report_cards(
     .bind(req_ctx.tenant_id)
     .fetch_all(&ctx.pool)
     .await
-    .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
+    .unwrap_or_else(|e| {
+        tracing::warn!("session_attendances query failed for rapor/cards: {e}");
+        Vec::new()
+    });
 
     let mut attendance_by_student: std::collections::HashMap<Uuid, AttendanceSummaryDto> =
         std::collections::HashMap::new();
@@ -748,14 +897,14 @@ pub async fn get_report_cards(
         let phase = get_curriculum_phase(&cls_name).to_string();
         let birth_str = format_indonesian_date(s.date_of_birth, s.place_of_birth.as_deref());
 
-        // Get or build subject competencies
-        let subjects = if let Some(snaps) = snapshots_by_student.remove(&s.student_id) {
-            snaps
-        } else {
-            // When teachers have not yet inputted grades into gradebook,
-            // subjects are created with 0.0 scores, predicate "-", and description "-" / belum dinilai.
-            build_empty_curriculum_subjects(&cls_name, &phase, s.religion.as_deref())
-        };
+        // Merge graded subjects into curriculum template so partial grading renders complete table
+        let graded_snaps = snapshots_by_student.remove(&s.student_id).unwrap_or_default();
+        let subjects = merge_subjects_with_curriculum_template(
+            &cls_name,
+            &phase,
+            s.religion.as_deref(),
+            graded_snaps,
+        );
 
         let has_scores = subjects.iter().any(|sub| sub.final_score > 0.0);
 
@@ -787,6 +936,15 @@ pub async fn get_report_cards(
             "DRAF_BELUM_DINILAI".to_string()
         };
 
+        let resolved_father = s
+            .father_name
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "-".to_string());
+        let resolved_mother = s
+            .mother_name
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "-".to_string());
+
         cards.push(StudentReportCardDto {
             student_id: s.student_id,
             nisn: s.nisn,
@@ -796,8 +954,8 @@ pub async fn get_report_cards(
             birth_place_date: birth_str,
             religion: s.religion.unwrap_or_else(|| "Islam".to_string()),
             address: s.address.clone().unwrap_or_else(|| "-".to_string()),
-            father_name: "-".to_string(),
-            mother_name: "-".to_string(),
+            father_name: resolved_father,
+            mother_name: resolved_mother,
             parent_address: s.address.unwrap_or_else(|| "-".to_string()),
             parent_phone: s.parent_phone.unwrap_or_else(|| "-".to_string()),
             class_name: cls_name,
@@ -894,7 +1052,7 @@ pub async fn verify_rapor_token(
             COALESCE(c.name, 'Kelas Umum') AS class_name,
             COALESCE(sch.name, 'Satuan Pendidikan') AS school_name,
             COALESCE(sch.npsn, '-') AS npsn,
-            COALESCE(sch.principal_name, '-') AS headmaster_name,
+            COALESCE(sch.headmaster_name, '-') AS headmaster_name,
             COALESCE(ay.name, '') AS academic_year_name,
             COALESCE(ay.current_semester, 1) AS current_semester
         FROM students s
