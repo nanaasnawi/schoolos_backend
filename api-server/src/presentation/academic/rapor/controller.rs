@@ -279,13 +279,17 @@ fn merge_subjects_with_curriculum_template(
     graded_subjects: Vec<SubjectCompetencyDto>,
 ) -> Vec<SubjectCompetencyDto> {
     let mut base = build_empty_curriculum_subjects(class_name, phase, religion);
-    if graded_subjects.is_empty() {
+    let graded_with_scores: Vec<SubjectCompetencyDto> = graded_subjects
+        .into_iter()
+        .filter(|s| s.final_score > 0.0)
+        .collect();
+    if graded_with_scores.is_empty() {
         return base;
     }
 
     let mut matched_indices = std::collections::HashSet::new();
     for item in &mut base {
-        if let Some((idx, graded)) = graded_subjects
+        if let Some((idx, graded)) = graded_with_scores
             .iter()
             .enumerate()
             .find(|(idx, g)| !matched_indices.contains(idx) && subjects_match(&item.subject_name, &g.subject_name))
@@ -297,13 +301,14 @@ fn merge_subjects_with_curriculum_template(
         }
     }
 
-    for (idx, extra) in graded_subjects.into_iter().enumerate() {
+    for (idx, extra) in graded_with_scores.into_iter().enumerate() {
         if !matched_indices.contains(&idx) {
             base.push(extra);
         }
     }
 
-    base
+    // Hide empty/ungraded subjects when final scores exist: empty scores indicate subjects not taught in this class.
+    base.into_iter().filter(|s| s.final_score > 0.0).collect()
 }
 
 struct PromotionEvaluation {
