@@ -68,6 +68,22 @@ pub struct GenerateAiContentResponse {
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct GenerateAiImageRequest {
+    pub prompt: String,
+    pub subject_name: Option<String>,
+    pub grade_level: Option<String>,
+    pub style: Option<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct GenerateAiImageResponse {
+    pub url: String,
+    pub prompt: String,
+    pub model: String,
+    pub source: String,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ParseQuizDocumentRequest {
     pub raw_text: String,
     pub file_name: Option<String>,
@@ -149,11 +165,81 @@ pub struct AiFeedbackResponse {
 pub fn ai_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/generate-content", post(generate_content))
+        .route("/generate-image", post(generate_image))
         .route("/parse-quiz-document", post(parse_quiz_document))
         .route("/analytics/student", post(analyze_student))
         .route("/tanya-ai", post(tanya_ai))
         .route("/tanya-ai/stream", post(tanya_ai_stream))
         .route("/feedback", post(submit_ai_feedback))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/ai/generate-image",
+    request_body = GenerateAiImageRequest,
+    responses(
+        (status = 200, description = "Generated educational image with FLUX AI successfully", body = inline(ApiResponse<GenerateAiImageResponse>)),
+        (status = 400, description = "Validation error")
+    ),
+    security(("Bearer" = []))
+)]
+async fn generate_image(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    Json(payload): Json<GenerateAiImageRequest>,
+) -> Result<Json<ApiResponse<GenerateAiImageResponse>>, ApiError> {
+    use crate::middleware::require_permission;
+    use school_core::permission::domain::permission_registry::Permission;
+    require_permission(&req_ctx.actor, Permission::LearningQuizCreate)
+        .or_else(|_| require_permission(&req_ctx.actor, Permission::LearningQuizUpdate))
+        .or_else(|_| require_permission(&req_ctx.actor, Permission::LearningMaterialCreate))
+        .map_err(|_| {
+            ApiError::new(
+                ApplicationError::Unauthorized(
+                    ErrorCode::AuthPermissionDenied,
+                    "Hanya guru atau staf akademik yang dapat membuat gambar soal AI".to_string(),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+
+    let prompt = payload.prompt.trim();
+    if prompt.chars().count() < 3 {
+        return Err(ApiError::new(
+            ApplicationError::Domain(DomainError::Validation(
+                "Deskripsi gambar minimal 3 karakter".to_string(),
+            )),
+            &req_ctx.request_id,
+        ));
+    }
+
+    let subject = payload.subject_name.as_deref().unwrap_or("Umum");
+    let grade = payload.grade_level.as_deref().unwrap_or("Kurikulum Merdeka");
+
+    let (url, model) = crate::infrastructure::cloudflare_ai::generate_quiz_question_image(
+        &ctx.pool,
+        prompt,
+        subject,
+        grade,
+        payload.style.as_deref(),
+    )
+    .await
+    .map_err(|err| {
+        ApiError::new(
+            ApplicationError::Internal(format!("Gagal generate gambar FLUX AI: {err}")),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    Ok(Json(ApiResponse::success(
+        GenerateAiImageResponse {
+            url,
+            prompt: prompt.to_string(),
+            model,
+            source: "flux-ai".to_string(),
+        },
+        req_ctx.request_id,
+    )))
 }
 
 #[utoipa::path(

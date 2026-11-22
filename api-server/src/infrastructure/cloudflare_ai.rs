@@ -117,6 +117,48 @@ fn build_infographic_visual_prompt(
     )
 }
 
+fn build_quiz_question_image_prompt(
+    concept_prompt: &str,
+    subject_name: &str,
+    grade_level: &str,
+    style_hint: Option<&str>,
+) -> String {
+    let style_upper = style_hint.unwrap_or("").trim().to_lowercase();
+    let subj_lower = subject_name.to_lowercase();
+
+    let style_directive = if style_upper == "photo" || style_upper == "realistic" {
+        "Realistic crisp educational documentary photograph, sharp natural lighting, true-to-life detail, clean unobstructed frame"
+    } else if style_upper == "diagram" || style_upper == "science" {
+        "Clean high-detail scientific textbook editorial illustration on a clean neutral studio background, accurate proportions and realistic morphology"
+    } else if subj_lower.contains("ipa")
+        || subj_lower.contains("ipas")
+        || subj_lower.contains("biologi")
+        || subj_lower.contains("fisika")
+        || subj_lower.contains("kimia")
+        || subj_lower.contains("sains")
+        || subj_lower.contains("science")
+    {
+        "Clean high-detail scientific textbook editorial illustration, accurate biological/physical subject structure on a clean light educational background, sharp focus"
+    } else if subj_lower.contains("ips")
+        || subj_lower.contains("sejarah")
+        || subj_lower.contains("geografi")
+        || subj_lower.contains("ppkn")
+        || subj_lower.contains("pancasila")
+        || subj_lower.contains("sosiologi")
+        || subj_lower.contains("ekonomi")
+    {
+        "Realistic crisp educational photograph and authentic cultural-historical scene, natural daylight, clear main subject"
+    } else {
+        "Crisp modern textbook educational illustration, clear central focal subject, balanced natural lighting, clean composition"
+    };
+
+    format!(
+        "{style_directive} for {subject_name} ({grade_level}).\n\
+        Subject to depict accurately: {concept_prompt}.\n\
+        Strict constraints: single clear scene, strictly no text, no words, no letters, no numbers, no labels, no callout boxes, no captions, no watermarks."
+    )
+}
+
 fn extract_cloudflare_error_message(txt: &str, status_code: u16) -> String {
     if let Ok(v) = serde_json::from_str::<Value>(txt) {
         if let Some(msg) = v
@@ -199,7 +241,7 @@ async fn call_cloudflare_flux(
     Err(format!("Cloudflare: {} -> {}", cfg.model, err_msg))
 }
 
-async fn persist_image(pool: &PgPool, mime: &str, bytes: Vec<u8>) -> String {
+async fn persist_image(pool: &PgPool, prefix: &str, mime: &str, bytes: Vec<u8>) -> String {
     let (clean_mime, ext) = if mime.contains("png") {
         ("image/png", "png")
     } else if mime.contains("webp") {
@@ -208,7 +250,7 @@ async fn persist_image(pool: &PgPool, mime: &str, bytes: Vec<u8>) -> String {
         ("image/jpeg", "jpg")
     };
 
-    let filename = format!("ai_infografis_{}.{}", Uuid::new_v4(), ext);
+    let filename = format!("{prefix}_{}.{}", Uuid::new_v4(), ext);
 
     let db_res = sqlx::query(
         r#"
@@ -225,7 +267,7 @@ async fn persist_image(pool: &PgPool, mime: &str, bytes: Vec<u8>) -> String {
     .await;
 
     if let Err(e) = db_res {
-        tracing::warn!("Failed to persist AI infographic image to uploaded_files: {e}");
+        tracing::warn!("Failed to persist AI image ({prefix}) to uploaded_files: {e}");
     }
 
     let _ = tokio::fs::create_dir_all("uploads").await;
@@ -248,7 +290,7 @@ pub async fn generate_hero_image(
 
     let (mime, bytes) = call_cloudflare_flux(client, &cfg, &prompt).await?;
     tracing::info!("Cloudflare Workers AI hero image succeeded ({})", cfg.model);
-    let url = persist_image(pool, &mime, bytes).await;
+    let url = persist_image(pool, "ai_infografis", &mime, bytes).await;
     Ok((url, cfg))
 }
 
@@ -264,12 +306,31 @@ pub async fn generate_card_image(
     let prompt = build_infographic_visual_prompt(concept_prompt, subject_name, grade_level);
 
     match call_cloudflare_flux(client, cfg, &prompt).await {
-        Ok((mime, bytes)) => Some(persist_image(pool, &mime, bytes).await),
+        Ok((mime, bytes)) => Some(persist_image(pool, "ai_infografis", &mime, bytes).await),
         Err(err) => {
             tracing::warn!("Cloudflare FLUX card image failed ({}): {}", cfg.model, err);
             None
         }
     }
+}
+
+/// Generates an accurate curriculum-aligned illustration or photograph for CBT quiz questions
+/// using Cloudflare Workers AI FLUX (`@cf/black-forest-labs/flux-1-schnell`).
+pub async fn generate_quiz_question_image(
+    pool: &PgPool,
+    concept_prompt: &str,
+    subject_name: &str,
+    grade_level: &str,
+    style_hint: Option<&str>,
+) -> Result<(String, String), String> {
+    let cfg = get_cloudflare_config()?;
+    let client = get_cloudflare_client();
+    let prompt = build_quiz_question_image_prompt(concept_prompt, subject_name, grade_level, style_hint);
+
+    let (mime, bytes) = call_cloudflare_flux(client, &cfg, &prompt).await?;
+    tracing::info!("Cloudflare FLUX quiz question image succeeded ({})", cfg.model);
+    let url = persist_image(pool, "ai_quiz", &mime, bytes).await;
+    Ok((url, cfg.model))
 }
 
 /// Optional wordless illustration generator for non-numeric visual prompts (falls back cleanly to `None` if unconfigured).
@@ -279,7 +340,7 @@ pub async fn try_generate_scene_image(
     subject_name: &str,
     grade_level: &str,
 ) -> Option<String> {
-    generate_hero_image(pool, concept_prompt, subject_name, grade_level)
+    generate_quiz_question_image(pool, concept_prompt, subject_name, grade_level, None)
         .await
         .ok()
         .map(|(url, _)| url)

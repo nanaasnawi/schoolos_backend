@@ -491,212 +491,13 @@ pub fn build_subject_pedagogical_instructions(subject: &str, grade: &str) -> Str
     )
 }
 
-// ── Educational Visual Engine (Zero Inaccurate Unsplash Stock Photos) ──
+// ── Educational Visual Engine (Powered by Cloudflare FLUX AI, zero random web/Wikipedia images) ──
 pub fn get_safe_curated_educational_image(_subject: &str, _query: &str) -> String {
     String::new()
 }
 
-fn url_encode_wiki(input: &str) -> String {
-    let mut encoded = String::new();
-    for byte in input.bytes() {
-        match byte {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(byte as char);
-            }
-            b' ' => encoded.push_str("%20"),
-            _ => {
-                encoded.push_str(&format!("%{:02X}", byte));
-            }
-        }
-    }
-    encoded
-}
-
-fn is_valid_educational_raster_url(url: &str) -> bool {
-    let lower = url.to_lowercase();
-    if !lower.starts_with("http") || lower.contains(".svg") {
-        return false;
-    }
-    let has_raster_ext = lower.contains(".jpg")
-        || lower.contains(".jpeg")
-        || lower.contains(".png")
-        || lower.contains(".webp");
-    if !has_raster_ext {
-        return false;
-    }
-    const BLOCKED_TERMS: &[&str] = &[
-        "flag_of_",
-        "coat_of_arms",
-        "ambox",
-        "question_book",
-        "commons-logo",
-        "wiki-logo",
-        "crystal_clear",
-        "nuvola_",
-        "disambig",
-        "signature",
-        "autograph",
-        "pictogram",
-        "placeholder",
-        "_icon.",
-        "_logo.",
-    ];
-    !BLOCKED_TERMS.iter().any(|term| lower.contains(term))
-}
-
-async fn fetch_wikipedia_educational_image(query: &str) -> Option<String> {
-    let clean_query = query.trim();
-    if clean_query.is_empty() {
-        return None;
-    }
-
-    let client = get_ai_client();
-    let langs = ["id", "en"];
-
-    for lang in langs {
-        // Step 1: Search Wikipedia for closest educational article title
-        let search_url = format!(
-            "https://{lang}.wikipedia.org/w/api.php?action=query&list=search&srsearch={}&format=json&utf8=1&srlimit=3",
-            url_encode_wiki(clean_query)
-        );
-
-        let search_resp = match client
-            .get(&search_url)
-            .header("User-Agent", "SchoolOS-EducationPlatform/1.0 (admin@akselerasi.edu; child-safe-pedagogy)")
-            .timeout(Duration::from_millis(3000))
-            .send()
-            .await
-        {
-            Ok(r) if r.status().is_success() => r,
-            _ => continue,
-        };
-
-        let search_json: serde_json::Value = match search_resp.json().await {
-            Ok(j) => j,
-            _ => continue,
-        };
-
-        let items = search_json
-            .get("query")
-            .and_then(|q| q.get("search"))
-            .and_then(|s| s.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        for item in items {
-            let Some(title) = item.get("title").and_then(|t| t.as_str()).filter(|t| !t.trim().is_empty()) else {
-                continue;
-            };
-
-            let summary_url = format!(
-                "https://{lang}.wikipedia.org/api/rest_v1/page/summary/{}",
-                url_encode_wiki(title)
-            );
-
-            let summary_resp = match client
-                .get(&summary_url)
-                .header("User-Agent", "SchoolOS-EducationPlatform/1.0 (admin@akselerasi.edu; child-safe-pedagogy)")
-                .timeout(Duration::from_millis(2500))
-                .send()
-                .await
-            {
-                Ok(r) if r.status().is_success() => r,
-                _ => continue,
-            };
-
-            let summary_json: serde_json::Value = match summary_resp.json().await {
-                Ok(j) => j,
-                _ => continue,
-            };
-
-            let image_url = summary_json
-                .get("thumbnail")
-                .and_then(|img| img.get("source"))
-                .and_then(|s| s.as_str())
-                .or_else(|| {
-                    summary_json
-                        .get("originalimage")
-                        .and_then(|img| img.get("source"))
-                        .and_then(|s| s.as_str())
-                });
-
-            if let Some(url) = image_url {
-                if is_valid_educational_raster_url(url) {
-                    tracing::info!(
-                        "Found Wikipedia raster educational image for '{}' on [{}]: {}",
-                        clean_query,
-                        lang,
-                        url
-                    );
-                    return Some(url.to_string());
-                }
-            }
-        }
-    }
-
-    // Fallback: Wikimedia Commons non-SVG raster file search
-    let commons_search = format!("{clean_query} -filetype:svg");
-    let commons_url = format!(
-        "https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrnamespace=6&gsrsearch={}&gsrlimit=6&prop=imageinfo&iiprop=url|mime|size&iiurlwidth=960&format=json",
-        url_encode_wiki(&commons_search)
-    );
-    if let Ok(resp) = client
-        .get(&commons_url)
-        .header("User-Agent", "SchoolOS-EducationPlatform/1.0 (admin@akselerasi.edu; child-safe-pedagogy)")
-        .timeout(Duration::from_millis(3500))
-        .send()
-        .await
-    {
-        if resp.status().is_success() {
-            if let Ok(json) = resp.json::<serde_json::Value>().await {
-                if let Some(pages) = json
-                    .get("query")
-                    .and_then(|q| q.get("pages"))
-                    .and_then(|p| p.as_object())
-                {
-                    for page in pages.values() {
-                        let Some(info) = page.get("imageinfo").and_then(|arr| arr.as_array()).and_then(|a| a.first()) else {
-                            continue;
-                        };
-                        let width = info.get("thumbwidth").or_else(|| info.get("width")).and_then(|w| w.as_i64()).unwrap_or(0);
-                        if width > 0 && width < 260 {
-                            continue;
-                        }
-                        if let Some(url) = info.get("thumburl").or_else(|| info.get("url")).and_then(|u| u.as_str()) {
-                            if is_valid_educational_raster_url(url) {
-                                tracing::info!(
-                                    "Found Wikimedia Commons raster educational image for '{}': {}",
-                                    clean_query,
-                                    url
-                                );
-                                return Some(url.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
-pub async fn search_real_educational_image(query: &str, subject_name: &str) -> String {
-    // 1. Query Wikipedia (Indonesian, then English) for actual encyclopedia diagram/photo
-    if let Some(wiki_url) = fetch_wikipedia_educational_image(query).await {
-        return wiki_url;
-    }
-
-    // 2. Query combined subject and topic if query was very concise
-    if !query.trim().is_empty() && query.trim() != subject_name.trim() {
-        let combined = format!("{} {}", subject_name, query);
-        if let Some(wiki_url) = fetch_wikipedia_educational_image(&combined).await {
-            return wiki_url;
-        }
-    }
-
-    // 3. Fallback to child-safe curated educational catalog
-    get_safe_curated_educational_image(subject_name, query)
+pub async fn search_real_educational_image(_query: &str, _subject_name: &str) -> String {
+    String::new()
 }
 
 #[derive(Deserialize)]
@@ -1644,20 +1445,50 @@ fn strip_leaked_diagram_bracket_tag(raw: &str) -> String {
     out.trim().to_string()
 }
 
+fn strip_orphaned_visual_lead(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let lower = trimmed.to_lowercase();
+    let visual_leads = [
+        "perhatikan gambar berikut",
+        "perhatikan gambar di atas",
+        "perhatikan gambar ini",
+        "amati gambar berikut",
+        "amati gambar di atas",
+        "amati gambar ini",
+        "perhatikan ilustrasi berikut",
+        "perhatikan ilustrasi di atas",
+        "observe the image above",
+        "observe the picture above",
+        "look at the picture above",
+    ];
+    for lead in visual_leads {
+        if lower.starts_with(lead) {
+            let after = &trimmed[lead.len()..];
+            let cleaned = after.trim_start_matches(|c: char| {
+                c.is_whitespace() || c == '!' || c == '.' || c == ':' || c == ',' || c == '-'
+            });
+            if cleaned.len() >= 12 {
+                return cleaned.to_string();
+            }
+        }
+    }
+    trimmed.to_string()
+}
+
 fn build_visual_diagram_prompt_instructions(is_english: bool, include_images: bool) -> &'static str {
     if !include_images {
         return "";
     }
     if is_english {
         r#"
-ACCURATE EDUCATIONAL IMAGE REQUIREMENT:
-- On 20-35% of questions that genuinely benefit from observing real-world photos, anatomy, geography maps, laboratory apparatus, historical landmarks, or named natural phenomena, include `"image_query"` (2-4 specific Wikimedia/Wikipedia searchable nouns, e.g. "Human heart anatomy", "Volcano eruption lava", "Chloroplast photosynthesis diagram") or `"diagram_spec": {"type":"illustration","prompt":"clean educational photograph/illustration of ..."}`.
-- NEVER use SVG placeholders, NEVER output `[Diagram: ...]`, and NEVER force an unrelated chart onto pure algebra/grammar items."#
+ACCURATE FLUX AI EDUCATIONAL IMAGE REQUIREMENT:
+- On 20-35% of questions that genuinely benefit from observing real-world scenes, anatomy, geography landforms, laboratory apparatus, historical scenes, or named natural phenomena, include `"image_prompt"` with a clear, concrete 1-sentence English visual scene description for FLUX AI image generation (e.g. "Clean scientific textbook illustration showing the cross-section anatomy of a human heart with chambers and major blood vessels, light studio background, no text labels").
+- NEVER use Wikipedia/Wikimedia queries, NEVER output SVG placeholders or `[Diagram: ...]`, and NEVER attach unrelated images onto pure arithmetic/grammar items."#
     } else {
         r#"
-ATURAN SOAL BERGAMBAR EDUKASI AKURAT:
-- Pada 20-35% butir soal yang relevan dengan objek nyata, anatomi, fenomena alam, sejarah/budaya, peta geografi, atau alat praktikum, sertakan properti `"image_query"` (2-4 kata kunci bahasa Inggris spesifik untuk foto/ilustrasi nyata Wikipedia/Wikimedia Commons, misal: "Plant cell organelles diagram", "Borobudur temple Java", "Human heart anatomy") atau `"diagram_spec": {"type":"illustration","prompt":"ilustrasi fotografi edukasi jelas tentang ..."}`.
-- DILARANG KERAS menghasilkan gambar SVG acak atau menulis tag `[Diagram: ...]`. Jangan paksakan gambar jika soal berupa hitungan aljabar atau tata bahasa murni."#
+ATURAN SOAL BERGAMBAR EDUKASI FLUX AI AKURAT:
+- Pada 20-35% butir soal yang relevan dengan pengamatan objek nyata, anatomi, fenomena alam, peristiwa sejarah/budaya, geografi, atau alat praktikum, sertakan properti `"image_prompt"` berisi deskripsi adegan visual berbahasa Inggris yang sangat spesifik, konkret, dan bebas teks untuk digenerate oleh FLUX AI (contoh: "Clean scientific textbook illustration showing a cross-section of a plant cell with chloroplast and nucleus, light neutral background, no text labels" atau "Authentic realistic scene of traditional Borobudur stone relief temple in sunny tropical morning light, no text").
+- DILARANG mengambil gambar acak Wikipedia/Wikimedia, DILARANG menghasilkan SVG acak atau menulis tag `[Diagram: ...]`, dan jangan paksakan gambar pada soal hitungan aljabar murni."#
     }
 }
 
@@ -2279,13 +2110,27 @@ PENTING & WAJIB:
             .map(json_value_to_string)
             .unwrap_or_default();
         let img = if include_images && diagrams_attached < 3 {
-            let resolved = crate::infrastructure::visual_diagram::resolve_visual_diagram_url(
+            let mut resolved = crate::infrastructure::visual_diagram::resolve_visual_diagram_url(
                 pool,
                 q_val.get("diagram_spec"),
                 subject_name,
                 grade_level,
             )
             .await;
+            if resolved.is_none() {
+                if let Some(flux_prompt) = extract_question_flux_prompt(&q_val) {
+                    resolved = crate::infrastructure::cloudflare_ai::generate_quiz_question_image(
+                        pool,
+                        &flux_prompt,
+                        subject_name,
+                        grade_level,
+                        None,
+                    )
+                    .await
+                    .ok()
+                    .map(|(url, _)| url);
+                }
+            }
             if resolved.is_some() {
                 diagrams_attached += 1;
             }
@@ -2544,60 +2389,144 @@ async fn ensure_assignment_visual_guarantee(
     }
 }
 
-async fn resolve_accurate_question_raster_image(
-    pool: &sqlx::PgPool,
-    q_val: &serde_json::Value,
-    subject_name: &str,
-    grade_level: &str,
-) -> Option<String> {
-    if let Some(query) = q_val
-        .get("image_query")
+fn extract_question_flux_prompt(q_val: &serde_json::Value) -> Option<String> {
+    q_val
+        .get("image_prompt")
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| s.len() >= 3)
-    {
-        if let Some(real_url) = fetch_wikipedia_educational_image(query).await {
-            return Some(real_url);
+        .map(|s| s.to_string())
+        .or_else(|| {
+            q_val
+                .get("diagram_spec")
+                .filter(|v| v.is_object())
+                .and_then(|spec| {
+                    spec.get("prompt")
+                        .or_else(|| spec.get("title"))
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| s.len() >= 3)
+                        .map(|s| s.to_string())
+                })
+        })
+        .or_else(|| {
+            q_val
+                .get("image_query")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| s.len() >= 3)
+                .map(|s| s.to_string())
+        })
+}
+
+fn derive_flux_prompt_from_question(
+    question_text: &str,
+    subject_name: &str,
+    topic: &str,
+) -> String {
+    let clean_topic = topic.split('|').next().unwrap_or(topic).trim();
+    let short_stem: String = question_text
+        .replace('\n', " ")
+        .trim()
+        .chars()
+        .take(180)
+        .collect();
+    if short_stem.len() >= 12 {
+        format!("{subject_name} concept '{clean_topic}': {short_stem}")
+    } else if clean_topic.len() >= 3 {
+        format!("{subject_name} educational concept: {clean_topic}")
+    } else {
+        subject_name.trim().to_string()
+    }
+}
+
+async fn attach_flux_images_concurrently(
+    pool: &sqlx::PgPool,
+    questions: &mut Vec<CbtQuestionDto>,
+    prompt_by_qid: &std::collections::HashMap<String, String>,
+    subject_name: &str,
+    topic: &str,
+    grade_level: &str,
+) {
+    if questions.is_empty() {
+        return;
+    }
+
+    let max_images = ((questions.len() * 35) / 100).clamp(1, 4).min(questions.len());
+    let mut targets: Vec<(usize, String)> = Vec::new();
+
+    for (idx, q) in questions.iter().enumerate() {
+        if targets.len() >= max_images {
+            break;
+        }
+        if q.image_url.is_some() {
+            continue;
+        }
+        if let Some(p) = prompt_by_qid.get(&q.id) {
+            targets.push((idx, p.clone()));
         }
     }
 
-    if let Some(spec) = q_val.get("diagram_spec").filter(|v| v.is_object()) {
-        let kind = spec
-            .get("type")
-            .or_else(|| spec.get("kind"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_lowercase();
-        let prompt = spec
-            .get("prompt")
-            .or_else(|| spec.get("title"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim();
-        if kind == "illustration" && !prompt.is_empty() {
-            if let Some(scene_url) =
-                crate::infrastructure::cloudflare_ai::try_generate_scene_image(
-                    pool,
-                    prompt,
-                    subject_name,
-                    grade_level,
-                )
-                .await
-            {
-                if !scene_url.to_lowercase().contains(".svg") {
-                    return Some(scene_url);
+    // Guarantee at least 1 context-matched FLUX illustration when include_images=true
+    if targets.is_empty() && !questions.iter().any(|q| q.image_url.is_some()) {
+        let best_idx = questions
+            .iter()
+            .position(|q| q.question_type.as_deref() != Some("SHORT_ANSWER"))
+            .unwrap_or(0);
+        let derived = derive_flux_prompt_from_question(
+            &questions[best_idx].question_text,
+            subject_name,
+            topic,
+        );
+        if derived.trim().len() >= 3 {
+            targets.push((best_idx, derived));
+        }
+    }
+
+    if targets.is_empty() {
+        return;
+    }
+
+    let mut join_set = tokio::task::JoinSet::new();
+    for (idx, prompt) in targets {
+        let pool_c = pool.clone();
+        let subj_c = subject_name.to_string();
+        let grade_c = grade_level.to_string();
+        join_set.spawn(async move {
+            let res = crate::infrastructure::cloudflare_ai::generate_quiz_question_image(
+                &pool_c,
+                &prompt,
+                &subj_c,
+                &grade_c,
+                None,
+            )
+            .await;
+            (idx, res)
+        });
+    }
+
+    while let Some(joined) = join_set.join_next().await {
+        match joined {
+            Ok((idx, Ok((url, _model)))) => {
+                if let Some(q) = questions.get_mut(idx) {
+                    q.image_url = Some(url);
+                    q.question_text = strip_leaked_diagram_bracket_tag(&q.question_text);
                 }
             }
-        }
-        if !prompt.is_empty() {
-            if let Some(wiki_url) = fetch_wikipedia_educational_image(prompt).await {
-                return Some(wiki_url);
+            Ok((idx, Err(err))) => {
+                tracing::warn!("FLUX AI quiz image generation failed for question #{idx}: {err}");
+            }
+            Err(join_err) => {
+                tracing::warn!("FLUX AI quiz image task join error: {join_err}");
             }
         }
     }
 
-    None
+    for q in questions.iter_mut() {
+        if q.image_url.is_none() {
+            q.question_text = strip_orphaned_visual_lead(&q.question_text);
+        }
+    }
 }
 
 async fn ensure_quiz_visual_guarantee(
@@ -2612,30 +2541,16 @@ async fn ensure_quiz_visual_guarantee(
         return;
     }
 
-    let clean_topic = topic.split('|').next().unwrap_or(topic).trim();
-    if clean_topic.len() < 3 {
-        return;
-    }
-
-    let real_url = match fetch_wikipedia_educational_image(clean_topic).await {
-        Some(url) => Some(url),
-        None => {
-            crate::infrastructure::cloudflare_ai::try_generate_scene_image(
-                pool,
-                clean_topic,
-                subject_name,
-                grade_level,
-            )
-            .await
-            .filter(|u| !u.to_lowercase().contains(".svg"))
-        }
-    };
-
-    if let Some(url) = real_url {
-        if let Some(first_q) = questions.first_mut() {
-            first_q.image_url = Some(url);
-        }
-    }
+    let empty_prompts = std::collections::HashMap::new();
+    attach_flux_images_concurrently(
+        pool,
+        questions,
+        &empty_prompts,
+        subject_name,
+        topic,
+        grade_level,
+    )
+    .await;
 }
 
 fn normalize_fill_blank_template_tokens(raw_tpl: &str) -> String {
@@ -3867,7 +3782,7 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
 
     let default_pts = (100 / total_questions.max(1) as i32).max(5);
     let mut questions: Vec<CbtQuestionDto> = Vec::new();
-    let mut diagrams_attached = 0usize;
+    let mut prompt_by_qid: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
     for (idx, q_val) in parsed.questions.into_iter().enumerate() {
         let q_text_raw = q_val
@@ -4205,32 +4120,19 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
             .map(|p| p as i32)
             .unwrap_or(if is_essay { 20 } else { default_pts });
 
-        let img_url = if include_images && diagrams_attached < 4 {
-            let resolved = resolve_accurate_question_raster_image(
-                pool,
-                &q_val,
-                subject_name,
-                grade_level,
-            )
-            .await;
-            if resolved.is_some() {
-                diagrams_attached += 1;
+        let q_id = format!("gen-q-{}-{}", idx + 1, now_ts);
+        if include_images {
+            if let Some(vis_prompt) = extract_question_flux_prompt(&q_val) {
+                prompt_by_qid.insert(q_id.clone(), vis_prompt);
             }
-            resolved
-        } else {
-            None
-        };
-        let clean_q_text = if img_url.is_some() {
-            strip_leaked_diagram_bracket_tag(&clean_q_text_base)
-        } else {
-            clean_q_text_base
-        };
+        }
+        let clean_q_text = strip_leaked_diagram_bracket_tag(&clean_q_text_base);
 
         questions.push(CbtQuestionDto {
-            id: format!("gen-q-{}-{}", idx + 1, now_ts),
+            id: q_id,
             question_text: clean_q_text,
             question_type: Some(question_type),
-            image_url: img_url,
+            image_url: None,
             choices,
             correct_key,
             explanation,
@@ -4395,13 +4297,13 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
     }
 
     if include_images {
-        ensure_quiz_visual_guarantee(
+        attach_flux_images_concurrently(
             pool,
             &mut questions,
+            &prompt_by_qid,
             subject_name,
             topic,
             grade_level,
-            is_english,
         )
         .await;
     }
