@@ -28,6 +28,14 @@ pub struct AttemptResponse {
     pub student_nisn: Option<String>,
     #[serde(default)]
     pub answers: Vec<AttemptAnswerDetailDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leave_violations_count: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_violation_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_device_platform: Option<String>,
 }
 
 impl From<QuizAttempt> for AttemptResponse {
@@ -53,6 +61,10 @@ impl From<QuizAttempt> for AttemptResponse {
             student_name: None,
             student_nisn: None,
             answers: Vec::new(),
+            leave_violations_count: None,
+            last_violation_at: None,
+            last_heartbeat_at: None,
+            last_device_platform: None,
         }
     }
 }

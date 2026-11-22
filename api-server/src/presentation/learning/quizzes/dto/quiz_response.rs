@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use school_core::learning::domain::proctoring::{evaluate_quiz_schedule, QuizScheduleInput};
 use school_core::learning::domain::quiz::Quiz;
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -32,6 +33,8 @@ pub struct QuizResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subject_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub teacher_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub teacher_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<Uuid>,
@@ -59,6 +62,14 @@ pub struct QuizResponse {
     pub student_last_score: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub student_last_attempt_id: Option<Uuid>,
+    #[serde(default = "default_exam_phase")]
+    pub exam_phase: String,
+    #[serde(default)]
+    pub is_open_for_student: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seconds_until_start: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seconds_remaining: Option<i64>,
 }
 
 fn default_exam_mode() -> Option<String> {
@@ -69,9 +80,35 @@ fn default_max_token_attempts() -> Option<i32> {
     Some(5)
 }
 
+fn default_exam_phase() -> String {
+    "DRAFT".to_string()
+}
+
+impl QuizResponse {
+    /// Populates canonical server-computed schedule phase and student availability flags
+    /// from the domain state evaluator (ADR-0011, ADR-0013).
+    pub fn apply_schedule_evaluation(&mut self, now: DateTime<Utc>) {
+        let eval = evaluate_quiz_schedule(QuizScheduleInput {
+            status: &self.status,
+            is_active: self.is_active,
+            questions_count: self.questions_count,
+            start_at: self.start_at,
+            end_at: self.end_at,
+            release_at: self.release_at,
+            student_attempt_status: self.student_attempt_status.as_deref(),
+            student_has_completed: self.student_has_completed.unwrap_or(false),
+            now,
+        });
+        self.exam_phase = eval.phase.as_str().to_string();
+        self.is_open_for_student = eval.is_open_for_student;
+        self.seconds_until_start = eval.seconds_until_start;
+        self.seconds_remaining = eval.seconds_remaining;
+    }
+}
+
 impl From<Quiz> for QuizResponse {
     fn from(q: Quiz) -> Self {
-        Self {
+        let mut resp = Self {
             id: q.id,
             tenant_id: q.tenant_id,
             lesson_id: q.lesson_id,
@@ -94,6 +131,7 @@ impl From<Quiz> for QuizResponse {
             class_id: None,
             class_name: None,
             subject_name: None,
+            teacher_id: None,
             teacher_name: None,
             session_id: None,
             release_at: None,
@@ -108,6 +146,12 @@ impl From<Quiz> for QuizResponse {
             student_has_completed: None,
             student_last_score: None,
             student_last_attempt_id: None,
-        }
+            exam_phase: default_exam_phase(),
+            is_open_for_student: false,
+            seconds_until_start: None,
+            seconds_remaining: None,
+        };
+        resp.apply_schedule_evaluation(Utc::now());
+        resp
     }
 }

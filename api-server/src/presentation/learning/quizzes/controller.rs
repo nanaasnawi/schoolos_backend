@@ -30,7 +30,7 @@ use school_core::learning::application::quiz::{
 
 static QUIZ_VARIATIF_SCHEMA_READY: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
-async fn ensure_quiz_variatif_schema(pool: &sqlx::PgPool) {
+pub(super) async fn ensure_quiz_variatif_schema(pool: &sqlx::PgPool) {
     QUIZ_VARIATIF_SCHEMA_READY
         .get_or_init(|| async {
             let statements = [
@@ -131,13 +131,44 @@ async fn dispatch_quiz_published_notifications(
 pub fn quiz_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/", post(create).get(list))
+        .route(
+            "/proctoring/schedule",
+            get(super::proctoring::get_proctor_schedule),
+        )
         .route("/{id}", get(get_by_id).patch(update).put(update).delete(delete_quiz))
         .route("/{id}/publish", post(publish))
         .route("/{id}/verify-token", post(verify_token))
+        .route(
+            "/{id}/proctoring/monitor",
+            get(super::proctoring::get_proctor_monitor),
+        )
+        .route(
+            "/{id}/proctoring/rotate-token",
+            post(super::proctoring::rotate_token),
+        )
+        .route(
+            "/{id}/proctoring/extend-time",
+            post(super::proctoring::extend_time),
+        )
         .route("/{id}/questions", post(add_question).get(get_questions))
         .route("/{id}/attempts", post(start_attempt).get(get_attempts))
         .route("/{id}/attempts/{attempt_id}", get(get_attempt_by_id))
-        .route("/{id}/attempts/{attempt_id}/submit", post(submit_attempt))
+        .route(
+            "/{id}/attempts/{attempt_id}/submit",
+            post(submit_attempt),
+        )
+        .route(
+            "/{id}/attempts/{attempt_id}/force-submit",
+            post(super::proctoring::force_submit_attempt),
+        )
+        .route(
+            "/{id}/attempts/{attempt_id}/reopen",
+            post(super::proctoring::reopen_attempt),
+        )
+        .route(
+            "/{id}/attempts/{attempt_id}/proctor-event",
+            post(super::proctoring::record_proctor_event),
+        )
         .route("/{id}/attempts/{attempt_id}/grade", post(grade_attempt))
         .route("/{id}/auto-grade", post(auto_grade_attempts))
 }
@@ -360,6 +391,7 @@ async fn create(
             .ok()
             .flatten();
     }
+    resp.teacher_id = teacher_id;
     if let Some(tid) = teacher_id {
         resp.teacher_name =
             sqlx::query_scalar!(r#"SELECT full_name FROM teachers WHERE id = $1"#, tid)
@@ -432,6 +464,8 @@ async fn create(
         resp.max_score = total_pts;
     }
 
+    resp.apply_schedule_evaluation(chrono::Utc::now());
+
     // Kirim notifikasi kuis baru ke siswa rombel target HANYA jika sudah diterbitkan bersama soal
     if should_publish_immediately {
         dispatch_quiz_published_notifications(
@@ -468,21 +502,8 @@ async fn list(
     crate::presentation::learning::grade_sync::ensure_grade_sync_schema(&ctx.pool).await;
 
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
-    let is_admin = req_ctx
-        .actor
-        .as_ref()
-        .map(|a| {
-            a.roles.iter().any(|r| {
-                let n = r.name.to_lowercase();
-                n.contains("admin")
-                    || n.contains("kepala")
-                    || n.contains("operator")
-                    || n.contains("tu")
-                    || n.contains("staff")
-                    || n.contains("staf")
-            })
-        })
-        .unwrap_or(false);
+    let now_utc = chrono::Utc::now();
+    let is_admin = actor_is_admin_or_principal(&req_ctx);
 
     let is_teacher = !is_admin && (
         req_ctx
@@ -491,7 +512,11 @@ async fn list(
             .map(|a| {
                 a.roles.iter().any(|r| {
                     let n = r.name.to_lowercase();
-                    n.contains("guru") || n.contains("teacher") || n.contains("pengajar")
+                    n.contains("guru")
+                        || n.contains("teacher")
+                        || n.contains("pengajar")
+                        || n.contains("tutor")
+                        || n.contains("pamong")
                 })
             })
             .unwrap_or(false)
@@ -551,7 +576,7 @@ async fn list(
                 CASE WHEN COALESCE(q.release_at, q.start_at) > NOW() THEN 'draft' ELSE q.status END as status, 
                 q.questions_count, q.is_active,
                 q.created_at, q.updated_at,
-                q.class_id,
+                q.class_id, q.teacher_id,
                 q.session_id, q.exam_mode, q.assessment_category, q.exam_token, q.token_expires_at, q.max_token_attempts,
                 q.release_at,
                 c.name as class_name,
@@ -579,50 +604,8 @@ async fn list(
             school_core::common::error::InfrastructureError::Database(e)
         ), &req_ctx.request_id))?;
 
-        rows.into_iter()
-            .map(|r| {
-                let dur = r.get::<Option<i32>, _>("time_limit_minutes").unwrap_or(30);
-                let raw_token: Option<String> = r.try_get("exam_token").ok().flatten();
-                let req_tok = raw_token.as_deref().is_some_and(|t| !t.trim().is_empty());
-                QuizResponse {
-                    id: r.get("id"),
-                    tenant_id: r.get("tenant_id"),
-                    lesson_id: r.get("lesson_id"),
-                    title: r.get("title"),
-                    description: r.get("description"),
-                    duration_minutes: dur,
-                    time_limit_minutes: dur,
-                    passing_score: r.get("passing_score"),
-                    max_score: r.get("max_score"),
-                    max_attempts: r.get("max_attempts"),
-                    shuffle_questions: r.get("shuffle_questions"),
-                    shuffle_choices: r.get("shuffle_choices"),
-                    start_at: r.get("start_at"),
-                    end_at: r.get("end_at"),
-                    status: r.get("status"),
-                    questions_count: r.get("questions_count"),
-                    is_active: r.get("is_active"),
-                    created_at: r.get("created_at"),
-                    updated_at: r.get("updated_at"),
-                    class_id: r.get("class_id"),
-                    class_name: r.get("class_name"),
-                    subject_name: r.get("subject_name"),
-                    teacher_name: r.get("teacher_name"),
-                    session_id: r.get("session_id"),
-                    release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
-                    exam_mode: r.get::<Option<String>, _>("exam_mode").or_else(|| Some("HOMEWORK_QUIZ".to_string())),
-                    assessment_category: r.try_get::<Option<String>, _>("assessment_category").ok().flatten().or_else(|| Some("FORMATIVE".to_string())),
-                    exam_token: raw_token,
-                    requires_token: req_tok,
-                    token_expires_at: r.get("token_expires_at"),
-                    max_token_attempts: r.get::<Option<i32>, _>("max_token_attempts").or(Some(5)),
-                    student_attempt_status: None,
-                    student_attempts_count: None,
-                    student_has_completed: None,
-                    student_last_score: None,
-                    student_last_attempt_id: None,
-                }
-            })
+        rows.iter()
+            .map(|r| build_quiz_response_from_list_row(r, false, false, now_utc))
             .collect()
     } else if is_student || is_parent {
         let rows = sqlx::query(
@@ -632,7 +615,7 @@ async fn list(
                 q.passing_score, q.max_score, q.max_attempts, q.shuffle_questions, q.shuffle_choices,
                 q.start_at, q.end_at, q.status, q.questions_count, q.is_active,
                 q.created_at, q.updated_at,
-                q.class_id,
+                q.class_id, q.teacher_id,
                 q.session_id, q.exam_mode, q.assessment_category, q.exam_token, q.token_expires_at, q.max_token_attempts,
                 q.release_at,
                 c.name as class_name,
@@ -684,10 +667,16 @@ async fn list(
             WHERE q.tenant_id = $1 
               AND q.deleted_at IS NULL
               AND q.is_active = true
-              AND (COALESCE(q.release_at, q.start_at) IS NULL OR COALESCE(q.release_at, q.start_at) <= NOW())
               AND (
                   q.status = 'published' 
                   OR q.status = 'active'
+                  OR q.status = 'scheduled'
+                  OR (
+                      q.status = 'draft'
+                      AND COALESCE(q.questions_count, 0) > 0
+                      AND COALESCE(q.release_at, q.start_at) IS NOT NULL
+                      AND COALESCE(q.release_at, q.start_at) > NOW()
+                  )
                   OR (COALESCE(q.release_at, q.start_at) IS NOT NULL AND COALESCE(q.release_at, q.start_at) <= NOW())
               )
               AND (
@@ -739,69 +728,8 @@ async fn list(
             school_core::common::error::InfrastructureError::Database(e)
         ), &req_ctx.request_id))?;
 
-        rows.into_iter()
-            .map(|r| {
-                let dur = r.get::<Option<i32>, _>("time_limit_minutes").unwrap_or(30);
-                let student_attempt_status: Option<String> = r.get("student_attempt_status");
-                let student_attempts_count: Option<i32> = r.get("student_attempts_count");
-                let student_last_score: Option<i32> = mask_ungraded_score(
-                    r.get("student_last_score"),
-                    student_attempt_status.as_deref(),
-                    false,
-                );
-                let student_last_attempt_id: Option<Uuid> = r.get("student_last_attempt_id");
-
-                let max_att = r.get::<i32, _>("max_attempts");
-                let count = student_attempts_count.unwrap_or(0);
-                let is_completed = student_attempt_status.as_deref().map(|s| {
-                    let s_lower = s.to_lowercase();
-                    s_lower == "completed" || s_lower == "submitted" || s_lower == "graded"
-                }).unwrap_or(false) || (count > 0 && count >= max_att);
-
-                QuizResponse {
-                    id: r.get("id"),
-                    tenant_id: r.get("tenant_id"),
-                    lesson_id: r.get("lesson_id"),
-                    title: r.get("title"),
-                    description: r.get("description"),
-                    duration_minutes: dur,
-                    time_limit_minutes: dur,
-                    passing_score: r.get("passing_score"),
-                    max_score: r.get("max_score"),
-                    max_attempts: max_att,
-                    shuffle_questions: r.get("shuffle_questions"),
-                    shuffle_choices: r.get("shuffle_choices"),
-                    start_at: r.get("start_at"),
-                    end_at: r.get("end_at"),
-                    status: r.get("status"),
-                    questions_count: r.get("questions_count"),
-                    is_active: r.get("is_active"),
-                    created_at: r.get("created_at"),
-                    updated_at: r.get("updated_at"),
-                    class_id: r.get("class_id"),
-                    class_name: r.get("class_name"),
-                    subject_name: r.get("subject_name"),
-                    teacher_name: r.get("teacher_name"),
-                    session_id: r.get("session_id"),
-                    release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
-                    exam_mode: r.get::<Option<String>, _>("exam_mode").or_else(|| Some("HOMEWORK_QUIZ".to_string())),
-                    assessment_category: r.try_get::<Option<String>, _>("assessment_category").ok().flatten().or_else(|| Some("FORMATIVE".to_string())),
-                    exam_token: None,
-                    requires_token: r
-                        .try_get::<Option<String>, _>("exam_token")
-                        .ok()
-                        .flatten()
-                        .as_deref()
-                        .is_some_and(|t| !t.trim().is_empty()),
-                    token_expires_at: r.get("token_expires_at"),
-                    max_token_attempts: r.get::<Option<i32>, _>("max_token_attempts").or(Some(5)),
-                    student_attempt_status,
-                    student_attempts_count,
-                    student_has_completed: Some(is_completed),
-                    student_last_score,
-                    student_last_attempt_id,
-                }
-            })
+        rows.iter()
+            .map(|r| build_quiz_response_from_list_row(r, true, true, now_utc))
             .collect()
     } else {
         let rows = sqlx::query(
@@ -813,7 +741,7 @@ async fn list(
                 CASE WHEN COALESCE(q.release_at, q.start_at) > NOW() THEN 'draft' ELSE q.status END as status, 
                 q.questions_count, q.is_active,
                 q.created_at, q.updated_at,
-                q.class_id,
+                q.class_id, q.teacher_id,
                 q.session_id, q.exam_mode, q.assessment_category, q.exam_token, q.token_expires_at, q.max_token_attempts,
                 q.release_at,
                 c.name as class_name,
@@ -834,57 +762,15 @@ async fn list(
             school_core::common::error::InfrastructureError::Database(e)
         ), &req_ctx.request_id))?;
 
-        rows.into_iter()
-            .map(|r| {
-                let dur = r.get::<Option<i32>, _>("time_limit_minutes").unwrap_or(30);
-                let raw_token: Option<String> = r.try_get("exam_token").ok().flatten();
-                let req_tok = raw_token.as_deref().is_some_and(|t| !t.trim().is_empty());
-                QuizResponse {
-                    id: r.get("id"),
-                    tenant_id: r.get("tenant_id"),
-                    lesson_id: r.get("lesson_id"),
-                    title: r.get("title"),
-                    description: r.get("description"),
-                    duration_minutes: dur,
-                    time_limit_minutes: dur,
-                    passing_score: r.get("passing_score"),
-                    max_score: r.get("max_score"),
-                    max_attempts: r.get("max_attempts"),
-                    shuffle_questions: r.get("shuffle_questions"),
-                    shuffle_choices: r.get("shuffle_choices"),
-                    start_at: r.get("start_at"),
-                    end_at: r.get("end_at"),
-                    status: r.get("status"),
-                    questions_count: r.get("questions_count"),
-                    is_active: r.get("is_active"),
-                    created_at: r.get("created_at"),
-                    updated_at: r.get("updated_at"),
-                    class_id: r.get("class_id"),
-                    class_name: r.get("class_name"),
-                    subject_name: r.get("subject_name"),
-                    teacher_name: r.get("teacher_name"),
-                    session_id: r.get("session_id"),
-                    release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
-                    exam_mode: r.get::<Option<String>, _>("exam_mode").or_else(|| Some("HOMEWORK_QUIZ".to_string())),
-                    assessment_category: r.try_get::<Option<String>, _>("assessment_category").ok().flatten().or_else(|| Some("FORMATIVE".to_string())),
-                    exam_token: raw_token,
-                    requires_token: req_tok,
-                    token_expires_at: r.get("token_expires_at"),
-                    max_token_attempts: r.get::<Option<i32>, _>("max_token_attempts").or(Some(5)),
-                    student_attempt_status: None,
-                    student_attempts_count: None,
-                    student_has_completed: None,
-                    student_last_score: None,
-                    student_last_attempt_id: None,
-                }
-            })
+        rows.iter()
+            .map(|r| build_quiz_response_from_list_row(r, false, false, now_utc))
             .collect()
     };
 
     Ok(Json(ApiResponse::success(items, req_ctx.request_id)))
 }
 
-async fn get_by_id(
+pub(super) async fn get_by_id(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
     Path(id): Path<Uuid>,
@@ -904,7 +790,7 @@ async fn get_by_id(
     crate::presentation::learning::grade_sync::ensure_grade_sync_schema(&ctx.pool).await;
 
     let meta = sqlx::query(
-        "SELECT tenant_id, class_id, teacher_id, created_by, session_id, exam_mode, assessment_category, exam_token, token_expires_at, max_token_attempts, release_at, status, start_at FROM quizzes WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+        "SELECT tenant_id, class_id, teacher_id, created_by, session_id, exam_mode, assessment_category, exam_token, token_expires_at, max_token_attempts, release_at, status, start_at, is_active, questions_count FROM quizzes WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
     )
     .bind(id)
     .bind(req_ctx.tenant_id)
@@ -948,16 +834,21 @@ async fn get_by_id(
     let meta_release_at: Option<chrono::DateTime<chrono::Utc>> = meta.try_get("release_at").ok().flatten();
     let meta_start_at: Option<chrono::DateTime<chrono::Utc>> = meta.try_get("start_at").ok().flatten();
     let meta_status: String = meta.try_get("status").unwrap_or_else(|_| "draft".to_string());
+    let meta_is_active: bool = meta.try_get("is_active").unwrap_or(true);
+    let meta_questions_count: i32 = meta.try_get("questions_count").unwrap_or(0);
     if is_student_or_parent {
+        let now_utc = chrono::Utc::now();
         let is_open_status = meta_status.eq_ignore_ascii_case("published")
             || meta_status.eq_ignore_ascii_case("active");
-        let effective_release = meta_release_at.or(meta_start_at);
-        let is_future_release = effective_release.is_some_and(|r| r > chrono::Utc::now());
-        if !is_open_status || is_future_release {
+        let is_scheduled_visible = meta_status.eq_ignore_ascii_case("scheduled")
+            || (meta_status.eq_ignore_ascii_case("draft")
+                && meta_questions_count > 0
+                && meta_release_at.or(meta_start_at).is_some_and(|r| r > now_utc));
+        if !meta_is_active || (!is_open_status && !is_scheduled_visible) {
             return Err(ApiError::new(
                 school_core::common::error::ApplicationError::NotFound(
                     school_core::common::error_code::ErrorCode::QuizNotFound,
-                    "Ujian CBT belum diterbitkan atau belum memasuki jadwal akses.".to_string(),
+                    "Ujian CBT belum diterbitkan untuk siswa.".to_string(),
                 ),
                 &req_ctx.request_id,
             ));
@@ -990,6 +881,7 @@ async fn get_by_id(
     resp.token_expires_at = meta.get("token_expires_at");
     resp.max_token_attempts = meta.get::<Option<i32>, _>("max_token_attempts").or(Some(5));
     resp.class_id = meta_class_id;
+    resp.teacher_id = meta_teacher_id;
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
 
     let attempt_info = sqlx::query(
@@ -1034,6 +926,8 @@ async fn get_by_id(
         resp.student_last_score = score;
         resp.student_last_attempt_id = att_id;
     }
+
+    resp.apply_schedule_evaluation(chrono::Utc::now());
 
     Ok(Json(ApiResponse::success(
         resp,
@@ -2309,6 +2203,10 @@ async fn grade_attempt(
             student_name: updated_attempt.get("student_name"),
             student_nisn: updated_attempt.get("student_nisn"),
             answers: Vec::new(),
+            leave_violations_count: None,
+            last_violation_at: None,
+            last_heartbeat_at: None,
+            last_device_platform: None,
         },
         req_ctx.request_id,
     )))
@@ -2406,21 +2304,7 @@ async fn auto_grade_attempts(
         let user_id: Option<Uuid> = att.try_get("user_id").ok();
 
         // Auto-score single-choice PG answers from official quiz_choices keys
-        let _ = sqlx::query(
-            r#"
-            UPDATE attempt_answers ans
-            SET points_earned = CASE WHEN COALESCE(c.is_correct, false) THEN COALESCE(q.points, 10) ELSE 0 END,
-                is_correct = COALESCE(c.is_correct, false)
-            FROM quiz_questions q
-            LEFT JOIN quiz_choices c ON c.id = ans.chosen_choice_id
-            WHERE ans.attempt_id = $1
-              AND q.id = ans.question_id
-              AND UPPER(COALESCE(q.question_type, 'MULTIPLE_CHOICE')) IN ('MULTIPLE_CHOICE', 'PG')
-            "#,
-        )
-        .bind(attempt_id)
-        .execute(&ctx.pool)
-        .await;
+        score_single_choice_pg_answers(&ctx.pool, attempt_id).await;
 
         // Auto-score variatif objective formats (TRUE_FALSE_MATRIX, MULTIPLE_SELECT, SHORT_ANSWER, MATCHING, ORDERING)
         score_variatif_objective_answers(&ctx.pool, attempt_id).await;
@@ -2587,6 +2471,8 @@ async fn get_attempts(
     )
     .await?;
 
+    super::proctoring::ensure_proctoring_schema(&ctx.pool).await;
+
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
     let is_student = !actor_is_teacher_or_admin(&req_ctx);
 
@@ -2604,6 +2490,8 @@ async fn get_attempts(
             SELECT 
                 a.id, a.quiz_id, a.student_id, a.started_at, a.completed_at,
                 a.score, a.total_points, a.status, a.created_at, a.updated_at,
+                COALESCE(a.leave_violations_count, 0) as leave_violations_count,
+                a.last_violation_at, a.last_heartbeat_at, a.last_device_platform,
                 COALESCE(s.full_name, u.full_name, 'Siswa') as student_name,
                 COALESCE(s.nisn, u.username, '-') as student_nisn,
                 q.max_score, q.passing_score
@@ -2632,6 +2520,8 @@ async fn get_attempts(
             SELECT 
                 a.id, a.quiz_id, a.student_id, a.started_at, a.completed_at,
                 a.score, a.total_points, a.status, a.created_at, a.updated_at,
+                COALESCE(a.leave_violations_count, 0) as leave_violations_count,
+                a.last_violation_at, a.last_heartbeat_at, a.last_device_platform,
                 COALESCE(s.full_name, u.full_name, 'Siswa') as student_name,
                 COALESCE(s.nisn, u.username, '-') as student_nisn,
                 q.max_score, q.passing_score
@@ -2679,6 +2569,10 @@ async fn get_attempts(
                 student_name: r.get("student_name"),
                 student_nisn: r.get("student_nisn"),
                 answers: Vec::new(),
+                leave_violations_count: r.try_get("leave_violations_count").ok(),
+                last_violation_at: r.try_get("last_violation_at").ok().flatten(),
+                last_heartbeat_at: r.try_get("last_heartbeat_at").ok().flatten(),
+                last_device_platform: r.try_get("last_device_platform").ok().flatten(),
             }
         })
         .collect();
@@ -2897,6 +2791,10 @@ async fn get_attempt_by_id(
         student_name: row.get("student_name"),
         student_nisn: row.get("student_nisn"),
         answers,
+        leave_violations_count: None,
+        last_violation_at: None,
+        last_heartbeat_at: None,
+        last_device_platform: None,
     };
 
     Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
@@ -3335,7 +3233,7 @@ fn mask_ungraded_score(
 
 /// Computes `(visible_score, effective_max, percentage, passed)` while withholding
 /// unfinalized scores from non-staff actors.
-fn build_attempt_score_summary(
+pub(super) fn build_attempt_score_summary(
     row: &sqlx::postgres::PgRow,
     is_staff_actor: bool,
 ) -> (Option<i32>, i32, Option<i32>, Option<bool>) {
@@ -3360,7 +3258,26 @@ fn build_attempt_score_summary(
     (visible_score, effective_max, percentage, passed)
 }
 
-fn actor_is_teacher_or_admin(req_ctx: &RequestContext) -> bool {
+pub(super) fn actor_is_admin_or_principal(req_ctx: &RequestContext) -> bool {
+    req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("admin")
+                    || n.contains("kepala")
+                    || n.contains("principal")
+                    || n.contains("operator")
+                    || n.contains("staff")
+                    || n.contains("staf")
+                    || n == "tu"
+            })
+        })
+        .unwrap_or(false)
+}
+
+pub(super) fn actor_is_teacher_or_admin(req_ctx: &RequestContext) -> bool {
     req_ctx
         .actor
         .as_ref()
@@ -3382,6 +3299,118 @@ fn actor_is_teacher_or_admin(req_ctx: &RequestContext) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+fn build_quiz_response_from_list_row(
+    r: &sqlx::postgres::PgRow,
+    hide_token: bool,
+    include_student_attempt: bool,
+    now_utc: chrono::DateTime<chrono::Utc>,
+) -> QuizResponse {
+    let dur = r.get::<Option<i32>, _>("time_limit_minutes").unwrap_or(30);
+    let raw_token: Option<String> = r.try_get("exam_token").ok().flatten();
+    let req_tok = raw_token.as_deref().is_some_and(|t| !t.trim().is_empty());
+
+    let (
+        student_attempt_status,
+        student_attempts_count,
+        student_has_completed,
+        student_last_score,
+        student_last_attempt_id,
+    ) = if include_student_attempt {
+        let att_status: Option<String> = r.try_get("student_attempt_status").ok().flatten();
+        let att_count: Option<i32> = r.try_get("student_attempts_count").ok().flatten();
+        let raw_score: Option<i32> = r.try_get("student_last_score").ok().flatten();
+        let score = mask_ungraded_score(raw_score, att_status.as_deref(), false);
+        let att_id: Option<Uuid> = r.try_get("student_last_attempt_id").ok().flatten();
+        let max_att = r.get::<i32, _>("max_attempts");
+        let count_val = att_count.unwrap_or(0);
+        let is_completed = att_status
+            .as_deref()
+            .map(|s| {
+                let s_lower = s.to_lowercase();
+                s_lower == "completed" || s_lower == "submitted" || s_lower == "graded"
+            })
+            .unwrap_or(false)
+            || (count_val > 0 && count_val >= max_att);
+
+        (att_status, att_count, Some(is_completed), score, att_id)
+    } else {
+        (None, None, None, None, None)
+    };
+
+    let mut resp = QuizResponse {
+        id: r.get("id"),
+        tenant_id: r.get("tenant_id"),
+        lesson_id: r.get("lesson_id"),
+        title: r.get("title"),
+        description: r.get("description"),
+        duration_minutes: dur,
+        time_limit_minutes: dur,
+        passing_score: r.get("passing_score"),
+        max_score: r.get("max_score"),
+        max_attempts: r.get("max_attempts"),
+        shuffle_questions: r.get("shuffle_questions"),
+        shuffle_choices: r.get("shuffle_choices"),
+        start_at: r.get("start_at"),
+        end_at: r.get("end_at"),
+        status: r.get("status"),
+        questions_count: r.get("questions_count"),
+        is_active: r.get("is_active"),
+        created_at: r.get("created_at"),
+        updated_at: r.get("updated_at"),
+        class_id: r.get("class_id"),
+        class_name: r.get("class_name"),
+        subject_name: r.get("subject_name"),
+        teacher_id: r.try_get("teacher_id").ok().flatten(),
+        teacher_name: r.get("teacher_name"),
+        session_id: r.get("session_id"),
+        release_at: r
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at")
+            .ok()
+            .flatten(),
+        exam_mode: r
+            .get::<Option<String>, _>("exam_mode")
+            .or_else(|| Some("HOMEWORK_QUIZ".to_string())),
+        assessment_category: r
+            .try_get::<Option<String>, _>("assessment_category")
+            .ok()
+            .flatten()
+            .or_else(|| Some("FORMATIVE".to_string())),
+        exam_token: if hide_token { None } else { raw_token },
+        requires_token: req_tok,
+        token_expires_at: r.get("token_expires_at"),
+        max_token_attempts: r.get::<Option<i32>, _>("max_token_attempts").or(Some(5)),
+        student_attempt_status,
+        student_attempts_count,
+        student_has_completed,
+        student_last_score,
+        student_last_attempt_id,
+        exam_phase: "DRAFT".to_string(),
+        is_open_for_student: false,
+        seconds_until_start: None,
+        seconds_remaining: None,
+    };
+    resp.apply_schedule_evaluation(now_utc);
+    resp
+}
+
+pub(super) async fn score_single_choice_pg_answers(pool: &sqlx::PgPool, attempt_id: Uuid) {
+    let _ = sqlx::query(
+        r#"
+        UPDATE attempt_answers ans
+        SET points_earned = CASE WHEN COALESCE(c.is_correct, false) THEN COALESCE(q.points, 10) ELSE 0 END,
+            is_correct = COALESCE(c.is_correct, false)
+        FROM quiz_questions q
+        LEFT JOIN quiz_choices c ON c.id = ans.chosen_choice_id
+        WHERE ans.attempt_id = $1
+          AND q.id = ans.question_id
+          AND UPPER(COALESCE(q.question_type, 'MULTIPLE_CHOICE')) IN ('MULTIPLE_CHOICE', 'PG')
+        "#,
+    )
+    .bind(attempt_id)
+    .execute(pool)
+    .await;
 }
 
 fn actor_is_strict_teacher(req_ctx: &RequestContext) -> bool {
@@ -3579,7 +3608,7 @@ fn sanitize_interaction_config_for_student(
     Some(cfg)
 }
 
-async fn score_variatif_objective_answers(pool: &sqlx::PgPool, attempt_id: Uuid) {
+pub(super) async fn score_variatif_objective_answers(pool: &sqlx::PgPool, attempt_id: Uuid) {
     let rows = match sqlx::query(
         r#"
         SELECT

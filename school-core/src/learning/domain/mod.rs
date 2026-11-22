@@ -13,6 +13,7 @@ pub mod learning_material;
 pub mod learning_session;
 pub mod lesson;
 pub mod lesson_plan;
+pub mod proctoring;
 pub mod quiz;
 pub mod quiz_attempt;
 pub mod quiz_choice;
