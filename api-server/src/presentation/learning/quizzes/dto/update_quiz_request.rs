@@ -16,6 +16,8 @@ pub struct UpdateQuizRequest {
     pub start_at: Option<DateTime<Utc>>,
     pub end_at: Option<DateTime<Utc>>,
     pub class_id: Option<String>,
+    pub teacher_id: Option<Uuid>,
+    pub subject_id: Option<Uuid>,
     pub session_id: Option<Uuid>,
     pub exam_mode: Option<String>,
     pub assessment_category: Option<String>,

@@ -43,6 +43,8 @@ pub struct QuizResponse {
     pub assessment_category: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exam_token: Option<String>,
+    #[serde(default)]
+    pub requires_token: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_expires_at: Option<DateTime<Utc>>,
     #[serde(default = "default_max_token_attempts")]
@@ -98,6 +100,7 @@ impl From<Quiz> for QuizResponse {
             exam_mode: Some("HOMEWORK_QUIZ".to_string()),
             assessment_category: Some("FORMATIVE".to_string()),
             exam_token: None,
+            requires_token: false,
             token_expires_at: None,
             max_token_attempts: Some(5),
             student_attempt_status: None,

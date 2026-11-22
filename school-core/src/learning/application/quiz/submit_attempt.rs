@@ -66,8 +66,8 @@ impl SubmitAttemptUseCase {
             })?;
 
         if attempt.status != "in_progress" {
-            if attempt.status == "completed" {
-                // Idempotent submit: return existing completed attempt without error
+            if attempt.status == "completed" || attempt.status == "submitted" {
+                // Idempotent submit: return existing submitted/completed attempt without error
                 return Ok(attempt);
             }
             return Err(ApplicationError::Domain(

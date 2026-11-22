@@ -49,6 +49,24 @@ impl StartAttemptUseCase {
             })?;
 
         let existing_attempts = self.repo.find_attempts_by_quiz(command.quiz_id).await?;
+        if let Some(in_progress) = existing_attempts
+            .iter()
+            .find(|a| a.student_id == command.student_id && a.status.eq_ignore_ascii_case("in_progress"))
+            .cloned()
+        {
+            let now = self.clock.now();
+            if let Some(end_at) = quiz.end_at {
+                if now > end_at {
+                    return Err(ApplicationError::Domain(
+                        crate::common::error::DomainError::Validation(
+                            "Quiz window has expired".to_string(),
+                        ),
+                    ));
+                }
+            }
+            return Ok(in_progress);
+        }
+
         let previous_count = existing_attempts
             .iter()
             .filter(|a| a.student_id == command.student_id)

@@ -47,13 +47,10 @@ impl PublishQuizUseCase {
             })?;
 
         let lesson_status = if let Some(lid) = quiz.lesson_id {
-            let lesson = self.lesson_repo.find_by_id(lid).await?.ok_or_else(|| {
-                ApplicationError::NotFound(
-                    ErrorCode::LessonNotFound,
-                    format!("Associated Lesson {} not found", lid),
-                )
-            })?;
-            Some(lesson.status)
+            self.lesson_repo
+                .find_by_id(lid)
+                .await?
+                .map(|lesson| lesson.status)
         } else {
             None
         };

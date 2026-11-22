@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateQuizRequest {
-    #[serde(default = "default_lesson_id")]
+    #[serde(default)]
     pub lesson_id: Option<Uuid>,
     pub title: String,
     pub description: Option<String>,
@@ -25,6 +25,12 @@ pub struct CreateQuizRequest {
     pub release_at: Option<DateTime<Utc>>,
     pub class_id: Option<String>,
     #[serde(default)]
+    pub teacher_id: Option<Uuid>,
+    #[serde(default)]
+    pub subject_id: Option<Uuid>,
+    #[serde(default)]
+    pub defer_publish: Option<bool>,
+    #[serde(default)]
     pub session_id: Option<Uuid>,
     #[serde(default = "default_exam_mode")]
     pub exam_mode: Option<String>,
@@ -38,10 +44,6 @@ pub struct CreateQuizRequest {
     pub max_token_attempts: Option<i32>,
     #[serde(default)]
     pub questions: Option<Vec<super::quiz_question_dto::CreateQuizQuestionRequest>>,
-}
-
-fn default_lesson_id() -> Option<Uuid> {
-    Some(Uuid::new_v4())
 }
 
 fn default_passing_score() -> i32 {

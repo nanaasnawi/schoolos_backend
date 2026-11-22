@@ -101,7 +101,7 @@ impl QuizAttempt {
         previous_attempts_count: i32,
         clock: &dyn Clock,
     ) -> Result<Self, DomainError> {
-        if quiz.status != "published" {
+        if !quiz.status.eq_ignore_ascii_case("published") && !quiz.status.eq_ignore_ascii_case("active") {
             return Err(DomainError::Validation(format!(
                 "Cannot start attempt for a quiz with status '{}'",
                 quiz.status
@@ -183,6 +183,12 @@ impl QuizAttempt {
     /// Nilai dan kelulusan TIDAK dihitung otomatis oleh sistem, melainkan diserahkan
     /// sepenuhnya kepada Guru pengampu untuk dikoreksi dan diverifikasi.
     pub fn submit(&mut self, clock: &dyn Clock) -> Result<(), DomainError> {
+        if !self.status.eq_ignore_ascii_case("in_progress") {
+            return Err(DomainError::Validation(format!(
+                "Attempt cannot be submitted from status '{}'",
+                self.status
+            )));
+        }
         let now = clock.now();
         self.status = "submitted".to_string();
         self.completed_at = Some(now);

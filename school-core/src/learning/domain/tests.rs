@@ -717,4 +717,47 @@ mod tests {
         assert!(passed);
         assert_eq!(gradebook.status, "calculated");
     }
+
+    #[test]
+    fn test_quiz_attempt_submit_blocks_overwrite_after_submission() {
+        use crate::learning::domain::quiz::Quiz;
+        use crate::learning::domain::quiz_attempt::QuizAttempt;
+
+        let clock = SystemClock;
+        let tenant_id = Uuid::now_v7();
+        let student_id = Uuid::now_v7();
+
+        let mut quiz = Quiz::new(
+            tenant_id,
+            None,
+            "SAS Matematika".to_string(),
+            None,
+            60,
+            75,
+            1,
+            false,
+            false,
+            None,
+            None,
+            &clock,
+        )
+        .unwrap();
+        quiz.status = "active".to_string();
+
+        let mut attempt = QuizAttempt::start_new(tenant_id, &quiz, student_id, 0, &clock).unwrap();
+        assert_eq!(attempt.status, "in_progress");
+
+        // First submit succeeds and transitions to "submitted" with score=None
+        assert!(attempt.submit(&clock).is_ok());
+        assert_eq!(attempt.status, "submitted");
+        assert_eq!(attempt.score, None);
+
+        // Second submit or submit after grading MUST be rejected to prevent score reset
+        assert!(attempt.submit(&clock).is_err());
+
+        attempt.status = "graded".to_string();
+        attempt.score = Some(92);
+        assert!(attempt.submit(&clock).is_err());
+        assert_eq!(attempt.score, Some(92));
+    }
 }
