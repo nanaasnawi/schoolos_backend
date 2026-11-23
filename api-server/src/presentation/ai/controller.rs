@@ -819,8 +819,190 @@ async fn fetch_principal_teacher_productivity_context(
         ATURAN KETAT ANALISIS KEPALA SEKOLAH:\n\
         - WAJIB menyebut NAMA ASLI GURU dan angka aktual dari daftar di atas untuk Top 3, Kelompok Menengah, dan Bottom 3 (butuh intervensi).\n\
         - DILARANG KERAS memakai nama samaran ilustratif ('Guru A', 'Guru B', 'Guru X', 'Guru Y', 'Guru Z'), menulis 'Data bersifat ilustratif', atau menyuruh menghubungi koordinator akademik.\n\
+        - DILARANG KERAS mengarang angka estimasi/korelasi memakai '~' (seperti '~45 siswa', '~80 siswa', '~41 siswa', atau 'sekitar 41 siswa') untuk mengaitkan guru Top/Bottom 3 dengan siswa at-risk tanpa data pemetaan per kelas/mapel yang nyata di konteks.\n\
         - Jaga konsistensi angka rasio/rerata tepat 2 desimal (misal {avg_modules:.2} modul/guru dan {avg_assignments:.2} tugas/guru) di seluruh tabel & narasi.",
         entries.join("\n")
+    ))
+}
+
+async fn fetch_principal_at_risk_breakdown_context(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+) -> Option<String> {
+    let (
+        active_students_res,
+        gradebook_failed_res,
+        unsubmitted_assign_res,
+        low_assign_res,
+        unread_mat_res,
+        absent_att_res,
+        low_quiz_res,
+        by_class_res,
+        by_subject_res,
+    ) = tokio::join!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM students WHERE tenant_id = $1 AND status IN ('Active', 'active') AND deleted_at IS NULL",
+        )
+        .bind(tenant_id)
+        .fetch_one(pool),
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(DISTINCT student_id) FROM gradebooks WHERE tenant_id = $1 AND passed = false",
+        )
+        .bind(tenant_id)
+        .fetch_one(pool),
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(DISTINCT s.id)::bigint
+            FROM assignments a
+            JOIN classes c ON c.id = a.class_id AND c.deleted_at IS NULL
+            JOIN enrollments en ON en.class_id = c.id AND (en.status ILIKE 'active' OR en.status IS NULL)
+            JOIN students s ON s.id = en.student_id AND s.deleted_at IS NULL AND s.is_active = true
+            LEFT JOIN assignment_submissions sub ON sub.assignment_id = a.id
+                AND (sub.student_id = s.id OR (s.user_id IS NOT NULL AND sub.student_id = s.user_id))
+            WHERE a.tenant_id = $1
+              AND a.deleted_at IS NULL
+              AND a.is_active = true
+              AND (a.status = 'published' OR a.status = 'active')
+              AND (a.release_at IS NULL OR a.release_at <= NOW())
+              AND (sub.id IS NULL OR sub.status = 'unsubmitted' OR sub.submitted_at IS NULL)
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_one(pool),
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(DISTINCT s.id)::bigint
+            FROM assignment_submissions sub
+            JOIN assignments a ON a.id = sub.assignment_id
+            JOIN students s ON (s.id = sub.student_id OR (s.user_id IS NOT NULL AND s.user_id = sub.student_id))
+                AND s.deleted_at IS NULL
+            WHERE sub.tenant_id = $1
+              AND a.deleted_at IS NULL
+              AND sub.score IS NOT NULL
+              AND sub.score < 70
+              AND sub.status != 'unsubmitted'
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_one(pool),
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(DISTINCT s.id)::bigint
+            FROM learning_materials m
+            JOIN classes c ON c.id = m.class_id AND c.deleted_at IS NULL
+            JOIN enrollments en ON en.class_id = c.id AND (en.status ILIKE 'active' OR en.status IS NULL)
+            JOIN students s ON s.id = en.student_id AND s.deleted_at IS NULL AND s.is_active = true
+            LEFT JOIN student_material_completions smc ON smc.student_id = s.id AND smc.material_id = m.id
+            LEFT JOIN reading_progress rp ON rp.student_id = s.id AND rp.material_id = m.id
+            WHERE m.tenant_id = $1
+              AND m.deleted_at IS NULL
+              AND m.is_active = true
+              AND (m.visibility = 'published' OR m.visibility = 'active')
+              AND (m.release_at IS NULL OR m.release_at <= NOW())
+              AND smc.id IS NULL
+              AND (rp.is_completed IS NULL OR rp.is_completed = false)
+              AND COALESCE(rp.current_page, 1) < 3
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_one(pool),
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(DISTINCT student_id)::bigint FROM session_attendances WHERE tenant_id = $1 AND status = 'absent'",
+        )
+        .bind(tenant_id)
+        .fetch_one(pool),
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(DISTINCT student_id)::bigint FROM quiz_attempts WHERE tenant_id = $1 AND score IS NOT NULL AND score < 70",
+        )
+        .bind(tenant_id)
+        .fetch_one(pool),
+        sqlx::query(
+            r#"
+            SELECT COALESCE(NULLIF(TRIM(c.name), ''), 'Kelas') AS class_name, COUNT(DISTINCT g.student_id)::bigint AS cnt
+            FROM gradebooks g
+            JOIN classes c ON c.id = g.class_id AND c.deleted_at IS NULL
+            WHERE g.tenant_id = $1 AND g.passed = false
+            GROUP BY c.name
+            ORDER BY cnt DESC, c.name ASC
+            LIMIT 15
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_all(pool),
+        sqlx::query(
+            r#"
+            SELECT COALESCE(NULLIF(TRIM(s.name), ''), 'Mapel') AS subject_name, COUNT(DISTINCT g.student_id)::bigint AS cnt
+            FROM gradebooks g
+            JOIN subjects s ON s.id = g.subject_id AND s.deleted_at IS NULL
+            WHERE g.tenant_id = $1 AND g.passed = false
+            GROUP BY s.name
+            ORDER BY cnt DESC, s.name ASC
+            LIMIT 10
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_all(pool),
+    );
+
+    let active_students = active_students_res.unwrap_or(0);
+    let gradebook_failed = gradebook_failed_res.unwrap_or(0);
+    let unsubmitted_assign = unsubmitted_assign_res.unwrap_or(0);
+    let low_assign = low_assign_res.unwrap_or(0);
+    let unread_mat = unread_mat_res.unwrap_or(0);
+    let absent_att = absent_att_res.unwrap_or(0);
+    let low_quiz = low_quiz_res.unwrap_or(0);
+
+    let class_breakdown: Vec<String> = by_class_res
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| {
+            let cname: String = r
+                .try_get("class_name")
+                .unwrap_or_else(|_| "Kelas".to_string());
+            let cnt: i64 = r.try_get("cnt").unwrap_or(0);
+            format!("{cname}: {cnt} siswa")
+        })
+        .collect();
+
+    let subject_breakdown: Vec<String> = by_subject_res
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| {
+            let sname: String = r
+                .try_get("subject_name")
+                .unwrap_or_else(|_| "Mapel".to_string());
+            let cnt: i64 = r.try_get("cnt").unwrap_or(0);
+            format!("{sname}: {cnt} siswa")
+        })
+        .collect();
+
+    let class_line = if class_breakdown.is_empty() {
+        "Belum ada rincian gradebook tidak tuntas per kelas.".to_string()
+    } else {
+        class_breakdown.join(" | ")
+    };
+    let subject_line = if subject_breakdown.is_empty() {
+        "Belum ada rincian gradebook tidak tuntas per mapel.".to_string()
+    } else {
+        subject_breakdown.join(" | ")
+    };
+
+    Some(format!(
+        "[RINCIAN INDIKATOR SISWA BUTUH INTERVENSI (AT-RISK / EWS) AKTUAL DARI DATABASE]\n\
+        - Populasi Siswa Aktif: {active_students} siswa\n\
+        - Siswa Belum Tuntas KKTP Rapor (gradebooks.passed = false, metrik KPI Dashboard): {gradebook_failed} siswa unik\n\
+        - Indikator Risiko Nyata Terukur per Metrik (siswa unik, dapat beririsan antar indikator):\n\
+          1) Belum Mengumpulkan Tugas Aktif: {unsubmitted_assign} siswa\n\
+          2) Nilai Tugas di Bawah KKM (< 70): {low_assign} siswa\n\
+          3) Materi Wajib Belum Dibaca (< halaman 3): {unread_mat} siswa\n\
+          4) Skor Kuis/CBT di Bawah 70: {low_quiz} siswa\n\
+          5) Catatan Ketidakhadiran (Alfa/Absent): {absent_att} siswa\n\
+        - Sebaran Aktual Siswa Belum Tuntas Rapor Per Kelas: {class_line}\n\
+        - Sebaran Aktual Siswa Belum Tuntas Rapor Per Mata Pelajaran: {subject_line}\n\
+        GUARDRAIL WAJIB ANALISIS SISWA AT-RISK:\n\
+        - HANYA kutip angka aktual di atas! DILARANG membuat tabel korelasi fiktif memakai tanda '~' (misal '~45 siswa', '~80 siswa', '~41 siswa') atau mengasumsikan pembagian angka guru Bottom 3 ke total {gradebook_failed} siswa at-risk.\n\
+        - Klasifikasikan akar masalah berdasarkan indikator nyata sistem di atas (belum kumpul tugas, nilai < 70, belum baca materi, ketidakhadiran); DILARANG menebak-nebak alasan non-database seperti 'motivasi/rumah tangga' atau 'HP/internet pribadi' sebagai penyebab pasti.\n\
+        - Gunakan diksi Indonesia baku: tulis 'produksi'/'penyusunan' (BUKAN 'produkkan'), dan hindari kata 'rumah tangga'."
     ))
 }
 
@@ -831,6 +1013,10 @@ fn normalize_ai_reply_typos(raw: &str) -> String {
         .replace("produktifitasnya", "produktivitasnya")
         .replace("Produktifitas", "Produktivitas")
         .replace("produktifitas", "produktivitas")
+        .replace("Memprodukkan", "Memproduksi")
+        .replace("memprodukkan", "memproduksi")
+        .replace("Produkkan", "Produksi")
+        .replace("produkkan", "produksi")
         .replace("Komarasi", "Kolaborasi")
         .replace("komarasi", "kolaborasi")
         .replace("Aktifitas", "Aktivitas")
@@ -879,15 +1065,72 @@ async fn prepare_tanya_ai_context(
 
     let sem_label = if db_semester == 2 { "Genap" } else { "Ganjil" };
 
-    let db_school_name = sqlx::query_scalar::<_, String>(
-        "SELECT name FROM schools WHERE tenant_id = $1 LIMIT 1"
+    let school_meta = sqlx::query(
+        "SELECT name, COALESCE(NULLIF(TRIM(headmaster_name), ''), '') AS headmaster_name FROM schools WHERE tenant_id = $1 AND deleted_at IS NULL LIMIT 1"
     )
     .bind(req_ctx.tenant_id)
     .fetch_optional(pool)
     .await
     .ok()
-    .flatten()
-    .unwrap_or_else(|| "PKBM AS-SALAFIYAH".to_string());
+    .flatten();
+
+    let db_school_name = school_meta
+        .as_ref()
+        .and_then(|r| r.try_get::<String, _>("name").ok())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "PKBM AS-SALAFIYAH".to_string());
+
+    let mut db_headmaster_name = school_meta
+        .as_ref()
+        .and_then(|r| r.try_get::<String, _>("headmaster_name").ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
+
+    if db_headmaster_name.is_empty() {
+        db_headmaster_name = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT u.full_name
+            FROM users u
+            JOIN user_roles ur ON ur.user_id = u.id
+            JOIN roles r ON r.id = ur.role_id
+            WHERE u.tenant_id = $1
+              AND u.is_active = true
+              AND (LOWER(r.name) LIKE '%kepala%' OR LOWER(r.name) LIKE '%principal%' OR LOWER(r.name) LIKE '%headmaster%')
+            LIMIT 1
+            "#,
+        )
+        .bind(req_ctx.tenant_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "Kepala Sekolah / Pimpinan PKBM".to_string());
+    }
+
+    let actor_user_name = if let Some(ref actor) = req_ctx.actor {
+        sqlx::query_scalar::<_, String>("SELECT full_name FROM users WHERE id = $1 LIMIT 1")
+            .bind(actor.id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let actor_roles = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "Pengguna".to_string());
 
     let subject = payload.subject_name.as_deref().unwrap_or("Umum").to_string();
     let grade = payload.grade_level.as_deref().unwrap_or("Siswa").to_string();
@@ -907,12 +1150,14 @@ async fn prepare_tanya_ai_context(
         Vec::new()
     };
 
-    let principal_teacher_breakdown = if is_principal {
-        fetch_principal_teacher_productivity_context(pool, req_ctx.tenant_id)
-            .await
-            .unwrap_or_default()
+    let (principal_teacher_breakdown, principal_at_risk_breakdown) = if is_principal {
+        let (t_ctx, r_ctx) = tokio::join!(
+            fetch_principal_teacher_productivity_context(pool, req_ctx.tenant_id),
+            fetch_principal_at_risk_breakdown_context(pool, req_ctx.tenant_id)
+        );
+        (t_ctx.unwrap_or_default(), r_ctx.unwrap_or_default())
     } else {
-        String::new()
+        (String::new(), String::new())
     };
 
     let sources_block = if grounded_sources.is_empty() {
@@ -934,15 +1179,24 @@ async fn prepare_tanya_ai_context(
         )
     };
 
+    let actor_identity_line = if actor_user_name.is_empty() {
+        String::new()
+    } else {
+        format!("\n        - Pengguna Sesi Chat Saat Ini: {actor_user_name} (Peran: {actor_roles})")
+    };
+
     let authoritative_db_directive = format!(
         "[KONTEKS OTORITATIF DATABASE REALTIME & ANTI-HALUSINASI]\n\
         - Satuan Pendidikan: {db_school_name}\n\
+        - Kepala Sekolah Resmi (Profil Sekolah): {db_headmaster_name}{actor_identity_line}\n\
+        - ATURAN IDENTITAS PIMPINAN: Kepala Sekolah resmi {db_school_name} adalah {db_headmaster_name}. JANGAN pernah menyebut operator, staf, atau guru lain (termasuk {actor_user_name}) sebagai Kepala Sekolah apabila bukan {db_headmaster_name}!\n\
         - Tahun Ajaran Aktif Resmi di Database: T.A {db_academic_year} (Semester {sem_label})\n\
         - INSTRUKSI KETAT: Seluruh analisis, rekomendasi, dan jawaban WAJIB merujuk ke Tahun Ajaran resmi aktif di database yaitu T.A {db_academic_year} (Semester {sem_label}). DILARANG MENGGUNAKAN tahun kadaluarsa seperti 2024/2025.\n\
-        - BAHASA & FORMAT TABEL: Gunakan ejaan Bahasa Indonesia baku (PUEBI) tanpa typo (mis. Produktivitas, Aktivitas, Kolaborasi, Efektivitas) dan pastikan setiap sel tabel terisi lengkap (tidak ada sel kolom yang dibiarkan kosong).\n\
-        - KEJUJURAN AKADEMIK & SITASI SUMBER: Jika ragu pada fakta spesifik, katakan terus terang jangan mengarang. Akhiri setiap jawaban edukatif/analitis dengan bagian singkat:\n  📚 **Sumber:** ...\n\
+        - BAHASA & FORMAT TABEL: Gunakan ejaan Bahasa Indonesia baku (PUEBI) tanpa typo (tulis 'Produktivitas', 'Aktivitas', 'Kolaborasi', 'Efektivitas', 'Produksi'; JANGAN tulis 'produkkan') dan pastikan setiap sel tabel terisi lengkap (tidak ada sel kolom yang dibiarkan kosong).\n\
+        - KEJUJURAN AKADEMIK & SITASI SUMBER: Jika ragu pada fakta spesifik, katakan terus terang jangan mengarang angka taksiran. Akhiri setiap jawaban edukatif/analitis dengan bagian singkat:\n  📚 **Sumber:** ...\n\
         {sources_block}\n\
-        {principal_teacher_breakdown}"
+        {principal_teacher_breakdown}\n\
+        {principal_at_risk_breakdown}"
     );
 
     let is_english = nvidia_ai::is_english_subject(&subject);
