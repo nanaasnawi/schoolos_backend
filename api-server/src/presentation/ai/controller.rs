@@ -719,6 +719,130 @@ async fn fetch_grounded_curriculum_sources(
     sources
 }
 
+async fn fetch_principal_teacher_productivity_context(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+) -> Option<String> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            COALESCE(NULLIF(TRIM(t.full_name), ''), u.full_name, 'Guru') AS teacher_name,
+            COALESCE(NULLIF(TRIM(t.subject), ''), '-') AS subject_name,
+            COUNT(DISTINCT m.id) FILTER (WHERE m.deleted_at IS NULL)::bigint AS modules_count,
+            COUNT(DISTINCT a.id) FILTER (WHERE a.deleted_at IS NULL)::bigint AS assignments_count,
+            COUNT(DISTINCT q.id) FILTER (WHERE q.deleted_at IS NULL)::bigint AS quizzes_count
+        FROM teachers t
+        LEFT JOIN users u ON u.id = t.user_id
+        LEFT JOIN learning_materials m ON m.tenant_id = t.tenant_id AND m.deleted_at IS NULL
+            AND (
+                m.teacher_id = t.id
+                OR (t.user_id IS NOT NULL AND (m.teacher_id = t.user_id OR m.created_by = t.user_id))
+            )
+        LEFT JOIN assignments a ON a.tenant_id = t.tenant_id AND a.deleted_at IS NULL
+            AND (
+                a.teacher_id = t.id
+                OR (t.user_id IS NOT NULL AND (a.teacher_id = t.user_id OR a.created_by = t.user_id))
+            )
+        LEFT JOIN quizzes q ON q.tenant_id = t.tenant_id AND q.deleted_at IS NULL
+            AND (
+                q.teacher_id = t.id
+                OR (t.user_id IS NOT NULL AND (q.teacher_id = t.user_id OR q.created_by = t.user_id))
+            )
+        WHERE t.tenant_id = $1 AND t.deleted_at IS NULL
+        GROUP BY
+            t.id,
+            COALESCE(NULLIF(TRIM(t.full_name), ''), u.full_name, 'Guru'),
+            COALESCE(NULLIF(TRIM(t.subject), ''), '-')
+        ORDER BY
+            (
+                COUNT(DISTINCT m.id) FILTER (WHERE m.deleted_at IS NULL)
+                + COUNT(DISTINCT a.id) FILTER (WHERE a.deleted_at IS NULL)
+                + COUNT(DISTINCT q.id) FILTER (WHERE q.deleted_at IS NULL)
+            ) DESC,
+            teacher_name ASC
+        LIMIT 60
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_all(pool)
+    .await
+    .ok()?;
+
+    if rows.is_empty() {
+        return None;
+    }
+
+    let teacher_count = rows.len();
+    let mut sum_modules: i64 = 0;
+    let mut sum_assignments: i64 = 0;
+    let mut sum_quizzes: i64 = 0;
+    let mut entries: Vec<String> = Vec::with_capacity(teacher_count);
+
+    for (idx, row) in rows.iter().enumerate() {
+        let name: String = row
+            .try_get("teacher_name")
+            .unwrap_or_else(|_| "Guru".to_string());
+        let subject: String = row
+            .try_get("subject_name")
+            .unwrap_or_else(|_| "-".to_string());
+        let modules: i64 = row.try_get("modules_count").unwrap_or(0);
+        let assignments: i64 = row.try_get("assignments_count").unwrap_or(0);
+        let quizzes: i64 = row.try_get("quizzes_count").unwrap_or(0);
+        let total = modules + assignments + quizzes;
+
+        sum_modules += modules;
+        sum_assignments += assignments;
+        sum_quizzes += quizzes;
+
+        entries.push(format!(
+            "{}. {} ({}) — Modul: {}, Tugas: {}, Kuis CBT: {}, Total: {}",
+            idx + 1,
+            name,
+            subject,
+            modules,
+            assignments,
+            quizzes,
+            total
+        ));
+    }
+
+    let denom = teacher_count as f64;
+    let avg_modules = (sum_modules as f64) / denom;
+    let avg_assignments = (sum_assignments as f64) / denom;
+    let avg_quizzes = (sum_quizzes as f64) / denom;
+
+    Some(format!(
+        "[DAFTAR KEAKTIFAN AKTUAL PER GURU DARI DATABASE ({teacher_count} Guru, Diurutkan Paling Aktif s.d. Terendah)]\n\
+        Ringkasan Tepat: Total Guru Aktif = {teacher_count}, Total Modul Terkait Guru = {sum_modules} (rerata {avg_modules:.2} modul/guru), Total Tugas Terkait Guru = {sum_assignments} (rerata {avg_assignments:.2} tugas/guru), Total Kuis CBT Terkait Guru = {sum_quizzes} (rerata {avg_quizzes:.2} kuis/guru).\n\
+        Daftar Nama Asli Guru & Statistik Aktual:\n\
+        {}\n\
+        ATURAN KETAT ANALISIS KEPALA SEKOLAH:\n\
+        - WAJIB menyebut NAMA ASLI GURU dan angka aktual dari daftar di atas untuk Top 3, Kelompok Menengah, dan Bottom 3 (butuh intervensi).\n\
+        - DILARANG KERAS memakai nama samaran ilustratif ('Guru A', 'Guru B', 'Guru X', 'Guru Y', 'Guru Z'), menulis 'Data bersifat ilustratif', atau menyuruh menghubungi koordinator akademik.\n\
+        - Jaga konsistensi angka rasio/rerata tepat 2 desimal (misal {avg_modules:.2} modul/guru dan {avg_assignments:.2} tugas/guru) di seluruh tabel & narasi.",
+        entries.join("\n")
+    ))
+}
+
+fn normalize_ai_reply_typos(raw: &str) -> String {
+    raw.replace("Produkturnya", "Produktivitasnya")
+        .replace("produkturnya", "produktivitasnya")
+        .replace("Produktifitasnya", "Produktivitasnya")
+        .replace("produktifitasnya", "produktivitasnya")
+        .replace("Produktifitas", "Produktivitas")
+        .replace("produktifitas", "produktivitas")
+        .replace("Komarasi", "Kolaborasi")
+        .replace("komarasi", "kolaborasi")
+        .replace("Aktifitas", "Aktivitas")
+        .replace("aktifitas", "aktivitas")
+        .replace("Efektifitas", "Efektivitas")
+        .replace("efektifitas", "efektivitas")
+        .replace("Kwalitas", "Kualitas")
+        .replace("kwalitas", "kualitas")
+        .replace("Sistim", "Sistem")
+        .replace("sistim", "sistem")
+}
+
 async fn prepare_tanya_ai_context(
     pool: &sqlx::PgPool,
     req_ctx: &RequestContext,
@@ -783,6 +907,14 @@ async fn prepare_tanya_ai_context(
         Vec::new()
     };
 
+    let principal_teacher_breakdown = if is_principal {
+        fetch_principal_teacher_productivity_context(pool, req_ctx.tenant_id)
+            .await
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
     let sources_block = if grounded_sources.is_empty() {
         format!(
             "Belum ada judul spesifik yang cocok langsung di katalog query ini; JANGAN mengarang nomor halaman buku fiktif atau nama penulis palsu! \
@@ -807,8 +939,10 @@ async fn prepare_tanya_ai_context(
         - Satuan Pendidikan: {db_school_name}\n\
         - Tahun Ajaran Aktif Resmi di Database: T.A {db_academic_year} (Semester {sem_label})\n\
         - INSTRUKSI KETAT: Seluruh analisis, rekomendasi, dan jawaban WAJIB merujuk ke Tahun Ajaran resmi aktif di database yaitu T.A {db_academic_year} (Semester {sem_label}). DILARANG MENGGUNAKAN tahun kadaluarsa seperti 2024/2025.\n\
+        - BAHASA & FORMAT TABEL: Gunakan ejaan Bahasa Indonesia baku (PUEBI) tanpa typo (mis. Produktivitas, Aktivitas, Kolaborasi, Efektivitas) dan pastikan setiap sel tabel terisi lengkap (tidak ada sel kolom yang dibiarkan kosong).\n\
         - KEJUJURAN AKADEMIK & SITASI SUMBER: Jika ragu pada fakta spesifik, katakan terus terang jangan mengarang. Akhiri setiap jawaban edukatif/analitis dengan bagian singkat:\n  📚 **Sumber:** ...\n\
-        {sources_block}"
+        {sources_block}\n\
+        {principal_teacher_breakdown}"
     );
 
     let is_english = nvidia_ai::is_english_subject(&subject);
@@ -937,7 +1071,7 @@ async fn tanya_ai(
         })
         .collect();
 
-    let reply = match nvidia_ai::call_nvidia_nim(msg_refs, 0.7, 1500).await {
+    let raw_reply = match nvidia_ai::call_nvidia_nim(msg_refs, 0.7, 1500).await {
         Ok(r) => r,
         Err(err) => {
             tracing::warn!("NVIDIA NIM call failed for tanya-ai: {err:?}");
@@ -958,6 +1092,7 @@ async fn tanya_ai(
             }
         }
     };
+    let reply = normalize_ai_reply_typos(&raw_reply);
 
     Ok(Json(ApiResponse::success(
         TanyaAiResponse {
