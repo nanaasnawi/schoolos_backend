@@ -1345,7 +1345,7 @@ fn generate_kahoot_blitz_challenge(rng: &mut u64, grade_band: &str) -> Value {
                         "Numerasi Kilat",
                     )
                 } else {
-                    let ans = mult * 10 + 5;
+                    let _ans = mult * 10 + 5;
                     let q_left = mult * 2;
                     let q_val = q_left * 5;
                     (

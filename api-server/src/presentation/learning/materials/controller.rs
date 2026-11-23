@@ -28,6 +28,7 @@ use crate::{
     bootstrap::ApplicationContext, error::ApiError, extractors::RequestContext,
     response::ApiResponse,
 };
+use school_core::authorization::domain::actor::Actor;
 use school_core::common::error::ApplicationError;
 use school_core::common::error_code::ErrorCode;
 use school_core::learning::application::learning_material::{
@@ -36,39 +37,36 @@ use school_core::learning::application::learning_material::{
     update_learning_material::UpdateLearningMaterialCommand,
 };
 
-fn actor_has_admin_material_role(
-    actor: &Option<school_core::auth::domain::authenticated_actor::AuthenticatedActor>,
-) -> bool {
+fn actor_has_role_keyword(actor: &Option<Actor>, keywords: &[&str]) -> bool {
     actor
         .as_ref()
         .map(|a| {
             a.roles.iter().any(|r| {
                 let n = r.name.to_lowercase();
-                n.contains("admin")
-                    || n.contains("kepala")
-                    || n.contains("principal")
-                    || n.contains("operator")
-                    || n.contains("staff")
-                    || n.contains("staf")
-                    || n.contains("super")
-                    || n.contains("tu")
+                keywords.iter().any(|kw| n.contains(kw))
             })
         })
         .unwrap_or(false)
 }
 
-fn actor_has_teacher_material_role(
-    actor: &Option<school_core::auth::domain::authenticated_actor::AuthenticatedActor>,
-) -> bool {
-    actor
-        .as_ref()
-        .map(|a| {
-            a.roles.iter().any(|r| {
-                let n = r.name.to_lowercase();
-                n.contains("guru") || n.contains("teacher") || n.contains("pengajar")
-            })
-        })
-        .unwrap_or(false)
+fn actor_has_admin_material_role(actor: &Option<Actor>) -> bool {
+    actor_has_role_keyword(
+        actor,
+        &[
+            "admin",
+            "kepala",
+            "principal",
+            "operator",
+            "staff",
+            "staf",
+            "super",
+            "tu",
+        ],
+    )
+}
+
+fn actor_has_teacher_material_role(actor: &Option<Actor>) -> bool {
+    actor_has_role_keyword(actor, &["guru", "teacher", "pengajar"])
 }
 
 pub fn material_routes() -> Router<ApplicationContext> {
