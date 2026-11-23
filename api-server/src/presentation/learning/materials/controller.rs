@@ -36,6 +36,41 @@ use school_core::learning::application::learning_material::{
     update_learning_material::UpdateLearningMaterialCommand,
 };
 
+fn actor_has_admin_material_role(
+    actor: &Option<school_core::auth::domain::authenticated_actor::AuthenticatedActor>,
+) -> bool {
+    actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("admin")
+                    || n.contains("kepala")
+                    || n.contains("principal")
+                    || n.contains("operator")
+                    || n.contains("staff")
+                    || n.contains("staf")
+                    || n.contains("super")
+                    || n.contains("tu")
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn actor_has_teacher_material_role(
+    actor: &Option<school_core::auth::domain::authenticated_actor::AuthenticatedActor>,
+) -> bool {
+    actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("guru") || n.contains("teacher") || n.contains("pengajar")
+            })
+        })
+        .unwrap_or(false)
+}
+
 pub fn material_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/", post(create).get(list))
@@ -57,35 +92,8 @@ async fn create(
     req_ctx: RequestContext,
     Json(payload): Json<CreateLearningMaterialRequest>,
 ) -> Result<Json<ApiResponse<LearningMaterialResponse>>, ApiError> {
-    let is_admin = req_ctx
-        .actor
-        .as_ref()
-        .map(|a| {
-            a.roles.iter().any(|r| {
-                let n = r.name.to_lowercase();
-                n.contains("admin")
-                    || n.contains("kepala")
-                    || n.contains("principal")
-                    || n.contains("operator")
-                    || n.contains("staff")
-                    || n.contains("staf")
-                    || n.contains("super")
-                    || n.contains("tu")
-            })
-        })
-        .unwrap_or(false);
-
-    let is_teacher = !is_admin
-        && req_ctx
-            .actor
-            .as_ref()
-            .map(|a| {
-                a.roles.iter().any(|r| {
-                    let n = r.name.to_lowercase();
-                    n.contains("guru") || n.contains("teacher") || n.contains("pengajar")
-                })
-            })
-            .unwrap_or(false);
+    let is_admin = actor_has_admin_material_role(&req_ctx.actor);
+    let is_teacher = !is_admin && actor_has_teacher_material_role(&req_ctx.actor);
 
     if !is_teacher && !is_admin {
         use crate::middleware::require_permission;
@@ -110,6 +118,17 @@ async fn create(
         payload.visibility.clone()
     };
 
+    let clean_external_url = payload.external_url.and_then(|u| {
+        let t = u.trim();
+        if t.is_empty() {
+            None
+        } else if t.starts_with("uploads/") {
+            Some(format!("/{t}"))
+        } else {
+            Some(t.to_string())
+        }
+    });
+
     let clean_storage_key = payload.storage_key.and_then(|k| {
         let trimmed = k.trim();
         if trimmed == "Modul Digital"
@@ -132,7 +151,7 @@ async fn create(
         title: payload.title.clone(),
         description: payload.description.clone(),
         storage_key: clean_storage_key,
-        external_url: payload.external_url,
+        external_url: clean_external_url,
         order_index: payload.order_index,
         visibility: initial_visibility.clone(),
     };
@@ -457,7 +476,16 @@ async fn create(
         r#"
         SELECT 
             m.id, m.tenant_id, m.lesson_id, m.material_type, m.title, m.description, 
-            m.storage_key, COALESCE(m.external_url, lb.file_url) as external_url,
+            m.storage_key,
+            COALESCE(
+                NULLIF(TRIM(m.external_url), ''),
+                CASE
+                    WHEN m.storage_key LIKE '/uploads/%' OR m.storage_key LIKE 'http%' THEN m.storage_key
+                    WHEN m.storage_key LIKE 'uploads/%' THEN '/' || m.storage_key
+                    ELSE NULL
+                END,
+                lb.file_url
+            ) as external_url,
             m.order_index, m.visibility, m.is_active, 
             m.created_at, m.updated_at,
             m.class_id, c.name as class_name,
@@ -608,7 +636,16 @@ async fn list(
             r#"
             SELECT 
                 m.id, m.tenant_id, m.lesson_id, m.material_type, m.title, m.description, 
-                m.storage_key, COALESCE(m.external_url, lb.file_url) as external_url,
+                m.storage_key,
+            COALESCE(
+                NULLIF(TRIM(m.external_url), ''),
+                CASE
+                    WHEN m.storage_key LIKE '/uploads/%' OR m.storage_key LIKE 'http%' THEN m.storage_key
+                    WHEN m.storage_key LIKE 'uploads/%' THEN '/' || m.storage_key
+                    ELSE NULL
+                END,
+                lb.file_url
+            ) as external_url,
                 m.order_index, 
                 CASE WHEN m.release_at > NOW() THEN 'draft' WHEN m.release_at <= NOW() AND (m.visibility = 'draft' OR m.visibility IS NULL) THEN 'published' ELSE COALESCE(m.visibility, 'published') END as visibility, 
                 m.is_active, 
@@ -705,7 +742,16 @@ async fn list(
             r#"
             SELECT 
                 m.id, m.tenant_id, m.lesson_id, m.material_type, m.title, m.description, 
-                m.storage_key, COALESCE(m.external_url, lb.file_url) as external_url,
+                m.storage_key,
+            COALESCE(
+                NULLIF(TRIM(m.external_url), ''),
+                CASE
+                    WHEN m.storage_key LIKE '/uploads/%' OR m.storage_key LIKE 'http%' THEN m.storage_key
+                    WHEN m.storage_key LIKE 'uploads/%' THEN '/' || m.storage_key
+                    ELSE NULL
+                END,
+                lb.file_url
+            ) as external_url,
                 m.order_index, 
                 CASE WHEN m.release_at > NOW() THEN 'draft' WHEN m.release_at <= NOW() AND (m.visibility = 'draft' OR m.visibility IS NULL) THEN 'published' ELSE COALESCE(m.visibility, 'published') END as visibility, 
                 m.is_active, 
@@ -736,8 +782,11 @@ async fn list(
                   OR m.visibility = 'active'
                   OR (m.release_at IS NOT NULL AND m.release_at <= NOW())
               )
-              AND m.class_id IN (
-                  SELECT en.class_id FROM students s JOIN enrollments en ON en.student_id = s.id WHERE (s.user_id = $2 OR s.id = $2) AND (en.status ILIKE 'active' OR en.status IS NULL)
+              AND (
+                  m.class_id IS NULL OR
+                  m.class_id IN (
+                      SELECT en.class_id FROM students s JOIN enrollments en ON en.student_id = s.id WHERE (s.user_id = $2 OR s.id = $2) AND (en.status ILIKE 'active' OR en.status IS NULL)
+                  )
               )
               AND ($3::uuid IS NULL OR m.class_id = $3)
               AND ($4::uuid IS NULL OR m.subject_id = $4)
@@ -807,7 +856,16 @@ async fn list(
             r#"
             SELECT 
                 m.id, m.tenant_id, m.lesson_id, m.material_type, m.title, m.description, 
-                m.storage_key, COALESCE(m.external_url, lb.file_url) as external_url,
+                m.storage_key,
+            COALESCE(
+                NULLIF(TRIM(m.external_url), ''),
+                CASE
+                    WHEN m.storage_key LIKE '/uploads/%' OR m.storage_key LIKE 'http%' THEN m.storage_key
+                    WHEN m.storage_key LIKE 'uploads/%' THEN '/' || m.storage_key
+                    ELSE NULL
+                END,
+                lb.file_url
+            ) as external_url,
                 m.order_index, 
                 CASE WHEN m.release_at > NOW() THEN 'draft' WHEN m.release_at <= NOW() AND (m.visibility = 'draft' OR m.visibility IS NULL) THEN 'published' ELSE COALESCE(m.visibility, 'published') END as visibility, 
                 m.is_active, 
@@ -1029,7 +1087,16 @@ async fn get_by_id(
         r#"
         SELECT 
             m.id, m.tenant_id, m.lesson_id, m.material_type, m.title, m.description, 
-            m.storage_key, COALESCE(m.external_url, lb.file_url) as external_url,
+            m.storage_key,
+            COALESCE(
+                NULLIF(TRIM(m.external_url), ''),
+                CASE
+                    WHEN m.storage_key LIKE '/uploads/%' OR m.storage_key LIKE 'http%' THEN m.storage_key
+                    WHEN m.storage_key LIKE 'uploads/%' THEN '/' || m.storage_key
+                    ELSE NULL
+                END,
+                lb.file_url
+            ) as external_url,
             m.order_index, m.visibility, m.is_active, 
             m.created_at, m.updated_at,
             m.class_id, c.name as class_name,
@@ -2046,16 +2113,9 @@ async fn upload_file(
     req_ctx: RequestContext,
     mut multipart: Multipart,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    let is_teacher = req_ctx
-        .actor
-        .as_ref()
-        .map(|a| {
-            a.roles
-                .iter()
-                .any(|r| r.name == "Guru" || r.name == "Teacher")
-        })
-        .unwrap_or(false);
-    if !is_teacher {
+    let can_upload_role = actor_has_admin_material_role(&req_ctx.actor)
+        || actor_has_teacher_material_role(&req_ctx.actor);
+    if !can_upload_role {
         use crate::middleware::require_permission;
         use school_core::permission::domain::permission_registry::Permission;
         require_permission(&req_ctx.actor, Permission::LearningMaterialCreate).map_err(|_| {
@@ -2069,6 +2129,8 @@ async fn upload_file(
         })?;
     }
 
+    const MAX_MATERIAL_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
+
     // Create uploads directory if it doesn't exist
     let uploads_dir = std::path::PathBuf::from("uploads");
     tokio::fs::create_dir_all(&uploads_dir).await.map_err(|e| {
@@ -2081,6 +2143,8 @@ async fn upload_file(
     })?;
 
     let mut file_url: Option<String> = None;
+    let mut uploaded_key: Option<String> = None;
+    let mut uploaded_size: usize = 0;
 
     while let Some(field) = multipart.next_field().await.map_err(|e| {
         ApiError::new(
@@ -2131,6 +2195,43 @@ async fn upload_file(
                 )
             })?;
 
+            if bytes.is_empty() {
+                return Err(ApiError::new(
+                    school_core::common::error::ApplicationError::Domain(
+                        school_core::common::error::DomainError::Validation(
+                            "Berkas yang diunggah kosong (0 byte).".to_string(),
+                        ),
+                    ),
+                    &req_ctx.request_id,
+                ));
+            }
+
+            if bytes.len() > MAX_MATERIAL_UPLOAD_BYTES {
+                return Err(ApiError::new(
+                    school_core::common::error::ApplicationError::Domain(
+                        school_core::common::error::DomainError::Validation(
+                            "Ukuran berkas melebihi batas maksimal 25 MB.".to_string(),
+                        ),
+                    ),
+                    &req_ctx.request_id,
+                ));
+            }
+
+            if ext == "pdf" {
+                let header_end = bytes.len().min(1024);
+                let has_pdf_magic = bytes[..header_end].windows(5).any(|w| w == b"%PDF-");
+                if !has_pdf_magic {
+                    return Err(ApiError::new(
+                        school_core::common::error::ApplicationError::Domain(
+                            school_core::common::error::DomainError::Validation(
+                                "Berkas bukan dokumen PDF yang valid.".to_string(),
+                            ),
+                        ),
+                        &req_ctx.request_id,
+                    ));
+                }
+            }
+
             // Generate unique filename
             let unique_name = format!("{}.{}", uuid::Uuid::new_v4(), ext);
             let file_path = uploads_dir.join(&unique_name);
@@ -2153,7 +2254,7 @@ async fn upload_file(
                 "gif" => "image/gif",
                 _ => "application/octet-stream",
             };
-            let _ = sqlx::query(
+            if let Err(err) = sqlx::query(
                 r#"
                 INSERT INTO uploaded_files (filename, mime_type, file_data)
                 VALUES ($1, $2, $3)
@@ -2165,16 +2266,26 @@ async fn upload_file(
             .bind(mime_val)
             .bind(bytes.as_ref())
             .execute(&ctx.pool)
-            .await;
+            .await
+            {
+                tracing::warn!("Failed persisting uploaded file {} to uploaded_files table: {:?}", unique_name, err);
+            }
 
             // Construct URL (served by backend static file handler or Nginx)
+            uploaded_key = Some(original_filename);
+            uploaded_size = bytes.len();
             file_url = Some(format!("/uploads/{unique_name}"));
         }
     }
 
     match file_url {
         Some(url) => Ok(Json(ApiResponse::success(
-            serde_json::json!({ "url": url }),
+            serde_json::json!({
+                "url": url,
+                "key": uploaded_key,
+                "filename": uploaded_key,
+                "size_bytes": uploaded_size,
+            }),
             req_ctx.request_id,
         ))),
         None => Err(ApiError::new(
@@ -2434,6 +2545,31 @@ pub async fn get_reading_summary(
 }
 
 
+fn build_uploaded_file_response(filename: &str, mime: &str, bytes: Vec<u8>) -> Response {
+    let out_bytes = sanitize_served_upload_bytes(mime, bytes);
+    let safe_filename = filename.replace('"', "");
+    axum::response::Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, mime)
+        .header(
+            axum::http::header::CONTENT_DISPOSITION,
+            format!("inline; filename=\"{safe_filename}\""),
+        )
+        .header(axum::http::header::ACCEPT_RANGES, "bytes")
+        .header(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(
+            axum::http::header::CACHE_CONTROL,
+            "public, max-age=31536000, immutable",
+        )
+        .body(axum::body::Body::from(out_bytes))
+        .unwrap_or_else(|_| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "Error building response",
+            )
+                .into_response()
+        })
+}
+
 pub async fn serve_uploaded_file(
     axum::extract::State(ctx): axum::extract::State<ApplicationContext>,
     axum::extract::Path(path): axum::extract::Path<String>,
@@ -2448,12 +2584,7 @@ pub async fn serve_uploaded_file(
     if disk_path.is_file() {
         if let Ok(bytes) = tokio::fs::read(&disk_path).await {
             let mime = guess_upload_mime(&clean);
-            let out_bytes = sanitize_served_upload_bytes(mime, bytes);
-            return axum::response::Response::builder()
-                .header(axum::http::header::CONTENT_TYPE, mime)
-                .header(axum::http::header::CACHE_CONTROL, "public, max-age=31536000, immutable")
-                .body(axum::body::Body::from(out_bytes))
-                .unwrap_or_else(|_| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Error building response").into_response());
+            return build_uploaded_file_response(&clean, mime, bytes);
         }
     }
 
@@ -2468,17 +2599,13 @@ pub async fn serve_uploaded_file(
     if let Some(r) = row {
         let mime: String = r.get("mime_type");
         let raw_bytes: Vec<u8> = r.get("file_data");
-        let bytes = sanitize_served_upload_bytes(&mime, raw_bytes);
+        let sanitized = sanitize_served_upload_bytes(&mime, raw_bytes);
 
         // Write to local disk cache
         let _ = tokio::fs::create_dir_all("uploads").await;
-        let _ = tokio::fs::write(&disk_path, &bytes).await;
+        let _ = tokio::fs::write(&disk_path, &sanitized).await;
 
-        return axum::response::Response::builder()
-            .header(axum::http::header::CONTENT_TYPE, mime)
-            .header(axum::http::header::CACHE_CONTROL, "public, max-age=31536000, immutable")
-            .body(axum::body::Body::from(bytes))
-            .unwrap_or_else(|_| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Error building response").into_response());
+        return build_uploaded_file_response(&clean, &mime, sanitized);
     }
 
     (axum::http::StatusCode::NOT_FOUND, "File not found").into_response()
