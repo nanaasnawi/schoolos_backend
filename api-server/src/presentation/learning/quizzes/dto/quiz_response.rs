@@ -103,6 +103,15 @@ impl QuizResponse {
         self.is_open_for_student = eval.is_open_for_student;
         self.seconds_until_start = eval.seconds_until_start;
         self.seconds_remaining = eval.seconds_remaining;
+
+        if eval.phase == school_core::learning::domain::proctoring::ExamPhase::Ended {
+            if !self.status.eq_ignore_ascii_case("draft")
+                && !self.status.eq_ignore_ascii_case("archived")
+            {
+                self.status = "closed".to_string();
+            }
+            self.is_active = false;
+        }
     }
 }
 

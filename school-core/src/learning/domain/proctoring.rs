@@ -75,14 +75,19 @@ pub struct ExamWindowEvaluation {
 pub fn evaluate_quiz_schedule(input: QuizScheduleInput<'_>) -> ExamWindowEvaluation {
     let status_lower = input.status.trim().to_lowercase();
     let effective_start = input.release_at.or(input.start_at);
+    let is_ended_status = status_lower == "closed" || status_lower == "archived" || status_lower == "ended";
+    let is_open_status = status_lower == "published"
+        || status_lower == "active"
+        || status_lower == "live_exam"
+        || status_lower == "live";
+    let has_expired_window = input.end_at.is_some_and(|end| input.now >= end);
+    let is_pure_draft = status_lower == "draft" && input.questions_count <= 0;
 
-    let phase = if !input.is_active || status_lower == "closed" || status_lower == "archived" {
+    let phase = if !input.is_active || is_ended_status || (!is_pure_draft && has_expired_window) {
         ExamPhase::Ended
-    } else if status_lower == "published" || status_lower == "active" {
+    } else if is_open_status {
         if effective_start.is_some_and(|start| input.now < start) {
             ExamPhase::Upcoming
-        } else if input.end_at.is_some_and(|end| input.now > end) {
-            ExamPhase::Ended
         } else {
             ExamPhase::Live
         }
@@ -96,16 +101,10 @@ pub fn evaluate_quiz_schedule(input: QuizScheduleInput<'_>) -> ExamWindowEvaluat
         ExamPhase::Draft
     };
 
-    let is_in_progress = input
-        .student_attempt_status
-        .is_some_and(|s| s.trim().eq_ignore_ascii_case("in_progress"));
-
-    let is_published_open =
-        input.is_active && (status_lower == "published" || status_lower == "active");
-
-    let is_open_for_student = is_published_open
+    let is_open_for_student = input.is_active
+        && is_open_status
         && !input.student_has_completed
-        && (phase == ExamPhase::Live || (is_in_progress && phase != ExamPhase::Draft));
+        && phase == ExamPhase::Live;
 
     let seconds_until_start = if phase == ExamPhase::Upcoming {
         effective_start.map(|start| (start - input.now).num_seconds().max(0))
@@ -337,6 +336,20 @@ mod tests {
         });
         assert_eq!(ended_eval.phase, ExamPhase::Ended);
         assert!(!ended_eval.is_open_for_student);
+
+        let ended_in_progress_eval = evaluate_quiz_schedule(QuizScheduleInput {
+            status: "live_exam",
+            is_active: true,
+            questions_count: 10,
+            start_at: Some(past_start),
+            end_at: Some(now),
+            release_at: Some(past_start),
+            student_attempt_status: Some("in_progress"),
+            student_has_completed: false,
+            now,
+        });
+        assert_eq!(ended_in_progress_eval.phase, ExamPhase::Ended);
+        assert!(!ended_in_progress_eval.is_open_for_student);
 
         let pure_draft = evaluate_quiz_schedule(QuizScheduleInput {
             status: "draft",

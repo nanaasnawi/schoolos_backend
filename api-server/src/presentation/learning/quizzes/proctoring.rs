@@ -822,6 +822,11 @@ pub async fn extend_time(
         UPDATE quizzes
         SET end_at = $1,
             token_expires_at = CASE WHEN token_expires_at IS NOT NULL THEN $1 ELSE NULL END,
+            status = CASE
+                WHEN $1 > NOW() AND LOWER(COALESCE(status, '')) = 'closed' THEN 'published'
+                ELSE status
+            END,
+            is_active = CASE WHEN $1 > NOW() THEN true ELSE is_active END,
             updated_at = NOW()
         WHERE id = $2 AND tenant_id = $3 AND deleted_at IS NULL
         "#,

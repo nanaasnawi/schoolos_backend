@@ -573,7 +573,11 @@ async fn list(
                 q.id, q.tenant_id, q.lesson_id, q.title, q.description, q.time_limit_minutes,
                 q.passing_score, q.max_score, q.max_attempts, q.shuffle_questions, q.shuffle_choices,
                 q.start_at, q.end_at, 
-                CASE WHEN COALESCE(q.release_at, q.start_at) > NOW() THEN 'draft' ELSE q.status END as status, 
+                CASE
+                    WHEN q.end_at IS NOT NULL AND q.end_at <= NOW() AND (LOWER(COALESCE(q.status, '')) != 'draft' OR COALESCE(q.questions_count, 0) > 0) THEN 'closed'
+                    WHEN COALESCE(q.release_at, q.start_at) > NOW() THEN 'draft'
+                    ELSE q.status
+                END as status, 
                 q.questions_count, q.is_active,
                 q.created_at, q.updated_at,
                 q.class_id, q.teacher_id,
@@ -666,11 +670,12 @@ async fn list(
             LEFT JOIN teachers t ON t.id = q.teacher_id
             WHERE q.tenant_id = $1 
               AND q.deleted_at IS NULL
-              AND q.is_active = true
+              AND (q.is_active = true OR LOWER(COALESCE(q.status, '')) = 'closed')
               AND (
                   q.status = 'published' 
                   OR q.status = 'active'
                   OR q.status = 'scheduled'
+                  OR LOWER(COALESCE(q.status, '')) = 'closed'
                   OR (
                       q.status = 'draft'
                       AND COALESCE(q.questions_count, 0) > 0
@@ -738,7 +743,11 @@ async fn list(
                 q.id, q.tenant_id, q.lesson_id, q.title, q.description, q.time_limit_minutes,
                 q.passing_score, q.max_score, q.max_attempts, q.shuffle_questions, q.shuffle_choices,
                 q.start_at, q.end_at, 
-                CASE WHEN COALESCE(q.release_at, q.start_at) > NOW() THEN 'draft' ELSE q.status END as status, 
+                CASE
+                    WHEN q.end_at IS NOT NULL AND q.end_at <= NOW() AND (LOWER(COALESCE(q.status, '')) != 'draft' OR COALESCE(q.questions_count, 0) > 0) THEN 'closed'
+                    WHEN COALESCE(q.release_at, q.start_at) > NOW() THEN 'draft'
+                    ELSE q.status
+                END as status, 
                 q.questions_count, q.is_active,
                 q.created_at, q.updated_at,
                 q.class_id, q.teacher_id,
@@ -790,7 +799,20 @@ pub(super) async fn get_by_id(
     crate::presentation::learning::grade_sync::ensure_grade_sync_schema(&ctx.pool).await;
 
     let meta = sqlx::query(
-        "SELECT tenant_id, class_id, teacher_id, created_by, session_id, exam_mode, assessment_category, exam_token, token_expires_at, max_token_attempts, release_at, status, start_at, is_active, questions_count FROM quizzes WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+        r#"
+        SELECT q.tenant_id, q.class_id, q.teacher_id, q.created_by, q.session_id,
+               q.exam_mode, q.assessment_category, q.exam_token, q.token_expires_at,
+               q.max_token_attempts, q.release_at, q.status, q.start_at, q.is_active, q.questions_count,
+               c.name AS class_name,
+               sub.name AS subject_name,
+               COALESCE(NULLIF(TRIM(t.full_name), ''), uc.full_name) AS teacher_name
+        FROM quizzes q
+        LEFT JOIN classes c ON c.id = q.class_id
+        LEFT JOIN subjects sub ON sub.id = q.subject_id
+        LEFT JOIN teachers t ON t.id = q.teacher_id
+        LEFT JOIN users uc ON uc.id = q.created_by
+        WHERE q.id = $1 AND q.tenant_id = $2 AND q.deleted_at IS NULL
+        "#,
     )
     .bind(id)
     .bind(req_ctx.tenant_id)
@@ -839,12 +861,15 @@ pub(super) async fn get_by_id(
     if is_student_or_parent {
         let now_utc = chrono::Utc::now();
         let is_open_status = meta_status.eq_ignore_ascii_case("published")
-            || meta_status.eq_ignore_ascii_case("active");
+            || meta_status.eq_ignore_ascii_case("active")
+            || meta_status.eq_ignore_ascii_case("live_exam")
+            || meta_status.eq_ignore_ascii_case("live");
+        let is_closed_status = meta_status.eq_ignore_ascii_case("closed");
         let is_scheduled_visible = meta_status.eq_ignore_ascii_case("scheduled")
             || (meta_status.eq_ignore_ascii_case("draft")
                 && meta_questions_count > 0
                 && meta_release_at.or(meta_start_at).is_some_and(|r| r > now_utc));
-        if !meta_is_active || (!is_open_status && !is_scheduled_visible) {
+        if (!meta_is_active && !is_closed_status) || (!is_open_status && !is_scheduled_visible && !is_closed_status) {
             return Err(ApiError::new(
                 school_core::common::error::ApplicationError::NotFound(
                     school_core::common::error_code::ErrorCode::QuizNotFound,
@@ -881,7 +906,10 @@ pub(super) async fn get_by_id(
     resp.token_expires_at = meta.get("token_expires_at");
     resp.max_token_attempts = meta.get::<Option<i32>, _>("max_token_attempts").or(Some(5));
     resp.class_id = meta_class_id;
+    resp.class_name = meta.try_get("class_name").ok().flatten();
+    resp.subject_name = meta.try_get("subject_name").ok().flatten();
     resp.teacher_id = meta_teacher_id;
+    resp.teacher_name = meta.try_get("teacher_name").ok().flatten();
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
 
     let attempt_info = sqlx::query(
@@ -1054,6 +1082,9 @@ async fn update(
         None
     };
 
+    let has_start_update = payload.start_at.is_some();
+    let has_end_update = payload.end_at.is_some();
+
     let _ = sqlx::query(
         r#"
         UPDATE quizzes
@@ -1065,6 +1096,7 @@ async fn update(
             shuffle_questions = COALESCE($6, shuffle_questions),
             shuffle_choices = COALESCE($7, shuffle_choices),
             start_at = CASE WHEN $8 THEN $9 ELSE start_at END,
+            release_at = CASE WHEN $8 THEN $9 ELSE release_at END,
             end_at = CASE WHEN $10 THEN $11 ELSE end_at END,
             class_id = COALESCE($12, class_id),
             session_id = COALESCE($13, session_id),
@@ -1072,7 +1104,15 @@ async fn update(
             exam_token = COALESCE($15, exam_token),
             token_expires_at = COALESCE($16, token_expires_at),
             max_token_attempts = COALESCE($17, max_token_attempts),
-            status = COALESCE($18, status),
+            status = CASE
+                WHEN $18 IS NOT NULL THEN $18
+                WHEN $10 AND $11 > NOW() AND LOWER(COALESCE(status, '')) = 'closed' THEN 'published'
+                ELSE status
+            END,
+            is_active = CASE
+                WHEN $10 AND $11 > NOW() AND LOWER(COALESCE($18, status, '')) NOT IN ('closed', 'archived') THEN true
+                ELSE is_active
+            END,
             assessment_category = COALESCE($21, assessment_category),
             teacher_id = COALESCE($22, teacher_id),
             subject_id = COALESCE($23, subject_id),
@@ -1087,9 +1127,9 @@ async fn update(
     .bind(payload.max_attempts)
     .bind(payload.shuffle_questions)
     .bind(payload.shuffle_choices)
-    .bind(payload.start_at.is_some())
+    .bind(has_start_update)
     .bind(payload.start_at)
-    .bind(payload.end_at.is_some())
+    .bind(has_end_update)
     .bind(payload.end_at)
     .bind(target_class_id)
     .bind(payload.session_id)
@@ -1113,6 +1153,11 @@ async fn update(
             &req_ctx.request_id,
         )
     })?;
+
+    if has_start_update {
+        crate::infrastructure::scheduled_publish_worker::clear_quiz_pre_start_notice(&ctx.pool, id)
+            .await;
+    }
 
     if is_published_status {
         let meta = sqlx::query(
@@ -1567,7 +1612,7 @@ async fn start_attempt(
     crate::presentation::learning::grade_sync::ensure_grade_sync_schema(&ctx.pool).await;
 
     let meta = sqlx::query(
-        "SELECT tenant_id, class_id, teacher_id, created_by, exam_token, token_expires_at, release_at, status, start_at FROM quizzes WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+        "SELECT tenant_id, class_id, teacher_id, created_by, exam_token, token_expires_at, release_at, status, start_at, end_at, is_active FROM quizzes WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
     )
     .bind(id)
     .bind(req_ctx.tenant_id)
@@ -1600,7 +1645,9 @@ async fn start_attempt(
         meta.try_get("token_expires_at").ok().flatten();
     let meta_release_at: Option<chrono::DateTime<chrono::Utc>> = meta.try_get("release_at").ok().flatten();
     let meta_start_at: Option<chrono::DateTime<chrono::Utc>> = meta.try_get("start_at").ok().flatten();
+    let meta_end_at: Option<chrono::DateTime<chrono::Utc>> = meta.try_get("end_at").ok().flatten();
     let meta_status: String = meta.try_get("status").unwrap_or_else(|_| "draft".to_string());
+    let meta_is_active: bool = meta.try_get("is_active").unwrap_or(true);
 
     // Verify student belongs to the class of this quiz
     crate::authorization_helpers::AuthorizationScope::verify_learning_resource_access(
@@ -1613,7 +1660,26 @@ async fn start_attempt(
     )
     .await?;
 
-    if !meta_status.eq_ignore_ascii_case("published") && !meta_status.eq_ignore_ascii_case("active") {
+    if !meta_is_active
+        || meta_status.eq_ignore_ascii_case("closed")
+        || meta_status.eq_ignore_ascii_case("archived")
+        || meta_end_at.is_some_and(|e| chrono::Utc::now() >= e)
+    {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Domain(
+                school_core::common::error::DomainError::Validation(
+                    "Waktu pelaksanaan ujian CBT telah berakhir.".to_string(),
+                ),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
+    if !meta_status.eq_ignore_ascii_case("published")
+        && !meta_status.eq_ignore_ascii_case("active")
+        && !meta_status.eq_ignore_ascii_case("live_exam")
+        && !meta_status.eq_ignore_ascii_case("live")
+    {
         return Err(ApiError::new(
             school_core::common::error::ApplicationError::Domain(
                 school_core::common::error::DomainError::Validation(
