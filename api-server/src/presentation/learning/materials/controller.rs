@@ -2104,29 +2104,15 @@ async fn delete(
     Ok(Json(ApiResponse::success((), req_ctx.request_id)))
 }
 
-/// Upload a PDF or image file for use as learning material.
-/// Returns a JSON with `url` field pointing to the uploaded file.
-async fn upload_file(
-    State(ctx): State<ApplicationContext>,
-    req_ctx: RequestContext,
+/// Shared multipart file storage helper used by both learning materials (teachers/admin)
+/// and student assignment submission uploads.
+pub(crate) async fn store_uploaded_file(
+    ctx: &ApplicationContext,
+    req_ctx: &RequestContext,
     mut multipart: Multipart,
+    allowed_exts: &[&str],
+    allowed_types_label: &str,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    let can_upload_role = actor_has_admin_material_role(&req_ctx.actor)
-        || actor_has_teacher_material_role(&req_ctx.actor);
-    if !can_upload_role {
-        use crate::middleware::require_permission;
-        use school_core::permission::domain::permission_registry::Permission;
-        require_permission(&req_ctx.actor, Permission::LearningMaterialCreate).map_err(|_| {
-            ApiError::new(
-                school_core::common::error::ApplicationError::Unauthorized(
-                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                    "Insufficient permissions".to_string(),
-                ),
-                &req_ctx.request_id,
-            )
-        })?;
-    }
-
     const MAX_MATERIAL_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 
     // Create uploads directory if it doesn't exist
@@ -2167,18 +2153,23 @@ async fn upload_file(
                     "image/png" => "png".to_string(),
                     "image/webp" => "webp".to_string(),
                     "image/gif" => "gif".to_string(),
+                    "image/heic" => "heic".to_string(),
+                    "image/heif" => "heif".to_string(),
+                    "application/msword" => "doc".to_string(),
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => {
+                        "docx".to_string()
+                    }
+                    "text/plain" => "txt".to_string(),
                     _ => "bin".to_string(),
                 };
             }
 
-            // Only allow safe file types
-            let allowed = ["pdf", "jpg", "jpeg", "png", "gif", "webp"];
-            if !allowed.contains(&ext.as_str()) {
+            if !allowed_exts.contains(&ext.as_str()) {
                 return Err(ApiError::new(
                     school_core::common::error::ApplicationError::Domain(
-                        school_core::common::error::DomainError::Validation(
-                            format!("Tipe file .{ext} tidak diizinkan. Hanya PDF dan gambar yang diperbolehkan."),
-                        ),
+                        school_core::common::error::DomainError::Validation(format!(
+                            "Tipe file .{ext} tidak diizinkan. Hanya {allowed_types_label} yang diperbolehkan."
+                        )),
                     ),
                     &req_ctx.request_id,
                 ));
@@ -2244,14 +2235,7 @@ async fn upload_file(
             })?;
 
             // Persist file in database uploaded_files table so container restarts/redeployments never lose user uploads
-            let mime_val = match ext.as_str() {
-                "pdf" => "application/pdf",
-                "jpg" | "jpeg" => "image/jpeg",
-                "png" => "image/png",
-                "webp" => "image/webp",
-                "gif" => "image/gif",
-                _ => "application/octet-stream",
-            };
+            let mime_val = guess_upload_mime(&unique_name);
             if let Err(err) = sqlx::query(
                 r#"
                 INSERT INTO uploaded_files (filename, mime_type, file_data)
@@ -2295,6 +2279,39 @@ async fn upload_file(
             &req_ctx.request_id,
         )),
     }
+}
+
+/// Upload a PDF or image file for use as learning material.
+/// Returns a JSON with `url` field pointing to the uploaded file.
+async fn upload_file(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    multipart: Multipart,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let can_upload_role = actor_has_admin_material_role(&req_ctx.actor)
+        || actor_has_teacher_material_role(&req_ctx.actor);
+    if !can_upload_role {
+        use crate::middleware::require_permission;
+        use school_core::permission::domain::permission_registry::Permission;
+        require_permission(&req_ctx.actor, Permission::LearningMaterialCreate).map_err(|_| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Insufficient permissions".to_string(),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+    }
+
+    store_uploaded_file(
+        &ctx,
+        &req_ctx,
+        multipart,
+        &["pdf", "jpg", "jpeg", "png", "gif", "webp"],
+        "PDF dan gambar",
+    )
+    .await
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -2546,12 +2563,17 @@ pub async fn get_reading_summary(
 fn build_uploaded_file_response(filename: &str, mime: &str, bytes: Vec<u8>) -> Response {
     let out_bytes = sanitize_served_upload_bytes(mime, bytes);
     let safe_filename = filename.replace('"', "");
+    let is_inline_safe = mime.starts_with("image/")
+        || mime.starts_with("video/")
+        || mime == "application/pdf";
+    let disposition = if is_inline_safe {
+        format!("inline; filename=\"{safe_filename}\"")
+    } else {
+        format!("attachment; filename=\"{safe_filename}\"")
+    };
     axum::response::Response::builder()
         .header(axum::http::header::CONTENT_TYPE, mime)
-        .header(
-            axum::http::header::CONTENT_DISPOSITION,
-            format!("inline; filename=\"{safe_filename}\""),
-        )
+        .header(axum::http::header::CONTENT_DISPOSITION, disposition)
         .header(axum::http::header::ACCEPT_RANGES, "bytes")
         .header(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .header(
@@ -2635,7 +2657,12 @@ fn guess_upload_mime(filename: &str) -> &'static str {
         "png" => "image/png",
         "webp" => "image/webp",
         "gif" => "image/gif",
+        "heic" => "image/heic",
+        "heif" => "image/heif",
         "svg" => "image/svg+xml",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "txt" => "text/plain; charset=utf-8",
         "mp4" => "video/mp4",
         _ => "application/octet-stream",
     }

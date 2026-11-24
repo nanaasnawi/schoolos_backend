@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     routing::{get, post},
     Json, Router,
 };
@@ -44,6 +44,10 @@ use school_core::learning::application::assignment::{
 pub fn assignment_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/", post(create).get(list))
+        .route(
+            "/upload",
+            post(upload_submission_file).layer(DefaultBodyLimit::max(100 * 1024 * 1024)),
+        )
         .route("/{id}", get(get_by_id).patch(update).delete(delete))
         .route("/{id}/publish", post(publish))
         .route("/{id}/close", post(close))
@@ -1511,6 +1515,38 @@ async fn delete(
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
     Ok(Json(ApiResponse::success((), req_ctx.request_id)))
+}
+
+/// Upload an assignment worksheet/photo/document attachment for student submissions or teacher tasks.
+async fn upload_submission_file(
+    State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
+    multipart: Multipart,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    use crate::middleware::require_permission;
+    use school_core::permission::domain::permission_registry::Permission;
+
+    let has_perm = require_permission(&req_ctx.actor, Permission::LearningAssignmentSubmit).is_ok()
+        || require_permission(&req_ctx.actor, Permission::LearningAssignmentCreate).is_ok()
+        || require_permission(&req_ctx.actor, Permission::LearningAssignmentGrade).is_ok();
+    if !has_perm {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Insufficient permissions".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
+    crate::presentation::learning::materials::controller::store_uploaded_file(
+        &ctx,
+        &req_ctx,
+        multipart,
+        &["pdf", "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "doc", "docx", "txt"],
+        "PDF, gambar (JPG/PNG/WEBP/HEIC), dan dokumen (DOC/DOCX/TXT)",
+    )
+    .await
 }
 
 async fn submit(
