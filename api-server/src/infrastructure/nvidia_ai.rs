@@ -1382,7 +1382,8 @@ pub fn clean_choice_text(raw: &str) -> String {
 }
 
 pub fn clean_question_stem(raw: &str) -> String {
-    let sanitized = sanitize_currency_to_idr(raw);
+    let meta_cleaned = strip_leaked_meta_notes(raw);
+    let sanitized = sanitize_currency_to_idr(&meta_cleaned);
     let lines: Vec<&str> = sanitized.lines().collect();
     if lines.len() <= 1 {
         return sanitized.trim().to_string();
@@ -1420,7 +1421,7 @@ pub fn clean_question_stem(raw: &str) -> String {
     if cut_idx > 0 && cut_idx < lines.len() {
         lines[..cut_idx].join("\n").trim().to_string()
     } else {
-        raw.trim().to_string()
+        sanitized.trim().to_string()
     }
 }
 
@@ -1445,8 +1446,51 @@ fn strip_leaked_diagram_bracket_tag(raw: &str) -> String {
     out.trim().to_string()
 }
 
+fn strip_leaked_meta_notes(raw: &str) -> String {
+    let mut cleaned = raw.trim().to_string();
+    for phrase in [
+        "(Gambar dipresentasikan secara deskriptif untuk AI generasi)",
+        "(gambar dipresentasikan secara deskriptif untuk ai generasi)",
+        "(Gambar dipresentasikan secara deskriptif)",
+        "(AI generasi)",
+    ] {
+        cleaned = cleaned.replace(phrase, "");
+    }
+    // Strip any case variation of "(...dipresentasikan secara deskriptif...)"
+    while let Some(start) = cleaned.to_lowercase().find("(gambar dipresentasikan") {
+        if let Some(rel_end) = cleaned[start..].find(')') {
+            let before = cleaned[..start].trim_end();
+            let after = cleaned[start + rel_end + 1..].trim_start();
+            cleaned = if before.is_empty() {
+                after.to_string()
+            } else if after.is_empty() {
+                before.to_string()
+            } else {
+                format!("{before} {after}")
+            };
+        } else {
+            break;
+        }
+    }
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn contains_leaked_visual_meta(raw: &str) -> bool {
+    let lower = raw.to_lowercase();
+    lower.contains("flux ai")
+        || lower.contains("flux_ai")
+        || lower.contains("ai generasi")
+        || lower.contains("dipresentasikan secara deskriptif")
+        || lower.contains("pilihlah gambar yang sesuai")
+        || lower.contains("pilihan gambar yang tepat")
+        || lower.contains("gambar visual flux")
+        || lower.contains("[gambar:")
+        || lower.contains("[diagram:")
+}
+
 fn strip_orphaned_visual_lead(raw: &str) -> String {
-    let trimmed = raw.trim();
+    let base = strip_leaked_meta_notes(raw);
+    let trimmed = base.trim();
     let lower = trimmed.to_lowercase();
     let visual_leads = [
         "perhatikan gambar berikut",
@@ -1476,19 +1520,27 @@ fn strip_orphaned_visual_lead(raw: &str) -> String {
 }
 
 fn build_visual_diagram_prompt_instructions(is_english: bool, include_images: bool) -> &'static str {
+    let game_and_text_guard = if is_english {
+        "\nSTRICT ANTI-PLACEHOLDER RULE:\n- NEVER write 'FLUX AI', 'Gambar visual FLUX AI', 'AI generasi', 'represented descriptively', or text descriptions pretending an image exists!\n- For INTERACTIVE GAME questions (MATCHING, ORDERING, FILL_BLANK, CROSSWORD), NEVER attach 'image_prompt' and NEVER ask students to 'choose an image'. Interactive games MUST be pure text/concept tasks (for FILL_BLANK, 'blanks' and 'distractors' MUST be concise 1-4 word concept terms matching the cloze sentence, and never leak the exact answer inside a hint)."
+    } else {
+        "\nATURAN KETAT ANTI-PLACEHOLDER TEKS:\n- DILARANG KERAS menulis kata 'FLUX AI', 'Gambar visual FLUX AI', 'AI generasi', 'dipresentasikan secara deskriptif', atau deskripsi teks yang berpura-pura menjadi gambar!\n- Khusus soal GAME INTERAKTIF (MATCHING, ORDERING, FILL_BLANK, CROSSWORD), DILARANG menyertakan 'image_prompt' dan DILARANG menyuruh siswa 'memilih gambar'. Seluruh game interaktif WAJIB berbasis teks konsep/kosakata materi (untuk FILL_BLANK, isi 'blanks' dan 'distractors' HARUS berupa istilah/frasa singkat 1-4 kata yang melengkapi kalimat materi, tanpa membocorkan kunci jawaban di dalam 'Petunjuk')."
+    };
+
     if !include_images {
-        return "";
+        return game_and_text_guard;
     }
     if is_english {
         r#"
 ACCURATE FLUX AI EDUCATIONAL IMAGE REQUIREMENT:
-- On 20-35% of questions that genuinely benefit from observing real-world scenes, anatomy, geography landforms, laboratory apparatus, historical scenes, or named natural phenomena, include `"image_prompt"` with a clear, concrete 1-sentence English visual scene description for FLUX AI image generation (e.g. "Clean scientific textbook illustration showing the cross-section anatomy of a human heart with chambers and major blood vessels, light studio background, no text labels").
-- NEVER use Wikipedia/Wikimedia queries, NEVER output SVG placeholders or `[Diagram: ...]`, and NEVER attach unrelated images onto pure arithmetic/grammar items."#
+- ONLY on MULTIPLE_CHOICE or ESSAY items (20-35% of them) that genuinely benefit from observing real-world scenes, anatomy, geography landforms, laboratory apparatus, or historical scenes, include `"image_prompt"` with a clear, concrete 1-sentence English visual scene description (e.g. "Clean scientific textbook illustration showing the cross-section anatomy of a human heart, light background, no text labels").
+- STRICTLY FORBIDDEN on MATCHING, ORDERING, FILL_BLANK, and CROSSWORD: keep interactive games 100% text-based and NEVER include `"image_prompt"` or image-selection prompts on them.
+- STRICTLY FORBIDDEN to write `'FLUX AI'`, `'AI generasi'`, `'represented descriptively'`, `'Gambar visual FLUX AI'`, Wikipedia queries, SVG tags, or `[Diagram: ...]` inside any question or template text."#
     } else {
         r#"
-ATURAN SOAL BERGAMBAR EDUKASI FLUX AI AKURAT:
-- Pada 20-35% butir soal yang relevan dengan pengamatan objek nyata, anatomi, fenomena alam, peristiwa sejarah/budaya, geografi, atau alat praktikum, sertakan properti `"image_prompt"` berisi deskripsi adegan visual berbahasa Inggris yang sangat spesifik, konkret, dan bebas teks untuk digenerate oleh FLUX AI (contoh: "Clean scientific textbook illustration showing a cross-section of a plant cell with chloroplast and nucleus, light neutral background, no text labels" atau "Authentic realistic scene of traditional Borobudur stone relief temple in sunny tropical morning light, no text").
-- DILARANG mengambil gambar acak Wikipedia/Wikimedia, DILARANG menghasilkan SVG acak atau menulis tag `[Diagram: ...]`, dan jangan paksakan gambar pada soal hitungan aljabar murni."#
+ATURAN SOAL BERGAMBAR EDUKASI AKURAT:
+- HANYA pada 20-35% soal MULTIPLE_CHOICE atau ESSAY yang benar-benar relevan dengan pengamatan objek nyata, anatomi, fenomena alam, sejarah/budaya, geografi, atau alat praktikum, sertakan properti `"image_prompt"` berbahasa Inggris bebas teks (contoh: "Clean scientific textbook illustration showing a cross-section of a plant cell, light background, no text labels").
+- DILARANG KERAS menyertakan `"image_prompt"` ataupun menyuruh siswa "memilih gambar" pada soal game interaktif (MATCHING, ORDERING, FILL_BLANK, CROSSWORD) — game interaktif wajib 100% teks materi!
+- DILARANG KERAS menuliskan kata `'FLUX AI'`, `'AI generasi'`, `'dipresentasikan secara deskriptif'`, `'Gambar visual'`, tag `[Diagram: ...]`, SVG acak, atau Wikipedia di dalam `question_text` maupun `template`!"#
     }
 }
 
@@ -2109,7 +2161,11 @@ PENTING & WAJIB:
             .get("explanation")
             .map(json_value_to_string)
             .unwrap_or_default();
-        let img = if include_images && diagrams_attached < 3 {
+        let is_interactive_game = matches!(
+            question_type.as_str(),
+            "MATCHING" | "ORDERING" | "FILL_BLANK" | "CROSSWORD"
+        );
+        let img = if include_images && !is_interactive_game && diagrams_attached < 3 {
             let mut resolved = crate::infrastructure::visual_diagram::resolve_visual_diagram_url(
                 pool,
                 q_val.get("diagram_spec"),
@@ -2139,9 +2195,9 @@ PENTING & WAJIB:
             None
         };
         let clean_q_text = if img.is_some() {
-            strip_leaked_diagram_bracket_tag(&q_text)
+            strip_leaked_diagram_bracket_tag(&strip_leaked_meta_notes(&q_text))
         } else {
-            q_text
+            strip_leaked_diagram_bracket_tag(&strip_orphaned_visual_lead(&q_text))
         };
 
         questions.push(AssignmentQuestionDto {
@@ -2185,7 +2241,10 @@ PENTING & WAJIB:
             } else if matches!(qt, "MATCHING" | "ORDERING" | "FILL_BLANK" | "CROSSWORD")
                 && q.interaction_config
                     .as_ref()
-                    .map(|cfg| is_valid_game_interaction_config(qt, cfg))
+                    .map(|cfg| {
+                        is_valid_game_interaction_config(qt, cfg)
+                            && !(qt == "FILL_BLANK" && contains_leaked_visual_meta(&q.question_text))
+                    })
                     .unwrap_or(false)
             {
                 final_games.push(q);
@@ -2720,15 +2779,21 @@ fn is_valid_game_interaction_config(question_type: &str, cfg: &serde_json::Value
         "FILL_BLANK" => {
             let tpl = cfg.get("template").and_then(|v| v.as_str()).unwrap_or("").trim();
             let has_slot = tpl.contains("___") || (tpl.contains("{{") && tpl.contains("}}"));
-            let has_blanks = cfg
-                .get("blanks")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .any(|b| !b.as_str().unwrap_or("").trim().is_empty())
-                })
-                .unwrap_or(false);
-            has_slot && has_blanks
+            if !has_slot || contains_leaked_visual_meta(tpl) {
+                return false;
+            }
+            let blanks_arr = match cfg.get("blanks").and_then(|v| v.as_array()) {
+                Some(arr) => arr,
+                None => return false,
+            };
+            let has_valid_blanks = blanks_arr
+                .iter()
+                .any(|b| !b.as_str().unwrap_or("").trim().is_empty());
+            let has_visual_prompt_blank = blanks_arr.iter().any(|b| {
+                let text = b.as_str().unwrap_or("").trim();
+                text.len() > 64 || text.split_whitespace().count() > 7 || contains_leaked_visual_meta(text)
+            });
+            has_valid_blanks && !has_visual_prompt_blank
         }
         "CROSSWORD" => {
             let valid_clues = cfg
