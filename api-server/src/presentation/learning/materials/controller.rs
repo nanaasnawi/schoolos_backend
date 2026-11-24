@@ -2268,7 +2268,7 @@ pub(crate) async fn store_uploaded_file(
                 "filename": uploaded_key,
                 "size_bytes": uploaded_size,
             }),
-            req_ctx.request_id,
+            req_ctx.request_id.clone(),
         ))),
         None => Err(ApiError::new(
             school_core::common::error::ApplicationError::Domain(

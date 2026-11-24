@@ -1528,7 +1528,7 @@ async fn upload_submission_file(
 
     let has_perm = require_permission(&req_ctx.actor, Permission::LearningAssignmentSubmit).is_ok()
         || require_permission(&req_ctx.actor, Permission::LearningAssignmentCreate).is_ok()
-        || require_permission(&req_ctx.actor, Permission::LearningAssignmentGrade).is_ok();
+        || require_permission(&req_ctx.actor, Permission::LearningAssignmentUpdate).is_ok();
     if !has_perm {
         return Err(ApiError::new(
             school_core::common::error::ApplicationError::Unauthorized(
