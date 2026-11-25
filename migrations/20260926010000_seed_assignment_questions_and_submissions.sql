@@ -1,4 +1,8 @@
 -- 20260926010000_seed_assignment_questions_and_submissions.sql
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM tenants WHERE id = 'e3c4d8da-ff44-4d87-bb13-759a54f49bd0')
+       AND EXISTS (SELECT 1 FROM assignments WHERE id = 'ae375f1e-e915-4ed4-8fe1-7ea519d39fe8') THEN
 
 UPDATE assignments
 SET instructions = 'Kerjakan seluruh soal Pilihan Ganda dan Esai di bawah ini dengan teliti. Pastikan setiap jawaban telah terisi sebelum menekan tombol Kumpulkan Tugas.'
@@ -60,6 +64,16 @@ INSERT INTO assignment_questions (id, tenant_id, assignment_id, question_text, q
 VALUES ('caa126df-a3e4-4dac-b680-ccaf728f0bed', 'e3c4d8da-ff44-4d87-bb13-759a54f49bd0', 'ae375f1e-e915-4ed4-8fe1-7ea519d39fe8', 'Berdasarkan pengamatan mandiri yang telah kamu lakukan di rumah/lingkungan sekitar, tuliskan hasil pengukuran 3 benda berbeda (nama benda, besaran yang diukur, alat ukur yang digunakan, dan hasil pengukuran beserta satuannya)!', 'ESSAY', 20, 5)
 ON CONFLICT (id) DO UPDATE SET question_text = EXCLUDED.question_text, points = EXCLUDED.points;
 
+IF (SELECT COUNT(DISTINCT id) FROM assignment_submissions WHERE id IN (
+    '65319769-9936-401e-a446-520aea1a3788',
+    '585ebd89-6fad-4afd-b1c5-d654245e01df',
+    '8c1250c5-252b-4042-bf6e-386692a92542',
+    'fffb62de-06f9-4912-9f67-4fe7d443287a',
+    '28ec95d1-c1c1-4af4-a429-20fa3e01f2c0',
+    '4ca44330-58b7-40b4-b336-8c914614dde0',
+    '056dac13-9388-4883-850f-ba3f2bbec1d3',
+    'e1e61996-ddb8-496c-a57e-55a865a078ae'
+)) = 8 THEN
 INSERT INTO assignment_submission_answers (id, submission_id, question_id, chosen_choice_id, text_answer, points_earned, teacher_feedback)
 VALUES ('f763fcba-f61b-4080-9ebe-2c563a979fcf', '65319769-9936-401e-a446-520aea1a3788', '316ce80e-3cd5-43c3-835d-4deb5ac8ca06', 'eb9f3409-7897-4509-8de1-81ee2e9fe029', NULL, 20, NULL)
 ON CONFLICT (submission_id, question_id) DO NOTHING;
@@ -180,3 +194,7 @@ ON CONFLICT (submission_id, question_id) DO NOTHING;
 INSERT INTO assignment_submission_answers (id, submission_id, question_id, chosen_choice_id, text_answer, points_earned, teacher_feedback)
 VALUES ('9c0403f7-71da-4a58-b276-9ad77aff252e', 'e1e61996-ddb8-496c-a57e-55a865a078ae', 'caa126df-a3e4-4dac-b680-ccaf728f0bed', NULL, 'Tugas pengukuran mandiri telah saya unggah dari Android App School OS. Mohon koreksi dan arahannya Bapak bila ada rumus yang belum tepat.', 18, 'Data pengamatan faktual dan konversi satuan ke SI sudah tepat.')
 ON CONFLICT (submission_id, question_id) DO NOTHING;
+END IF;
+
+    END IF;
+END $$;

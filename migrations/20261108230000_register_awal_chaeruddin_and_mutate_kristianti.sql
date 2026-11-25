@@ -11,6 +11,11 @@ DECLARE
     v_kristianti_teacher_id UUID := '01a096e3-cbf5-7041-a07c-720d92034dfa';
     v_kristianti_user_id UUID := '01a096e3-cbf1-7923-acc8-1b03dbe6e0e1';
 BEGIN
+    IF NOT EXISTS (SELECT 1 FROM tenants WHERE id = v_tenant_id)
+       OR NOT EXISTS (SELECT 1 FROM roles WHERE id = v_guru_role_id) THEN
+        RETURN;
+    END IF;
+
     -- 1. Ensure User Account for Pak Awal Chaeruddin
     INSERT INTO users (
         id, tenant_id, email, username, password_hash, full_name, is_active, created_at, updated_at

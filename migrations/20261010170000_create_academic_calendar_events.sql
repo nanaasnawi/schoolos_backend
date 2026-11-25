@@ -25,6 +25,9 @@ CREATE INDEX IF NOT EXISTS idx_kaldik_dates ON academic_calendar_events(start_da
 CREATE INDEX IF NOT EXISTS idx_kaldik_semester ON academic_calendar_events(semester);
 
 -- Seed National/Official Kaldik Kemendikdasmen 2026/2027 Baseline Events (tenant_id NULL for global template)
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM academic_calendar_events WHERE tenant_id IS NULL LIMIT 1) THEN
 INSERT INTO academic_calendar_events 
     (tenant_id, academic_year, semester, title, start_date, end_date, category, color, description, is_effective_learning, is_national_holiday)
 VALUES
@@ -58,3 +61,5 @@ VALUES
     (NULL, '2026/2027', 'EVEN', 'Pembagian Rapor Semester Genap & Kelulusan', '2027-06-19', '2027-06-19', 'REPORT_CARD', '#059669', 'Penyerahan buku rapor kenaikan kelas dan ijazah/SKL kelulusan.', false, false),
     (NULL, '2026/2027', 'EVEN', 'Libur Akhir Tahun Ajaran 2026/2027', '2027-06-21', '2027-07-10', 'HOLIDAY_SEMESTER', '#dc2626', 'Libur kenaikan kelas dan transisi Tahun Ajaran baru 2027/2028.', false, true)
 ON CONFLICT DO NOTHING;
+    END IF;
+END $$;

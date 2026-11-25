@@ -11,6 +11,12 @@ DECLARE
     v_ikin_teacher_id UUID := '46ce30ba-b618-42d9-8d6d-31d698331353';
     v_ikin_user_id UUID := '01a096e3-cbd9-78d3-8a4d-54e97cb12b92';
 BEGIN
+    IF NOT EXISTS (SELECT 1 FROM tenants WHERE id = v_tenant_id)
+       OR NOT EXISTS (SELECT 1 FROM roles WHERE id = v_guru_role_id)
+       OR NOT EXISTS (SELECT 1 FROM users WHERE id = v_nana_user_id) THEN
+        RETURN;
+    END IF;
+
     -- 1. Ensure User Account for Nana Asnawi
     UPDATE users
     SET username = COALESCE(username, 'nana.asnawi'),
