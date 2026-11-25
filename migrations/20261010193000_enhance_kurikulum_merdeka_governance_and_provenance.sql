@@ -114,6 +114,7 @@ CREATE INDEX IF NOT EXISTS idx_lfce_flow_id ON learning_flow_calendar_events(flo
 CREATE INDEX IF NOT EXISTS idx_lfce_event_id ON learning_flow_calendar_events(calendar_event_id);
 CREATE INDEX IF NOT EXISTS idx_lfce_tenant_week ON learning_flow_calendar_events(tenant_id, week_number);
 
+DROP TRIGGER IF EXISTS update_learning_flow_calendar_events_updated_at ON learning_flow_calendar_events;
 CREATE TRIGGER update_learning_flow_calendar_events_updated_at
     BEFORE UPDATE ON learning_flow_calendar_events
     FOR EACH ROW

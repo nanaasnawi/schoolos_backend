@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS kosp_documents (
 
 CREATE INDEX IF NOT EXISTS idx_kosp_tenant_year ON kosp_documents(tenant_id, academic_year);
 
+DROP TRIGGER IF EXISTS update_kosp_documents_updated_at ON kosp_documents;
 CREATE TRIGGER update_kosp_documents_updated_at
     BEFORE UPDATE ON kosp_documents
     FOR EACH ROW

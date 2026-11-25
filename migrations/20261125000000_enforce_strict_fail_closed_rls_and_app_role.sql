@@ -298,6 +298,8 @@ CREATE POLICY tenants_isolation ON tenants
 DROP POLICY IF EXISTS tenants_write ON tenants;
 DROP POLICY IF EXISTS tenants_insert_delete ON tenants;
 DROP POLICY IF EXISTS tenants_update_own ON tenants;
+DROP POLICY IF EXISTS tenants_insert_system ON tenants;
+DROP POLICY IF EXISTS tenants_delete_system ON tenants;
 CREATE POLICY tenants_update_own ON tenants
     FOR UPDATE
     USING (is_tenant_allowed(id))

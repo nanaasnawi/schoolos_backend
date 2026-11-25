@@ -380,9 +380,46 @@ impl Bootstrap {
         if skip_migrations {
             tracing::info!("SKIP_MIGRATIONS=true; skipping sqlx::migrate! at startup.");
         } else {
-            school_core::common::tenant_context::with_system_rls_bypass(
-                sqlx::migrate!("../migrations").run(&pool),
-            )
+            school_core::common::tenant_context::with_system_rls_bypass(async {
+                const LEGACY_MIGRATION_CUTOFF: i64 = 20261125000000;
+                let mut migrator = sqlx::migrate!("../migrations");
+                migrator.set_ignore_missing(true);
+
+                // Sync checksums for pre-cutoff historical migrations already marked `success = true`
+                // in `_sqlx_migrations` so legacy migration file edits do not block startup or stall
+                // newer multi-tenant security migrations.
+                let has_mig_table: bool = sqlx::query_scalar::<_, bool>(
+                    "SELECT to_regclass('public._sqlx_migrations') IS NOT NULL",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap_or(false);
+
+                if has_mig_table {
+                    for m in migrator.iter() {
+                        if m.version < LEGACY_MIGRATION_CUTOFF
+                            && !m.migration_type.is_down_migration()
+                        {
+                            if let Err(e) = sqlx::query(
+                                "UPDATE _sqlx_migrations SET checksum = $2 WHERE version = $1 AND success = true AND checksum <> $2",
+                            )
+                            .bind(m.version)
+                            .bind(m.checksum.as_ref())
+                            .execute(&pool)
+                            .await
+                            {
+                                tracing::warn!(
+                                    "Failed to sync legacy migration checksum for {}: {:?}",
+                                    m.version,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+
+                migrator.run(&pool).await
+            })
             .await
             .map_err(|e| {
                 tracing::error!("Database migration failed: {:?}", e);

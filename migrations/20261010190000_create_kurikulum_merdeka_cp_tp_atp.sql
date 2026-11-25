@@ -34,6 +34,7 @@ CREATE INDEX IF NOT EXISTS idx_lo_phase ON learning_outcomes(phase);
 CREATE INDEX IF NOT EXISTS idx_lo_subject_id ON learning_outcomes(subject_id);
 CREATE INDEX IF NOT EXISTS idx_lo_deleted_at ON learning_outcomes(deleted_at) WHERE deleted_at IS NULL;
 
+DROP TRIGGER IF EXISTS update_learning_outcomes_updated_at ON learning_outcomes;
 CREATE TRIGGER update_learning_outcomes_updated_at
     BEFORE UPDATE ON learning_outcomes
     FOR EACH ROW
@@ -66,6 +67,7 @@ CREATE INDEX IF NOT EXISTS idx_tp_tenant_lo ON learning_objectives(tenant_id, le
 CREATE INDEX IF NOT EXISTS idx_tp_code ON learning_objectives(code);
 CREATE INDEX IF NOT EXISTS idx_tp_deleted_at ON learning_objectives(deleted_at) WHERE deleted_at IS NULL;
 
+DROP TRIGGER IF EXISTS update_learning_objectives_updated_at ON learning_objectives;
 CREATE TRIGGER update_learning_objectives_updated_at
     BEFORE UPDATE ON learning_objectives
     FOR EACH ROW
@@ -98,6 +100,7 @@ CREATE INDEX IF NOT EXISTS idx_atp_tenant_year_sem ON learning_objective_flows(t
 CREATE INDEX IF NOT EXISTS idx_atp_lo_id ON learning_objective_flows(learning_objective_id);
 CREATE INDEX IF NOT EXISTS idx_atp_deleted_at ON learning_objective_flows(deleted_at) WHERE deleted_at IS NULL;
 
+DROP TRIGGER IF EXISTS update_learning_objective_flows_updated_at ON learning_objective_flows;
 CREATE TRIGGER update_learning_objective_flows_updated_at
     BEFORE UPDATE ON learning_objective_flows
     FOR EACH ROW
