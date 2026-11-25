@@ -627,7 +627,14 @@ async fn list(
             SELECT 
                 a.id, a.tenant_id, a.lesson_id, a.title, a.description, a.instructions,
                 a.max_score, a.due_at, a.assignment_type,
-                CASE WHEN a.release_at > NOW() THEN 'draft' WHEN a.release_at <= NOW() AND a.status = 'draft' THEN 'published' ELSE a.status END as status,
+                CASE
+                    WHEN a.release_at IS NOT NULL AND a.release_at > NOW() THEN 'draft'
+                    WHEN a.status = 'archived' THEN 'archived'
+                    WHEN a.due_at IS NOT NULL AND a.due_at <= NOW() THEN 'closed'
+                    WHEN a.release_at IS NOT NULL AND a.release_at <= NOW() AND a.status = 'draft' THEN 'published'
+                    ELSE a.status
+                END as status,
+                (a.due_at IS NOT NULL AND a.due_at <= NOW()) as is_past_due,
                 a.is_active,
                 a.created_at, a.updated_at,
                 a.class_id, a.session_id, a.release_at, a.allow_late_submission, a.assessment_category,
@@ -658,7 +665,23 @@ async fn list(
                         WHERE sub.assignment_id = a.id
                           AND sub.status != 'unsubmitted'
                     ), 0
-                )::bigint as submitted_count
+                )::bigint as submitted_count,
+                COALESCE(
+                    (
+                        SELECT COUNT(DISTINCT sub.student_id)
+                        FROM assignment_submissions sub
+                        WHERE sub.assignment_id = a.id
+                          AND sub.status = 'graded'
+                    ), 0
+                )::bigint as graded_count,
+                COALESCE(
+                    (
+                        SELECT COUNT(DISTINCT sub.student_id)
+                        FROM assignment_submissions sub
+                        WHERE sub.assignment_id = a.id
+                          AND sub.status IN ('submitted', 'late', 'grading')
+                    ), 0
+                )::bigint as ungraded_count
             FROM assignments a
             LEFT JOIN classes c ON c.id = a.class_id
             LEFT JOIN subjects sub ON sub.id = a.subject_id
@@ -719,6 +742,9 @@ async fn list(
                 total_students: r.try_get::<Option<i64>, _>("total_students").ok().flatten(),
                 submitted_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
                 submission_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
+                graded_count: r.try_get::<Option<i64>, _>("graded_count").ok().flatten(),
+                ungraded_count: r.try_get::<Option<i64>, _>("ungraded_count").ok().flatten(),
+                is_past_due: r.try_get::<bool, _>("is_past_due").unwrap_or(false),
                 assessment_category: r.try_get::<Option<String>, _>("assessment_category").ok().flatten(),
                 has_game_questions: false,
                 questions: Vec::new(),
@@ -746,8 +772,14 @@ async fn list(
                         ORDER BY sub.submitted_at DESC NULLS LAST
                         LIMIT 1
                     ),
-                    CASE WHEN a.release_at > NOW() THEN 'draft' WHEN a.release_at <= NOW() AND a.status = 'draft' THEN 'published' ELSE a.status END
+                    CASE
+                        WHEN a.release_at IS NOT NULL AND a.release_at > NOW() THEN 'draft'
+                        WHEN a.due_at IS NOT NULL AND a.due_at <= NOW() AND COALESCE(a.allow_late_submission, false) = false THEN 'closed'
+                        WHEN a.release_at IS NOT NULL AND a.release_at <= NOW() AND a.status = 'draft' THEN 'published'
+                        ELSE a.status
+                    END
                 ) as status,
+                (a.due_at IS NOT NULL AND a.due_at <= NOW()) as is_past_due,
                 a.is_active,
                 a.created_at, a.updated_at,
                 a.class_id, a.session_id, a.release_at, a.allow_late_submission, a.assessment_category,
@@ -791,8 +823,7 @@ async fn list(
               AND a.is_active = true
               AND (a.release_at IS NULL OR a.release_at <= NOW())
               AND (
-                  a.status = 'published' 
-                  OR a.status = 'active'
+                  a.status IN ('published', 'active', 'closed')
                   OR (a.release_at IS NOT NULL AND a.release_at <= NOW())
               )
               AND (
@@ -852,6 +883,9 @@ async fn list(
                 total_students: r.try_get::<Option<i64>, _>("total_students").ok().flatten(),
                 submitted_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
                 submission_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
+                graded_count: None,
+                ungraded_count: None,
+                is_past_due: r.try_get::<bool, _>("is_past_due").unwrap_or(false),
                 assessment_category: r.try_get::<Option<String>, _>("assessment_category").ok().flatten(),
                 has_game_questions: false,
                 questions: Vec::new(),
@@ -863,7 +897,14 @@ async fn list(
             SELECT 
                 a.id, a.tenant_id, a.lesson_id, a.title, a.description, a.instructions,
                 a.max_score, a.due_at, a.assignment_type,
-                CASE WHEN a.release_at > NOW() THEN 'draft' WHEN a.release_at <= NOW() AND a.status = 'draft' THEN 'published' ELSE a.status END as status,
+                CASE
+                    WHEN a.release_at IS NOT NULL AND a.release_at > NOW() THEN 'draft'
+                    WHEN a.status = 'archived' THEN 'archived'
+                    WHEN a.due_at IS NOT NULL AND a.due_at <= NOW() THEN 'closed'
+                    WHEN a.release_at IS NOT NULL AND a.release_at <= NOW() AND a.status = 'draft' THEN 'published'
+                    ELSE a.status
+                END as status,
+                (a.due_at IS NOT NULL AND a.due_at <= NOW()) as is_past_due,
                 a.is_active,
                 a.created_at, a.updated_at,
                 a.class_id, a.session_id, a.release_at, a.allow_late_submission, a.assessment_category,
@@ -897,7 +938,23 @@ async fn list(
                         WHERE sub.assignment_id = a.id
                           AND sub.status != 'unsubmitted'
                     ), 0
-                )::bigint as submitted_count
+                )::bigint as submitted_count,
+                COALESCE(
+                    (
+                        SELECT COUNT(DISTINCT sub.student_id)
+                        FROM assignment_submissions sub
+                        WHERE sub.assignment_id = a.id
+                          AND sub.status = 'graded'
+                    ), 0
+                )::bigint as graded_count,
+                COALESCE(
+                    (
+                        SELECT COUNT(DISTINCT sub.student_id)
+                        FROM assignment_submissions sub
+                        WHERE sub.assignment_id = a.id
+                          AND sub.status IN ('submitted', 'late', 'grading')
+                    ), 0
+                )::bigint as ungraded_count
             FROM assignments a
             LEFT JOIN classes c ON c.id = a.class_id
             LEFT JOIN subjects sub ON sub.id = a.subject_id
@@ -951,6 +1008,9 @@ async fn list(
                 total_students: r.try_get::<Option<i64>, _>("total_students").ok().flatten(),
                 submitted_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
                 submission_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
+                graded_count: r.try_get::<Option<i64>, _>("graded_count").ok().flatten(),
+                ungraded_count: r.try_get::<Option<i64>, _>("ungraded_count").ok().flatten(),
+                is_past_due: r.try_get::<bool, _>("is_past_due").unwrap_or(false),
                 assessment_category: r.try_get::<Option<String>, _>("assessment_category").ok().flatten(),
                 has_game_questions: false,
                 questions: Vec::new(),
@@ -1039,42 +1099,65 @@ async fn get_by_id(
                     ORDER BY sub.submitted_at DESC NULLS LAST
                     LIMIT 1
                 ),
-                CASE WHEN a.release_at IS NOT NULL AND a.release_at > NOW() THEN 'draft' WHEN a.release_at IS NOT NULL AND a.release_at <= NOW() AND a.status = 'draft' THEN 'published' ELSE a.status END
-            ) as status,
-            a.is_active,
-            a.created_at, a.updated_at,
-            a.class_id, a.teacher_id, a.created_by, a.session_id, a.release_at, a.allow_late_submission, a.assessment_category,
-            c.name as class_name,
-            sub.name as subject_name,
-            COALESCE(
-                t.full_name,
-                (SELECT t2.full_name FROM class_schedules cs JOIN teachers t2 ON t2.id = cs.teacher_id WHERE cs.class_id = a.class_id AND cs.subject_id = a.subject_id LIMIT 1),
-                (SELECT t3.full_name FROM teachers t3 WHERE t3.user_id = a.created_by LIMIT 1),
-                (SELECT t4.full_name FROM teachers t4 WHERE t4.id = a.created_by LIMIT 1),
-                (SELECT t5.full_name FROM classes cl JOIN teachers t5 ON t5.id = cl.homeroom_teacher_id WHERE cl.id = a.class_id LIMIT 1),
-                (SELECT u.full_name FROM users u WHERE u.id = a.created_by LIMIT 1),
-                (SELECT t6.full_name FROM teachers t6 WHERE t6.tenant_id = a.tenant_id ORDER BY t6.created_at ASC LIMIT 1)
-            ) as teacher_name,
-            COALESCE(
-                (
-                    SELECT COUNT(DISTINCT en.student_id)
-                    FROM enrollments en
-                    JOIN students s ON s.id = en.student_id
-                    WHERE en.class_id = a.class_id
-                      AND (en.status ILIKE 'active' OR en.status IS NULL)
-                      AND (s.is_active = true OR s.is_active IS NULL)
-                      AND (s.status ILIKE 'active' OR s.status IS NULL)
-                      AND s.deleted_at IS NULL
-                ), 0
-            )::bigint as total_students,
-            COALESCE(
-                (
-                    SELECT COUNT(DISTINCT sub.student_id)
-                    FROM assignment_submissions sub
-                    WHERE sub.assignment_id = a.id
-                      AND sub.status != 'unsubmitted'
-                ), 0
-            )::bigint as submitted_count
+                    CASE
+                        WHEN a.release_at IS NOT NULL AND a.release_at > NOW() THEN 'draft'
+                        WHEN a.status = 'archived' THEN 'archived'
+                        WHEN a.due_at IS NOT NULL AND a.due_at <= NOW() AND COALESCE(a.allow_late_submission, false) = false THEN 'closed'
+                        WHEN a.release_at IS NOT NULL AND a.release_at <= NOW() AND a.status = 'draft' THEN 'published'
+                        ELSE a.status
+                    END
+                ) as status,
+                (a.due_at IS NOT NULL AND a.due_at <= NOW()) as is_past_due,
+                a.is_active,
+                a.created_at, a.updated_at,
+                a.class_id, a.teacher_id, a.created_by, a.session_id, a.release_at, a.allow_late_submission, a.assessment_category,
+                c.name as class_name,
+                sub.name as subject_name,
+                COALESCE(
+                    t.full_name,
+                    (SELECT t2.full_name FROM class_schedules cs JOIN teachers t2 ON t2.id = cs.teacher_id WHERE cs.class_id = a.class_id AND cs.subject_id = a.subject_id LIMIT 1),
+                    (SELECT t3.full_name FROM teachers t3 WHERE t3.user_id = a.created_by LIMIT 1),
+                    (SELECT t4.full_name FROM teachers t4 WHERE t4.id = a.created_by LIMIT 1),
+                    (SELECT t5.full_name FROM classes cl JOIN teachers t5 ON t5.id = cl.homeroom_teacher_id WHERE cl.id = a.class_id LIMIT 1),
+                    (SELECT u.full_name FROM users u WHERE u.id = a.created_by LIMIT 1),
+                    (SELECT t6.full_name FROM teachers t6 WHERE t6.tenant_id = a.tenant_id ORDER BY t6.created_at ASC LIMIT 1)
+                ) as teacher_name,
+                COALESCE(
+                    (
+                        SELECT COUNT(DISTINCT en.student_id)
+                        FROM enrollments en
+                        JOIN students s ON s.id = en.student_id
+                        WHERE en.class_id = a.class_id
+                          AND (en.status ILIKE 'active' OR en.status IS NULL)
+                          AND (s.is_active = true OR s.is_active IS NULL)
+                          AND (s.status ILIKE 'active' OR s.status IS NULL)
+                          AND s.deleted_at IS NULL
+                    ), 0
+                )::bigint as total_students,
+                COALESCE(
+                    (
+                        SELECT COUNT(DISTINCT sub.student_id)
+                        FROM assignment_submissions sub
+                        WHERE sub.assignment_id = a.id
+                          AND sub.status != 'unsubmitted'
+                    ), 0
+                )::bigint as submitted_count,
+                COALESCE(
+                    (
+                        SELECT COUNT(DISTINCT sub.student_id)
+                        FROM assignment_submissions sub
+                        WHERE sub.assignment_id = a.id
+                          AND sub.status = 'graded'
+                    ), 0
+                )::bigint as graded_count,
+                COALESCE(
+                    (
+                        SELECT COUNT(DISTINCT sub.student_id)
+                        FROM assignment_submissions sub
+                        WHERE sub.assignment_id = a.id
+                          AND sub.status IN ('submitted', 'late', 'grading')
+                    ), 0
+                )::bigint as ungraded_count
         FROM assignments a
         LEFT JOIN classes c ON c.id = a.class_id
         LEFT JOIN subjects sub ON sub.id = a.subject_id
@@ -1160,6 +1243,9 @@ async fn get_by_id(
                 total_students: r.try_get::<Option<i64>, _>("total_students").ok().flatten(),
                 submitted_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
                 submission_count: r.try_get::<Option<i64>, _>("submitted_count").ok().flatten(),
+                graded_count: r.try_get::<Option<i64>, _>("graded_count").ok().flatten(),
+                ungraded_count: r.try_get::<Option<i64>, _>("ungraded_count").ok().flatten(),
+                is_past_due: r.try_get::<bool, _>("is_past_due").unwrap_or(false),
                 assessment_category: r.try_get::<Option<String>, _>("assessment_category").ok().flatten(),
                 has_game_questions: questions.iter().any(|q| is_interactive_game_type(&q.question_type)),
                 questions,
@@ -1561,7 +1647,21 @@ async fn submit(
     })?;
 
     let assignment = sqlx::query(
-        "SELECT tenant_id, class_id, teacher_id, created_by FROM assignments WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL"
+        r#"
+        SELECT
+            a.tenant_id,
+            a.class_id,
+            a.teacher_id,
+            a.created_by,
+            COALESCE(a.title, 'Tugas') AS title,
+            (a.due_at IS NOT NULL AND a.due_at <= NOW()) AS is_past_due,
+            c.name AS class_name,
+            COALESCE(t.user_id, a.created_by) AS teacher_user_id
+        FROM assignments a
+        LEFT JOIN classes c ON c.id = a.class_id
+        LEFT JOIN teachers t ON t.id = a.teacher_id
+        WHERE a.id = $1 AND a.tenant_id = $2 AND a.deleted_at IS NULL
+        "#,
     )
     .bind(id)
     .bind(req_ctx.tenant_id)
@@ -1589,6 +1689,11 @@ async fn submit(
     let assignment_class_id: Option<Uuid> = assignment.get("class_id");
     let assignment_teacher_id: Option<Uuid> = assignment.get("teacher_id");
     let assignment_created_by: Option<Uuid> = assignment.get("created_by");
+    let assignment_title: String = assignment.get("title");
+    let assignment_is_past_due: bool = assignment.try_get("is_past_due").unwrap_or(false);
+    let assignment_class_name: Option<String> = assignment.try_get("class_name").ok().flatten();
+    let assignment_teacher_user_id: Option<Uuid> =
+        assignment.try_get("teacher_user_id").ok().flatten();
 
     // Verify student belongs to the class of this assignment
     crate::authorization_helpers::AuthorizationScope::verify_learning_resource_access(
@@ -1782,7 +1887,102 @@ async fn submit(
         .await;
     }
 
+    let needs_manual_grading = final_submission.status != "graded";
+    let submission_id = final_submission.id;
+    let submission_student_id = final_submission.student_id;
+    let submission_status = final_submission.status.clone();
+
     let mut resp = SubmissionResponse::from(final_submission);
+
+    if needs_manual_grading {
+        if let Some(teacher_uid) = assignment_teacher_user_id.filter(|uid| *uid != actor_id) {
+            let student_name = sqlx::query_scalar::<_, String>(
+                r#"
+                SELECT COALESCE(NULLIF(TRIM(u.full_name), ''), 'Warga Belajar')
+                FROM users u
+                LEFT JOIN students s ON s.user_id = u.id
+                WHERE s.id = $1 OR u.id = $2
+                ORDER BY (s.id = $1) DESC
+                LIMIT 1
+                "#,
+            )
+            .bind(submission_student_id)
+            .bind(actor_id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "Warga Belajar".to_string());
+
+            let ungraded_total: i64 = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM assignment_submissions WHERE assignment_id = $1 AND status IN ('submitted', 'late', 'grading')",
+            )
+            .bind(id)
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap_or(1)
+            .max(1);
+
+            let class_label = assignment_class_name
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or("Kelas Anda");
+            let status_note = if submission_status == "late" {
+                " (terlambat)"
+            } else {
+                ""
+            };
+            let notif_title = if assignment_is_past_due {
+                format!("⚠️ Tugas Lewat Tenggat Siap Dinilai: {}", assignment_title)
+            } else {
+                format!("📝 Tugas Baru Siap Dinilai: {}", assignment_title)
+            };
+            let notif_body = format!(
+                "{}{} dari {} telah mengumpulkan \"{}\". Total {} jawaban menunggu penilaian Anda.",
+                student_name, status_note, class_label, assignment_title, ungraded_total
+            );
+            let priority_label = if assignment_is_past_due { "HIGH" } else { "NORMAL" };
+
+            if let Ok(res) = sqlx::query(
+                r#"
+                INSERT INTO notifications (
+                    id, tenant_id, user_id, title, body, notification_type, channel,
+                    reference_type, reference_id, is_read, dedup_key, scheduled_at, is_urgent, priority, created_at
+                )
+                VALUES (
+                    $1, $2, $3, $4, $5, 'GRADING_WARNING', 'in_app',
+                    'assignment', $6, false,
+                    CONCAT('SUB_READY:', $7::text, ':', to_char(NOW() AT TIME ZONE 'Asia/Jakarta', 'YYYYMMDDHH24')),
+                    NOW(), $8, $9, NOW()
+                )
+                ON CONFLICT (tenant_id, dedup_key) WHERE dedup_key IS NOT NULL DO NOTHING
+                "#,
+            )
+            .bind(Uuid::now_v7())
+            .bind(req_ctx.tenant_id)
+            .bind(teacher_uid)
+            .bind(&notif_title)
+            .bind(&notif_body)
+            .bind(id)
+            .bind(submission_id)
+            .bind(assignment_is_past_due)
+            .bind(priority_label)
+            .execute(&ctx.pool)
+            .await
+            {
+                if res.rows_affected() > 0 {
+                    crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                        req_ctx.tenant_id,
+                        notif_title,
+                        notif_body,
+                        crate::infrastructure::fcm::FcmCategory::Assignment,
+                        id,
+                        crate::infrastructure::fcm::FcmTarget::User(teacher_uid),
+                    );
+                }
+            }
+        }
+    }
 
     let answer_rows = sqlx::query(
         r#"

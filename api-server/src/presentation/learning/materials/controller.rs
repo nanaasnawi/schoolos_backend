@@ -534,6 +534,7 @@ async fn create(
                 created_at: r.get("created_at"),
                 updated_at: r.get("updated_at"),
                 is_completed: None,
+                progress_percent: None,
                 completed_count: Some(0),
                 teacher_name: r.get("teacher_name"),
                 teacher_id: r.get("teacher_id"),
@@ -723,6 +724,7 @@ async fn list(
                     created_at: r.get("created_at"),
                     updated_at: r.get("updated_at"),
                     is_completed: None,
+                    progress_percent: None,
                     completed_count: r.get("completed_count"),
                     teacher_name: r.get("teacher_name"),
                     teacher_id: r.get("teacher_id"),
@@ -762,7 +764,12 @@ async fn list(
                 COALESCE(s.name, lb.subject_name, t.subject, 'Umum') as subject_name,
                 m.start_page, m.end_page,
                 m.session_id, m.release_at,
-                (smc.id IS NOT NULL) as is_completed
+                (smc.id IS NOT NULL) as is_completed,
+                CASE
+                    WHEN smc.id IS NOT NULL OR COALESCE(rp.is_completed, false) = true THEN 100
+                    WHEN rp.id IS NOT NULL THEN LEAST(95, GREATEST(10, ROUND((rp.current_page::float8 / GREATEST(1, COALESCE(m.end_page, 20) - COALESCE(m.start_page, 1) + 1)::float8) * 100.0))::int)
+                    ELSE NULL
+                END as progress_percent
             FROM learning_materials m
             LEFT JOIN classes c ON c.id = m.class_id
             LEFT JOIN subjects s ON s.id = m.subject_id
@@ -773,6 +780,9 @@ async fn list(
             LEFT JOIN student_material_completions smc 
                 ON smc.material_id = m.id 
                 AND smc.student_id IN (SELECT id FROM students WHERE user_id = $2 OR id = $2)
+            LEFT JOIN reading_progress rp
+                ON rp.material_id = m.id
+                AND rp.student_id IN (SELECT id FROM students WHERE user_id = $2 OR id = $2)
             WHERE m.tenant_id = $1 
               AND m.deleted_at IS NULL
               AND m.is_active = true
@@ -837,6 +847,7 @@ async fn list(
                     created_at: r.get("created_at"),
                     updated_at: r.get("updated_at"),
                     is_completed: Some(r.get("is_completed")),
+                    progress_percent: r.try_get::<Option<i32>, _>("progress_percent").ok().flatten(),
                     completed_count: None,
                     teacher_name: r.get("teacher_name"),
                     teacher_id: r.get("teacher_id"),
@@ -931,6 +942,7 @@ async fn list(
                     created_at: r.get("created_at"),
                     updated_at: r.get("updated_at"),
                     is_completed: None,
+                    progress_percent: None,
                     completed_count: r.get("completed_count"),
                     teacher_name: r.get("teacher_name"),
                     teacher_id: r.get("teacher_id"),
@@ -1194,6 +1206,7 @@ async fn get_by_id(
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         is_completed,
+        progress_percent: None,
         completed_count,
         teacher_name: row.get("teacher_name"),
         teacher_id: row.get("teacher_id"),

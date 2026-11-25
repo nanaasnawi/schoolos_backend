@@ -1002,7 +1002,7 @@ async fn calculate_student_study_tracker(
             en.class_id
         FROM students s
         LEFT JOIN users u ON u.id = s.user_id
-        LEFT JOIN enrollments en ON en.student_id = s.id AND (en.status = 'Active' OR en.status = 'ACTIVE')
+        LEFT JOIN enrollments en ON en.student_id = s.id AND (en.status ILIKE 'active' OR en.status IS NULL)
         WHERE s.id = $1 AND s.tenant_id = $2
         LIMIT 1
         "#,
@@ -1012,7 +1012,7 @@ async fn calculate_student_study_tracker(
     .fetch_optional(&ctx.pool)
     .await?;
 
-    let (student_name, class_id) = match student_info {
+    let (student_name, _primary_class_id) = match student_info {
         Some(row) => (
             row.get::<String, _>("student_name"),
             row.get::<Option<Uuid>, _>("class_id"),
@@ -1038,17 +1038,20 @@ async fn calculate_student_study_tracker(
             lm.title,
             COALESCE(lm.material_type, 'DOCUMENT') as sub_type,
             COALESCE(s.name, 'Mata Pelajaran') as subject_name,
-            to_char(smc.completed_at AT TIME ZONE 'Asia/Jakarta', 'DD Mon YYYY, HH24:MI') as date_str,
-            to_char(smc.completed_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso
+            to_char(COALESCE(smc.completed_at, smc.created_at) AT TIME ZONE 'Asia/Jakarta', 'DD Mon YYYY, HH24:MI') as date_str,
+            to_char(COALESCE(smc.completed_at, smc.created_at), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso
         FROM student_material_completions smc
         JOIN learning_materials lm ON lm.id = smc.material_id
         LEFT JOIN subjects s ON s.id = lm.subject_id
         WHERE smc.student_id = $1
-        ORDER BY smc.completed_at DESC
-        LIMIT 15
+          AND lm.tenant_id = $2
+          AND lm.deleted_at IS NULL
+        ORDER BY COALESCE(smc.completed_at, smc.created_at) DESC
+        LIMIT 25
         "#,
     )
     .bind(student_id)
+    .bind(tenant_id)
     .fetch_all(&ctx.pool)
     .await?;
 
@@ -1087,12 +1090,16 @@ async fn calculate_student_study_tracker(
         FROM quiz_attempts qa
         JOIN quizzes q ON q.id = qa.quiz_id
         LEFT JOIN subjects s ON s.id = q.subject_id
-        WHERE qa.student_id = $1 AND qa.status = 'completed'
-        ORDER BY qa.completed_at DESC
-        LIMIT 15
+        WHERE qa.student_id = $1
+          AND q.tenant_id = $2
+          AND q.deleted_at IS NULL
+          AND qa.status = 'completed'
+        ORDER BY COALESCE(qa.completed_at, qa.updated_at) DESC NULLS LAST
+        LIMIT 25
         "#,
     )
     .bind(student_id)
+    .bind(tenant_id)
     .fetch_all(&ctx.pool)
     .await?;
 
@@ -1139,12 +1146,16 @@ async fn calculate_student_study_tracker(
         FROM assignment_submissions asb
         JOIN assignments a ON a.id = asb.assignment_id
         LEFT JOIN subjects s ON s.id = a.subject_id
-        WHERE asb.student_id = $1 AND asb.status IN ('submitted', 'graded')
-        ORDER BY asb.submitted_at DESC
-        LIMIT 15
+        WHERE asb.student_id = $1
+          AND a.tenant_id = $2
+          AND a.deleted_at IS NULL
+          AND asb.status IN ('submitted', 'graded')
+        ORDER BY COALESCE(asb.submitted_at, asb.created_at) DESC NULLS LAST
+        LIMIT 25
         "#,
     )
     .bind(student_id)
+    .bind(tenant_id)
     .fetch_all(&ctx.pool)
     .await?;
 
@@ -1184,11 +1195,11 @@ async fn calculate_student_study_tracker(
     history_items.sort_by(|a, b| b.date_iso.cmp(&a.date_iso));
 
     // ─────────────────────────────────────────────────────────────────────────────
-    // 2. TERLEWAT / PERLU DIKEJAR (Menampilkan semua materi, tugas, dan kuis yang belum tuntas, baik yang lalu maupun yang sekarang)
+    // 2. TERLEWAT (Materi sebelum hari ini, tugas lewat tenggat, kuis kedaluwarsa, & sesi tidak hadir)
     // ─────────────────────────────────────────────────────────────────────────────
     let mut missed_items: Vec<TrackerItem> = Vec::new();
 
-    // A. Unopened Materials (semua yang lalu dan yang sekarang)
+    // A. Unopened Materials released BEFORE today WIB
     let unread_mat_rows = sqlx::query(
         r#"
         SELECT 
@@ -1196,29 +1207,42 @@ async fn calculate_student_study_tracker(
             lm.title,
             COALESCE(lm.material_type, 'DOCUMENT') as sub_type,
             COALESCE(s.name, 'Mata Pelajaran') as subject_name,
-            to_char(lm.created_at AT TIME ZONE 'Asia/Jakarta', 'DD Mon YYYY') as date_str,
-            to_char(lm.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso
+            to_char(COALESCE(lm.release_at, lm.created_at) AT TIME ZONE 'Asia/Jakarta', 'DD Mon') as date_str,
+            to_char(COALESCE(lm.release_at, lm.created_at), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso
         FROM learning_materials lm
         LEFT JOIN subjects s ON s.id = lm.subject_id
         WHERE lm.tenant_id = $1 
           AND lm.deleted_at IS NULL 
           AND lm.is_active = true
-          AND (lm.class_id IS NULL OR lm.class_id = $2)
+          AND (lm.release_at IS NULL OR lm.release_at <= NOW())
+          AND (
+              lm.visibility = 'published'
+              OR lm.visibility = 'active'
+              OR (lm.release_at IS NOT NULL AND lm.release_at <= NOW())
+          )
+          AND (
+              lm.class_id IS NULL
+              OR lm.class_id IN (
+                  SELECT en.class_id FROM enrollments en
+                  WHERE en.student_id = $2 AND (en.status ILIKE 'active' OR en.status IS NULL)
+              )
+          )
+          AND (COALESCE(lm.release_at, lm.created_at) AT TIME ZONE 'Asia/Jakarta')::date < $3::date
           AND NOT EXISTS (
               SELECT 1 FROM student_material_completions smc 
-              WHERE smc.material_id = lm.id AND smc.student_id = $3
+              WHERE smc.material_id = lm.id AND smc.student_id = $2
           )
           AND NOT EXISTS (
               SELECT 1 FROM reading_progress rp 
-              WHERE rp.material_id = lm.id AND rp.student_id = $3
+              WHERE rp.material_id = lm.id AND rp.student_id = $2
           )
-        ORDER BY lm.created_at DESC
-        LIMIT 20
+        ORDER BY COALESCE(lm.release_at, lm.created_at) DESC
+        LIMIT 25
         "#,
     )
     .bind(tenant_id)
-    .bind(class_id)
     .bind(student_id)
+    .bind(&today_date_str)
     .fetch_all(&ctx.pool)
     .await?;
 
@@ -1234,15 +1258,15 @@ async fn calculate_student_study_tracker(
             progress_percent: Some(0),
             score: None,
             max_score: None,
-            timestamp_label: format!("Terbit {}", r.get::<String, _>("date_str")),
+            timestamp_label: format!("Rilis • {}", r.get::<String, _>("date_str")),
             date_iso: Some(r.get("date_iso")),
             status_badge: "Belum Dibuka".to_string(),
             badge_variant: "warning".to_string(),
-            reason_note: Some("Materi pembelajaran mandiri belum pernah kamu buka.".to_string()),
+            reason_note: Some("Materi sebelum hari ini belum pernah kamu buka. Klik untuk membaca modul.".to_string()),
         });
     }
 
-    // B. Overdue or unsubmitted assignments (semua yang lalu dan yang sekarang)
+    // B. Strictly overdue unsubmitted assignments (due_at < NOW())
     let overdue_assign_rows = sqlx::query(
         r#"
         SELECT 
@@ -1250,34 +1274,42 @@ async fn calculate_student_study_tracker(
             a.title,
             COALESCE(a.assignment_type, 'TUGAS') as sub_type,
             COALESCE(s.name, 'Mata Pelajaran') as subject_name,
-            to_char(COALESCE(a.due_at, a.created_at) AT TIME ZONE 'Asia/Jakarta', 'DD Mon YYYY, HH24:MI') as date_str,
-            to_char(COALESCE(a.due_at, a.created_at), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso,
-            (a.due_at IS NOT NULL AND a.due_at < NOW()) as is_overdue
+            to_char(a.due_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') as date_str,
+            to_char(a.due_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso
         FROM assignments a
         LEFT JOIN subjects s ON s.id = a.subject_id
         WHERE a.tenant_id = $1 
           AND a.deleted_at IS NULL 
           AND a.is_active = true
-          AND (a.class_id IS NULL OR a.class_id = $2)
+          AND (a.release_at IS NULL OR a.release_at <= NOW())
+          AND (
+              a.status IN ('published', 'active', 'closed')
+              OR (a.release_at IS NOT NULL AND a.release_at <= NOW())
+          )
+          AND (
+              a.class_id IS NULL
+              OR a.class_id IN (
+                  SELECT en.class_id FROM enrollments en
+                  WHERE en.student_id = $2 AND (en.status ILIKE 'active' OR en.status IS NULL)
+              )
+          )
+          AND a.due_at IS NOT NULL
+          AND a.due_at < NOW()
           AND NOT EXISTS (
               SELECT 1 FROM assignment_submissions asb 
-              WHERE asb.assignment_id = a.id AND asb.student_id = $3 AND asb.status IN ('submitted', 'graded', 'returned')
+              WHERE asb.assignment_id = a.id AND asb.student_id = $2 AND asb.status IN ('submitted', 'graded', 'returned', 'draft')
           )
-        ORDER BY (a.due_at IS NOT NULL AND a.due_at < NOW()) DESC, a.due_at ASC NULLS LAST, a.created_at DESC
+        ORDER BY a.due_at DESC
         LIMIT 25
         "#,
     )
     .bind(tenant_id)
-    .bind(class_id)
     .bind(student_id)
     .fetch_all(&ctx.pool)
     .await?;
 
     for r in overdue_assign_rows {
         let id: String = r.get("id");
-        let is_overdue: bool = r.get("is_overdue");
-        let badge = if is_overdue { "Lewat Tenggat" } else { "Belum Dikerjakan" };
-        let variant = if is_overdue { "danger" } else { "warning" };
         missed_items.push(TrackerItem {
             action_url: format!("/student/assignments/{}", id),
             id,
@@ -1290,13 +1322,13 @@ async fn calculate_student_study_tracker(
             max_score: None,
             timestamp_label: format!("Tenggat: {}", r.get::<String, _>("date_str")),
             date_iso: Some(r.get("date_iso")),
-            status_badge: badge.to_string(),
-            badge_variant: variant.to_string(),
-            reason_note: Some("Tugas belum dikumpulkan. Segera selesaikan dan serahkan lembar jawaban.".to_string()),
+            status_badge: "Lewat Tenggat".to_string(),
+            badge_variant: "danger".to_string(),
+            reason_note: Some("Tenggat waktu pengumpulan telah lewat. Segera kerjakan dan serahkan kepada guru.".to_string()),
         });
     }
 
-    // C. Missed / Unattempted Quizzes (semua yang lalu dan yang sekarang)
+    // C. Expired or past unattempted quizzes
     let missed_quiz_rows = sqlx::query(
         r#"
         SELECT 
@@ -1304,25 +1336,54 @@ async fn calculate_student_study_tracker(
             q.title,
             COALESCE(q.exam_mode, 'QUIZ') as sub_type,
             COALESCE(s.name, 'Mata Pelajaran') as subject_name,
-            to_char(q.created_at AT TIME ZONE 'Asia/Jakarta', 'DD Mon YYYY') as date_str,
-            to_char(q.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso
+            to_char(COALESCE(q.end_at, q.release_at, q.start_at, q.created_at) AT TIME ZONE 'Asia/Jakarta', 'DD Mon') as date_str,
+            to_char(COALESCE(q.end_at, q.release_at, q.start_at, q.created_at), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso
         FROM quizzes q
         LEFT JOIN subjects s ON s.id = q.subject_id
         WHERE q.tenant_id = $1 
           AND q.deleted_at IS NULL 
-          AND q.is_active = true
-          AND (q.class_id IS NULL OR q.class_id = $2)
+          AND (q.is_active = true OR LOWER(COALESCE(q.status, '')) = 'closed')
+          AND (q.release_at IS NULL OR q.release_at <= NOW())
+          AND (
+              q.status IN ('published', 'active', 'scheduled', 'closed')
+              OR (COALESCE(q.release_at, q.start_at) IS NOT NULL AND COALESCE(q.release_at, q.start_at) <= NOW())
+          )
+          AND (
+              q.class_id IN (
+                  SELECT en.class_id FROM enrollments en
+                  WHERE en.student_id = $2 AND (en.status ILIKE 'active' OR en.status IS NULL)
+              )
+              OR (
+                  q.class_id IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM classes other_c
+                      WHERE other_c.tenant_id = q.tenant_id
+                        AND (q.description ILIKE '%' || other_c.name || '%' OR q.title ILIKE '%' || other_c.name || '%')
+                        AND other_c.id NOT IN (
+                            SELECT en.class_id FROM enrollments en
+                            WHERE en.student_id = $2 AND (en.status ILIKE 'active' OR en.status IS NULL)
+                        )
+                  )
+              )
+          )
+          AND (
+              (q.end_at IS NOT NULL AND q.end_at < NOW())
+              OR (
+                  q.end_at IS NULL
+                  AND (COALESCE(q.release_at, q.start_at, q.created_at) AT TIME ZONE 'Asia/Jakarta')::date < $3::date
+              )
+          )
           AND NOT EXISTS (
               SELECT 1 FROM quiz_attempts qa 
-              WHERE qa.quiz_id = q.id AND qa.student_id = $3
+              WHERE qa.quiz_id = q.id AND qa.student_id = $2
           )
-        ORDER BY q.created_at DESC
+        ORDER BY COALESCE(q.end_at, q.release_at, q.start_at, q.created_at) DESC
         LIMIT 20
         "#,
     )
     .bind(tenant_id)
-    .bind(class_id)
     .bind(student_id)
+    .bind(&today_date_str)
     .fetch_all(&ctx.pool)
     .await?;
 
@@ -1338,11 +1399,11 @@ async fn calculate_student_study_tracker(
             progress_percent: Some(0),
             score: None,
             max_score: None,
-            timestamp_label: format!("Jadwal: {}", r.get::<String, _>("date_str")),
+            timestamp_label: format!("Jadwal • {}", r.get::<String, _>("date_str")),
             date_iso: Some(r.get("date_iso")),
             status_badge: "Kuis Terlewat".to_string(),
             badge_variant: "danger".to_string(),
-            reason_note: Some("Kuis telah dirilis sebelum hari ini namun kamu belum mengikutinya.".to_string()),
+            reason_note: Some("Kuis telah lewat jadwal atau sebelum hari ini namun belum kamu kerjakan.".to_string()),
         });
     }
 
@@ -1351,28 +1412,27 @@ async fn calculate_student_study_tracker(
         r#"
         SELECT 
             ls.id::text as id,
-            ls.title,
+            COALESCE(NULLIF(TRIM(s.name), ''), NULLIF(TRIM(ls.notes), ''), 'Sesi Pembelajaran') as title,
             'SESSION' as sub_type,
             COALESCE(s.name, 'Mata Pelajaran') as subject_name,
             sa.status as attendance_status,
-            to_char(ls.scheduled_at AT TIME ZONE 'Asia/Jakarta', 'DD Mon YYYY, HH24:MI') as date_str,
-            to_char(ls.scheduled_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso
+            to_char(COALESCE(ls.scheduled_at, ls.session_date::timestamp AT TIME ZONE 'Asia/Jakarta') AT TIME ZONE 'Asia/Jakarta', 'DD Mon YYYY, HH24:MI') as date_str,
+            to_char(COALESCE(ls.scheduled_at, ls.session_date::timestamp AT TIME ZONE 'Asia/Jakarta'), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso
         FROM learning_sessions ls
         JOIN session_attendances sa ON sa.session_id = ls.id
         LEFT JOIN subjects s ON s.id = ls.subject_id
         WHERE ls.tenant_id = $1 
           AND ls.deleted_at IS NULL
-          AND sa.student_id = $4
+          AND sa.student_id = $2
           AND sa.status IN ('absent', 'sick', 'excused')
-          AND (ls.scheduled_at AT TIME ZONE 'Asia/Jakarta')::date < $3::date
-        ORDER BY ls.scheduled_at DESC
+          AND COALESCE(ls.session_date, (ls.scheduled_at AT TIME ZONE 'Asia/Jakarta')::date) < $3::date
+        ORDER BY COALESCE(ls.session_date, (ls.scheduled_at AT TIME ZONE 'Asia/Jakarta')::date) DESC, ls.scheduled_at DESC NULLS LAST
         LIMIT 10
         "#,
     )
     .bind(tenant_id)
-    .bind(class_id)
-    .bind(&today_date_str)
     .bind(student_id)
+    .bind(&today_date_str)
     .fetch_all(&ctx.pool)
     .await?;
 
@@ -1380,21 +1440,21 @@ async fn calculate_student_study_tracker(
         let id: String = r.get("id");
         let att_status: String = r.get("attendance_status");
         let (badge, note) = match att_status.as_str() {
-            "sick" => ("Izin Sakit", "Kamu tercatat izin sakit pada sesi tatap muka ini. Cek materi kelas agar tidak tertinggal."),
+            "sick" => ("Izin Sakit", "Kamu tercatat izin sakit pada sesi pembelajaran ini. Cek materi kelas agar tidak tertinggal."),
             "excused" => ("Izin Tercatat", "Kamu tercatat izin pada sesi ini. Cek rangkuman materi dari guru."),
-            _ => ("Tidak Hadir", "Kamu tidak hadir pada sesi tatap muka ini. Silakan pelajari materi mandiri."),
+            _ => ("Tidak Hadir", "Kamu tidak hadir pada sesi pembelajaran ini. Silakan pelajari materi mandiri."),
         };
         missed_items.push(TrackerItem {
             action_url: "/student/materials".to_string(),
             id,
             title: r.get("title"),
             item_type: "SESSION".to_string(),
-            sub_type: Some("TATAP MUKA".to_string()),
+            sub_type: Some("SESI KELAS".to_string()),
             subject_name: r.get("subject_name"),
             progress_percent: Some(0),
             score: None,
             max_score: None,
-            timestamp_label: format!("Sesi: {}", r.get::<String, _>("date_str")),
+            timestamp_label: format!("Sesi • {}", r.get::<String, _>("date_str")),
             date_iso: Some(r.get("date_iso")),
             status_badge: badge.to_string(),
             badge_variant: "warning".to_string(),
@@ -1402,8 +1462,10 @@ async fn calculate_student_study_tracker(
         });
     }
 
+    missed_items.sort_by(|a, b| b.date_iso.cmp(&a.date_iso));
+
     // ─────────────────────────────────────────────────────────────────────────────
-    // 3. BELUM SELESAI (Sebagian dibaca, revisi guru, aktivitas berjalan)
+    // 3. BELUM SELESAI (Sebagian dibaca, materi hari ini, tugas aktif/revisi, & kuis aktif/berlangsung)
     // ─────────────────────────────────────────────────────────────────────────────
     let mut in_progress_items: Vec<TrackerItem> = Vec::new();
 
@@ -1416,12 +1478,14 @@ async fn calculate_student_study_tracker(
             COALESCE(lm.material_type, 'DOCUMENT') as sub_type,
             COALESCE(s.name, 'Mata Pelajaran') as subject_name,
             COALESCE(rp.current_page, 1) as current_page,
-            to_char(COALESCE(rp.last_read_at, rp.updated_at) AT TIME ZONE 'Asia/Jakarta', 'DD Mon YYYY, HH24:MI') as date_str,
+            GREATEST(1, COALESCE(lm.end_page, 20) - COALESCE(lm.start_page, 1) + 1) as total_pages,
             to_char(COALESCE(rp.last_read_at, rp.updated_at), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso
         FROM reading_progress rp
         JOIN learning_materials lm ON lm.id = rp.material_id
         LEFT JOIN subjects s ON s.id = lm.subject_id
         WHERE rp.student_id = $1 
+          AND lm.tenant_id = $2
+          AND lm.deleted_at IS NULL
           AND NOT rp.is_completed
           AND NOT EXISTS (
               SELECT 1 FROM student_material_completions smc 
@@ -1432,13 +1496,15 @@ async fn calculate_student_study_tracker(
         "#,
     )
     .bind(student_id)
+    .bind(tenant_id)
     .fetch_all(&ctx.pool)
     .await?;
 
     for r in partial_reading_rows {
         let id: String = r.get("id");
         let page: i32 = r.get("current_page");
-        let estimated_pct = ((page as f64 / 20.0) * 100.0).clamp(10.0, 90.0) as i32;
+        let total_pages: i32 = r.get("total_pages");
+        let estimated_pct = (((page as f64) / (total_pages as f64)) * 100.0).clamp(10.0, 95.0) as i32;
         in_progress_items.push(TrackerItem {
             action_url: format!("/student/materials/{}", id),
             id,
@@ -1449,7 +1515,7 @@ async fn calculate_student_study_tracker(
             progress_percent: Some(estimated_pct),
             score: None,
             max_score: None,
-            timestamp_label: format!("Dibaca • Hal. {}", page),
+            timestamp_label: format!("Dibaca • Hal. {}/{}", page, total_pages),
             date_iso: Some(r.get("date_iso")),
             status_badge: format!("Dibaca {}%", estimated_pct),
             badge_variant: "info".to_string(),
@@ -1457,34 +1523,45 @@ async fn calculate_student_study_tracker(
         });
     }
 
-    // B. Assignments needing revision (returned by teacher)
-    let returned_assign_rows = sqlx::query(
+    // B. Assignments needing revision (returned) or saved as draft
+    let returned_or_draft_assign_rows = sqlx::query(
         r#"
         SELECT 
             a.id::text as id,
             a.title,
             COALESCE(a.assignment_type, 'TUGAS') as sub_type,
             COALESCE(s.name, 'Mata Pelajaran') as subject_name,
+            asb.status as submission_status,
             asb.feedback,
-            to_char(COALESCE(asb.updated_at, asb.submitted_at) AT TIME ZONE 'Asia/Jakarta', 'DD Mon YYYY, HH24:MI') as date_str,
-            to_char(COALESCE(asb.updated_at, asb.submitted_at), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso
+            to_char(COALESCE(asb.updated_at, asb.submitted_at, asb.created_at) AT TIME ZONE 'Asia/Jakarta', 'DD Mon YYYY') as date_str,
+            to_char(COALESCE(asb.updated_at, asb.submitted_at, asb.created_at), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso
         FROM assignment_submissions asb
         JOIN assignments a ON a.id = asb.assignment_id
         LEFT JOIN subjects s ON s.id = a.subject_id
         WHERE asb.student_id = $1 
-          AND asb.status = 'returned'
-        ORDER BY asb.updated_at DESC
-        LIMIT 10
+          AND a.tenant_id = $2
+          AND a.deleted_at IS NULL
+          AND asb.status IN ('returned', 'draft')
+        ORDER BY COALESCE(asb.updated_at, asb.submitted_at, asb.created_at) DESC
+        LIMIT 15
         "#,
     )
     .bind(student_id)
+    .bind(tenant_id)
     .fetch_all(&ctx.pool)
     .await?;
 
-    for r in returned_assign_rows {
+    for r in returned_or_draft_assign_rows {
         let id: String = r.get("id");
+        let sub_status: String = r.get("submission_status");
         let fb: Option<String> = r.get("feedback");
-        let note = fb.unwrap_or_else(|| "Guru meminta tugas diperbaiki dan dikirimkan ulang.".to_string());
+        let is_revision = sub_status == "returned";
+        let note = if is_revision {
+            fb.map(|f| format!("Catatan Guru: {}", f))
+                .unwrap_or_else(|| "Guru meminta tugas diperbaiki dan dikirimkan ulang.".to_string())
+        } else {
+            "Draf jawaban tugas tersimpan dan belum dikirimkan.".to_string()
+        };
         in_progress_items.push(TrackerItem {
             action_url: format!("/student/assignments/{}", id),
             id,
@@ -1495,11 +1572,15 @@ async fn calculate_student_study_tracker(
             progress_percent: Some(50),
             score: None,
             max_score: None,
-            timestamp_label: format!("Dikembalikan • {}", r.get::<String, _>("date_str")),
+            timestamp_label: if is_revision {
+                format!("Dikembalikan • {}", r.get::<String, _>("date_str"))
+            } else {
+                format!("Draf • {}", r.get::<String, _>("date_str"))
+            },
             date_iso: Some(r.get("date_iso")),
-            status_badge: "Perlu Perbaikan".to_string(),
-            badge_variant: "danger".to_string(),
-            reason_note: Some(format!("Catatan Guru: {}", note)),
+            status_badge: if is_revision { "Perlu Perbaikan".to_string() } else { "Draf".to_string() },
+            badge_variant: if is_revision { "danger".to_string() } else { "warning".to_string() },
+            reason_note: Some(note),
         });
     }
 
@@ -1517,12 +1598,15 @@ async fn calculate_student_study_tracker(
         JOIN quizzes q ON q.id = qa.quiz_id
         LEFT JOIN subjects s ON s.id = q.subject_id
         WHERE qa.student_id = $1 
+          AND q.tenant_id = $2
+          AND q.deleted_at IS NULL
           AND qa.status = 'in_progress'
         ORDER BY qa.started_at DESC
         LIMIT 10
         "#,
     )
     .bind(student_id)
+    .bind(tenant_id)
     .fetch_all(&ctx.pool)
     .await?;
 
@@ -1546,6 +1630,214 @@ async fn calculate_student_study_tracker(
         });
     }
 
+    // D. Active unsubmitted assignments NOT yet past due
+    let active_assign_rows = sqlx::query(
+        r#"
+        SELECT 
+            a.id::text as id,
+            a.title,
+            COALESCE(a.assignment_type, 'TUGAS') as sub_type,
+            COALESCE(s.name, 'Mata Pelajaran') as subject_name,
+            (a.due_at IS NOT NULL) as has_due_at,
+            to_char(COALESCE(a.due_at, a.release_at, a.created_at) AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') as date_str,
+            to_char(COALESCE(a.due_at, a.release_at, a.created_at), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso
+        FROM assignments a
+        LEFT JOIN subjects s ON s.id = a.subject_id
+        WHERE a.tenant_id = $1 
+          AND a.deleted_at IS NULL 
+          AND a.is_active = true
+          AND (a.release_at IS NULL OR a.release_at <= NOW())
+          AND (
+              a.status IN ('published', 'active')
+              OR (a.release_at IS NOT NULL AND a.release_at <= NOW())
+          )
+          AND (
+              a.class_id IS NULL
+              OR a.class_id IN (
+                  SELECT en.class_id FROM enrollments en
+                  WHERE en.student_id = $2 AND (en.status ILIKE 'active' OR en.status IS NULL)
+              )
+          )
+          AND (a.due_at IS NULL OR a.due_at >= NOW())
+          AND NOT EXISTS (
+              SELECT 1 FROM assignment_submissions asb 
+              WHERE asb.assignment_id = a.id AND asb.student_id = $2 AND asb.status IN ('submitted', 'graded', 'returned', 'draft')
+          )
+        ORDER BY a.due_at ASC NULLS LAST, a.created_at DESC
+        LIMIT 25
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(student_id)
+    .fetch_all(&ctx.pool)
+    .await?;
+
+    for r in active_assign_rows {
+        let id: String = r.get("id");
+        let has_due_at: bool = r.get("has_due_at");
+        let date_str: String = r.get("date_str");
+        in_progress_items.push(TrackerItem {
+            action_url: format!("/student/assignments/{}", id),
+            id,
+            title: r.get("title"),
+            item_type: "ASSIGNMENT".to_string(),
+            sub_type: Some(r.get("sub_type")),
+            subject_name: r.get("subject_name"),
+            progress_percent: Some(0),
+            score: None,
+            max_score: None,
+            timestamp_label: if has_due_at { format!("Tenggat: {}", date_str) } else { "Tugas Aktif".to_string() },
+            date_iso: Some(r.get("date_iso")),
+            status_badge: "Belum Dikerjakan".to_string(),
+            badge_variant: "warning".to_string(),
+            reason_note: Some("Tugas aktif belum kamu kumpulkan. Buka untuk melihat petunjuk dan soal.".to_string()),
+        });
+    }
+
+    // E. Active unattempted quizzes still open / released today
+    let active_quiz_rows = sqlx::query(
+        r#"
+        SELECT 
+            q.id::text as id,
+            q.title,
+            COALESCE(q.exam_mode, 'QUIZ') as sub_type,
+            COALESCE(s.name, 'Mata Pelajaran') as subject_name,
+            to_char(COALESCE(q.end_at, q.release_at, q.start_at, q.created_at) AT TIME ZONE 'Asia/Jakarta', 'DD Mon') as date_str,
+            to_char(COALESCE(q.end_at, q.release_at, q.start_at, q.created_at), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso
+        FROM quizzes q
+        LEFT JOIN subjects s ON s.id = q.subject_id
+        WHERE q.tenant_id = $1 
+          AND q.deleted_at IS NULL 
+          AND q.is_active = true
+          AND (q.release_at IS NULL OR q.release_at <= NOW())
+          AND (
+              q.status IN ('published', 'active', 'scheduled')
+              OR (COALESCE(q.release_at, q.start_at) IS NOT NULL AND COALESCE(q.release_at, q.start_at) <= NOW())
+          )
+          AND (
+              q.class_id IN (
+                  SELECT en.class_id FROM enrollments en
+                  WHERE en.student_id = $2 AND (en.status ILIKE 'active' OR en.status IS NULL)
+              )
+              OR (
+                  q.class_id IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM classes other_c
+                      WHERE other_c.tenant_id = q.tenant_id
+                        AND (q.description ILIKE '%' || other_c.name || '%' OR q.title ILIKE '%' || other_c.name || '%')
+                        AND other_c.id NOT IN (
+                            SELECT en.class_id FROM enrollments en
+                            WHERE en.student_id = $2 AND (en.status ILIKE 'active' OR en.status IS NULL)
+                        )
+                  )
+              )
+          )
+          AND (q.end_at IS NULL OR q.end_at >= NOW())
+          AND (
+              q.end_at IS NOT NULL
+              OR (COALESCE(q.release_at, q.start_at, q.created_at) AT TIME ZONE 'Asia/Jakarta')::date >= $3::date
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM quiz_attempts qa 
+              WHERE qa.quiz_id = q.id AND qa.student_id = $2
+          )
+        ORDER BY COALESCE(q.end_at, q.release_at, q.start_at, q.created_at) ASC
+        LIMIT 15
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(student_id)
+    .bind(&today_date_str)
+    .fetch_all(&ctx.pool)
+    .await?;
+
+    for r in active_quiz_rows {
+        let id: String = r.get("id");
+        in_progress_items.push(TrackerItem {
+            action_url: format!("/student/quizzes/{}", id),
+            id,
+            title: r.get("title"),
+            item_type: "QUIZ".to_string(),
+            sub_type: Some(r.get("sub_type")),
+            subject_name: r.get("subject_name"),
+            progress_percent: Some(0),
+            score: None,
+            max_score: None,
+            timestamp_label: format!("Aktif • {}", r.get::<String, _>("date_str")),
+            date_iso: Some(r.get("date_iso")),
+            status_badge: "Kuis Aktif".to_string(),
+            badge_variant: "warning".to_string(),
+            reason_note: Some("Kuis evaluasi aktif tersedia untuk kamu kerjakan.".to_string()),
+        });
+    }
+
+    // F. Newly released materials from today WIB not yet opened
+    let today_mat_rows = sqlx::query(
+        r#"
+        SELECT 
+            lm.id::text as id,
+            lm.title,
+            COALESCE(lm.material_type, 'DOCUMENT') as sub_type,
+            COALESCE(s.name, 'Mata Pelajaran') as subject_name,
+            to_char(COALESCE(lm.release_at, lm.created_at) AT TIME ZONE 'Asia/Jakarta', 'DD Mon') as date_str,
+            to_char(COALESCE(lm.release_at, lm.created_at), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso
+        FROM learning_materials lm
+        LEFT JOIN subjects s ON s.id = lm.subject_id
+        WHERE lm.tenant_id = $1 
+          AND lm.deleted_at IS NULL 
+          AND lm.is_active = true
+          AND (lm.release_at IS NULL OR lm.release_at <= NOW())
+          AND (
+              lm.visibility = 'published'
+              OR lm.visibility = 'active'
+              OR (lm.release_at IS NOT NULL AND lm.release_at <= NOW())
+          )
+          AND (
+              lm.class_id IS NULL
+              OR lm.class_id IN (
+                  SELECT en.class_id FROM enrollments en
+                  WHERE en.student_id = $2 AND (en.status ILIKE 'active' OR en.status IS NULL)
+              )
+          )
+          AND (COALESCE(lm.release_at, lm.created_at) AT TIME ZONE 'Asia/Jakarta')::date >= $3::date
+          AND NOT EXISTS (
+              SELECT 1 FROM student_material_completions smc 
+              WHERE smc.material_id = lm.id AND smc.student_id = $2
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM reading_progress rp 
+              WHERE rp.material_id = lm.id AND rp.student_id = $2
+          )
+        ORDER BY COALESCE(lm.release_at, lm.created_at) DESC
+        LIMIT 15
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(student_id)
+    .bind(&today_date_str)
+    .fetch_all(&ctx.pool)
+    .await?;
+
+    for r in today_mat_rows {
+        let id: String = r.get("id");
+        in_progress_items.push(TrackerItem {
+            action_url: format!("/student/materials/{}", id),
+            id,
+            title: r.get("title"),
+            item_type: "MATERIAL".to_string(),
+            sub_type: Some(r.get("sub_type")),
+            subject_name: r.get("subject_name"),
+            progress_percent: Some(0),
+            score: None,
+            max_score: None,
+            timestamp_label: format!("Rilis Hari Ini • {}", r.get::<String, _>("date_str")),
+            date_iso: Some(r.get("date_iso")),
+            status_badge: "Materi Hari Ini".to_string(),
+            badge_variant: "info".to_string(),
+            reason_note: Some("Materi baru dirilis untuk hari ini. Buka untuk belajar & mencatat presensi.".to_string()),
+        });
+    }
+
     let history_total = history_items.len() as i32;
     let missed_total = missed_items.len() as i32;
     let in_progress_total = in_progress_items.len() as i32;
@@ -1556,21 +1848,21 @@ async fn calculate_student_study_tracker(
         history: TrackerCategory {
             key: "history".to_string(),
             title: "Riwayat Belajar".to_string(),
-            description: "Materi yang sudah tuntas kamu pelajari & hasil kuis/tugasmu".to_string(),
+            description: "Materi yang sudah tuntas kamu pelajari serta tugas dan kuis yang selesai.".to_string(),
             total_count: history_total,
             items: history_items,
         },
         missed: TrackerCategory {
             key: "missed".to_string(),
             title: "Terlewat".to_string(),
-            description: "Materi, tugas, atau kuis sebelum hari ini yang belum sempat kamu buka/ikuti".to_string(),
+            description: "Materi sebelum hari ini, tugas lewat tenggat, dan kuis/sesi yang terlewat.".to_string(),
             total_count: missed_total,
             items: missed_items,
         },
         in_progress: TrackerCategory {
             key: "in_progress".to_string(),
             title: "Belum Selesai".to_string(),
-            description: "Materi yang baru dibaca sebagian, tugas revisi guru, & aktivitas berjalan".to_string(),
+            description: "Materi hari ini atau sedang dibaca, tugas aktif/revisi guru, & kuis aktif.".to_string(),
             total_count: in_progress_total,
             items: in_progress_items,
         },

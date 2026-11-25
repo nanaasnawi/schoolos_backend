@@ -69,6 +69,215 @@ async fn close_expired_quizzes(pool: &PgPool) {
     }
 }
 
+async fn close_expired_assignments(pool: &PgPool) {
+    // Only auto-lock submissions in DB when late submissions are disallowed.
+    // Assignments with allow_late_submission=true keep accepting late student attempts while
+    // read APIs & UI mark due_at <= NOW() as expired/closed instead of "Aktif Tayang".
+    match sqlx::query(
+        r#"
+        UPDATE assignments
+        SET status = 'closed',
+            updated_at = NOW()
+        WHERE deleted_at IS NULL
+          AND due_at IS NOT NULL
+          AND due_at <= NOW()
+          AND COALESCE(allow_late_submission, false) = false
+          AND LOWER(COALESCE(status, '')) IN ('published', 'active')
+        "#,
+    )
+    .execute(pool)
+    .await
+    {
+        Ok(res) if res.rows_affected() > 0 => {
+            tracing::info!(
+                component = "scheduled_publish_worker",
+                closed_count = res.rows_affected(),
+                "Automatically transitioned past-due assignments without late submission to closed"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                component = "scheduled_publish_worker",
+                "Failed to close expired assignments: {e}"
+            );
+        }
+        _ => {}
+    }
+}
+
+async fn dispatch_ready_to_grade_assignment_warnings(pool: &PgPool) {
+    let wib_hour = (Utc::now() + Duration::hours(7)).hour();
+    if wib_hour < 6 || wib_hour >= 22 {
+        return;
+    }
+
+    let rows = match sqlx::query(
+        r#"
+        SELECT
+            a.id,
+            a.tenant_id,
+            a.title,
+            COALESCE(c.name, 'Semua Kelas') AS class_name,
+            COALESCE(NULLIF(TRIM(t.full_name), ''), ut.full_name, uc.full_name, 'Guru Pengampu') AS teacher_name,
+            COALESCE(t.user_id, a.created_by) AS teacher_user_id,
+            (
+                SELECT COUNT(DISTINCT sub.student_id)::bigint
+                FROM assignment_submissions sub
+                WHERE sub.assignment_id = a.id
+                  AND sub.status IN ('submitted', 'late', 'grading')
+            ) AS ungraded_count
+        FROM assignments a
+        LEFT JOIN classes c ON c.id = a.class_id
+        LEFT JOIN teachers t ON t.id = a.teacher_id
+        LEFT JOIN users ut ON ut.id = t.user_id
+        LEFT JOIN users uc ON uc.id = a.created_by
+        WHERE a.deleted_at IS NULL
+          AND a.due_at IS NOT NULL
+          AND a.due_at <= NOW()
+          AND (a.release_at IS NULL OR a.release_at <= NOW())
+          AND EXISTS (
+              SELECT 1 FROM assignment_submissions sub
+              WHERE sub.assignment_id = a.id
+                AND sub.status IN ('submitted', 'late', 'grading')
+          )
+        ORDER BY a.due_at DESC
+        LIMIT 30
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                component = "scheduled_publish_worker",
+                "Ready-to-grade assignment warning query failed: {e}"
+            );
+            return;
+        }
+    };
+
+    for row in rows {
+        let assignment_id: Uuid = row.get("id");
+        let tenant_id: Uuid = row.get("tenant_id");
+        let title: String = row.get("title");
+        let class_name: String = row.get("class_name");
+        let teacher_name: String = row.get("teacher_name");
+        let teacher_user_id: Option<Uuid> = row.try_get("teacher_user_id").ok().flatten();
+        let ungraded_count: i64 = row.try_get::<i64, _>("ungraded_count").unwrap_or(0);
+        if ungraded_count <= 0 {
+            continue;
+        }
+
+        // 1. Targeted warning to the assigned teacher
+        if let Some(t_uid) = teacher_user_id {
+            let dedup_key = format!("ASSIGN_READY_GRADE_{}_{}", assignment_id, t_uid);
+            let notif_title = format!("⚠️ Tugas Siap Dinilai: {}", title);
+            let notif_body = format!(
+                "Tenggat tugas kelas {} telah berakhir dan ada {} jawaban siswa menunggu penilaian.",
+                class_name, ungraded_count
+            );
+
+            if let Ok(res) = sqlx::query(
+                r#"
+                INSERT INTO notifications (
+                    id, tenant_id, user_id, title, body, notification_type, channel,
+                    reference_type, reference_id, is_read, dedup_key, scheduled_at, is_urgent, priority, created_at
+                )
+                VALUES ($1, $2, $3, $4, $5, 'GRADING_WARNING', 'in_app', 'assignment', $6, false, $7, NOW(), true, 'HIGH', NOW())
+                ON CONFLICT (tenant_id, dedup_key) WHERE dedup_key IS NOT NULL DO NOTHING
+                "#,
+            )
+            .bind(Uuid::now_v7())
+            .bind(tenant_id)
+            .bind(t_uid)
+            .bind(&notif_title)
+            .bind(&notif_body)
+            .bind(assignment_id)
+            .bind(&dedup_key)
+            .execute(pool)
+            .await
+            {
+                if res.rows_affected() > 0 {
+                    crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                        tenant_id,
+                        notif_title,
+                        notif_body,
+                        crate::infrastructure::fcm::FcmCategory::Assignment,
+                        assignment_id,
+                        crate::infrastructure::fcm::FcmTarget::User(t_uid),
+                    );
+                }
+            }
+        }
+
+        // 2. Targeted supervision warning to Principal(s) in the same tenant
+        let principal_uids = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT DISTINCT u.id
+            FROM users u
+            JOIN user_roles ur ON ur.user_id = u.id
+            JOIN roles r ON r.id = ur.role_id
+            WHERE u.tenant_id = $1
+              AND u.is_active = true
+              AND (
+                  LOWER(r.name) LIKE '%kepala%'
+                  OR LOWER(r.name) LIKE '%principal%'
+                  OR LOWER(r.name) LIKE '%headmaster%'
+              )
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+        for p_uid in principal_uids {
+            if Some(p_uid) == teacher_user_id {
+                continue;
+            }
+            let dedup_key = format!("PRINCIPAL_GRADE_WARN_{}_{}", assignment_id, p_uid);
+            let exec_title = format!("⚠️ Supervisi Tugas Siap Dinilai ({})", class_name);
+            let exec_body = format!(
+                "{} ({}) oleh {} telah lewat tenggat dengan {} jawaban menunggu koreksi.",
+                title, class_name, teacher_name, ungraded_count
+            );
+
+            if let Ok(res) = sqlx::query(
+                r#"
+                INSERT INTO notifications (
+                    id, tenant_id, user_id, title, body, notification_type, channel,
+                    reference_type, reference_id, is_read, dedup_key, scheduled_at, is_urgent, priority, created_at
+                )
+                VALUES ($1, $2, $3, $4, $5, 'GRADING_WARNING', 'in_app', 'assignment', $6, false, $7, NOW(), true, 'HIGH', NOW())
+                ON CONFLICT (tenant_id, dedup_key) WHERE dedup_key IS NOT NULL DO NOTHING
+                "#,
+            )
+            .bind(Uuid::now_v7())
+            .bind(tenant_id)
+            .bind(p_uid)
+            .bind(&exec_title)
+            .bind(&exec_body)
+            .bind(assignment_id)
+            .bind(&dedup_key)
+            .execute(pool)
+            .await
+            {
+                if res.rows_affected() > 0 {
+                    crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                        tenant_id,
+                        exec_title,
+                        exec_body,
+                        crate::infrastructure::fcm::FcmCategory::Assignment,
+                        assignment_id,
+                        crate::infrastructure::fcm::FcmTarget::User(p_uid),
+                    );
+                }
+            }
+        }
+    }
+}
+
 async fn dispatch_upcoming_exam_5min_notifications(pool: &PgPool) {
     ensure_exam_pre_start_dispatch_schema(pool).await;
 
@@ -497,6 +706,8 @@ impl ScheduledPublishWorker {
 
     async fn run_publish_cycle_inner(pool: &PgPool) -> Result<(), sqlx::Error> {
         close_expired_quizzes(pool).await;
+        close_expired_assignments(pool).await;
+        dispatch_ready_to_grade_assignment_warnings(pool).await;
         dispatch_upcoming_exam_5min_notifications(pool).await;
         // ── 1. Publish & Notify Scheduled Learning Materials ──
         let pending_materials = sqlx::query(

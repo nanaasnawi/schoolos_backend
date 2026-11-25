@@ -26,6 +26,8 @@ pub struct LearningMaterialResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_completed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress_percent: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_count: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub teacher_name: Option<String>,
@@ -117,6 +119,7 @@ impl From<LearningMaterial> for LearningMaterialResponse {
             created_at: m.created_at,
             updated_at: m.updated_at,
             is_completed: None,
+            progress_percent: None,
             completed_count: None,
             teacher_name: None,
             teacher_id: None,

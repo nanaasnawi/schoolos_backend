@@ -1080,6 +1080,21 @@ async fn update_reading_progress(
         )
     })?;
 
+    if payload.is_completed {
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO student_material_completions (id, tenant_id, student_id, material_id, completed_at, created_at, updated_at)
+            VALUES (gen_random_uuid(), $1, $2, $3, NOW(), NOW(), NOW())
+            ON CONFLICT (student_id, material_id) DO NOTHING
+            "#,
+        )
+        .bind(req_ctx.tenant_id)
+        .bind(student_id)
+        .bind(payload.material_id)
+        .execute(&ctx.pool)
+        .await;
+    }
+
     let _ = crate::presentation::learning::attendance_automation::record_online_material_presence(
         &ctx.pool,
         req_ctx.tenant_id,

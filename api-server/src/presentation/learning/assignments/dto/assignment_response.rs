@@ -41,6 +41,12 @@ pub struct AssignmentResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub submission_count: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub graded_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ungraded_count: Option<i64>,
+    #[serde(default)]
+    pub is_past_due: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub assessment_category: Option<String>,
     #[serde(default)]
     pub has_game_questions: bool,
@@ -74,6 +80,9 @@ impl From<Assignment> for AssignmentResponse {
             total_students: None,
             submitted_count: None,
             submission_count: None,
+            graded_count: None,
+            ungraded_count: None,
+            is_past_due: a.due_at.is_some_and(|d| d <= Utc::now()),
             assessment_category: None,
             has_game_questions: false,
             questions: Vec::new(),
