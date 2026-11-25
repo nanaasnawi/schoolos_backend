@@ -33,14 +33,14 @@ pub fn auth_routes(context: ApplicationContext) -> Router<ApplicationContext> {
         .route("/qr-login", post(qr_login))
         .route("/refresh", post(refresh))
         .route("/logout", post(logout))
-        .route("/register", post(register))
         .route("/avatar/{id}", axum::routing::get(get_user_avatar))
-        .route(
-            "/documents/{id}/file",
-            axum::routing::get(super::super::people::students::documents::stream_student_document_file),
-        )
         .merge(
             Router::new()
+                .route("/register", post(register))
+                .route(
+                    "/documents/{id}/file",
+                    axum::routing::get(super::super::people::students::documents::stream_student_document_file),
+                )
                 .route("/me", axum::routing::get(get_me))
                 .route("/profile", axum::routing::put(update_profile))
                 .route(
@@ -56,6 +56,7 @@ pub fn auth_routes(context: ApplicationContext) -> Router<ApplicationContext> {
                 )
                 .route("/qr-tokens/users", axum::routing::get(list_users_qr_status))
                 .route("/qr-tokens/my-badge", axum::routing::get(get_my_qr_badge))
+                .route("/firebase-token", axum::routing::get(get_firebase_custom_token))
                 .layer(middleware::from_fn_with_state(context, auth_middleware)),
         )
 }
@@ -79,6 +80,67 @@ pub fn auth_routes(context: ApplicationContext) -> Router<ApplicationContext> {
     ),
     tag = "Auth"
 )]
+async fn issue_tracked_refresh_token(
+    pool: &sqlx::PgPool,
+    jwt_secret: &str,
+    user_id: uuid::Uuid,
+    tenant_id: uuid::Uuid,
+    email: Option<String>,
+    full_name: Option<String>,
+    role: Option<String>,
+    family_id: Option<uuid::Uuid>,
+    parent_jti: Option<uuid::Uuid>,
+) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    let jti = uuid::Uuid::now_v7();
+    let fam = family_id.unwrap_or_else(uuid::Uuid::now_v7);
+    let expires_at = chrono::Utc::now() + chrono::Duration::days(90);
+
+    let refresh_claims = school_core::identity::application::auth::authenticate_user::Claims {
+        sub: user_id.to_string(),
+        tenant_id: tenant_id.to_string(),
+        email,
+        full_name,
+        role,
+        exp: expires_at.timestamp() as usize,
+        token_type: Some("refresh".to_string()),
+        jti: Some(jti.to_string()),
+        family_id: Some(fam.to_string()),
+        sysadmin: None,
+    };
+
+    let token = jsonwebtoken::encode(
+        &jsonwebtoken::Header::default(),
+        &refresh_claims,
+        &jsonwebtoken::EncodingKey::from_secret(jwt_secret.as_bytes()),
+    )
+    .ok()?;
+
+    let token_hash = hex::encode(Sha256::digest(token.as_bytes()));
+    let _ = crate::db_tenant::with_tenant_db_scope(tenant_id, async {
+        sqlx::query(
+            r#"
+            INSERT INTO refresh_tokens (id, jti, family_id, tenant_id, user_id, token_hash, parent_jti, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            "#,
+        )
+        .bind(uuid::Uuid::now_v7())
+        .bind(jti)
+        .bind(fam)
+        .bind(tenant_id)
+        .bind(user_id)
+        .bind(token_hash)
+        .bind(parent_jti)
+        .bind(expires_at)
+        .execute(pool)
+        .await
+    })
+    .await;
+
+    Some(token)
+}
+
 async fn login(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
@@ -86,12 +148,13 @@ async fn login(
     Json(payload): Json<LoginRequest>,
 ) -> Result<Json<ApiResponse<LoginResponse>>, ApiError> {
     // 1. Check if Global Maintenance Mode is active
-    let maintenance_record =
+    let maintenance_record = crate::db_tenant::with_system_rls_bypass(
         sqlx::query!("SELECT value FROM system_settings WHERE key = 'maintenance'")
-            .fetch_optional(&ctx.pool)
-            .await
-            .ok()
-            .flatten();
+            .fetch_optional(&ctx.pool),
+    )
+    .await
+    .ok()
+    .flatten();
 
     if let Some(rec) = maintenance_record {
         if rec
@@ -124,14 +187,15 @@ async fn login(
         password: payload.password,
     };
 
-    let (token, auth_user) = ctx
-        .authenticate_user
-        .execute(command)
-        .await
-        .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
+    let (token, auth_user) = crate::db_tenant::with_system_rls_bypass(
+        ctx.authenticate_user.execute(command),
+    )
+    .await
+    .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
-    let user_row = sqlx::query(
-        r#"
+    let user_row = crate::db_tenant::with_system_rls_bypass(
+        sqlx::query(
+            r#"
         SELECT u.id, u.tenant_id, u.username, u.email, u.full_name, u.avatar_url,
                COALESCE(
                  (
@@ -252,7 +316,7 @@ async fn login(
                    FROM class_schedules cs
                    JOIN teachers t ON t.id = cs.teacher_id
                    JOIN subjects sub ON sub.id = cs.subject_id
-                   WHERE (t.user_id = u.id OR LOWER(t.full_name) = LOWER(u.full_name) OR LOWER(t.email) = LOWER(u.email))
+                   WHERE t.user_id = u.id
                      AND cs.deleted_at IS NULL AND sub.is_active = true
                  ),
                  ''
@@ -261,9 +325,10 @@ async fn login(
         WHERE u.id = $1
         LIMIT 1
         "#,
+        )
+        .bind(auth_user.id)
+        .fetch_optional(&ctx.pool),
     )
-    .bind(auth_user.id)
-    .fetch_optional(&ctx.pool)
     .await
     .ok()
     .flatten();
@@ -311,11 +376,14 @@ async fn login(
         };
 
     let school_info = if let Some(t_id) = tenant_id {
-        sqlx::query(
-            "SELECT name, logo_url FROM schools WHERE tenant_id = $1 AND deleted_at IS NULL LIMIT 1",
+        crate::db_tenant::with_tenant_db_scope(
+            t_id,
+            sqlx::query(
+                "SELECT name, logo_url FROM schools WHERE tenant_id = $1 AND deleted_at IS NULL LIMIT 1",
+            )
+            .bind(t_id)
+            .fetch_optional(&ctx.pool),
         )
-        .bind(t_id)
-        .fetch_optional(&ctx.pool)
         .await
         .ok()
         .flatten()
@@ -326,25 +394,27 @@ async fn login(
     let school_name: Option<String> = school_info.as_ref().map(|s| s.get("name"));
     let school_logo_url: Option<String> = school_info.as_ref().and_then(|s| s.get("logo_url"));
 
-    let refresh_claims = school_core::identity::application::auth::authenticate_user::Claims {
-        sub: auth_user.id.to_string(),
-        tenant_id: tenant_id.map(|t| t.to_string()).unwrap_or_default(),
-        email: Some(auth_user.email.clone()),
-        full_name: Some(auth_user.full_name.clone()),
-        role: role.clone(),
-        exp: (chrono::Utc::now() + chrono::Duration::days(365)).timestamp() as usize,
+    let refresh_token = if let Some(t_id) = tenant_id {
+        issue_tracked_refresh_token(
+            &ctx.pool,
+            &ctx.jwt_secret,
+            auth_user.id,
+            t_id,
+            Some(auth_user.email.clone()),
+            Some(auth_user.full_name.clone()),
+            role.clone(),
+            None,
+            None,
+        )
+        .await
+    } else {
+        None
     };
-    let refresh_token = jsonwebtoken::encode(
-        &jsonwebtoken::Header::default(),
-        &refresh_claims,
-        &jsonwebtoken::EncodingKey::from_secret(ctx.jwt_secret.as_bytes()),
-    )
-    .ok();
 
     let response_data = LoginResponse {
         access_token: token,
         token_type: "Bearer".to_string(),
-        expires_in: 315360000,
+        expires_in: 7 * 86400,
         refresh_token,
         user_id,
         tenant_id: tenant_id.map(|t| t.to_string()),
@@ -387,30 +457,33 @@ async fn login(
             .or_else(|| req_ctx.ip.clone())
             .unwrap_or_else(|| "182.253.14.88".to_string());
 
-        let _ = sqlx::query(
-            r#"
-            INSERT INTO audit_logs (
-                id, tenant_id, school_id, request_id, actor_id,
-                action, resource, permission, policy, decision,
-                reason, ip, user_agent, timestamp
+        let _ = crate::db_tenant::with_tenant_db_scope(
+            t_id,
+            sqlx::query(
+                r#"
+                INSERT INTO audit_logs (
+                    id, tenant_id, school_id, request_id, actor_id,
+                    action, resource, permission, policy, decision,
+                    reason, ip, user_agent, timestamp
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
+                "#,
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
-            "#,
+            .bind(uuid::Uuid::now_v7())
+            .bind(t_id)
+            .bind(None as Option<uuid::Uuid>)
+            .bind(&req_ctx.request_id)
+            .bind(Some(auth_user.id))
+            .bind("AUTH_LOGIN")
+            .bind(Some(resource_str))
+            .bind(Some("Auth.Login"))
+            .bind(Some("ALLOW"))
+            .bind("ALLOW")
+            .bind(Some(format!("Otentikasi berhasil via {}", resource_str)))
+            .bind(Some(client_ip))
+            .bind(Some(ua))
+            .execute(&ctx.pool),
         )
-        .bind(uuid::Uuid::new_v4())
-        .bind(t_id)
-        .bind(None as Option<uuid::Uuid>)
-        .bind(&req_ctx.request_id)
-        .bind(Some(auth_user.id))
-        .bind("AUTH_LOGIN")
-        .bind(Some(resource_str))
-        .bind(Some("Auth.Login"))
-        .bind(Some("ALLOW"))
-        .bind("ALLOW")
-        .bind(Some(format!("Otentikasi berhasil via {}", resource_str)))
-        .bind(Some(client_ip))
-        .bind(Some(ua))
-        .execute(&ctx.pool)
         .await;
     }
 
@@ -422,14 +495,13 @@ async fn login(
 
 fn is_privileged_admin_actor(actor: &Option<school_core::authorization::domain::actor::Actor>) -> bool {
     actor.as_ref().is_some_and(|a| {
-        a.id.is_nil()
-            || a.roles.iter().any(|r| {
-                let n = r.name.to_lowercase();
-                n.contains("admin")
-                    || n.contains("kepala")
-                    || n.contains("operator")
-                    || n.contains("super")
-            })
+        a.roles.iter().any(|r| {
+            let n = r.name.to_lowercase();
+            n.contains("admin")
+                || n.contains("kepala")
+                || n.contains("operator")
+                || n.contains("super")
+        })
     })
 }
 
@@ -464,54 +536,41 @@ fn require_admin_or_operator(req_ctx: &RequestContext) -> Result<(), ApiError> {
 async fn register(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
-    headers: axum::http::HeaderMap,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<ApiResponse<RegisterResponse>>, ApiError> {
+    let actor = req_ctx.actor.as_ref().ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthInvalidToken,
+                "Authentication required".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    if !is_privileged_admin_actor(&req_ctx.actor) {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Forbidden(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Hanya Operator / Kepala Sekolah / Admin yang berhak mendaftarkan akun pengguna.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     if let Some(ref requested_role) = payload.role {
-        let normalized = requested_role.trim().to_lowercase();
-        let is_non_privileged = matches!(
-            normalized.as_str(),
-            "" | "siswa" | "student" | "orang tua" | "wali" | "parent" | "guardian"
-        );
-
-        if !is_non_privileged {
-            let mut caller_is_admin = is_privileged_admin_actor(&req_ctx.actor);
-            if !caller_is_admin {
-                if let Some(auth_str) = headers
-                    .get(axum::http::header::AUTHORIZATION)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.strip_prefix("Bearer "))
-                {
-                    use jsonwebtoken::{decode, DecodingKey, Validation};
-                    use school_core::identity::application::auth::authenticate_user::Claims;
-                    if let Ok(token_data) = decode::<Claims>(
-                        auth_str.trim(),
-                        &DecodingKey::from_secret(ctx.jwt_secret.as_bytes()),
-                        &Validation::default(),
-                    ) {
-                        if let Some(r) = token_data.claims.role {
-                            let rn = r.to_lowercase();
-                            if rn.contains("admin")
-                                || rn.contains("kepala")
-                                || rn.contains("operator")
-                                || rn.contains("super")
-                            {
-                                caller_is_admin = true;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if !caller_is_admin {
-                return Err(ApiError::new(
-                    school_core::common::error::ApplicationError::Forbidden(
-                        school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                        "Pendaftaran mandiri tidak diizinkan untuk menetapkan peran khusus/istimewa.".to_string(),
-                    ),
-                    &req_ctx.request_id,
-                ));
-            }
+        let normalized_role = requested_role.trim().to_ascii_lowercase().replace([' ', '-', '_'], "");
+        let is_caller_super = actor.roles.iter().any(|r| {
+            r.name.trim().to_ascii_lowercase().replace([' ', '-', '_'], "") == "superadmin"
+        });
+        if normalized_role == "superadmin" && !is_caller_super {
+            return Err(ApiError::new(
+                school_core::common::error::ApplicationError::Forbidden(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Hanya SuperAdmin platform yang dapat menetapkan peran SuperAdmin.".to_string(),
+                ),
+                &req_ctx.request_id,
+            ));
         }
     }
 
@@ -1267,13 +1326,13 @@ async fn get_user_avatar(
     State(ctx): State<ApplicationContext>,
     axum::extract::Path(user_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<axum::response::Response, ApiError> {
-    let row = sqlx::query(
-        "SELECT avatar_data, avatar_mime FROM users WHERE id = $1",
-    )
-    .bind(user_id)
-    .fetch_optional(&ctx.pool)
-    .await
-    .map_err(|e| {
+        let row = crate::db_tenant::with_system_rls_bypass(
+            sqlx::query("SELECT avatar_data, avatar_mime FROM users WHERE id = $1")
+                .bind(user_id)
+                .fetch_optional(&ctx.pool),
+        )
+        .await
+        .map_err(|e| {
         ApiError::new(
             school_core::common::error::ApplicationError::Infrastructure(
                 school_core::common::error::InfrastructureError::Database(e),
@@ -1286,10 +1345,20 @@ async fn get_user_avatar(
         let avatar_data: Option<Vec<u8>> = r.try_get("avatar_data").ok().flatten();
         let avatar_mime: Option<String> = r.try_get("avatar_mime").ok().flatten();
         if let Some(data) = avatar_data {
-            let mime = avatar_mime.unwrap_or_else(|| "image/jpeg".to_string());
+            let mime = match avatar_mime
+                .as_deref()
+                .map(|m| m.trim().to_ascii_lowercase())
+                .as_deref()
+            {
+                Some("image/png") => "image/png",
+                Some("image/webp") => "image/webp",
+                Some("image/gif") => "image/gif",
+                _ => "image/jpeg",
+            };
             let resp = axum::response::Response::builder()
                 .status(axum::http::StatusCode::OK)
                 .header(axum::http::header::CONTENT_TYPE, mime)
+                .header(axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
                 // Instruct clients (Android Coil, browsers) never to persist or cache in local disk storage
                 .header(axum::http::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
                 .header(axum::http::header::PRAGMA, "no-cache")
@@ -1563,12 +1632,13 @@ async fn qr_login(
         payload.token.len()
     );
     // 1. Check if Global Maintenance Mode is active
-    let maintenance_record =
+    let maintenance_record = crate::db_tenant::with_system_rls_bypass(
         sqlx::query!("SELECT value FROM system_settings WHERE key = 'maintenance'")
-            .fetch_optional(&ctx.pool)
-            .await
-            .ok()
-            .flatten();
+            .fetch_optional(&ctx.pool),
+    )
+    .await
+    .ok()
+    .flatten();
 
     if let Some(rec) = maintenance_record {
         if rec
@@ -1593,22 +1663,23 @@ async fn qr_login(
         }
     }
 
-    let result = ctx
-        .authenticate_qr_token
-        .execute(&payload.token)
-        .await
-        .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
-
-    let school_info = sqlx::query!(
-        "SELECT name, logo_url FROM schools WHERE tenant_id = $1 AND deleted_at IS NULL LIMIT 1",
-        result.tenant_id
+    let result = crate::db_tenant::with_system_rls_bypass(
+        ctx.authenticate_qr_token.execute(&payload.token),
     )
-    .fetch_optional(&ctx.pool)
     .await
-    .ok()
-    .flatten();
+    .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
-    let user_extra = sqlx::query(
+    let (school_info, user_extra) = crate::db_tenant::with_tenant_db_scope(result.tenant_id, async {
+        let school_info = sqlx::query!(
+            "SELECT name, logo_url FROM schools WHERE tenant_id = $1 AND deleted_at IS NULL LIMIT 1",
+            result.tenant_id
+        )
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten();
+
+        let user_extra = sqlx::query(
         r#"
         SELECT 
             (SELECT u.username FROM users u WHERE u.id = $1) as username,
@@ -1702,13 +1773,17 @@ async fn qr_login(
                     LIMIT 1
                 )
             ) as child_id
-        "#
-    )
-    .bind(result.user_id)
-    .fetch_optional(&ctx.pool)
-    .await
-    .ok()
-    .flatten();
+        "#,
+        )
+        .bind(result.user_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten();
+
+        (school_info, user_extra)
+    })
+    .await;
 
     let (user_identifier, class_name, class_id, child_name, child_id, qr_username, qr_avatar_url) = if let Some(e) = user_extra {
         let ident: String = e.get("identifier");
@@ -1725,25 +1800,23 @@ async fn qr_login(
         (None, None, None, None, None, None, None)
     };
 
-    let refresh_claims = school_core::identity::application::auth::authenticate_user::Claims {
-        sub: result.user_id.to_string(),
-        tenant_id: result.tenant_id.to_string(),
-        email: Some(result.email.clone()),
-        full_name: Some(result.full_name.clone()),
-        role: Some(result.role.clone()),
-        exp: (chrono::Utc::now() + chrono::Duration::days(365)).timestamp() as usize,
-    };
-    let refresh_token = jsonwebtoken::encode(
-        &jsonwebtoken::Header::default(),
-        &refresh_claims,
-        &jsonwebtoken::EncodingKey::from_secret(ctx.jwt_secret.as_bytes()),
+    let refresh_token = issue_tracked_refresh_token(
+        &ctx.pool,
+        &ctx.jwt_secret,
+        result.user_id,
+        result.tenant_id,
+        Some(result.email.clone()),
+        Some(result.full_name.clone()),
+        Some(result.role.clone()),
+        None,
+        None,
     )
-    .ok();
+    .await;
 
     let response_data = LoginResponse {
         access_token: result.token,
         token_type: "Bearer".to_string(),
-        expires_in: result.expires_in,
+        expires_in: 7 * 86400,
         refresh_token,
         user_id: Some(result.user_id.to_string()),
         tenant_id: Some(result.tenant_id.to_string()),
@@ -1774,30 +1847,33 @@ async fn qr_login(
         .or_else(|| req_ctx.ip.clone())
         .unwrap_or_else(|| "182.253.14.88".to_string());
 
-    let _ = sqlx::query(
-        r#"
-        INSERT INTO audit_logs (
-            id, tenant_id, school_id, request_id, actor_id,
-            action, resource, permission, policy, decision,
-            reason, ip, user_agent, timestamp
+    let _ = crate::db_tenant::with_tenant_db_scope(
+        result.tenant_id,
+        sqlx::query(
+            r#"
+            INSERT INTO audit_logs (
+                id, tenant_id, school_id, request_id, actor_id,
+                action, resource, permission, policy, decision,
+                reason, ip, user_agent, timestamp
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
+            "#,
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
-        "#,
+        .bind(uuid::Uuid::now_v7())
+        .bind(result.tenant_id)
+        .bind(None as Option<uuid::Uuid>)
+        .bind(&req_ctx.request_id)
+        .bind(Some(result.user_id))
+        .bind("AUTH_QR_LOGIN")
+        .bind(Some("Mobile App (Android)"))
+        .bind(Some("Auth.QrLogin"))
+        .bind(Some("ALLOW"))
+        .bind("ALLOW")
+        .bind(Some("Login berhasil via Scan QR Kartu Siswa (Mobile App)"))
+        .bind(Some(client_ip))
+        .bind(Some(ua))
+        .execute(&ctx.pool),
     )
-    .bind(uuid::Uuid::new_v4())
-    .bind(result.tenant_id)
-    .bind(None as Option<uuid::Uuid>)
-    .bind(&req_ctx.request_id)
-    .bind(Some(result.user_id))
-    .bind("AUTH_QR_LOGIN")
-    .bind(Some("Mobile App (Android)"))
-    .bind(Some("Auth.QrLogin"))
-    .bind(Some("ALLOW"))
-    .bind("ALLOW")
-    .bind(Some("Login berhasil via Scan QR Kartu Siswa (Mobile App)"))
-    .bind(Some(client_ip))
-    .bind(Some(ua))
-    .execute(&ctx.pool)
     .await;
 
     Ok(Json(ApiResponse::success(
@@ -2176,8 +2252,9 @@ async fn refresh(
     req_ctx: RequestContext,
     Json(payload): Json<RefreshTokenRequest>,
 ) -> Result<Json<RefreshCombinedResponse>, ApiError> {
-    use jsonwebtoken::{decode, DecodingKey, Validation};
+    use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
     use school_core::identity::application::auth::authenticate_user::Claims;
+    use sha2::{Digest, Sha256};
 
     let mut validation = Validation::default();
     validation.validate_exp = true;
@@ -2196,6 +2273,20 @@ async fn refresh(
             &req_ctx.request_id,
         )
     })?;
+
+    if matches!(
+        token_data.claims.token_type.as_deref(),
+        Some("access") | Some("system_access")
+    ) || token_data.claims.sysadmin == Some(true)
+    {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthInvalidToken,
+                "Access token cannot be used as refresh token".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
 
     let user_id = uuid::Uuid::parse_str(&token_data.claims.sub).map_err(|_| {
         ApiError::new(
@@ -2216,19 +2307,17 @@ async fn refresh(
         )
     })?;
 
-    if !user_id.is_nil() {
-        let active_row = sqlx::query(
-            r#"
-            SELECT u.is_active, t.status as tenant_status
-            FROM users u
-            JOIN tenants t ON t.id = u.tenant_id
-            WHERE u.id = $1 AND u.tenant_id = $2 AND u.deleted_at IS NULL
-            LIMIT 1
-            "#,
-        )
-        .bind(user_id)
-        .bind(tenant_id)
-        .fetch_optional(&ctx.pool)
+    if user_id.is_nil() || tenant_id.is_nil() {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthInvalidToken,
+                "Invalid refresh token identity".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
+    let mut tx = crate::db_tenant::begin_tenant_tx(&ctx.pool, tenant_id)
         .await
         .map_err(|e| {
             ApiError::new(
@@ -2239,27 +2328,141 @@ async fn refresh(
             )
         })?;
 
-        let (user_active, tenant_status): (bool, String) = match active_row {
-            Some(row) => (
-                row.try_get("is_active").unwrap_or(false),
-                row.try_get("tenant_status").unwrap_or_default(),
+    let active_row = sqlx::query(
+        r#"
+        SELECT u.is_active AS user_active, t.is_active AS tenant_active
+        FROM users u
+        JOIN tenants t ON t.id = u.tenant_id
+        WHERE u.id = $1 AND u.tenant_id = $2
+        LIMIT 1
+        "#,
+    )
+    .bind(user_id)
+    .bind(tenant_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
             ),
-            None => (false, String::new()),
-        };
+            &req_ctx.request_id,
+        )
+    })?;
 
-        if !user_active || !tenant_status.eq_ignore_ascii_case("active") {
+    let (user_active, tenant_active): (bool, bool) = match active_row {
+        Some(row) => (
+            row.try_get("user_active").unwrap_or(false),
+            row.try_get("tenant_active").unwrap_or(false),
+        ),
+        None => (false, false),
+    };
+
+    if !user_active || !tenant_active {
+        ctx.auth_cache.invalidate_actor(&user_id).await;
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthInvalidToken,
+                "User account or school tenant is no longer active".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
+    let incoming_hash = hex::encode(Sha256::digest(payload.refresh_token.as_bytes()));
+    let is_tracked_refresh = token_data.claims.token_type.as_deref() == Some("refresh");
+
+    let (rotation_family_id, parent_jti): (uuid::Uuid, Option<uuid::Uuid>) = if is_tracked_refresh {
+        let rt_row = sqlx::query(
+            r#"
+            SELECT id, jti, family_id, revoked_at, expires_at
+            FROM refresh_tokens
+            WHERE token_hash = $1 AND tenant_id = $2 AND user_id = $3
+            FOR UPDATE
+            "#,
+        )
+        .bind(&incoming_hash)
+        .bind(tenant_id)
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+
+        let row = rt_row.ok_or_else(|| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthInvalidToken,
+                    "Refresh token tidak dikenali atau sudah dicabut".to_string(),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+
+        let rt_id: uuid::Uuid = row.get("id");
+        let rt_jti: uuid::Uuid = row.get("jti");
+        let rt_family: uuid::Uuid = row.get("family_id");
+        let revoked_at: Option<chrono::DateTime<chrono::Utc>> = row.try_get("revoked_at").ok().flatten();
+        let expires_at: chrono::DateTime<chrono::Utc> = row.get("expires_at");
+
+        if revoked_at.is_some() {
+            // Replay of an already-rotated refresh token: revoke the whole token family!
+            let _ = sqlx::query(
+                "UPDATE refresh_tokens SET revoked_at = NOW(), revoke_reason = COALESCE(revoke_reason, 'REUSE_DETECTED') WHERE family_id = $1 AND tenant_id = $2 AND revoked_at IS NULL",
+            )
+            .bind(rt_family)
+            .bind(tenant_id)
+            .execute(&mut *tx)
+            .await;
+            let _ = tx.commit().await;
+            ctx.auth_cache.invalidate_actor(&user_id).await;
+
             return Err(ApiError::new(
                 school_core::common::error::ApplicationError::Unauthorized(
                     school_core::common::error_code::ErrorCode::AuthInvalidToken,
-                    "User account or school tenant is no longer active".to_string(),
+                    "Sesi dicabut karena terdeteksi penggunaan ulang refresh token. Silakan login ulang.".to_string(),
                 ),
                 &req_ctx.request_id,
             ));
         }
-    }
 
-    let is_student = token_data.claims.role.as_deref() == Some("Siswa") || token_data.claims.role.as_deref() == Some("Student");
-    let access_days = if is_student { 3650 } else { 365 };
+        if expires_at <= chrono::Utc::now() {
+            return Err(ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthInvalidToken,
+                    "Refresh token telah kedaluwarsa".to_string(),
+                ),
+                &req_ctx.request_id,
+            ));
+        }
+
+        sqlx::query(
+            "UPDATE refresh_tokens SET revoked_at = NOW(), revoke_reason = 'ROTATED', last_used_at = NOW() WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(rt_id)
+        .bind(tenant_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+
+        (rt_family, Some(rt_jti))
+    } else {
+        // Legacy pre-upgrade refresh token: allow one-time migration into a tracked 90-day rotation family
+        (uuid::Uuid::now_v7(), None)
+    };
 
     let new_access_claims = Claims {
         sub: token_data.claims.sub.clone(),
@@ -2267,12 +2470,16 @@ async fn refresh(
         email: token_data.claims.email.clone(),
         full_name: token_data.claims.full_name.clone(),
         role: token_data.claims.role.clone(),
-        exp: (chrono::Utc::now() + chrono::Duration::days(access_days)).timestamp() as usize,
+        exp: (chrono::Utc::now() + chrono::Duration::days(7)).timestamp() as usize,
+        token_type: Some("access".to_string()),
+        jti: Some(uuid::Uuid::now_v7().to_string()),
+        family_id: Some(rotation_family_id.to_string()),
+        sysadmin: None,
     };
-    let new_access_token = jsonwebtoken::encode(
-        &jsonwebtoken::Header::default(),
+    let new_access_token = encode(
+        &Header::default(),
         &new_access_claims,
-        &jsonwebtoken::EncodingKey::from_secret(ctx.jwt_secret.as_bytes()),
+        &EncodingKey::from_secret(ctx.jwt_secret.as_bytes()),
     )
     .map_err(|e| {
         ApiError::new(
@@ -2281,22 +2488,74 @@ async fn refresh(
         )
     })?;
 
+    let new_refresh_jti = uuid::Uuid::now_v7();
+    let new_refresh_expires = chrono::Utc::now() + chrono::Duration::days(90);
     let new_refresh_claims = Claims {
         sub: token_data.claims.sub,
         tenant_id: token_data.claims.tenant_id,
         email: token_data.claims.email,
         full_name: token_data.claims.full_name,
         role: token_data.claims.role,
-        exp: (chrono::Utc::now() + chrono::Duration::days(3650)).timestamp() as usize,
+        exp: new_refresh_expires.timestamp() as usize,
+        token_type: Some("refresh".to_string()),
+        jti: Some(new_refresh_jti.to_string()),
+        family_id: Some(rotation_family_id.to_string()),
+        sysadmin: None,
     };
-    let new_refresh_token = jsonwebtoken::encode(
-        &jsonwebtoken::Header::default(),
+    let new_refresh_token = encode(
+        &Header::default(),
         &new_refresh_claims,
-        &jsonwebtoken::EncodingKey::from_secret(ctx.jwt_secret.as_bytes()),
+        &EncodingKey::from_secret(ctx.jwt_secret.as_bytes()),
     )
     .map_err(|e| {
         ApiError::new(
             school_core::common::error::ApplicationError::Internal(e.to_string()),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let new_refresh_hash = hex::encode(Sha256::digest(new_refresh_token.as_bytes()));
+    if let Some(old_jti) = parent_jti {
+        let _ = sqlx::query(
+            "UPDATE refresh_tokens SET replaced_by_jti = $1 WHERE jti = $2 AND tenant_id = $3",
+        )
+        .bind(new_refresh_jti)
+        .bind(old_jti)
+        .bind(tenant_id)
+        .execute(&mut *tx)
+        .await;
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO refresh_tokens (id, jti, family_id, tenant_id, user_id, token_hash, parent_jti, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        "#,
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(new_refresh_jti)
+    .bind(rotation_family_id)
+    .bind(tenant_id)
+    .bind(user_id)
+    .bind(new_refresh_hash)
+    .bind(parent_jti)
+    .bind(new_refresh_expires)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    tx.commit().await.map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
             &req_ctx.request_id,
         )
     })?;
@@ -2319,12 +2578,117 @@ async fn refresh(
     }))
 }
 
+#[derive(Debug, serde::Deserialize, Default)]
+struct LogoutBody {
+    pub refresh_token: Option<String>,
+}
+
 async fn logout(
+    State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    use jsonwebtoken::{decode, DecodingKey, Validation};
+    use school_core::identity::application::auth::authenticate_user::Claims;
+    use sha2::{Digest, Sha256};
+
+    if let Some(bearer) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .and_then(|s| s.strip_prefix("Bearer ").or_else(|| s.strip_prefix("bearer ")))
+    {
+        let mut val = Validation::default();
+        val.validate_exp = false;
+        if let Ok(td) = decode::<Claims>(
+            bearer.trim(),
+            &DecodingKey::from_secret(ctx.jwt_secret.as_bytes()),
+            &val,
+        ) {
+            if let Ok(uid) = uuid::Uuid::parse_str(&td.claims.sub) {
+                if !uid.is_nil() {
+                    ctx.auth_cache.invalidate_actor(&uid).await;
+                }
+            }
+        }
+    }
+
+    if let Ok(parsed_body) = serde_json::from_slice::<LogoutBody>(&body) {
+        if let Some(rt) = parsed_body.refresh_token.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            let token_hash = hex::encode(Sha256::digest(rt.as_bytes()));
+            let _ = crate::db_tenant::with_system_rls_bypass(async {
+                if let Ok(Some(fam_id)) = sqlx::query_scalar::<_, uuid::Uuid>(
+                    "SELECT family_id FROM refresh_tokens WHERE token_hash = $1 LIMIT 1",
+                )
+                .bind(&token_hash)
+                .fetch_optional(&ctx.pool)
+                .await
+                {
+                    let _ = sqlx::query(
+                        "UPDATE refresh_tokens SET revoked_at = NOW(), revoke_reason = 'LOGOUT' WHERE family_id = $1 AND revoked_at IS NULL",
+                    )
+                    .bind(fam_id)
+                    .execute(&ctx.pool)
+                    .await;
+                } else {
+                    let _ = sqlx::query(
+                        "UPDATE refresh_tokens SET revoked_at = NOW(), revoke_reason = 'LOGOUT' WHERE token_hash = $1 AND revoked_at IS NULL",
+                    )
+                    .bind(&token_hash)
+                    .execute(&ctx.pool)
+                    .await;
+                }
+            })
+            .await;
+        }
+    }
+
     Ok(Json(ApiResponse::success(
         serde_json::json!({
             "message": "Sesi berhasil diakhiri"
+        }),
+        req_ctx.request_id,
+    )))
+}
+
+async fn get_firebase_custom_token(
+    req_ctx: RequestContext,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let actor = req_ctx.actor.as_ref().ok_or_else(|| {
+        ApiError::new(
+            ApplicationError::Unauthorized(
+                ErrorCode::AuthTokenExpired,
+                "Autentikasi diperlukan".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+    let primary_role = actor
+        .roles
+        .first()
+        .map(|r| r.name.as_str())
+        .unwrap_or("Siswa");
+
+    let custom_token = crate::infrastructure::fcm::create_firebase_custom_token(
+        actor.id,
+        req_ctx.tenant_id,
+        primary_role,
+    )
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Internal(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({
+            "custom_token": custom_token,
+            "tenant_id": req_ctx.tenant_id,
+            "expires_in": 3600
         }),
         req_ctx.request_id,
     )))

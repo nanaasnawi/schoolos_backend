@@ -305,20 +305,28 @@ async fn get_dashboard(
     let pool = &ctx.pool;
     let tid = req_ctx.tenant_id;
 
-    if let Some(ref actor) = req_ctx.actor {
-        let is_admin_or_staff = actor.roles.iter().any(|r| {
-            let n = r.name.to_lowercase();
-            n.contains("admin") || n.contains("kepala") || n.contains("staff") || n.contains("tata usaha")
-        });
-        if !is_admin_or_staff {
-            return Err(ApiError::new(
-                ApplicationError::Forbidden(
-                    ErrorCode::AuthPermissionDenied,
-                    "Akses ditolak: Portal administrator dan analitik sekolah hanya dapat diakses oleh Administrator & Staf Tata Usaha.".to_string(),
-                ),
-                req_ctx.request_id,
-            ));
-        }
+    let is_admin_or_staff = req_ctx
+        .actor
+        .as_ref()
+        .map(|actor| {
+            actor.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("admin")
+                    || n.contains("kepala")
+                    || n.contains("principal")
+                    || n.contains("staff")
+                    || n.contains("tata usaha")
+            })
+        })
+        .unwrap_or(false);
+    if !is_admin_or_staff {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Akses ditolak: Portal administrator dan analitik sekolah hanya dapat diakses oleh Administrator & Staf Tata Usaha.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
     }
 
     let (
@@ -803,20 +811,33 @@ async fn get_schedule_compliance(
     Query(filter): Query<ScheduleComplianceFilterQuery>,
     req_ctx: RequestContext,
 ) -> Result<Json<ApiResponse<ScheduleComplianceResponse>>, ApiError> {
-    use crate::middleware::require_permission;
-    use school_core::permission::domain::permission_registry::Permission;
+    let has_compliance_role = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("admin")
+                    || n.contains("kepala")
+                    || n.contains("principal")
+                    || n.contains("staff")
+                    || n.contains("tata usaha")
+                    || n.contains("guru")
+                    || n.contains("teacher")
+                    || n.contains("tutor")
+            })
+        })
+        .unwrap_or(false);
 
-    require_permission(&req_ctx.actor, Permission::AcademicManage)
-        .or_else(|_| require_permission(&req_ctx.actor, Permission::TeacherRead))
-        .map_err(|_| {
-            ApiError::new(
-                ApplicationError::Unauthorized(
-                    ErrorCode::AuthPermissionDenied,
-                    "Insufficient permissions to view schedule compliance".to_string(),
-                ),
-                &req_ctx.request_id,
-            )
-        })?;
+    if !has_compliance_role {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Insufficient permissions to view schedule compliance".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
 
     let now_utc = chrono::Utc::now();
     let today = now_utc.date_naive();
@@ -1042,6 +1063,31 @@ async fn get_mobile_logins(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
 ) -> Result<Json<ApiResponse<Vec<MobileLoginLogDto>>>, ApiError> {
+    let is_admin_or_staff = req_ctx
+        .actor
+        .as_ref()
+        .map(|actor| {
+            actor.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("admin")
+                    || n.contains("kepala")
+                    || n.contains("principal")
+                    || n.contains("staff")
+                    || n.contains("tata usaha")
+                    || n.contains("operator")
+            })
+        })
+        .unwrap_or(false);
+    if !is_admin_or_staff {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Akses ditolak: Log login perangkat seluler hanya dapat diakses Administrator atau Kepala Sekolah.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     let pool = &ctx.pool;
     let tid = req_ctx.tenant_id;
 
@@ -1151,6 +1197,31 @@ async fn get_tenant_audit_logs(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
 ) -> Result<Json<ApiResponse<Vec<serde_json::Value>>>, ApiError> {
+    let is_admin_or_staff = req_ctx
+        .actor
+        .as_ref()
+        .map(|actor| {
+            actor.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("admin")
+                    || n.contains("kepala")
+                    || n.contains("principal")
+                    || n.contains("staff")
+                    || n.contains("tata usaha")
+                    || n.contains("operator")
+            })
+        })
+        .unwrap_or(false);
+    if !is_admin_or_staff {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Akses ditolak: Jejak audit sistem hanya dapat diakses Administrator atau Kepala Sekolah.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     let pool = &ctx.pool;
     let tid = req_ctx.tenant_id;
 

@@ -321,15 +321,44 @@ async fn get_by_id(
 ) -> Result<Json<ApiResponse<super::dto::student_responses::StudentProfileResponse>>, ApiError> {
     use crate::middleware::require_permission;
     use school_core::permission::domain::permission_registry::Permission;
-    require_permission(&req_ctx.actor, Permission::StudentRead).map_err(|_| {
-        ApiError::new(
-            school_core::common::error::ApplicationError::Unauthorized(
-                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                "Insufficient permissions".to_string(),
-            ),
-            &req_ctx.request_id,
+    let has_student_read = require_permission(&req_ctx.actor, Permission::StudentRead).is_ok();
+    if !has_student_read {
+        let actor_id = req_ctx.actor.as_ref().map(|a| a.id).ok_or_else(|| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthInvalidToken,
+                    "Authentication required".to_string(),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+        let is_own_or_guardian = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM students s
+                LEFT JOIN guardians g ON g.id = s.guardian_id
+                WHERE s.id = $1 AND s.tenant_id = $2 AND s.deleted_at IS NULL
+                  AND (s.user_id = $3 OR g.user_id = $3)
+            )
+            "#,
         )
-    })?;
+        .bind(id)
+        .bind(req_ctx.tenant_id)
+        .bind(actor_id)
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap_or(false);
+
+        if !is_own_or_guardian {
+            return Err(ApiError::new(
+                school_core::common::error::ApplicationError::Forbidden(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Insufficient permissions".to_string(),
+                ),
+                &req_ctx.request_id,
+            ));
+        }
+    }
 
     let query = GetStudentQuery {
         tenant_id: req_ctx.tenant_id,
@@ -549,6 +578,28 @@ async fn update(
             .bind(id)
             .execute(&ctx.pool)
             .await;
+
+            // Immediately revoke active refresh tokens & purge AuthCache when student mutates out
+            if let Ok(deactivated_uids) = sqlx::query_scalar::<_, Uuid>(
+                "SELECT user_id FROM students WHERE id = $1 AND tenant_id = $2 AND user_id IS NOT NULL",
+            )
+            .bind(id)
+            .bind(req_ctx.tenant_id)
+            .fetch_all(&ctx.pool)
+            .await
+            {
+                let _ = sqlx::query(
+                    "UPDATE refresh_tokens SET revoked_at = NOW(), revoke_reason = 'STUDENT_MUTATED_OUT' WHERE tenant_id = $1 AND user_id = ANY($2) AND revoked_at IS NULL",
+                )
+                .bind(req_ctx.tenant_id)
+                .bind(&deactivated_uids)
+                .execute(&ctx.pool)
+                .await;
+
+                for uid in deactivated_uids {
+                    ctx.auth_cache.invalidate_actor(&uid).await;
+                }
+            }
 
             let _ = sqlx::query(
                 "UPDATE students SET is_active = false WHERE id = $1 AND tenant_id = $2"

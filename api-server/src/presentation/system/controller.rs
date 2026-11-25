@@ -201,6 +201,15 @@ async fn toggle_tenant_status(
         )
     })?;
 
+    if !updated {
+        let _ = sqlx::query(
+            "UPDATE refresh_tokens SET revoked_at = NOW(), revoke_reason = 'TENANT_DEACTIVATED' WHERE tenant_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(id)
+        .execute(&ctx.pool)
+        .await;
+    }
+
     Ok(Json(ApiResponse::success(updated, req_ctx.request_id)))
 }
 
@@ -264,6 +273,10 @@ async fn impersonate_tenant(
         full_name: Some(full_name.clone()),
         role: Some(role_name.clone()),
         exp: (chrono::Utc::now() + chrono::Duration::hours(12)).timestamp() as usize,
+        token_type: Some("access".to_string()),
+        jti: Some(Uuid::now_v7().to_string()),
+        family_id: None,
+        sysadmin: None,
     };
 
     let token = encode(
@@ -880,23 +893,34 @@ async fn system_login(
             )
         })?;
 
+    use sha2::{Digest, Sha256};
+
     let input_email = payload.email.trim();
     let input_password = payload.password.trim();
 
-    if input_email.eq_ignore_ascii_case(&expected_email) && input_password == expected_password {
+    let email_matches = input_email.eq_ignore_ascii_case(&expected_email);
+    let pass_matches =
+        Sha256::digest(input_password.as_bytes()) == Sha256::digest(expected_password.as_bytes());
+
+    if email_matches && pass_matches {
         let claims = Claims {
             sub: Uuid::nil().to_string(),
             tenant_id: Uuid::nil().to_string(),
             email: Some(input_email.to_string()),
             full_name: Some("Super Admin".to_string()),
             role: Some("System Admin".to_string()),
-            exp: (chrono::Utc::now() + chrono::Duration::hours(24)).timestamp() as usize,
+            exp: (chrono::Utc::now() + chrono::Duration::hours(12)).timestamp() as usize,
+            token_type: Some("system_access".to_string()),
+            jti: Some(Uuid::now_v7().to_string()),
+            family_id: None,
+            sysadmin: Some(true),
         };
 
+        let sys_secret = crate::middleware::system_jwt_signing_key(&ctx.jwt_secret);
         let token = encode(
             &Header::default(),
             &claims,
-            &EncodingKey::from_secret(ctx.jwt_secret.as_bytes()),
+            &EncodingKey::from_secret(sys_secret.as_bytes()),
         )
         .map_err(|e| {
             ApiError::new(
@@ -1374,13 +1398,23 @@ async fn send_system_broadcast(
             crate::infrastructure::fcm::FcmTarget::Roles(fcm_roles)
         };
 
-        crate::infrastructure::fcm::trigger_fcm_push_targeted(
-            broadcast_title.clone(),
-            broadcast_body.clone(),
-            crate::infrastructure::fcm::FcmCategory::Announcement,
-            broadcast_id,
-            fcm_target,
-        );
+        let active_tenant_ids = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM tenants WHERE is_active = TRUE",
+        )
+        .fetch_all(&ctx.pool)
+        .await
+        .unwrap_or_default();
+
+        for target_tid in active_tenant_ids {
+            crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                target_tid,
+                broadcast_title.clone(),
+                broadcast_body.clone(),
+                crate::infrastructure::fcm::FcmCategory::Announcement,
+                broadcast_id,
+                fcm_target.clone(),
+            );
+        }
     }
 
     // 4. Jika Super Admin memilih mengaktifkan status maintenance mode

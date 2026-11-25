@@ -126,15 +126,23 @@ async fn list(
 ) -> Result<Json<ApiResponse<Vec<EnrollmentResponse>>>, crate::error::ApiError> {
     use crate::middleware::require_permission;
     use school_core::permission::domain::permission_registry::Permission;
-    require_permission(&req_ctx.actor, Permission::StudentRead).map_err(|_| {
-        crate::error::ApiError::new(
-            school_core::common::error::ApplicationError::Unauthorized(
+    let can_list_enrollments = require_permission(&req_ctx.actor, Permission::StudentRead).is_ok()
+        || require_permission(&req_ctx.actor, Permission::AcademicManage).is_ok()
+        || req_ctx.actor.as_ref().is_some_and(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("guru") || n.contains("teacher") || n.contains("tutor") || n.contains("pamong") || n.contains("wali kelas")
+            })
+        });
+    if !can_list_enrollments {
+        return Err(crate::error::ApiError::new(
+            school_core::common::error::ApplicationError::Forbidden(
                 school_core::common::error_code::ErrorCode::AuthPermissionDenied,
                 "Insufficient permissions".to_string(),
             ),
             &req_ctx.request_id,
-        )
-    })?;
+        ));
+    }
 
     let query = ListEnrollmentsQuery {
         tenant_id: req_ctx.tenant_id,

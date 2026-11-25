@@ -47,21 +47,40 @@ impl IdempotencyCleanupService {
             .checked_sub_signed(chrono_ttl)
             .unwrap_or_default();
 
-        let deleted = sqlx::query(
-            r#"
-            DELETE FROM idempotency_keys
-            WHERE created_at < $1
-            "#,
-        )
-        .bind(cutoff)
-        .execute(&self.pool)
-        .await?;
+        let mut total_deleted: u64 = 0;
+        loop {
+            let deleted = crate::db_tenant::with_system_rls_bypass(async {
+                sqlx::query(
+                    r#"
+                    DELETE FROM idempotency_keys
+                    WHERE idempotency_key IN (
+                        SELECT idempotency_key
+                        FROM idempotency_keys
+                        WHERE created_at < $1
+                        ORDER BY created_at ASC
+                        LIMIT 5000
+                    )
+                    "#,
+                )
+                .bind(cutoff)
+                .execute(&self.pool)
+                .await
+            })
+            .await?;
 
-        if deleted.rows_affected() > 0 {
+            let count = deleted.rows_affected();
+            total_deleted += count;
+            if count < 5000 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        if total_deleted > 0 {
             info!(
-                deleted_count = deleted.rows_affected(),
+                deleted_count = total_deleted,
                 cutoff = ?cutoff,
-                "Idempotency keys cleanup completed"
+                "Idempotency keys batched cleanup completed"
             );
         }
 

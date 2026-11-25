@@ -90,18 +90,49 @@ pub async fn claim_qr_token(
     state: State<ApplicationContext>,
     Json(payload): Json<ClaimQrTokenRequest>,
 ) -> Result<Json<ApiResponse<OpaqueQrTokenResponse>>, ApiError> {
-    if let Ok(req_uuid) = Uuid::parse_str(&payload.request_id) {
-        let _ = sqlx::query(
-            r#"
-            UPDATE onboarding_tokens
-            SET token_state = 'CONSUMED', updated_at = NOW()
-            WHERE request_id = $1 AND opaque_token = $2
-            "#,
+    super::controller::require_dapodik_admin(&ctx)?;
+
+    let req_uuid = Uuid::parse_str(&payload.request_id).map_err(|_| {
+        ApiError::new(
+            ApplicationError::Domain(school_core::common::error::DomainError::Validation(
+                "Invalid onboarding request_id".to_string(),
+            )),
+            &ctx.request_id,
         )
-        .bind(req_uuid)
-        .bind(&payload.opaque_token)
-        .execute(&state.pool)
-        .await;
+    })?;
+
+    let updated = sqlx::query(
+        r#"
+        UPDATE onboarding_tokens
+        SET token_state = 'CONSUMED', updated_at = NOW()
+        WHERE request_id = $1
+          AND tenant_id = $2
+          AND opaque_token = $3
+          AND token_state = 'ISSUED'
+          AND expires_at > NOW()
+        RETURNING request_id
+        "#,
+    )
+    .bind(req_uuid)
+    .bind(ctx.tenant_id)
+    .bind(&payload.opaque_token)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ApplicationError::Internal(format!("Failed to claim onboarding token: {e}")),
+            &ctx.request_id,
+        )
+    })?;
+
+    if updated.is_none() {
+        return Err(ApiError::new(
+            ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthInvalidToken,
+                "Token QR tidak valid, sudah digunakan, atau telah kedaluwarsa".to_string(),
+            ),
+            &ctx.request_id,
+        ));
     }
 
     let res = OpaqueQrTokenResponse {

@@ -82,7 +82,6 @@ async fn start(
 
     // Guru, pengajar, dan admin berhak memulai sesi
     require_permission(&req_ctx.actor, Permission::LearningSessionCreate)
-        .or_else(|_| require_permission(&req_ctx.actor, Permission::TeacherRead))
         .or_else(|_| require_permission(&req_ctx.actor, Permission::AcademicManage))
         .map_err(|_| {
             ApiError::new(
@@ -302,6 +301,7 @@ async fn start(
             .execute(&ctx.pool)
             .await;
             crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                tid,
                 t,
                 b,
                 crate::infrastructure::fcm::FcmCategory::Session,
@@ -811,7 +811,6 @@ async fn end(
     use crate::middleware::require_permission;
     use school_core::permission::domain::permission_registry::Permission;
     require_permission(&req_ctx.actor, Permission::LearningSessionUpdate)
-        .or_else(|_| require_permission(&req_ctx.actor, Permission::TeacherRead))
         .map_err(|_| {
             ApiError::new(
                 school_core::common::error::ApplicationError::Unauthorized(
@@ -822,7 +821,10 @@ async fn end(
             )
         })?;
 
-    let command = EndSessionCommand { session_id: id };
+    let command = EndSessionCommand {
+        session_id: id,
+        tenant_id: req_ctx.tenant_id,
+    };
 
     let session = ctx
         .end_session
@@ -846,7 +848,6 @@ async fn cancel_session(
     use crate::middleware::require_permission;
     use school_core::permission::domain::permission_registry::Permission;
     require_permission(&req_ctx.actor, Permission::LearningSessionUpdate)
-        .or_else(|_| require_permission(&req_ctx.actor, Permission::TeacherRead))
         .map_err(|_| {
             ApiError::new(
                 school_core::common::error::ApplicationError::Unauthorized(
@@ -965,7 +966,6 @@ async fn record_attendance(
     use crate::middleware::require_permission;
     use school_core::permission::domain::permission_registry::Permission;
     require_permission(&req_ctx.actor, Permission::LearningSessionUpdate)
-        .or_else(|_| require_permission(&req_ctx.actor, Permission::TeacherRead))
         .map_err(|_| {
             ApiError::new(
                 school_core::common::error::ApplicationError::Unauthorized(
@@ -1059,7 +1059,6 @@ async fn record_attendance_bulk(
     use crate::middleware::require_permission;
     use school_core::permission::domain::permission_registry::Permission;
     require_permission(&req_ctx.actor, Permission::LearningSessionUpdate)
-        .or_else(|_| require_permission(&req_ctx.actor, Permission::TeacherRead))
         .map_err(|_| {
             ApiError::new(
                 school_core::common::error::ApplicationError::Unauthorized(

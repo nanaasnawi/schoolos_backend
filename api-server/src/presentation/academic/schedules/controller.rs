@@ -266,21 +266,11 @@ async fn list(
     let mut filter_teacher_id = query.teacher_id;
     if is_teacher && filter_teacher_id.is_none() {
         let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
-        let t_id = sqlx::query_scalar::<_, Uuid>(
-            r#"
-            SELECT id FROM teachers 
-            WHERE (
-                user_id = $1 
-                OR lower(trim(full_name)) = (SELECT lower(trim(full_name)) FROM users WHERE id = $1)
-                OR (email IS NOT NULL AND lower(trim(email)) = (SELECT lower(trim(email)) FROM users WHERE id = $1))
-            )
-            AND tenant_id = $2 AND deleted_at IS NULL
-            LIMIT 1
-            "#,
+        let t_id = crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            user_id,
         )
-        .bind(user_id)
-        .bind(req_ctx.tenant_id)
-        .fetch_optional(&ctx.pool)
         .await
         .ok()
         .flatten();
@@ -390,21 +380,11 @@ async fn today_schedules(
     let mut filter_teacher_id = query.teacher_id;
     if is_teacher && filter_teacher_id.is_none() {
         let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
-        let t_id = sqlx::query_scalar::<_, Uuid>(
-            r#"
-            SELECT id FROM teachers 
-            WHERE (
-                user_id = $1 
-                OR lower(trim(full_name)) = (SELECT lower(trim(full_name)) FROM users WHERE id = $1)
-                OR (email IS NOT NULL AND lower(trim(email)) = (SELECT lower(trim(email)) FROM users WHERE id = $1))
-            )
-            AND tenant_id = $2 AND deleted_at IS NULL
-            LIMIT 1
-            "#,
+        let t_id = crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            user_id,
         )
-        .bind(user_id)
-        .bind(req_ctx.tenant_id)
-        .fetch_optional(&ctx.pool)
         .await
         .ok()
         .flatten();

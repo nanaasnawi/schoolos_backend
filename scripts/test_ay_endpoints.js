@@ -9,7 +9,7 @@ function createJwt(payload, secret) {
 }
 
 async function testApi() {
-  const secret = 'REDACTED_JWT_SECRET';
+  const secret = process.env.JWT_SECRET;
   const token = createJwt({
     sub: '01a092fc-af59-76b2-85f2-cca8b8d8d515',
     tenant_id: 'b158ec8a-6ea3-468a-bed5-917e37499550',

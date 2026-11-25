@@ -228,34 +228,16 @@ async fn list(
 
     if is_teacher && params.all != Some(true) {
         let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
-        let teacher_id_opt: Option<Uuid> = sqlx::query_scalar::<_, Uuid>(
-            r#"
-            SELECT id FROM teachers 
-            WHERE (
-                user_id = $1 
-                OR lower(trim(full_name)) = (SELECT lower(trim(full_name)) FROM users WHERE id = $1)
-                OR (email IS NOT NULL AND lower(trim(email)) = (SELECT lower(trim(email)) FROM users WHERE id = $1))
-            )
-            AND tenant_id = $2 AND deleted_at IS NULL
-            LIMIT 1
-            "#,
+        let teacher_id_opt = crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            user_id,
         )
-        .bind(user_id)
-        .bind(req_ctx.tenant_id)
-        .fetch_optional(&ctx.pool)
         .await
-        .unwrap_or(None);
+        .ok()
+        .flatten();
 
         if let Some(teacher_id) = teacher_id_opt {
-            // Auto-heal user_id link on teachers record if missing
-            let _ = sqlx::query(
-                "UPDATE teachers SET user_id = $1 WHERE id = $2 AND user_id IS NULL",
-            )
-            .bind(user_id)
-            .bind(teacher_id)
-            .execute(&ctx.pool)
-            .await;
-
             let allowed_class_ids: Vec<Uuid> = sqlx::query_scalar::<_, Uuid>(
                 r#"
                 SELECT DISTINCT c.id FROM classes c
@@ -355,23 +337,14 @@ async fn list_class_students(
     let mut teacher_filter_id: Option<Uuid> = None;
     if is_teacher && !is_class_targeted {
         let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
-        let t_id = sqlx::query_scalar::<_, Uuid>(
-            r#"
-            SELECT id FROM teachers 
-            WHERE (
-                user_id = $1 
-                OR lower(trim(full_name)) = (SELECT lower(trim(full_name)) FROM users WHERE id = $1)
-                OR (email IS NOT NULL AND lower(trim(email)) = (SELECT lower(trim(email)) FROM users WHERE id = $1))
-            )
-            AND tenant_id = $2 AND deleted_at IS NULL
-            LIMIT 1
-            "#,
+        let t_id = crate::authorization_helpers::AuthorizationScope::resolve_teacher_id(
+            &ctx.pool,
+            tenant_id,
+            user_id,
         )
-        .bind(user_id)
-        .bind(tenant_id)
-        .fetch_optional(&ctx.pool)
         .await
-        .unwrap_or(None);
+        .ok()
+        .flatten();
 
         teacher_filter_id = t_id.or(Some(Uuid::nil()));
     }
@@ -444,9 +417,10 @@ async fn get_class_students_by_id(
             s.id, s.full_name, s.nisn, s.gender, s.status, s.no_hp, s.email,
             c.id as class_id, c.name as class_name
         FROM students s
-        JOIN enrollments en ON en.student_id = s.id
-        JOIN classes c ON c.id = en.class_id
+        JOIN enrollments en ON en.student_id = s.id AND en.tenant_id = $2
+        JOIN classes c ON c.id = en.class_id AND c.tenant_id = $2
         WHERE c.id = $1
+          AND s.tenant_id = $2
           AND (en.status = 'Active' OR en.status = 'active')
           AND s.is_active = true
           AND (s.status = 'active' OR s.status = 'Active')
@@ -455,6 +429,7 @@ async fn get_class_students_by_id(
         "#,
     )
     .bind(id)
+    .bind(req_ctx.tenant_id)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| {

@@ -242,6 +242,33 @@ pub async fn get_report_hub_stats(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
 ) -> Result<Json<ApiResponse<ReportHubStats>>, ApiError> {
+    let is_staff_or_teacher = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("admin")
+                    || n.contains("kepala")
+                    || n.contains("staff")
+                    || n.contains("tata usaha")
+                    || n.contains("bendahara")
+                    || n.contains("guru")
+                    || n.contains("teacher")
+                    || n.contains("tutor")
+            })
+        })
+        .unwrap_or(false);
+    if !is_staff_or_teacher {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Akses ditolak: Ringkasan laporan sekolah hanya tersedia untuk Pendidik, Tata Usaha, dan Kepala Sekolah.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     let pool = &ctx.pool;
     let tid = req_ctx.tenant_id;
 
@@ -307,25 +334,32 @@ pub async fn export_report(
     let tid = req_ctx.tenant_id;
     let format = query.format.as_deref().unwrap_or("json").to_lowercase();
 
-    // Check authorization: must be admin or staff or teacher
-    if let Some(ref actor) = req_ctx.actor {
-        let has_export_perm = actor.roles.iter().any(|r| {
-            let n = r.name.to_lowercase();
-            n.contains("admin")
-                || n.contains("kepala")
-                || n.contains("staff")
-                || n.contains("tata usaha")
-                || n.contains("guru")
-        });
-        if !has_export_perm {
-            return Err(ApiError::new(
-                ApplicationError::Forbidden(
-                    ErrorCode::AuthPermissionDenied,
-                    "Akses ditolak: Ekspor data resmi sekolah memerlukan hak akses Administrator, Tata Usaha, atau Pendidik.".to_string(),
-                ),
-                req_ctx.request_id,
-            ));
-        }
+    // Check authorization: must be admin, staff, or teacher (fail-closed if actor missing)
+    let has_export_perm = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("admin")
+                    || n.contains("kepala")
+                    || n.contains("staff")
+                    || n.contains("tata usaha")
+                    || n.contains("bendahara")
+                    || n.contains("guru")
+                    || n.contains("teacher")
+                    || n.contains("tutor")
+            })
+        })
+        .unwrap_or(false);
+    if !has_export_perm {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Akses ditolak: Ekspor data resmi sekolah memerlukan hak akses Administrator, Tata Usaha, atau Pendidik.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
     }
 
     let (headers_list, rows_data, filename_prefix) = match report_type.as_str() {

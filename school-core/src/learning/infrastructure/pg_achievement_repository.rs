@@ -112,11 +112,22 @@ impl AchievementRepository for PgAchievementRepository {
     }
 
     async fn delete(&self, id: Uuid) -> Result<(), InfrastructureError> {
-        sqlx::query("UPDATE achievements SET deleted_at = NOW() WHERE id = $1")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(InfrastructureError::Database)?;
+        if let Some(crate::common::tenant_context::TenantDbScope::Tenant(tid)) =
+            crate::common::tenant_context::current_tenant_db_scope()
+        {
+            sqlx::query("UPDATE achievements SET deleted_at = NOW() WHERE id = $1 AND tenant_id = $2")
+                .bind(id)
+                .bind(tid)
+                .execute(&self.pool)
+                .await
+                .map_err(InfrastructureError::Database)?;
+        } else {
+            sqlx::query("UPDATE achievements SET deleted_at = NOW() WHERE id = $1")
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .map_err(InfrastructureError::Database)?;
+        }
         Ok(())
     }
 

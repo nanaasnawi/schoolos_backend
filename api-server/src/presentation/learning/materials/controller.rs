@@ -422,6 +422,7 @@ async fn create(
         let sibling_cids = vec![cid];
 
         crate::infrastructure::fcm::trigger_fcm_push_targeted(
+            req_ctx.tenant_id,
             notif_title.clone(),
             notif_body,
             crate::infrastructure::fcm::FcmCategory::Material,
@@ -461,6 +462,7 @@ async fn create(
         .await;
 
         crate::infrastructure::fcm::trigger_fcm_push_targeted(
+            req_ctx.tenant_id,
             notif_title,
             notif_body,
             crate::infrastructure::fcm::FcmCategory::Material,
@@ -1951,6 +1953,7 @@ async fn update(
                     .await;
 
                     crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                        req_ctx.tenant_id,
                         notif_title,
                         notif_body,
                         crate::infrastructure::fcm::FcmCategory::Material,
@@ -1959,6 +1962,7 @@ async fn update(
                     );
                 } else {
                     crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                        req_ctx.tenant_id,
                         notif_title,
                         notif_body,
                         crate::infrastructure::fcm::FcmCategory::Material,
@@ -2370,6 +2374,36 @@ pub async fn get_reading_summary(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
 ) -> Result<Json<ApiResponse<ReadingSummaryResponse>>, ApiError> {
+    let is_staff_or_teacher = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("admin")
+                    || n.contains("kepala")
+                    || n.contains("operator")
+                    || n.contains("staff")
+                    || n.contains("staf")
+                    || n.contains("tata usaha")
+                    || n.contains("guru")
+                    || n.contains("teacher")
+                    || n.contains("tutor")
+                    || n.contains("pengajar")
+            })
+        })
+        .unwrap_or(false);
+
+    if !is_staff_or_teacher {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Akses ditolak: Ringkasan aktivitas membaca siswa hanya tersedia untuk Pendidik dan Staf Sekolah.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     // Query 1: All active learning materials for the tenant with counts
     let material_rows = sqlx::query(
         r#"
@@ -2561,25 +2595,39 @@ pub async fn get_reading_summary(
 
 
 fn build_uploaded_file_response(filename: &str, mime: &str, bytes: Vec<u8>) -> Response {
-    let out_bytes = sanitize_served_upload_bytes(mime, bytes);
+    let lower_mime = mime.trim().to_ascii_lowercase();
+    let safe_mime = match lower_mime.as_str() {
+        "text/html" | "application/xhtml+xml" | "application/javascript" | "text/javascript"
+        | "application/x-javascript" | "text/xml" | "application/xml" => "application/octet-stream",
+        _ => mime.trim(),
+    };
+    let out_bytes = sanitize_served_upload_bytes(safe_mime, bytes);
     let safe_filename = filename.replace('"', "");
-    let is_inline_safe = mime.starts_with("image/")
-        || mime.starts_with("video/")
-        || mime == "application/pdf";
+    let is_svg = safe_mime.eq_ignore_ascii_case("image/svg+xml");
+    let is_inline_safe = safe_mime.starts_with("image/")
+        || safe_mime.starts_with("video/")
+        || safe_mime == "application/pdf";
     let disposition = if is_inline_safe {
         format!("inline; filename=\"{safe_filename}\"")
     } else {
         format!("attachment; filename=\"{safe_filename}\"")
     };
-    axum::response::Response::builder()
-        .header(axum::http::header::CONTENT_TYPE, mime)
+    let mut builder = axum::response::Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, safe_mime)
         .header(axum::http::header::CONTENT_DISPOSITION, disposition)
+        .header(axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header(axum::http::header::ACCEPT_RANGES, "bytes")
-        .header(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .header(
             axum::http::header::CACHE_CONTROL,
             "public, max-age=31536000, immutable",
-        )
+        );
+    if is_svg {
+        builder = builder.header(
+            axum::http::header::CONTENT_SECURITY_POLICY,
+            "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+        );
+    }
+    builder
         .body(axum::body::Body::from(out_bytes))
         .unwrap_or_else(|_| {
             (
@@ -2609,12 +2657,14 @@ pub async fn serve_uploaded_file(
     }
 
     // Fallback to PostgreSQL uploaded_files table
-    let row = sqlx::query("SELECT mime_type, file_data FROM uploaded_files WHERE filename = $1")
-        .bind(&clean)
-        .fetch_optional(&ctx.pool)
-        .await
-        .ok()
-        .flatten();
+    let row = school_core::common::tenant_context::with_system_rls_bypass(
+        sqlx::query("SELECT mime_type, file_data FROM uploaded_files WHERE filename = $1")
+            .bind(&clean)
+            .fetch_optional(&ctx.pool),
+    )
+    .await
+    .ok()
+    .flatten();
 
     if let Some(r) = row {
         let mime: String = r.get("mime_type");
@@ -2631,15 +2681,44 @@ pub async fn serve_uploaded_file(
     (axum::http::StatusCode::NOT_FOUND, "File not found").into_response()
 }
 
-/// Ensures SVG uploads remain SVG 1.1 compatible with AndroidSVG (`orient="auto"` instead of SVG 2 `orient="auto-start-reverse"`).
+fn strip_tag_block_case_insensitive(input: &str, open_tag: &str, close_tag: &str) -> String {
+    let mut out = input.to_string();
+    loop {
+        let lower = out.to_ascii_lowercase();
+        let Some(start) = lower.find(open_tag) else {
+            break;
+        };
+        if let Some(rel_end) = lower[start..].find(close_tag) {
+            let end = start + rel_end + close_tag.len();
+            out.replace_range(start..end, "");
+        } else {
+            out.truncate(start);
+            break;
+        }
+    }
+    out
+}
+
+/// Sanitizes SVG diagrams against embedded scripts/event handlers while preserving SVG 1.1 compatibility for AndroidSVG.
 fn sanitize_served_upload_bytes(mime: &str, bytes: Vec<u8>) -> Vec<u8> {
     if mime.eq_ignore_ascii_case("image/svg+xml") {
         if let Ok(text) = std::str::from_utf8(&bytes) {
-            if text.contains("auto-start-reverse") {
-                return text
-                    .replace(r#"orient="auto-start-reverse""#, r#"orient="auto""#)
-                    .into_bytes();
+            let mut cleaned = strip_tag_block_case_insensitive(text, "<script", "</script>");
+            cleaned = strip_tag_block_case_insensitive(&cleaned, "<foreignobject", "</foreignobject>");
+            // Strip inline event handlers and active URI schemes case-insensitively
+            for dangerous in ["onload=", "onclick=", "onerror=", "onmouseover=", "onfocus=", "javascript:", "vbscript:"] {
+                loop {
+                    let lower = cleaned.to_ascii_lowercase();
+                    let Some(pos) = lower.find(dangerous) else {
+                        break;
+                    };
+                    cleaned.replace_range(pos..pos + dangerous.len(), "data-blocked=");
+                }
             }
+            if cleaned.contains("auto-start-reverse") {
+                cleaned = cleaned.replace(r#"orient="auto-start-reverse""#, r#"orient="auto""#);
+            }
+            return cleaned.into_bytes();
         }
     }
     bytes

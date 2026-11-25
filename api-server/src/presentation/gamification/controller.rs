@@ -85,9 +85,30 @@ pub async fn get_student_gamification(
     req_ctx: RequestContext,
     Query(query): Query<GamificationQuery>,
 ) -> Result<Json<ApiResponse<GamificationStatusResponse>>, ApiError> {
+    let actor = req_ctx.actor.as_ref().ok_or_else(|| {
+        ApiError::new(
+            ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthInvalidToken,
+                "Authentication required".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+    let is_staff_or_teacher = actor.roles.iter().any(|r| {
+        let n = r.name.to_lowercase();
+        n.contains("admin")
+            || n.contains("kepala")
+            || n.contains("operator")
+            || n.contains("staff")
+            || n.contains("tata usaha")
+            || n.contains("guru")
+            || n.contains("teacher")
+            || n.contains("tutor")
+    });
+
     let target_student_id = match query.student_id {
-        Some(sid) => {
-            // Cek apakah sid adalah student_id atau user_id
+        Some(sid) if is_staff_or_teacher => {
+            // Staff/Teacher may inspect any student within their active tenant
             let resolved = sqlx::query(
                 "SELECT id FROM students WHERE (id = $1 OR user_id = $1) AND tenant_id = $2 LIMIT 1"
             )
@@ -96,22 +117,60 @@ pub async fn get_student_gamification(
             .fetch_optional(&ctx.pool)
             .await
             .map_err(|e| ApiError::new(ApplicationError::Infrastructure(InfrastructureError::Database(e)), &req_ctx.request_id))?;
-            
+
             resolved.map(|r| r.get::<Uuid, _>("id")).unwrap_or(sid)
         }
-        None => {
-            // Ambil dari authenticated actor jika Siswa
-            let actor_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
+        Some(sid) => {
+            // Student / Parent may inspect ONLY themselves or their linked child
             let resolved = sqlx::query(
-                "SELECT id FROM students WHERE user_id = $1 AND tenant_id = $2 LIMIT 1"
+                r#"
+                SELECT s.id
+                FROM students s
+                LEFT JOIN guardians g ON g.id = s.guardian_id
+                WHERE (s.id = $1 OR s.user_id = $1)
+                  AND s.tenant_id = $2
+                  AND (s.user_id = $3 OR g.user_id = $3)
+                LIMIT 1
+                "#
             )
-            .bind(actor_id)
+            .bind(sid)
+            .bind(req_ctx.tenant_id)
+            .bind(actor.id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .map_err(|e| ApiError::new(ApplicationError::Infrastructure(InfrastructureError::Database(e)), &req_ctx.request_id))?;
+
+            match resolved {
+                Some(r) => r.get::<Uuid, _>("id"),
+                None => {
+                    return Err(ApiError::new(
+                        ApplicationError::Forbidden(
+                            school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                            "Anda tidak memiliki izin melihat progres gamifikasi siswa lain".to_string(),
+                        ),
+                        &req_ctx.request_id,
+                    ));
+                }
+            }
+        }
+        None => {
+            // Ambil dari authenticated actor jika Siswa (atau wali dengan anak pertama)
+            let resolved = sqlx::query(
+                r#"
+                SELECT s.id
+                FROM students s
+                LEFT JOIN guardians g ON g.id = s.guardian_id
+                WHERE s.tenant_id = $2 AND (s.user_id = $1 OR g.user_id = $1)
+                LIMIT 1
+                "#
+            )
+            .bind(actor.id)
             .bind(req_ctx.tenant_id)
             .fetch_optional(&ctx.pool)
             .await
             .map_err(|e| ApiError::new(ApplicationError::Infrastructure(InfrastructureError::Database(e)), &req_ctx.request_id))?;
 
-            resolved.map(|r| r.get::<Uuid, _>("id")).unwrap_or(actor_id)
+            resolved.map(|r| r.get::<Uuid, _>("id")).unwrap_or(actor.id)
         }
     };
 

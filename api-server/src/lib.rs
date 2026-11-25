@@ -1,5 +1,6 @@
 pub mod authorization_helpers;
 pub mod bootstrap;
+pub mod db_tenant;
 pub mod error;
 pub mod extractors;
 pub mod idempotency;

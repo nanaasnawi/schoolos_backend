@@ -241,6 +241,16 @@ pub async fn register_school_cp(
     req_ctx: RequestContext,
     Json(payload): Json<RegisterSchoolCpPayload>,
 ) -> Result<Json<ApiResponse<LearningOutcomeElementDto>>, ApiError> {
+    if !is_pedagogy_teacher_or_admin(&req_ctx) {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Hanya Pendidik / Staf / Admin yang diizinkan mendaftarkan Capaian Pembelajaran sekolah.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     let subject_name = payload.subject_name.trim();
     let phase = payload.phase.trim().to_uppercase();
     let element_name = payload.element_name.trim();
@@ -363,6 +373,16 @@ pub async fn synthesize_cp(
     req_ctx: RequestContext,
     Json(payload): Json<SynthesizeCpRequest>,
 ) -> Result<Json<ApiResponse<SynthesizeCpResponse>>, ApiError> {
+    if !is_pedagogy_teacher_or_admin(&req_ctx) {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Hanya Pendidik / Staf / Admin yang diizinkan menyintesis Capaian Pembelajaran.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     let grade_level = payload
         .grade_level
         .as_deref()
@@ -1281,6 +1301,16 @@ pub async fn update_tp(
     req_ctx: RequestContext,
     Json(payload): Json<UpdateTpPayload>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    if !is_pedagogy_teacher_or_admin(&req_ctx) {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Hanya Pendidik / Staf / Admin yang diizinkan memperbarui Tujuan Pembelajaran.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     let tp_id = payload.id;
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
 
@@ -1387,6 +1417,16 @@ pub async fn publish_pedagogy(
     req_ctx: RequestContext,
     Json(payload): Json<PublishPedagogyPayload>,
 ) -> Result<Json<ApiResponse<PublishPedagogyResponse>>, ApiError> {
+    if !is_pedagogy_teacher_or_admin(&req_ctx) {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Hanya Pendidik / Staf / Admin yang diizinkan memublikasikan ATP/TP.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     if payload.tp_ids.is_empty() {
         return Err(ApiError::new(
             ApplicationError::Domain(DomainError::Validation(
@@ -1397,14 +1437,16 @@ pub async fn publish_pedagogy(
     }
 
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
-    let mut tx = ctx.pool.begin().await.map_err(|e| {
-        ApiError::new(
-            ApplicationError::Infrastructure(
-                school_core::common::error::InfrastructureError::Database(e),
-            ),
-            &req_ctx.request_id,
-        )
-    })?;
+    let mut tx = crate::db_tenant::begin_tenant_tx(&ctx.pool, req_ctx.tenant_id)
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
 
     let tp_rows = sqlx::query(
         r#"
@@ -1415,7 +1457,7 @@ pub async fn publish_pedagogy(
             published_at = NOW(),
             updated_at = NOW()
         WHERE id = ANY($1)
-          AND ($3 IS NULL OR tenant_id = $3 OR tenant_id IS NULL)
+          AND tenant_id = $3
           AND deleted_at IS NULL
         RETURNING id, estimated_hours
         "#
@@ -1612,6 +1654,16 @@ pub async fn create_modul_ajar(
     req_ctx: RequestContext,
     Json(payload): Json<CreateModulAjarPayload>,
 ) -> Result<Json<ApiResponse<ModulAjarDto>>, ApiError> {
+    if !is_pedagogy_teacher_or_admin(&req_ctx) {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Hanya Pendidik / Staf / Admin yang diizinkan membuat Modul Ajar.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
     let academic_year = payload.academic_year.unwrap_or_else(|| "2026/2027".to_string());
     let semester = payload.semester.unwrap_or_else(|| "ODD".to_string()).to_uppercase();
@@ -1716,22 +1768,41 @@ pub async fn activate_modul_ajar(
     req_ctx: RequestContext,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    if !is_pedagogy_teacher_or_admin(&req_ctx) {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Hanya Pendidik / Staf / Admin yang diizinkan mengaktifkan Modul Ajar.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     let row = sqlx::query(
         r#"
         UPDATE modul_ajar
         SET status = 'ACTIVE', suspension_reason = NULL, updated_at = NOW()
-        WHERE id = $1 AND ($2 IS NULL OR tenant_id = $2 OR tenant_id IS NULL)
+        WHERE id = $1 AND tenant_id = $2
         RETURNING id, title, status
         "#
     )
     .bind(id)
     .bind(req_ctx.tenant_id)
-    .fetch_one(&ctx.pool)
+    .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| {
         ApiError::new(
             ApplicationError::Infrastructure(
                 school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?
+    .ok_or_else(|| {
+        ApiError::new(
+            ApplicationError::NotFound(
+                ErrorCode::ResourceNotFound,
+                "Modul ajar tidak ditemukan di tenant aktif".to_string(),
             ),
             &req_ctx.request_id,
         )
@@ -1866,6 +1937,16 @@ pub async fn create_assessment(
     req_ctx: RequestContext,
     Json(payload): Json<CreateAssessmentPayload>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    if !is_pedagogy_teacher_or_admin(&req_ctx) {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Hanya Pendidik / Staf / Admin yang diizinkan membuat instrumen asesmen.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
     let academic_year = payload.academic_year.unwrap_or_else(|| "2026/2027".to_string());
     let semester = payload.semester.unwrap_or_else(|| "ODD".to_string()).to_uppercase();
@@ -1936,6 +2017,16 @@ pub async fn get_assessment_detail(
     req_ctx: RequestContext,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    if !is_pedagogy_teacher_or_admin(&req_ctx) {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Hanya Pendidik / Staf / Admin yang diizinkan mengakses detail instrumen asesmen.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     let row = sqlx::query(
         r#"
         SELECT 
@@ -1957,7 +2048,7 @@ pub async fn get_assessment_detail(
         JOIN classes c ON pa.class_id = c.id
         LEFT JOIN learning_objectives tp ON pa.learning_objective_id = tp.id
         LEFT JOIN modul_ajar m ON pa.modul_ajar_id = m.id
-        WHERE pa.id = $1 AND ($2 IS NULL OR pa.tenant_id = $2 OR pa.tenant_id IS NULL)
+        WHERE pa.id = $1 AND pa.tenant_id = $2
           AND pa.deleted_at IS NULL
         "#
     )
@@ -2066,7 +2157,24 @@ pub async fn record_assessment_grades(
     Path(assessment_id): Path<Uuid>,
     Json(payload): Json<SubmitGradesPayload>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    let mut tx = ctx.pool.begin().await.map_err(|e| {
+    if !is_pedagogy_teacher_or_admin(&req_ctx) {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Hanya Pendidik / Staf / Admin yang diizinkan menginput nilai asesmen.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
+    let owns_assessment = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM pedagogical_assessments WHERE id = $1 AND tenant_id = $2)",
+    )
+    .bind(assessment_id)
+    .bind(req_ctx.tenant_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .map_err(|e| {
         ApiError::new(
             ApplicationError::Infrastructure(
                 school_core::common::error::InfrastructureError::Database(e),
@@ -2074,6 +2182,26 @@ pub async fn record_assessment_grades(
             &req_ctx.request_id,
         )
     })?;
+    if !owns_assessment {
+        return Err(ApiError::new(
+            ApplicationError::NotFound(
+                ErrorCode::ResourceNotFound,
+                "Instrumen asesmen tidak ditemukan di sekolah aktif".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
+    let mut tx = crate::db_tenant::begin_tenant_tx(&ctx.pool, req_ctx.tenant_id)
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
 
     for g in payload.grades {
         sqlx::query(
@@ -2301,7 +2429,47 @@ pub async fn verify_habit_parent(
     req_ctx: RequestContext,
     Json(payload): Json<VerifyHabitParentPayload>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
+    let actor = req_ctx.actor.as_ref().ok_or_else(|| {
+        ApiError::new(
+            ApplicationError::Unauthorized(
+                ErrorCode::AuthPermissionDenied,
+                "Sesi tidak valid.".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+    let actor_id = Some(actor.id);
+
+    let is_guardian_or_admin = is_pedagogy_teacher_or_admin(&req_ctx)
+        || sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM habit_tracker_entries h
+                JOIN students s ON s.id = h.student_id AND s.tenant_id = h.tenant_id
+                JOIN guardians g ON g.id = s.guardian_id AND g.tenant_id = h.tenant_id
+                WHERE h.id = $1
+                  AND h.tenant_id = $2
+                  AND g.user_id = $3
+            )
+            "#,
+        )
+        .bind(payload.entry_id)
+        .bind(req_ctx.tenant_id)
+        .bind(actor.id)
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap_or(false);
+
+    if !is_guardian_or_admin {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Verifikasi orang tua hanya dapat dilakukan oleh Wali Siswa terkait atau Pendidik.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
 
     let row = sqlx::query(
         r#"
@@ -2416,6 +2584,16 @@ pub async fn supervise_modul_ajar(
     Path(id): Path<Uuid>,
     Json(payload): Json<SuperviseModulAjarRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    if !is_pedagogy_teacher_or_admin(&req_ctx) {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Hanya Kepala Sekolah / Admin / Pendidik berwenang yang diizinkan melakukan supervisi Modul Ajar.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     let target_status = payload.status.unwrap_or_else(|| "ACTIVE".to_string()).to_uppercase();
     let valid_statuses = ["ACTIVE", "APPROVED", "REVISION_REQUIRED", "SUSPENDED", "DRAFT"];
     if !valid_statuses.contains(&target_status.as_str()) {
@@ -2544,6 +2722,16 @@ pub async fn synthesize_modul_ajar(
     req_ctx: RequestContext,
     Json(payload): Json<SynthesizeModulAjarPayload>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    if !is_pedagogy_teacher_or_admin(&req_ctx) {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Hanya Pendidik / Staf / Admin yang diizinkan menyintesis Modul Ajar.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     let tp_id = payload.tp_id.or(payload.learning_objective_id).ok_or_else(|| {
         ApiError::new(
             ApplicationError::Domain(DomainError::Validation("Field 'learning_objective_id' atau 'tp_id' wajib diisi".to_string())),
@@ -2816,6 +3004,16 @@ pub async fn get_diagnostic_clustering(
     req_ctx: RequestContext,
     Query(query): Query<DiagnosticClusteringQuery>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    if !is_pedagogy_teacher_or_admin(&req_ctx) {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Hanya Pendidik / Staf / Admin yang diizinkan melihat klastering diagnostik kelas.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     let academic_year = query.academic_year.unwrap_or_else(|| "2026/2027".to_string());
 
     let students_rows = sqlx::query(
@@ -2824,11 +3022,12 @@ pub async fn get_diagnostic_clustering(
         FROM enrollments e
         JOIN students s ON e.student_id = s.id
         LEFT JOIN users u ON s.user_id = u.id
-        WHERE e.class_id = $1 AND (e.status IS NULL OR LOWER(e.status) = 'active') AND s.deleted_at IS NULL
+        WHERE e.class_id = $1 AND e.tenant_id = $2 AND s.tenant_id = $2 AND (e.status IS NULL OR LOWER(e.status) = 'active') AND s.deleted_at IS NULL
         ORDER BY full_name ASC
         "#,
     )
     .bind(query.class_id)
+    .bind(req_ctx.tenant_id)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| {
@@ -2963,6 +3162,16 @@ pub async fn get_rapor_preview(
     req_ctx: RequestContext,
     Query(query): Query<RaporPreviewQuery>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    if !is_pedagogy_teacher_or_admin(&req_ctx) {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Hanya Pendidik / Staf / Admin yang diizinkan mengakses pratinjau e-Rapor kelas.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     let academic_year = query.academic_year.unwrap_or_else(|| "2026/2027".to_string());
     let semester = query.semester.unwrap_or_else(|| "ODD".to_string()).to_uppercase();
     let subject_code = query.subject_code.unwrap_or_else(|| "401000000".to_string());
@@ -2976,6 +3185,7 @@ pub async fn get_rapor_preview(
         FROM pedagogical_assessments pa
         LEFT JOIN learning_objectives tp ON pa.learning_objective_id = tp.id
         WHERE pa.class_id = $1
+          AND pa.tenant_id = $5
           AND pa.academic_year = $2
           AND pa.semester = $3
           AND (pa.subject_code = $4 OR $4 = 'ALL')
@@ -2985,6 +3195,10 @@ pub async fn get_rapor_preview(
         "#,
     )
     .bind(query.class_id)
+    .bind(&academic_year)
+    .bind(&semester)
+    .bind(&subject_code)
+    .bind(req_ctx.tenant_id)
     .bind(&academic_year)
     .bind(&semester)
     .bind(&subject_code)
@@ -3144,15 +3358,40 @@ pub async fn approve_rapor(
     req_ctx: RequestContext,
     Json(payload): Json<ApproveRaporPayload>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    if !is_pedagogy_teacher_or_admin(&req_ctx) {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Pengesahan e-Rapor hanya dapat dilakukan oleh Kepala Sekolah, Admin, atau Wali Kelas.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     let academic_year = payload.academic_year.unwrap_or_else(|| "2026/2027".to_string());
     let semester = payload.semester.unwrap_or_else(|| "ODD".to_string()).to_uppercase();
-    let approved_by_name = payload.approved_by_name.unwrap_or_else(|| "Siti Muniroh, S.Pd".to_string());
+    let actor_name = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT headmaster_name FROM schools WHERE tenant_id = $1 AND deleted_at IS NULL LIMIT 1",
+    )
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .ok()
+    .flatten()
+    .flatten()
+    .filter(|s| !s.trim().is_empty())
+    .unwrap_or_else(|| "Kepala Sekolah".to_string());
+    let approved_by_name = payload
+        .approved_by_name
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(actor_name);
     let approved_by_role = payload.approved_by_role.unwrap_or_else(|| "Kepala Sekolah".to_string());
 
     let class_row = sqlx::query(
-        r#"SELECT id, name FROM classes WHERE id = $1"#,
+        r#"SELECT id, name FROM classes WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL"#,
     )
     .bind(payload.class_id)
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| {
@@ -3253,13 +3492,14 @@ pub async fn approve_rapor(
         r#"
         UPDATE gradebook_snapshots
         SET is_stale = false, updated_at = NOW()
-        WHERE class_id = $1 AND academic_year = $2 AND (semester = $3 OR UPPER(semester) = $4)
+        WHERE class_id = $1 AND tenant_id = $5 AND academic_year = $2 AND (semester = $3 OR UPPER(semester) = $4)
         "#,
     )
     .bind(payload.class_id)
     .bind(&academic_year)
     .bind(&semester)
     .bind(normalized_sem)
+    .bind(req_ctx.tenant_id)
     .execute(&ctx.pool)
     .await;
 
@@ -3407,6 +3647,16 @@ pub async fn send_habit_reminder(
     req_ctx: RequestContext,
     Json(payload): Json<SendHabitReminderPayload>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    if !is_pedagogy_teacher_or_admin(&req_ctx) {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Hanya Pendidik / Staf / Admin yang diizinkan mengirim pengingat jurnal kebiasaan.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     let days_lookback = payload.days_lookback.unwrap_or(7);
 
     let rows = sqlx::query(
@@ -3423,12 +3673,15 @@ pub async fn send_habit_reminder(
         JOIN users u ON s.user_id = u.id
         LEFT JOIN guardians g ON s.guardian_id = g.id
         WHERE h.verification_status = 'PENDING'
+          AND h.tenant_id = $3
+          AND s.tenant_id = $3
           AND h.entry_date >= (CURRENT_DATE - ($1 || ' days')::interval)::date
           AND ($2::uuid IS NULL OR h.student_id = $2)
         "#,
     )
     .bind(days_lookback.to_string())
     .bind(payload.student_id)
+    .bind(req_ctx.tenant_id)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| {

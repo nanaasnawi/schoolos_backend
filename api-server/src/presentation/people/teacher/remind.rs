@@ -128,6 +128,36 @@ pub async fn remind_students(
     req_ctx: RequestContext,
     Json(payload): Json<SendReminderRequest>,
 ) -> Result<Json<SendReminderResponse>, ApiError> {
+    let actor = req_ctx.actor.as_ref().ok_or_else(|| {
+        ApiError::new(
+            ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthInvalidToken,
+                "Authentication required".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+    let is_teacher_or_admin = actor.roles.iter().any(|r| {
+        let n = r.name.to_lowercase();
+        n.contains("admin")
+            || n.contains("kepala")
+            || n.contains("operator")
+            || n.contains("staff")
+            || n.contains("tata usaha")
+            || n.contains("guru")
+            || n.contains("teacher")
+            || n.contains("tutor")
+    });
+    if !is_teacher_or_admin {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Hanya Guru atau Pengelola Sekolah yang dapat mengirim pengingat belajar".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     let mut target_ids = Vec::new();
     if let Some(list) = payload.student_ids {
         target_ids.extend(list);
@@ -151,8 +181,8 @@ pub async fn remind_students(
         r#"
         SELECT s.id, s.user_id, s.full_name, s.tenant_id
         FROM students s
-        WHERE s.id = ANY($1) 
-          AND ($2::uuid = '00000000-0000-0000-0000-000000000000'::uuid OR s.tenant_id = $2) 
+        WHERE s.id = ANY($1)
+          AND s.tenant_id = $2
           AND s.deleted_at IS NULL
         "#,
     )
@@ -277,6 +307,7 @@ pub async fn remind_students(
 
         // Push targeted FCM notification exclusively to this student
         fcm::trigger_fcm_push_targeted(
+            tenant_id,
             notif_title,
             notif_body,
             fcm_cat,
@@ -341,23 +372,57 @@ pub async fn get_at_risk_students(
     Query(query): Query<AtRiskQuery>,
 ) -> Result<Json<ApiResponse<Vec<AtRiskStudentResponse>>>, ApiError> {
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
-    let is_admin = req_ctx.actor.as_ref().map(|a| {
-        a.roles.iter().any(|r| {
-            let n = r.name.to_lowercase();
-            n.contains("admin") || n.contains("kepala") || n.contains("headmaster") || n.contains("staff")
+    let is_admin = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("admin") || n.contains("kepala") || n.contains("headmaster") || n.contains("staff") || n.contains("operator")
+            })
         })
-    }).unwrap_or(false);
+        .unwrap_or(false);
+    let is_teacher_role = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("guru") || n.contains("teacher") || n.contains("tutor") || n.contains("wali kelas")
+            })
+        })
+        .unwrap_or(false);
+
+    if !is_admin && !is_teacher_role {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Akses ditolak: Daftar siswa perlu perhatian hanya tersedia untuk Pendidik dan Pimpinan Sekolah.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
 
     let teacher_id: Option<Uuid> = if !is_admin {
-        sqlx::query_scalar(
-            "SELECT id FROM teachers WHERE (user_id = $1 OR id = $1) AND tenant_id = $2 LIMIT 1",
+        let tid = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM teachers WHERE user_id = $1 AND tenant_id = $2 AND deleted_at IS NULL LIMIT 1",
         )
         .bind(actor_id)
         .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await
         .ok()
-        .flatten()
+        .flatten();
+        if tid.is_none() {
+            return Err(ApiError::new(
+                ApplicationError::Forbidden(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Akses ditolak: Akun pendidik belum tertaut dengan profil guru aktif.".to_string(),
+                ),
+                &req_ctx.request_id,
+            ));
+        }
+        tid
     } else {
         None
     };

@@ -438,10 +438,8 @@ async fn save_gradebook(
     use crate::middleware::require_permission;
     use school_core::permission::domain::permission_registry::Permission;
     require_permission(&req_ctx.actor, Permission::LearningAssessmentConfigure)
-        .or_else(|_| require_permission(&req_ctx.actor, Permission::TeacherRead))
-        .or_else(|_| require_permission(&req_ctx.actor, Permission::TeacherCreate))
+        .or_else(|_| require_permission(&req_ctx.actor, Permission::LearningAssessmentGrade))
         .or_else(|_| require_permission(&req_ctx.actor, Permission::AcademicManage))
-        .or_else(|_| require_permission(&req_ctx.actor, Permission::StaffRead))
         .map_err(|_| {
             ApiError::new(
                 school_core::common::error::ApplicationError::Unauthorized(
@@ -457,11 +455,12 @@ async fn save_gradebook(
         .as_ref()
         .map(|a| {
             a.roles.iter().any(|r| {
-                r.name == "Kepala Sekolah"
-                    || r.name == "Operator/Staff"
-                    || r.name == "Admin"
-                    || r.name == "SuperAdmin"
-                    || r.name == "Bendahara"
+                let n = r.name.to_lowercase();
+                n.contains("kepala")
+                    || n.contains("operator")
+                    || n.contains("staff")
+                    || n.contains("admin")
+                    || n.contains("bendahara")
             })
         })
         .unwrap_or(false);
@@ -471,23 +470,31 @@ async fn save_gradebook(
             .actor
             .as_ref()
             .map(|a| {
-                a.roles
-                    .iter()
-                    .any(|r| r.name == "Guru" || r.name == "Teacher")
+                a.roles.iter().any(|r| {
+                    let n = r.name.to_lowercase();
+                    n.contains("guru") || n.contains("teacher") || n.contains("tutor")
+                })
             })
             .unwrap_or(false);
+
+    if !is_admin_or_staff && !is_teacher {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Forbidden(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Insufficient permissions to save grades".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
 
     let teacher_id_opt: Option<Uuid> = if is_teacher {
         let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
         sqlx::query_scalar::<_, Uuid>(
             r#"
-            SELECT id FROM teachers 
-            WHERE (
-                user_id = $1 
-                OR lower(trim(full_name)) = (SELECT lower(trim(full_name)) FROM users WHERE id = $1)
-                OR (email IS NOT NULL AND lower(trim(email)) = (SELECT lower(trim(email)) FROM users WHERE id = $1))
-            )
-            AND tenant_id = $2 AND deleted_at IS NULL
+            SELECT id FROM teachers
+            WHERE user_id = $1
+              AND tenant_id = $2
+              AND deleted_at IS NULL
             LIMIT 1
             "#,
         )
@@ -499,6 +506,16 @@ async fn save_gradebook(
     } else {
         None
     };
+
+    if is_teacher && teacher_id_opt.is_none() {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Forbidden(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Akun pendidik belum tertaut dengan data profil guru.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
 
     if let Some(t_id) = teacher_id_opt {
         let allowed_class_ids: Vec<Uuid> = sqlx::query_scalar::<_, Uuid>(
@@ -921,6 +938,7 @@ async fn save_gradebook(
             crate::infrastructure::fcm::FcmTarget::Roles(vec!["student".to_string()])
         };
         crate::infrastructure::fcm::trigger_fcm_push_targeted(
+            tid,
             t,
             b,
             crate::infrastructure::fcm::FcmCategory::Grade,
@@ -981,47 +999,71 @@ async fn get_gradebook_summary(
 
     // Scope student/guardian requests to their own student_id so students never read peer summaries.
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
-    let target_student_id = match params.student_id {
-        Some(sid) => Some(sid),
-        None => {
-            if !is_admin_or_staff && !is_teacher {
-                if let Some(aid) = actor_id {
-                    let sid = sqlx::query_scalar::<_, Uuid>(
-                        "SELECT id FROM students WHERE user_id = $1 AND tenant_id = $2 LIMIT 1",
-                    )
-                    .bind(aid)
-                    .bind(req_ctx.tenant_id)
-                    .fetch_optional(&ctx.pool)
-                    .await
-                    .ok()
-                    .flatten();
+    let target_student_id = if !is_admin_or_staff && !is_teacher {
+        let Some(aid) = actor_id else {
+            return Ok(Json(ApiResponse::success(Vec::new(), req_ctx.request_id)));
+        };
+        if let Some(requested_sid) = params.student_id {
+            let is_owner = sqlx::query_scalar::<_, bool>(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1 FROM students s
+                    LEFT JOIN guardians g ON g.id = s.guardian_id
+                    WHERE s.id = $1
+                      AND s.tenant_id = $3
+                      AND (s.user_id = $2 OR g.user_id = $2)
+                )
+                "#,
+            )
+            .bind(requested_sid)
+            .bind(aid)
+            .bind(req_ctx.tenant_id)
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap_or(false);
+            if !is_owner {
+                return Err(ApiError::new(
+                    school_core::common::error::ApplicationError::Forbidden(
+                        school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                        "Akses ditolak: Anda hanya dapat melihat ringkasan nilai milik sendiri.".to_string(),
+                    ),
+                    &req_ctx.request_id,
+                ));
+            }
+            Some(requested_sid)
+        } else {
+            let sid = sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM students WHERE user_id = $1 AND tenant_id = $2 LIMIT 1",
+            )
+            .bind(aid)
+            .bind(req_ctx.tenant_id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .ok()
+            .flatten();
 
-                    if sid.is_some() {
-                        sid
-                    } else {
-                        sqlx::query_scalar::<_, Uuid>(
-                            r#"
-                            SELECT s.id
-                            FROM guardians g
-                            JOIN students s ON s.guardian_id = g.id
-                            WHERE g.user_id = $1 AND g.tenant_id = $2
-                            LIMIT 1
-                            "#,
-                        )
-                        .bind(aid)
-                        .bind(req_ctx.tenant_id)
-                        .fetch_optional(&ctx.pool)
-                        .await
-                        .ok()
-                        .flatten()
-                    }
-                } else {
-                    None
-                }
+            if sid.is_some() {
+                sid
             } else {
-                None
+                sqlx::query_scalar::<_, Uuid>(
+                    r#"
+                    SELECT s.id
+                    FROM guardians g
+                    JOIN students s ON s.guardian_id = g.id
+                    WHERE g.user_id = $1 AND g.tenant_id = $2
+                    LIMIT 1
+                    "#,
+                )
+                .bind(aid)
+                .bind(req_ctx.tenant_id)
+                .fetch_optional(&ctx.pool)
+                .await
+                .ok()
+                .flatten()
             }
         }
+    } else {
+        params.student_id
     };
 
     if !is_admin_or_staff && !is_teacher && target_student_id.is_none() {
@@ -1030,15 +1072,12 @@ async fn get_gradebook_summary(
 
     let teacher_id_opt: Option<Uuid> = if is_teacher {
         let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
-        sqlx::query_scalar::<_, Uuid>(
+        let tid = sqlx::query_scalar::<_, Uuid>(
             r#"
-            SELECT id FROM teachers 
-            WHERE (
-                user_id = $1 
-                OR lower(trim(full_name)) = (SELECT lower(trim(full_name)) FROM users WHERE id = $1)
-                OR (email IS NOT NULL AND lower(trim(email)) = (SELECT lower(trim(email)) FROM users WHERE id = $1))
-            )
-            AND tenant_id = $2 AND deleted_at IS NULL
+            SELECT id FROM teachers
+            WHERE user_id = $1
+              AND tenant_id = $2
+              AND deleted_at IS NULL
             LIMIT 1
             "#,
         )
@@ -1046,7 +1085,11 @@ async fn get_gradebook_summary(
         .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await
-        .unwrap_or(None)
+        .unwrap_or(None);
+        if tid.is_none() {
+            return Ok(Json(ApiResponse::success(Vec::new(), req_ctx.request_id)));
+        }
+        tid
     } else {
         None
     };
@@ -1215,59 +1258,17 @@ async fn get_gradebook(
             )
         })?;
 
-    let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
-
-    // If student_id is not specified in params, check if the current actor is a student or guardian
-    let target_student_id = match params.student_id {
-        Some(sid) => Some(sid),
-        None => {
-            if let Some(aid) = actor_id {
-                let sid = sqlx::query_scalar!(
-                    r#"SELECT id FROM students WHERE user_id = $1 AND tenant_id = $2 LIMIT 1"#,
-                    aid,
-                    req_ctx.tenant_id
-                )
-                .fetch_optional(&ctx.pool)
-                .await
-                .ok()
-                .flatten();
-
-                if sid.is_some() {
-                    sid
-                } else {
-                    // Check if guardian
-                    sqlx::query_scalar!(
-                        r#"
-                        SELECT s.id
-                        FROM guardians g
-                        JOIN students s ON s.guardian_id = g.id
-                        WHERE g.user_id = $1 AND g.tenant_id = $2
-                        LIMIT 1
-                        "#,
-                        aid,
-                        req_ctx.tenant_id
-                    )
-                    .fetch_optional(&ctx.pool)
-                    .await
-                    .ok()
-                    .flatten()
-                }
-            } else {
-                None
-            }
-        }
-    };
-
     let is_admin_or_staff = req_ctx
         .actor
         .as_ref()
         .map(|a| {
             a.roles.iter().any(|r| {
-                r.name == "Kepala Sekolah"
-                    || r.name == "Operator/Staff"
-                    || r.name == "Admin"
-                    || r.name == "SuperAdmin"
-                    || r.name == "Bendahara"
+                let n = r.name.to_lowercase();
+                n.contains("kepala")
+                    || n.contains("operator")
+                    || n.contains("staff")
+                    || n.contains("admin")
+                    || n.contains("bendahara")
             })
         })
         .unwrap_or(false);
@@ -1277,23 +1278,106 @@ async fn get_gradebook(
             .actor
             .as_ref()
             .map(|a| {
-                a.roles
-                    .iter()
-                    .any(|r| r.name == "Guru" || r.name == "Teacher")
+                a.roles.iter().any(|r| {
+                    let n = r.name.to_lowercase();
+                    n.contains("guru") || n.contains("teacher") || n.contains("tutor")
+                })
             })
             .unwrap_or(false);
 
+    let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
+
+    if !is_admin_or_staff && !is_teacher {
+        if let Some(requested_sid) = params.student_id {
+            let Some(aid) = actor_id else {
+                return Ok(Json(ApiResponse::success(Vec::new(), req_ctx.request_id)));
+            };
+            let is_owner = sqlx::query_scalar::<_, bool>(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1 FROM students s
+                    LEFT JOIN guardians g ON g.id = s.guardian_id
+                    WHERE s.id = $1
+                      AND s.tenant_id = $3
+                      AND (s.user_id = $2 OR g.user_id = $2)
+                )
+                "#,
+            )
+            .bind(requested_sid)
+            .bind(aid)
+            .bind(req_ctx.tenant_id)
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap_or(false);
+            if !is_owner {
+                return Err(ApiError::new(
+                    school_core::common::error::ApplicationError::Forbidden(
+                        school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                        "Akses ditolak: Anda hanya dapat melihat detail nilai milik sendiri.".to_string(),
+                    ),
+                    &req_ctx.request_id,
+                ));
+            }
+        }
+    }
+
+    // If student_id is not specified in params, check if the current actor is a student or guardian
+    let target_student_id = match params.student_id {
+        Some(sid) => Some(sid),
+        None => {
+            if !is_admin_or_staff && !is_teacher {
+                if let Some(aid) = actor_id {
+                    let sid = sqlx::query_scalar!(
+                        r#"SELECT id FROM students WHERE user_id = $1 AND tenant_id = $2 LIMIT 1"#,
+                        aid,
+                        req_ctx.tenant_id
+                    )
+                    .fetch_optional(&ctx.pool)
+                    .await
+                    .ok()
+                    .flatten();
+
+                    if sid.is_some() {
+                        sid
+                    } else {
+                        // Check if guardian
+                        sqlx::query_scalar!(
+                            r#"
+                            SELECT s.id
+                            FROM guardians g
+                            JOIN students s ON s.guardian_id = g.id
+                            WHERE g.user_id = $1 AND g.tenant_id = $2
+                            LIMIT 1
+                            "#,
+                            aid,
+                            req_ctx.tenant_id
+                        )
+                        .fetch_optional(&ctx.pool)
+                        .await
+                        .ok()
+                        .flatten()
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+    };
+
+    if !is_admin_or_staff && !is_teacher && target_student_id.is_none() {
+        return Ok(Json(ApiResponse::success(Vec::new(), req_ctx.request_id)));
+    }
+
     let teacher_id_opt: Option<Uuid> = if is_teacher {
         let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
-        sqlx::query_scalar::<_, Uuid>(
+        let tid = sqlx::query_scalar::<_, Uuid>(
             r#"
-            SELECT id FROM teachers 
-            WHERE (
-                user_id = $1 
-                OR lower(trim(full_name)) = (SELECT lower(trim(full_name)) FROM users WHERE id = $1)
-                OR (email IS NOT NULL AND lower(trim(email)) = (SELECT lower(trim(email)) FROM users WHERE id = $1))
-            )
-            AND tenant_id = $2 AND deleted_at IS NULL
+            SELECT id FROM teachers
+            WHERE user_id = $1
+              AND tenant_id = $2
+              AND deleted_at IS NULL
             LIMIT 1
             "#,
         )
@@ -1301,7 +1385,11 @@ async fn get_gradebook(
         .bind(req_ctx.tenant_id)
         .fetch_optional(&ctx.pool)
         .await
-        .unwrap_or(None)
+        .unwrap_or(None);
+        if tid.is_none() {
+            return Ok(Json(ApiResponse::success(Vec::new(), req_ctx.request_id)));
+        }
+        tid
     } else {
         None
     };
@@ -1399,10 +1487,8 @@ async fn sync_gradebook_sources(
     use crate::middleware::require_permission;
     use school_core::permission::domain::permission_registry::Permission;
     require_permission(&req_ctx.actor, Permission::LearningAssessmentConfigure)
-        .or_else(|_| require_permission(&req_ctx.actor, Permission::TeacherRead))
-        .or_else(|_| require_permission(&req_ctx.actor, Permission::TeacherCreate))
+        .or_else(|_| require_permission(&req_ctx.actor, Permission::LearningAssessmentGrade))
         .or_else(|_| require_permission(&req_ctx.actor, Permission::AcademicManage))
-        .or_else(|_| require_permission(&req_ctx.actor, Permission::StaffRead))
         .map_err(|_| {
             ApiError::new(
                 school_core::common::error::ApplicationError::Unauthorized(
@@ -1412,6 +1498,32 @@ async fn sync_gradebook_sources(
                 &req_ctx.request_id,
             )
         })?;
+
+    let is_staff_or_teacher = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                n.contains("kepala")
+                    || n.contains("operator")
+                    || n.contains("staff")
+                    || n.contains("admin")
+                    || n.contains("guru")
+                    || n.contains("teacher")
+                    || n.contains("tutor")
+            })
+        })
+        .unwrap_or(false);
+    if !is_staff_or_teacher {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Forbidden(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Insufficient permissions to sync grades".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
 
     let body = payload.map(|Json(p)| p).unwrap_or_default();
     let synced_count = crate::presentation::learning::grade_sync::sync_all_graded_sources(

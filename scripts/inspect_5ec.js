@@ -1,6 +1,6 @@
 const { Client } = require('pg');
 const client = new Client({
-  connectionString: 'postgresql://postgres:REDACTED@REDACTED_DB_HOST:5432/railway'
+  connectionString: process.env.DATABASE_URL
 });
 
 async function run() {

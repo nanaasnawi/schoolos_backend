@@ -156,9 +156,9 @@ impl AuthenticateQrTokenUseCase {
             .await;
         }
 
-        // 5. Generate JWT Access Token (permanent session on device: 10 years / 3650 days)
+        // 5. Generate bounded 7-day Access Token (continuity handled via 90-day rotating refresh token)
         let expiration = now
-            .checked_add_signed(chrono::Duration::days(3650))
+            .checked_add_signed(chrono::Duration::days(7))
             .expect("valid timestamp")
             .timestamp() as usize;
 
@@ -169,6 +169,10 @@ impl AuthenticateQrTokenUseCase {
             full_name: Some(record.full_name.clone()),
             role: Some(record.role_name.clone()),
             exp: expiration,
+            token_type: Some("access".to_string()),
+            jti: Some(Uuid::now_v7().to_string()),
+            family_id: None,
+            sysadmin: None,
         };
 
         let token = encode(
@@ -185,7 +189,7 @@ impl AuthenticateQrTokenUseCase {
             email: record.email,
             full_name: record.full_name,
             role: record.role_name,
-            expires_in: 86400,
+            expires_in: 7 * 86400,
         })
     }
 }

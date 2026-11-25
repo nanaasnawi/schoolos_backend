@@ -41,6 +41,30 @@ async fn provision(
     req_ctx: RequestContext,
     Json(payload): Json<ProvisionTenantRequest>,
 ) -> Result<Json<ApiResponse<ProvisionTenantResponse>>, ApiError> {
+    let actor = req_ctx.actor.as_ref().ok_or_else(|| {
+        ApiError::new(
+            ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthInvalidToken,
+                "Autentikasi diperlukan untuk melakukan provisioning tenant".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let is_super_admin = actor.roles.iter().any(|r| {
+        let norm = r.name.trim().to_ascii_lowercase().replace([' ', '-', '_'], "");
+        norm == "superadmin"
+    });
+    if !is_super_admin {
+        return Err(ApiError::new(
+            ApplicationError::Forbidden(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Hanya SuperAdmin platform yang berhak membuat tenant sekolah baru".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     if req_ctx.idempotency_key.is_none() {
         return Err(ApiError::new(
             ApplicationError::Domain(school_core::common::error::DomainError::Validation(

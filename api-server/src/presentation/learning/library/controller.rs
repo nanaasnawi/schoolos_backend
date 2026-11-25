@@ -1000,11 +1000,13 @@ async fn assign_reading_material(
         .await;
 
         // Trigger high-priority FCM push notification (wakes up lockscreen & alerts students)
-        crate::infrastructure::fcm::trigger_fcm_push_notification(
+        crate::infrastructure::fcm::trigger_fcm_push_targeted(
+            req_ctx.tenant_id,
             notif_title,
             notif_body,
-            "Materi Pembelajaran".to_string(),
+            crate::infrastructure::fcm::FcmCategory::Material,
             material_id,
+            crate::infrastructure::fcm::FcmTarget::Class(payload.class_id),
         );
     }
 

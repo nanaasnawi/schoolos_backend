@@ -155,10 +155,13 @@ pub async fn get_current_academic_context(
             if let Some(ref f) = fallback {
                 let parsed_f = parse_year_row(f);
                 // Activate fallback
-                let _ = sqlx::query("UPDATE academic_years SET is_active = true, updated_at = NOW() WHERE id = $1")
-                    .bind(parsed_f.id)
-                    .execute(&ctx.pool)
-                    .await;
+                let _ = sqlx::query(
+                    "UPDATE academic_years SET is_active = true, updated_at = NOW() WHERE id = $1 AND tenant_id = $2",
+                )
+                .bind(parsed_f.id)
+                .bind(req_ctx.tenant_id)
+                .execute(&ctx.pool)
+                .await;
                 parsed_f
             } else {
                 // Auto-provision 2026/2027 default

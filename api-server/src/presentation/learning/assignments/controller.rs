@@ -59,19 +59,9 @@ pub fn assignment_routes() -> Router<ApplicationContext> {
 
 static INTERACTION_CONFIG_READY: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
-async fn ensure_interaction_config_column(pool: &sqlx::PgPool) {
-    INTERACTION_CONFIG_READY
-        .get_or_init(|| async {
-            if let Err(e) = sqlx::query(
-                "ALTER TABLE assignment_questions ADD COLUMN IF NOT EXISTS interaction_config JSONB DEFAULT NULL",
-            )
-            .execute(pool)
-            .await
-            {
-                tracing::warn!("ensure_interaction_config_column failed: {e}");
-            }
-        })
-        .await;
+async fn ensure_interaction_config_column(_pool: &sqlx::PgPool) {
+    // Schema managed exclusively via SQLx migrations (20261125020000_add_multitenant_hot_indexes_and_analytics_projection.sql).
+    INTERACTION_CONFIG_READY.get_or_init(|| async {}).await;
 }
 
 async fn persist_assignment_questions(
@@ -83,7 +73,7 @@ async fn persist_assignment_questions(
     ensure_interaction_config_column(pool).await;
     let mut created_questions = Vec::with_capacity(questions.len());
     for (q_idx, q) in questions.into_iter().enumerate() {
-        let question_id = q.id.unwrap_or_else(Uuid::new_v4);
+        let question_id = q.id.unwrap_or_else(Uuid::now_v7);
         let order_idx = q.order_index.unwrap_or(q_idx as i32);
         let points = q.points.unwrap_or(10);
         let normalized_interaction_config = if q.question_type.trim().eq_ignore_ascii_case("CROSSWORD") {
@@ -112,7 +102,7 @@ async fn persist_assignment_questions(
 
         let mut created_choices = Vec::with_capacity(q.choices.len());
         for (c_idx, c) in q.choices.into_iter().enumerate() {
-            let choice_id = c.id.unwrap_or_else(Uuid::new_v4);
+            let choice_id = c.id.unwrap_or_else(Uuid::now_v7);
             let c_order_idx = c.order_index.unwrap_or(c_idx as i32);
             let is_correct = c.is_correct.unwrap_or(false);
             let _ = sqlx::query(
@@ -559,6 +549,7 @@ async fn create(
             crate::infrastructure::fcm::FcmTarget::Roles(vec!["student".to_string()])
         };
         crate::infrastructure::fcm::trigger_fcm_push_targeted(
+            tid,
             t,
             b,
             crate::infrastructure::fcm::FcmCategory::Assignment,
@@ -1323,6 +1314,7 @@ async fn update(
                     .await;
 
                     crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                        req_ctx.tenant_id,
                         notif_title,
                         notif_body,
                         crate::infrastructure::fcm::FcmCategory::Assignment,
@@ -1403,6 +1395,7 @@ async fn publish(
             crate::infrastructure::fcm::FcmTarget::Roles(vec!["student".to_string()])
         };
         crate::infrastructure::fcm::trigger_fcm_push_targeted(
+            req_ctx.tenant_id,
             t,
             b,
             crate::infrastructure::fcm::FcmCategory::Assignment,
@@ -2190,6 +2183,60 @@ async fn grade(
     })?;
 
     let grader_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
+
+    let sub_exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM assignment_submissions WHERE id = $1 AND assignment_id = $2 AND tenant_id = $3)",
+    )
+    .bind(submission_id)
+    .bind(assignment_id)
+    .bind(req_ctx.tenant_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .unwrap_or(false);
+    if !sub_exists {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::NotFound(
+                school_core::common::error_code::ErrorCode::ResourceNotFound,
+                "Submission tugas tidak ditemukan pada penugasan ini.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
+    let asg_row = sqlx::query(
+        "SELECT tenant_id, class_id, teacher_id, created_by FROM assignments WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(assignment_id)
+    .bind(req_ctx.tenant_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            &req_ctx.request_id,
+        )
+    })?
+    .ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::NotFound(
+                school_core::common::error_code::ErrorCode::AssignmentNotFound,
+                format!("Assignment {} not found", assignment_id),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    crate::authorization_helpers::AuthorizationScope::verify_learning_resource_access(
+        &ctx.pool,
+        &req_ctx,
+        asg_row.get("tenant_id"),
+        asg_row.get("class_id"),
+        asg_row.get("teacher_id"),
+        asg_row.get("created_by"),
+    )
+    .await?;
 
     let has_explicit_grades = payload
         .answer_grades

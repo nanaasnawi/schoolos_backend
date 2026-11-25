@@ -23,6 +23,14 @@ pub struct Claims {
     #[serde(default)]
     pub role: Option<String>,
     pub exp: usize,
+    #[serde(default)]
+    pub token_type: Option<String>,
+    #[serde(default)]
+    pub jti: Option<String>,
+    #[serde(default)]
+    pub family_id: Option<String>,
+    #[serde(default)]
+    pub sysadmin: Option<bool>,
 }
 
 pub struct AuthenticateUserCommand {
@@ -94,12 +102,8 @@ impl AuthenticateUserUseCase {
                     .await
                     .unwrap_or(None);
 
-                let is_student = primary_role.as_deref() == Some("Siswa") || primary_role.is_none();
-                let validity_duration = if is_student {
-                    chrono::Duration::days(3650) // 10 years permanent on device
-                } else {
-                    chrono::Duration::days(365) // 1 year for staff/teachers
-                };
+                // Access token uses bounded lifetime (7 days); silent continuity relies on 90-day rotating refresh tokens.
+                let validity_duration = chrono::Duration::days(7);
 
                 let expiration = self
                     .clock
@@ -115,6 +119,10 @@ impl AuthenticateUserUseCase {
                     full_name: Some(user.full_name.clone()),
                     role: primary_role.or_else(|| Some("Siswa".to_string())),
                     exp: expiration,
+                    token_type: Some("access".to_string()),
+                    jti: Some(Uuid::now_v7().to_string()),
+                    family_id: None,
+                    sysadmin: None,
                 };
 
                 let token = encode(

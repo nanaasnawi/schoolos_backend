@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 pub struct PublishQuizCommand {
     pub quiz_id: Uuid,
+    pub tenant_id: Uuid,
 }
 
 pub struct PublishQuizUseCase {
@@ -39,6 +40,7 @@ impl PublishQuizUseCase {
             .repo
             .find_by_id(command.quiz_id)
             .await?
+            .filter(|q| q.tenant_id == command.tenant_id)
             .ok_or_else(|| {
                 ApplicationError::NotFound(
                     ErrorCode::QuizNotFound,
@@ -50,6 +52,7 @@ impl PublishQuizUseCase {
             self.lesson_repo
                 .find_by_id(lid)
                 .await?
+                .filter(|lesson| lesson.tenant_id == command.tenant_id)
                 .map(|lesson| lesson.status)
         } else {
             None

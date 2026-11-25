@@ -87,8 +87,6 @@ async fn list(
         use crate::middleware::require_permission;
         require_permission(&req_ctx.actor, Permission::AcademicManage)
             .or_else(|_| require_permission(&req_ctx.actor, Permission::LearningCurriculumRead))
-            .or_else(|_| require_permission(&req_ctx.actor, Permission::StudentRead))
-            .or_else(|_| require_permission(&req_ctx.actor, Permission::TeacherRead))
             .map_err(|_| {
                 ApiError::new(
                     school_core::common::error::ApplicationError::Unauthorized(
@@ -216,19 +214,32 @@ async fn get_by_id(
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<SubjectResponse>>, ApiError> {
     use crate::middleware::require_permission;
-    require_permission(&req_ctx.actor, Permission::AcademicManage)
-        .or_else(|_| require_permission(&req_ctx.actor, Permission::LearningCurriculumRead))
-        .or_else(|_| require_permission(&req_ctx.actor, Permission::StudentRead))
-        .or_else(|_| require_permission(&req_ctx.actor, Permission::TeacherRead))
-        .map_err(|_| {
-            ApiError::new(
-                school_core::common::error::ApplicationError::Unauthorized(
-                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                    "Insufficient permissions".to_string(),
-                ),
-                &req_ctx.request_id,
-            )
-        })?;
+    let is_role_allowed = req_ctx.actor.as_ref().is_some_and(|a| {
+        a.roles.iter().any(|r| {
+            let n = r.name.to_lowercase();
+            n.contains("siswa")
+                || n.contains("student")
+                || n.contains("guru")
+                || n.contains("teacher")
+                || n.contains("tutor")
+                || n.contains("admin")
+                || n.contains("operator")
+                || n.contains("kepala")
+        })
+    });
+    if !is_role_allowed {
+        require_permission(&req_ctx.actor, Permission::AcademicManage)
+            .or_else(|_| require_permission(&req_ctx.actor, Permission::LearningCurriculumRead))
+            .map_err(|_| {
+                ApiError::new(
+                    school_core::common::error::ApplicationError::Unauthorized(
+                        school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                        "Insufficient permissions".to_string(),
+                    ),
+                    &req_ctx.request_id,
+                )
+            })?;
+    }
 
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
     let is_teacher = req_ctx

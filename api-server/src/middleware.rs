@@ -1,14 +1,16 @@
 use axum::{
-    extract::{Request, State},
+    extract::{OriginalUri, Request, State},
     http::{header, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use jsonwebtoken::{decode, DecodingKey, Validation};
 use school_core::authorization::domain::actor::Actor;
+use school_core::common::tenant_context::{with_system_rls_bypass, with_tenant_db_scope};
 use school_core::identity::application::auth::authenticate_user::Claims;
 use school_core::permission::domain::permission_registry::Permission;
 use school_core::permission::domain::role::Role;
+use sqlx::Row;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,10 +19,21 @@ use uuid::Uuid;
 
 use crate::bootstrap::ApplicationContext;
 
+/// Derives the isolated JWT signing secret used exclusively for platform system-admin tokens.
+pub fn system_jwt_signing_key(base_jwt_secret: &str) -> String {
+    std::env::var("SYSTEM_JWT_SECRET")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("__sysadmin_scope__:{base_jwt_secret}"))
+}
+
 #[derive(Clone)]
 pub struct CachedActorData {
     pub roles: Vec<Role>,
     pub permissions: Vec<Permission>,
+    pub is_active: bool,
+    pub tenant_id: Uuid,
     pub cached_at: Instant,
 }
 
@@ -43,32 +56,31 @@ impl AuthCache {
         Self {
             actors: Arc::new(RwLock::new(HashMap::new())),
             maintenance: Arc::new(RwLock::new(None)),
-            ttl: Duration::from_secs(60), // Cache user roles & permissions for 60s
-            maintenance_ttl: Duration::from_secs(15), // Cache maintenance status for 15s
+            ttl: Duration::from_secs(30), // Fast 30s TTL so user deactivation takes effect rapidly
+            maintenance_ttl: Duration::from_secs(15),
         }
     }
 
-    pub async fn get_actor_roles_and_permissions(
-        &self,
-        user_id: &Uuid,
-    ) -> Option<(Vec<Role>, Vec<Permission>)> {
+    pub async fn get_actor_entry(&self, user_id: &Uuid) -> Option<CachedActorData> {
         let read = self.actors.read().await;
         if let Some(data) = read.get(user_id) {
             if data.cached_at.elapsed() < self.ttl {
-                return Some((data.roles.clone(), data.permissions.clone()));
+                return Some(data.clone());
             }
         }
         None
     }
 
-    pub async fn set_actor_roles_and_permissions(
+    pub async fn set_actor_entry(
         &self,
         user_id: Uuid,
+        tenant_id: Uuid,
+        is_active: bool,
         roles: Vec<Role>,
         permissions: Vec<Permission>,
     ) {
         let mut write = self.actors.write().await;
-        if write.len() > 1000 {
+        if write.len() > 2000 {
             let ttl = self.ttl;
             write.retain(|_, v| v.cached_at.elapsed() < ttl);
         }
@@ -77,6 +89,8 @@ impl AuthCache {
             CachedActorData {
                 roles,
                 permissions,
+                is_active,
+                tenant_id,
                 cached_at: Instant::now(),
             },
         );
@@ -110,6 +124,252 @@ impl AuthCache {
     }
 }
 
+fn json_auth_error(status: StatusCode, code: &str, message: &str) -> Response {
+    let res_body = serde_json::json!({
+        "success": false,
+        "error": {
+            "code": code,
+            "message": message
+        }
+    });
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(
+            serde_json::to_string(&res_body).unwrap_or_default(),
+        ))
+        .unwrap_or_else(|_| status.into_response())
+}
+
+fn actor_is_superadmin_role(actor: &Actor) -> bool {
+    actor.roles.iter().any(|r| {
+        let norm = r
+            .name
+            .trim()
+            .to_ascii_lowercase()
+            .replace([' ', '-', '_'], "");
+        norm == "superadmin" || norm == "platformadmin" || norm == "systemadmin"
+    })
+}
+
+/// Verifies a Bearer JWT access token (or dedicated system-admin token) and resolves an active `Actor`.
+/// Enforces strict expiration for ALL roles (including Siswa) and checks user/tenant active state.
+pub async fn authenticate_jwt_token(
+    ctx: &ApplicationContext,
+    token: &str,
+) -> Result<(Actor, bool), (StatusCode, &'static str, &'static str)> {
+    let mut validation = Validation::default();
+    validation.validate_exp = true;
+    validation.leeway = 5;
+
+    let user_decode = decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(ctx.jwt_secret.as_bytes()),
+        &validation,
+    );
+
+    if let Ok(td) = user_decode {
+        let claims = td.claims;
+        if matches!(
+            claims.token_type.as_deref(),
+            Some("refresh") | Some("system_access")
+        ) || claims.sysadmin == Some(true)
+        {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "AUTH_INVALID_TOKEN",
+                "Token tidak valid untuk akses API.",
+            ));
+        }
+
+        let now_ts = chrono::Utc::now().timestamp() as usize;
+        if claims.exp <= now_ts {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "AUTH_EXPIRED_TOKEN",
+                "Sesi Anda telah berakhir (expired). Silakan muat ulang atau login kembali.",
+            ));
+        }
+
+        let user_id = Uuid::parse_str(&claims.sub).map_err(|_| {
+            (
+                StatusCode::UNAUTHORIZED,
+                "AUTH_INVALID_TOKEN",
+                "Token sub tidak valid.",
+            )
+        })?;
+        let tenant_id = Uuid::parse_str(&claims.tenant_id).map_err(|_| {
+            (
+                StatusCode::UNAUTHORIZED,
+                "AUTH_INVALID_TOKEN",
+                "Token tenant_id tidak valid.",
+            )
+        })?;
+
+        if user_id.is_nil() || tenant_id.is_nil() {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "AUTH_INVALID_TOKEN",
+                "Token pengguna reguler tidak valid.",
+            ));
+        }
+
+        let cached = ctx.auth_cache.get_actor_entry(&user_id).await;
+        let (roles, permissions) = if let Some(entry) = cached {
+            if !entry.is_active || entry.tenant_id != tenant_id {
+                ctx.auth_cache.invalidate_actor(&user_id).await;
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "AUTH_ACCOUNT_INACTIVE",
+                    "Akun pengguna atau sekolah sedang nonaktif.",
+                ));
+            }
+            (entry.roles, entry.permissions)
+        } else {
+            let lookup_res: Result<Option<(bool, bool)>, sqlx::Error> = with_system_rls_bypass(
+                async {
+                    let row = sqlx::query(
+                        r#"
+                        SELECT u.is_active AS user_active, t.is_active AS tenant_active
+                        FROM users u
+                        JOIN tenants t ON t.id = u.tenant_id
+                        WHERE u.id = $1 AND u.tenant_id = $2
+                        LIMIT 1
+                        "#,
+                    )
+                    .bind(user_id)
+                    .bind(tenant_id)
+                    .fetch_optional(&ctx.pool)
+                    .await?;
+
+                    Ok(row.map(|r| {
+                        (
+                            r.try_get::<bool, _>("user_active").unwrap_or(false),
+                            r.try_get::<bool, _>("tenant_active").unwrap_or(false),
+                        )
+                    }))
+                },
+            )
+            .await;
+
+            let (user_active, tenant_active) = match lookup_res {
+                Ok(Some(flags)) => flags,
+                Ok(None) => (false, false),
+                Err(e) => {
+                    tracing::error!("Auth active-state lookup DB error: {:?}", e);
+                    return Err((
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "AUTH_SERVICE_UNAVAILABLE",
+                        "Gagal memverifikasi status sesi pengguna.",
+                    ));
+                }
+            };
+
+            if !user_active || !tenant_active {
+                ctx.auth_cache.invalidate_actor(&user_id).await;
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "AUTH_ACCOUNT_INACTIVE",
+                    "Akun Anda dinonaktifkan, dihapus, atau telah dimutasi keluar.",
+                ));
+            }
+
+            let (r, p) = with_system_rls_bypass(async {
+                let r = ctx
+                    .role_repo
+                    .find_roles_by_user_id(user_id)
+                    .await
+                    .unwrap_or_default();
+                let p = ctx
+                    .role_repo
+                    .find_permissions_by_user_id(user_id)
+                    .await
+                    .unwrap_or_default();
+                (r, p)
+            })
+            .await;
+
+            ctx.auth_cache
+                .set_actor_entry(user_id, tenant_id, true, r.clone(), p.clone())
+                .await;
+            (r, p)
+        };
+
+        return Ok((
+            Actor {
+                id: user_id,
+                tenant_id,
+                roles,
+                permissions,
+            },
+            false,
+        ));
+    }
+
+    if let Err(ref err) = user_decode {
+        if matches!(err.kind(), jsonwebtoken::errors::ErrorKind::ExpiredSignature) {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "AUTH_EXPIRED_TOKEN",
+                "Sesi Anda telah berakhir (expired). Silakan refresh atau login kembali.",
+            ));
+        }
+    }
+
+    // Attempt verification ONLY for dedicated system_access tokens signed with isolated system key
+    let sys_secret = system_jwt_signing_key(&ctx.jwt_secret);
+    if let Ok(td_sys) = decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(sys_secret.as_bytes()),
+        &validation,
+    ) {
+        let claims = td_sys.claims;
+        if claims.sysadmin == Some(true)
+            && claims.token_type.as_deref() == Some("system_access")
+            && Uuid::parse_str(&claims.sub).ok() == Some(Uuid::nil())
+        {
+            let now_ts = chrono::Utc::now().timestamp() as usize;
+            if claims.exp <= now_ts {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "AUTH_EXPIRED_TOKEN",
+                    "Sesi System Admin telah berakhir (expired).",
+                ));
+            }
+            return Ok((
+                Actor {
+                    id: Uuid::nil(),
+                    tenant_id: Uuid::nil(),
+                    roles: vec![Role {
+                        id: Uuid::nil(),
+                        tenant_id: Uuid::nil(),
+                        name: "SuperAdmin".to_string(),
+                        is_system_default: true,
+                        created_at: chrono::Utc::now(),
+                        updated_at: chrono::Utc::now(),
+                    }],
+                    permissions: vec![
+                        Permission::AcademicManage,
+                        Permission::StudentRead,
+                        Permission::StudentUpdate,
+                        Permission::TeacherRead,
+                        Permission::TeacherUpdate,
+                        Permission::LearningCurriculumRead,
+                        Permission::LearningCurriculumUpdate,
+                    ],
+                },
+                true,
+            ));
+        }
+    }
+
+    Err((
+        StatusCode::UNAUTHORIZED,
+        "AUTH_INVALID_TOKEN",
+        "Token autentikasi tidak valid. Silakan login kembali.",
+    ))
+}
+
 pub async fn auth_middleware(
     State(ctx): State<ApplicationContext>,
     mut req: Request,
@@ -119,240 +379,80 @@ pub async fn auth_middleware(
 
     if let Some(auth_header) = req.headers().get(header::AUTHORIZATION) {
         if let Ok(auth_str) = auth_header.to_str() {
-            if let Some(token) = auth_str.strip_prefix("Bearer ") {
+            let trimmed = auth_str.trim();
+            if let Some(token) = trimmed
+                .strip_prefix("Bearer ")
+                .or_else(|| trimmed.strip_prefix("bearer "))
+            {
                 token_opt = Some(token.trim().to_string());
             }
         }
-    } else if let Some(query) = req.uri().query() {
-        for pair in query.split('&') {
-            let mut parts = pair.splitn(2, '=');
-            if parts.next() == Some("token") {
-                if let Some(val) = parts.next() {
-                    token_opt = Some(val.trim().to_string());
-                    break;
-                }
-            }
-        }
     }
 
-    // Fail-fast #1: If no token provided on protected route, return 401 JSON immediately
+    // Fail-fast #1: Reject unauthenticated requests without Authorization Bearer header
+    // (URL query `?token=` JWT parsing intentionally removed; SSE uses short-lived one-time `?ticket=`.)
     let token = match token_opt {
         Some(t) if !t.is_empty() => t,
         _ => {
-            let res_body = serde_json::json!({
-                "success": false,
-                "error": {
-                    "code": "AUTH_UNAUTHORIZED",
-                    "message": "Header otorisasi atau token tidak ditemukan. Silakan login kembali."
-                }
-            });
-            return Ok(Response::builder()
-                .status(StatusCode::UNAUTHORIZED)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(axum::body::Body::from(
-                    serde_json::to_string(&res_body).unwrap_or_default(),
-                ))
-                .unwrap_or_else(|_| StatusCode::UNAUTHORIZED.into_response()));
+            return Ok(json_auth_error(
+                StatusCode::UNAUTHORIZED,
+                "AUTH_UNAUTHORIZED",
+                "Header otorisasi tidak ditemukan. Silakan login kembali.",
+            ));
         }
     };
 
-    // Fail-fast #2: Decode and validate JWT token signature and expiration
-    // Reject immediately at the outer layer before touching Postgres connection pool
-    let mut validation = Validation::default();
-    validation.validate_exp = true;
-    validation.leeway = 5;
+    let (actor, is_verified_sysadmin) = match authenticate_jwt_token(&ctx, &token).await {
+        Ok(res) => res,
+        Err((status, code, msg)) => return Ok(json_auth_error(status, code, msg)),
+    };
 
-    let mut token_data = decode::<Claims>(
-        &token,
-        &DecodingKey::from_secret(ctx.jwt_secret.as_bytes()),
-        &validation,
-    );
+    let is_superadmin = is_verified_sysadmin || actor_is_superadmin_role(&actor);
 
-    // If an authentic student token has an older expired timestamp, permit permanent session on device
-    if let Err(ref err) = token_data {
-        if matches!(err.kind(), jsonwebtoken::errors::ErrorKind::ExpiredSignature) {
-            let mut lenient_val = Validation::default();
-            lenient_val.validate_exp = false;
-            if let Ok(td_lenient) = decode::<Claims>(
-                &token,
-                &DecodingKey::from_secret(ctx.jwt_secret.as_bytes()),
-                &lenient_val,
-            ) {
-                if td_lenient.claims.role.as_deref() == Some("Siswa") || td_lenient.claims.role.as_deref() == Some("Student") {
-                    token_data = Ok(td_lenient);
-                }
-            }
+    // Enforce strict tenant isolation against spoofed `x-tenant-id` header
+    let header_tenant_id = req
+        .headers()
+        .get("x-tenant-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .filter(|id| !id.is_nil());
+
+    if let Some(hdr_tid) = header_tenant_id {
+        if !is_superadmin && hdr_tid != actor.tenant_id {
+            tracing::warn!(
+                actor_id = %actor.id,
+                token_tenant = %actor.tenant_id,
+                header_tenant = %hdr_tid,
+                "Rejected cross-tenant X-Tenant-ID header mismatch"
+            );
+            return Ok(json_auth_error(
+                StatusCode::FORBIDDEN,
+                "AUTH_TENANT_MISMATCH",
+                "Akses lintas tenant sekolah tidak diizinkan.",
+            ));
         }
     }
 
-    let claims = match token_data {
-        Err(err) => {
-            let (code, msg) = match err.kind() {
-                jsonwebtoken::errors::ErrorKind::ExpiredSignature => (
-                    "AUTH_EXPIRED_TOKEN",
-                    "Sesi Anda telah berakhir (expired). Silakan login kembali.",
-                ),
-                _ => (
-                    "AUTH_INVALID_TOKEN",
-                    "Token autentikasi tidak valid. Silakan login kembali.",
-                ),
-            };
-            tracing::warn!(
-                "Fail-fast JWT rejection at gateway: {} (err: {:?})",
-                msg,
-                err.kind()
-            );
-            let res_body = serde_json::json!({
-                "success": false,
-                "error": {
-                    "code": code,
-                    "message": msg
-                }
-            });
-            return Ok(Response::builder()
-                .status(StatusCode::UNAUTHORIZED)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(axum::body::Body::from(
-                    serde_json::to_string(&res_body).unwrap_or_default(),
-                ))
-                .unwrap_or_else(|_| StatusCode::UNAUTHORIZED.into_response()));
-        }
-        Ok(td) => {
-            // Additional wall-clock timestamp check against claims.exp (except permanent student sessions)
-            let is_student = td.claims.role.as_deref() == Some("Siswa") || td.claims.role.as_deref() == Some("Student");
-            let now_ts = chrono::Utc::now().timestamp() as usize;
-            if !is_student && td.claims.exp <= now_ts {
-                tracing::warn!(
-                    "Fail-fast JWT rejection: token expired (exp: {}, now: {})",
-                    td.claims.exp,
-                    now_ts
-                );
-                let res_body = serde_json::json!({
-                    "success": false,
-                    "error": {
-                        "code": "AUTH_EXPIRED_TOKEN",
-                        "message": "Sesi Anda telah berakhir (expired). Silakan login kembali."
-                    }
-                });
-                return Ok(Response::builder()
-                    .status(StatusCode::UNAUTHORIZED)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(axum::body::Body::from(
-                        serde_json::to_string(&res_body).unwrap_or_default(),
-                    ))
-                    .unwrap_or_else(|_| StatusCode::UNAUTHORIZED.into_response()));
-            }
-            td.claims
-        }
-    };
-
-    // Fail-fast #3: Validate subject and tenant_id UUIDs
-    let user_id = match Uuid::parse_str(&claims.sub) {
-        Ok(id) => id,
-        Err(_) => {
-            tracing::error!("Fail-fast: Invalid user_id in JWT subject: {}", claims.sub);
-            let res_body = serde_json::json!({
-                "success": false,
-                "error": {
-                    "code": "AUTH_INVALID_TOKEN",
-                    "message": "Token sub tidak valid."
-                }
-            });
-            return Ok(Response::builder()
-                .status(StatusCode::UNAUTHORIZED)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(axum::body::Body::from(
-                    serde_json::to_string(&res_body).unwrap_or_default(),
-                ))
-                .unwrap_or_else(|_| StatusCode::UNAUTHORIZED.into_response()));
-        }
-    };
-
-    let tenant_id = match Uuid::parse_str(&claims.tenant_id) {
-        Ok(id) => id,
-        Err(_) => {
-            tracing::error!(
-                "Fail-fast: Invalid tenant_id in JWT claims: {}",
-                claims.tenant_id
-            );
-            let res_body = serde_json::json!({
-                "success": false,
-                "error": {
-                    "code": "AUTH_INVALID_TOKEN",
-                    "message": "Token tenant_id tidak valid."
-                }
-            });
-            return Ok(Response::builder()
-                .status(StatusCode::UNAUTHORIZED)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(axum::body::Body::from(
-                    serde_json::to_string(&res_body).unwrap_or_default(),
-                ))
-                .unwrap_or_else(|_| StatusCode::UNAUTHORIZED.into_response()));
-        }
-    };
-
-    // 1. In-memory Cache lookup for roles & permissions
-    let (roles, permissions) = if user_id.is_nil() {
-        (
-            vec![Role {
-                id: Uuid::nil(),
-                tenant_id: Uuid::nil(),
-                name: "SuperAdmin".to_string(),
-                is_system_default: true,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            }],
-            vec![
-                Permission::AcademicManage,
-                Permission::StudentRead,
-                Permission::StudentUpdate,
-                Permission::TeacherRead,
-                Permission::TeacherUpdate,
-                Permission::LearningCurriculumRead,
-                Permission::LearningCurriculumUpdate,
-            ],
-        )
-    } else if let Some(cached) = ctx
-        .auth_cache
-        .get_actor_roles_and_permissions(&user_id)
-        .await
-    {
-        cached
+    let effective_tenant_id = if is_superadmin {
+        header_tenant_id.unwrap_or(actor.tenant_id)
     } else {
-        let r = ctx
-            .role_repo
-            .find_roles_by_user_id(user_id)
-            .await
-            .unwrap_or_default();
-        let p = ctx
-            .role_repo
-            .find_permissions_by_user_id(user_id)
-            .await
-            .unwrap_or_default();
-        ctx.auth_cache
-            .set_actor_roles_and_permissions(user_id, r.clone(), p.clone())
-            .await;
-        (r, p)
+        actor.tenant_id
     };
 
-    let actor = Actor {
-        id: user_id,
-        tenant_id,
-        roles,
-        permissions,
-    };
-
-    // 2. Global Maintenance Mode check using fast in-memory cache
-    if !actor.id.is_nil() {
+    // Global Maintenance Mode check using fast in-memory cache
+    if !is_verified_sysadmin {
         let is_maintenance = if let Some(cached) = ctx.auth_cache.get_maintenance_mode().await {
             cached
         } else {
-            let row = sqlx::query!("SELECT value FROM system_settings WHERE key = 'maintenance'")
-                .fetch_optional(&ctx.pool)
-                .await
-                .ok()
-                .flatten();
+            let row = with_system_rls_bypass(
+                sqlx::query!("SELECT value FROM system_settings WHERE key = 'maintenance'")
+                    .fetch_optional(&ctx.pool),
+            )
+            .await
+            .ok()
+            .flatten();
 
             let active = row
                 .and_then(|rec| rec.value.get("maintenance_mode").and_then(|v| v.as_bool()))
@@ -366,25 +466,32 @@ pub async fn auth_middleware(
                 "Rejecting request due to active Maintenance Mode for actor {}",
                 actor.id
             );
-            let res_body = serde_json::json!({
-                "success": false,
-                "error": {
-                    "code": "MAINTENANCE_MODE_ACTIVE",
-                    "message": "Sistem sedang dalam mode pemeliharaan (maintenance)."
-                }
-            });
-            return Ok(Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(axum::body::Body::from(
-                    serde_json::to_string(&res_body).unwrap_or_default(),
-                ))
-                .unwrap_or_else(|_| StatusCode::SERVICE_UNAVAILABLE.into_response()));
+            return Ok(json_auth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "MAINTENANCE_MODE_ACTIVE",
+                "Sistem sedang dalam mode pemeliharaan (maintenance).",
+            ));
         }
     }
 
+    let orig_path = req
+        .extensions()
+        .get::<OriginalUri>()
+        .map(|u| u.0.path().to_string())
+        .unwrap_or_else(|| req.uri().path().to_string());
+
     req.extensions_mut().insert(actor);
-    Ok(next.run(req).await)
+
+    let use_system_bypass = is_superadmin
+        && (orig_path.starts_with("/api/v1/system")
+            || orig_path.starts_with("/api/v1/tenants")
+            || effective_tenant_id.is_nil());
+
+    if use_system_bypass {
+        Ok(with_system_rls_bypass(next.run(req)).await)
+    } else {
+        Ok(with_tenant_db_scope(effective_tenant_id, next.run(req)).await)
+    }
 }
 
 /// Check whether the requesting actor has a required permission.

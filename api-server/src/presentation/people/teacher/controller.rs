@@ -216,15 +216,25 @@ async fn list(
 {
     use crate::middleware::require_permission;
     use school_core::permission::domain::permission_registry::Permission;
-    require_permission(&req_ctx.actor, Permission::TeacherRead).map_err(|_| {
+    let actor = req_ctx.actor.as_ref().ok_or_else(|| {
         ApiError::new(
             school_core::common::error::ApplicationError::Unauthorized(
-                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
-                "Insufficient permissions".to_string(),
+                school_core::common::error_code::ErrorCode::AuthInvalidToken,
+                "Authentication required".to_string(),
             ),
             &req_ctx.request_id,
         )
     })?;
+    let can_read_full_hr = require_permission(&req_ctx.actor, Permission::TeacherRead).is_ok()
+        || actor.roles.iter().any(|r| {
+            let lower = r.name.trim().to_lowercase();
+            lower.contains("admin")
+                || lower.contains("operator")
+                || lower.contains("kepala")
+                || lower.contains("staff")
+                || lower.contains("tata usaha")
+                || lower == "tu"
+        });
 
     let page = filter.page.unwrap_or(1);
     let page_size = filter.page_size.unwrap_or(20);
@@ -250,29 +260,51 @@ async fn list(
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
+    // Students & parents calling teacher directory for chat only see public teaching metadata; HR PII stays redacted.
     let response_data: Vec<super::dto::teacher_responses::TeacherSummaryResponse> = teachers_page
         .items
         .into_iter()
-        .map(
-            |summary| super::dto::teacher_responses::TeacherSummaryResponse {
-                id: summary.id,
-                nip: summary.nip,
-                full_name: summary.full_name,
-                nuptk: summary.nuptk,
-                jk: summary.jk,
-                tempat_lahir: summary.tempat_lahir,
-                tanggal_lahir: summary.tanggal_lahir,
-                status_kepegawaian: summary.status_kepegawaian,
-                jenis_ptk: summary.jenis_ptk,
-                agama: summary.agama,
-                alamat_jalan: summary.alamat_jalan,
-                no_hp: summary.no_hp,
-                email: summary.email,
-                subject: summary.subject,
-                status: summary.status,
-                updated_at: summary.updated_at,
-            },
-        )
+        .map(|summary| {
+            if can_read_full_hr {
+                super::dto::teacher_responses::TeacherSummaryResponse {
+                    id: summary.id,
+                    nip: summary.nip,
+                    full_name: summary.full_name,
+                    nuptk: summary.nuptk,
+                    jk: summary.jk,
+                    tempat_lahir: summary.tempat_lahir,
+                    tanggal_lahir: summary.tanggal_lahir,
+                    status_kepegawaian: summary.status_kepegawaian,
+                    jenis_ptk: summary.jenis_ptk,
+                    agama: summary.agama,
+                    alamat_jalan: summary.alamat_jalan,
+                    no_hp: summary.no_hp,
+                    email: summary.email,
+                    subject: summary.subject,
+                    status: summary.status,
+                    updated_at: summary.updated_at,
+                }
+            } else {
+                super::dto::teacher_responses::TeacherSummaryResponse {
+                    id: summary.id,
+                    nip: None,
+                    full_name: summary.full_name,
+                    nuptk: None,
+                    jk: None,
+                    tempat_lahir: None,
+                    tanggal_lahir: None,
+                    status_kepegawaian: None,
+                    jenis_ptk: None,
+                    agama: None,
+                    alamat_jalan: None,
+                    no_hp: None,
+                    email: None,
+                    subject: summary.subject,
+                    status: summary.status,
+                    updated_at: summary.updated_at,
+                }
+            }
+        })
         .collect();
 
     let mut response = ApiResponse::success(response_data, req_ctx.correlation_id.clone());

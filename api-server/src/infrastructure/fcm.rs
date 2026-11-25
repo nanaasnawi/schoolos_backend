@@ -149,6 +149,67 @@ fn load_service_account() -> Option<ServiceAccountKey> {
 static FCM_TOKEN_CACHE: std::sync::OnceLock<std::sync::RwLock<Option<(String, String, std::time::Instant)>>> =
     std::sync::OnceLock::new();
 
+static FCM_HTTP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+pub fn get_http_client() -> &'static reqwest::Client {
+    FCM_HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
+/// Generates a short-lived Firebase Custom Auth Token (RS256 JWT) scoped to the
+/// authenticated user's `tenant_id` and `role`, so Android Firebase RTDB rules can
+/// require `auth != null && auth.token.tenant_id == $tenantId`.
+pub fn create_firebase_custom_token(
+    uid: Uuid,
+    tenant_id: Uuid,
+    role: &str,
+) -> Result<String, String> {
+    let sa = load_service_account()
+        .ok_or_else(|| "Firebase service account is not configured".to_string())?;
+    let now = chrono::Utc::now().timestamp();
+
+    #[derive(Serialize)]
+    struct FirebaseCustomClaims<'a> {
+        iss: &'a str,
+        sub: &'a str,
+        aud: &'static str,
+        iat: i64,
+        exp: i64,
+        uid: String,
+        claims: serde_json::Value,
+    }
+
+    let claims = FirebaseCustomClaims {
+        iss: &sa.client_email,
+        sub: &sa.client_email,
+        aud: "https://identitytoolkit.googleapis.com/google.identity.identitytoolkit.v1.IdentityToolkit",
+        iat: now,
+        exp: now + 3600,
+        uid: uid.to_string(),
+        claims: serde_json::json!({
+            "tenant_id": tenant_id.to_string(),
+            "role": role,
+        }),
+    };
+
+    let key = jsonwebtoken::EncodingKey::from_rsa_pem(sa.private_key.as_bytes())
+        .map_err(|e| format!("Invalid Firebase RSA private key: {}", e))?;
+    let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+    jsonwebtoken::encode(&header, &claims, &key)
+        .map_err(|e| format!("Failed to encode Firebase custom token: {}", e))
+}
+
+/// Acquires a cached Google OAuth2 access token with Firebase RTDB & Messaging privileges.
+pub async fn get_firebase_rtdb_access_token() -> Result<String, String> {
+    let (token, _) = get_access_token(get_http_client()).await?;
+    Ok(token)
+}
+
 fn get_fcm_cache() -> &'static std::sync::RwLock<Option<(String, String, std::time::Instant)>> {
     FCM_TOKEN_CACHE.get_or_init(|| std::sync::RwLock::new(None))
 }
@@ -183,7 +244,7 @@ async fn fetch_fresh_access_token(client: &reqwest::Client) -> Result<(String, S
         let now = chrono::Utc::now().timestamp();
         let claims = GoogleJwtClaims {
             iss: &sa.client_email,
-            scope: "https://www.googleapis.com/auth/firebase.messaging",
+            scope: "https://www.googleapis.com/auth/firebase.messaging https://www.googleapis.com/auth/firebase.database https://www.googleapis.com/auth/userinfo.email",
             aud: "https://oauth2.googleapis.com/token",
             exp: now + 3600,
             iat: now,
@@ -372,42 +433,58 @@ fn parse_category(raw: &str) -> FcmCategory {
 }
 
 pub fn trigger_fcm_push_notification(
+    tenant_id: Uuid,
     title: String,
     content: String,
     category: String,
     reference_id: Uuid,
 ) {
     let cat = parse_category(&category);
-    trigger_fcm_push_targeted(title, content, cat, reference_id, FcmTarget::All);
+    trigger_fcm_push_targeted(tenant_id, title, content, cat, reference_id, FcmTarget::All);
 }
 
 /// Varian eksplisit agar setiap tipe event (tugas/kuis/nilai/sesi) dapat channel & deep-link sendiri.
 pub fn trigger_fcm_push_categorized(
+    tenant_id: Uuid,
     title: String,
     content: String,
     category: FcmCategory,
     reference_id: Uuid,
 ) {
-    trigger_fcm_push_targeted(title, content, category, reference_id, FcmTarget::All);
+    trigger_fcm_push_targeted(tenant_id, title, content, category, reference_id, FcmTarget::All);
 }
 
-/// Kirim FCM push notification tertarget (per kelas, per role, atau 1-to-1 per user).
+fn tenant_topic_prefix(tenant_id: Uuid) -> String {
+    format!("t_{}", tenant_id.to_string().replace('-', ""))
+}
+
+/// Kirim FCM push notification tertarget (per kelas, per role, atau 1-to-1 per user),
+/// selalu terisolasi di bawah prefix topik `t_{tenant_uuid_hex}_*`.
 pub fn trigger_fcm_push_targeted(
+    tenant_id: Uuid,
     title: String,
     content: String,
     category: FcmCategory,
     reference_id: Uuid,
     target: FcmTarget,
 ) {
+    if tenant_id.is_nil() {
+        tracing::warn!("FCM push skipped: refuse unscoped broadcast with nil tenant_id");
+        return;
+    }
+
     tokio::spawn(async move {
-        let client = reqwest::Client::new();
-        let (access_token, project_id) = match get_access_token(&client).await {
+        let client = get_http_client();
+        let (access_token, project_id) = match get_access_token(client).await {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!("FCM authentication skipped or failed: {}", e);
                 return;
             }
         };
+
+        let tenant_prefix = tenant_topic_prefix(tenant_id);
+        let tenant_id_str = tenant_id.to_string();
 
         let fcm_url = format!(
             "https://fcm.googleapis.com/v1/projects/{}/messages:send",
@@ -432,16 +509,10 @@ pub fn trigger_fcm_push_targeted(
 
         let notif_tag = format!("schoolos_{}", reference_id);
 
-        // Payload FCM Data-Only Berprioritas Tinggi:
-        // Google Play Services mewajibkan pesan berbentuk DATA-ONLY (tanpa root key "notification")
-        // agar FirebaseMessagingService.onMessageReceived() di HP Android DIJAMIN selalu dipanggil
-        // saat layar terkunci, Doze mode aktif, maupun saat aplikasi dalam keadaan mati/tertutup.
-        // Di dalam onMessageReceived(), SystemNotificationHelper membangunkan layar perangkat
-        // (PowerManager.ACQUIRE_CAUSES_WAKEUP), menampilkan heads-up banner publik di lockscreen,
-        // serta memutar ringtone notifikasi kustom.
         let mut message_obj = serde_json::json!({
             "data": {
                 "id": reference_id.to_string(),
+                "tenant_id": tenant_id_str,
                 "title": &title,
                 "body": &content,
                 "content": &content,
@@ -497,35 +568,33 @@ pub fn trigger_fcm_push_targeted(
                     FcmCategory::Reminder => "school_sessions",
                     _ => "school_announcements",
                 };
+                let scoped_ann = format!("{}_school_announcements", tenant_prefix);
                 if cat_topic == "school_announcements" {
-                    message_obj["topic"] = serde_json::Value::String("school_announcements".to_string());
+                    message_obj["topic"] = serde_json::Value::String(scoped_ann);
                 } else {
-                    let cond = format!("'{}' in topics || 'school_announcements' in topics", cat_topic);
+                    let scoped_cat = format!("{}_{}", tenant_prefix, cat_topic);
+                    let cond = format!("'{}' in topics || '{}' in topics", scoped_cat, scoped_ann);
                     message_obj["condition"] = serde_json::Value::String(cond);
                 }
             }
             FcmTarget::Class(cid) => {
                 let clean = cid.to_string().replace('-', "");
-                let raw = cid.to_string().to_lowercase();
-                if clean != raw {
-                    let cond = format!("'class_{}' in topics || 'class_{}' in topics", clean, raw);
-                    message_obj["condition"] = serde_json::Value::String(cond);
-                } else {
-                    message_obj["topic"] = serde_json::Value::String(format!("class_{}", clean));
-                }
+                let topic = format!("{}_class_{}", tenant_prefix, clean);
+                message_obj["topic"] = serde_json::Value::String(topic);
             }
             FcmTarget::Classes(cids) => {
                 if cids.is_empty() {
                     return;
                 } else if cids.len() == 1 {
                     let clean = cids[0].to_string().replace('-', "");
-                    message_obj["topic"] = serde_json::Value::String(format!("class_{}", clean));
+                    message_obj["topic"] =
+                        serde_json::Value::String(format!("{}_class_{}", tenant_prefix, clean));
                 } else {
                     let cond = cids
                         .iter()
                         .map(|c| {
                             let clean = c.to_string().replace('-', "");
-                            format!("'class_{}' in topics", clean)
+                            format!("'{}_class_{}' in topics", tenant_prefix, clean)
                         })
                         .collect::<Vec<_>>()
                         .join(" || ");
@@ -534,25 +603,33 @@ pub fn trigger_fcm_push_targeted(
             }
             FcmTarget::User(uid) => {
                 let clean = uid.to_string().replace('-', "");
-                message_obj["topic"] = serde_json::Value::String(format!("user_{}", clean));
+                message_obj["topic"] =
+                    serde_json::Value::String(format!("{}_user_{}", tenant_prefix, clean));
             }
             FcmTarget::Roles(roles) => {
                 if roles.is_empty() {
-                    message_obj["topic"] = serde_json::Value::String("school_announcements".to_string());
+                    message_obj["topic"] =
+                        serde_json::Value::String(format!("{}_school_announcements", tenant_prefix));
                 } else if roles.len() == 1 {
                     let r = roles[0].to_lowercase();
-                    message_obj["topic"] = serde_json::Value::String(format!("role_{}", r));
+                    message_obj["topic"] =
+                        serde_json::Value::String(format!("{}_role_{}", tenant_prefix, r));
                 } else {
                     let cond = roles
                         .iter()
-                        .map(|r| format!("'role_{}' in topics", r.to_lowercase()))
+                        .map(|r| format!("'{}_role_{}' in topics", tenant_prefix, r.to_lowercase()))
                         .collect::<Vec<_>>()
                         .join(" || ");
                     message_obj["condition"] = serde_json::Value::String(cond);
                 }
             }
             FcmTarget::Topic(t) => {
-                message_obj["topic"] = serde_json::Value::String(t);
+                let scoped = if t.starts_with(&tenant_prefix) {
+                    t
+                } else {
+                    format!("{}_{}", tenant_prefix, t)
+                };
+                message_obj["topic"] = serde_json::Value::String(scoped);
             }
         }
 

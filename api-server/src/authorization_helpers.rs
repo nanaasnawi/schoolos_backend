@@ -25,7 +25,7 @@ impl AuthorizationScope {
         Ok(row.and_then(|r| r.try_get("id").ok()))
     }
 
-    /// Resolve the teachers.id from an authenticated actor's user_id within a tenant
+    /// Resolve the teachers.id from an authenticated actor's user_id within a tenant (strict user_id binding only).
     pub async fn resolve_teacher_id(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -34,12 +34,9 @@ impl AuthorizationScope {
         let row = sqlx::query(
             r#"
             SELECT id FROM teachers 
-            WHERE (
-                user_id = $1 
-                OR lower(trim(full_name)) = (SELECT lower(trim(full_name)) FROM users WHERE id = $1)
-                OR (email IS NOT NULL AND lower(trim(email)) = (SELECT lower(trim(email)) FROM users WHERE id = $1))
-            )
-            AND tenant_id = $2 AND deleted_at IS NULL
+            WHERE user_id = $1
+              AND tenant_id = $2
+              AND deleted_at IS NULL
             LIMIT 1
             "#,
         )
@@ -341,6 +338,14 @@ impl AuthorizationScope {
             return Ok(());
         }
 
-        Ok(())
+        // Fail closed when actor holds none of admin / teacher / student / parent roles
+        Err(ApiError::new(
+            ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Peran pengguna tidak memiliki izin mengakses sumber daya pembelajaran ini"
+                    .to_string(),
+            ),
+            &req_ctx.request_id,
+        ))
     }
 }

@@ -654,7 +654,9 @@ async fn fast_safe_upsert_user(
 
     // 3. Insert with savepoint protection against unique constraint abort
     let new_uid = Uuid::now_v7();
-    let default_pw_hash = generate_salted_default_password_hash();
+    let default_pw_hash = tokio::task::spawn_blocking(generate_salted_default_password_hash)
+        .await
+        .unwrap_or_else(|_| generate_salted_default_password_hash());
     let _ = sqlx::query("SAVEPOINT sp_upsert_user")
         .execute(&mut **tx)
         .await;
@@ -856,7 +858,9 @@ async fn safe_upsert_user(
 
     // 2. Insert with savepoint protection against unique constraint abort
     let new_uid = Uuid::now_v7();
-    let default_pw_hash = generate_salted_default_password_hash();
+    let default_pw_hash = tokio::task::spawn_blocking(generate_salted_default_password_hash)
+        .await
+        .unwrap_or_else(|_| generate_salted_default_password_hash());
     let _ = sqlx::query("SAVEPOINT sp_upsert_user")
         .execute(&mut **tx)
         .await;
@@ -1488,13 +1492,15 @@ pub async fn pull_dapodik_records(
             )
         })?;
 
-    // ── 1. Start ACID Database Transaction ──────────────────────
-    let mut tx = state.pool.begin().await.map_err(|e| {
-        ApiError::new(
-            ApplicationError::Internal(format!("Failed to start database transaction: {}", e)),
-            &ctx.request_id,
-        )
-    })?;
+    // ── 1. Start ACID Database Transaction scoped strictly to ctx.tenant_id ──
+    let mut tx = crate::db_tenant::begin_tenant_tx(&state.pool, ctx.tenant_id)
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                ApplicationError::Internal(format!("Failed to start database transaction: {}", e)),
+                &ctx.request_id,
+            )
+        })?;
 
     // ── 2. Strict Master Data Resolution ────────────────────────
     let default_ay =
@@ -2867,6 +2873,20 @@ pub async fn pull_dapodik_records(
                     .execute(&mut *tx)
                     .await;
 
+                    let _ = sqlx::query(
+                        r#"
+                        UPDATE refresh_tokens
+                        SET revoked_at = NOW(), revoke_reason = 'MUTASI_OUT'
+                        WHERE tenant_id = $1 AND revoked_at IS NULL AND user_id IN (
+                            SELECT user_id FROM students WHERE tenant_id = $1 AND id = $2 AND user_id IS NOT NULL
+                        )
+                        "#
+                    )
+                    .bind(ctx.tenant_id)
+                    .bind(sid)
+                    .execute(&mut *tx)
+                    .await;
+
                     if let Some(&rec_id) = sync_by_nisn.get(&final_nisn) {
                         let _ = sqlx::query(
                             r#"
@@ -3598,12 +3618,26 @@ pub async fn pull_dapodik_records(
                 .execute(&mut *tx)
                 .await;
 
-                // 3. Nonaktifkan akun login pengguna bagi siswa yang keluar/mutasi
+                // 3. Nonaktifkan akun login pengguna bagi siswa yang keluar/mutasi & cabut refresh token aktif
                 let _ = sqlx::query(
                     r#"
                     UPDATE users 
                     SET is_active = false, updated_at = NOW() 
                     WHERE tenant_id = $1 AND id IN (
+                        SELECT user_id FROM students WHERE tenant_id = $1 AND id = ANY($2) AND user_id IS NOT NULL
+                    )
+                    "#
+                )
+                .bind(ctx.tenant_id)
+                .bind(&removed_ids)
+                .execute(&mut *tx)
+                .await;
+
+                let _ = sqlx::query(
+                    r#"
+                    UPDATE refresh_tokens
+                    SET revoked_at = NOW(), revoke_reason = 'MUTASI_OUT'
+                    WHERE tenant_id = $1 AND revoked_at IS NULL AND user_id IN (
                         SELECT user_id FROM students WHERE tenant_id = $1 AND id = ANY($2) AND user_id IS NOT NULL
                     )
                     "#

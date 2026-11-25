@@ -315,6 +315,29 @@ impl Bootstrap {
                 .min_connections(min_connections)
                 .acquire_timeout(Duration::from_secs(acquire_timeout_secs))
                 .idle_timeout(Duration::from_secs(idle_timeout_secs))
+                .max_lifetime(Duration::from_secs(1800))
+                .after_connect(|conn, _meta| {
+                    let scope = school_core::common::tenant_context::current_tenant_db_scope();
+                    Box::pin(async move {
+                        school_core::common::tenant_context::apply_scope_to_pg_conn(conn, scope)
+                            .await
+                    })
+                })
+                .before_acquire(|conn, _meta| {
+                    let scope = school_core::common::tenant_context::current_tenant_db_scope();
+                    Box::pin(async move {
+                        school_core::common::tenant_context::apply_scope_to_pg_conn(conn, scope)
+                            .await?;
+                        Ok(true)
+                    })
+                })
+                .after_release(|conn, _meta| {
+                    Box::pin(async move {
+                        school_core::common::tenant_context::apply_scope_to_pg_conn(conn, None)
+                            .await?;
+                        Ok(true)
+                    })
+                })
                 .connect(&self.database_url)
                 .await
             {
@@ -350,181 +373,37 @@ impl Bootstrap {
             }
         };
 
-        // Run database schema migrations automatically on startup
-        if let Err(e) = sqlx::migrate!("../migrations").run(&pool).await {
-            tracing::warn!("Database migration notice: {:?}", e);
+        // Run database schema migrations automatically on startup unless SKIP_MIGRATIONS=true (when running under least-privilege app_runtime role)
+        let skip_migrations = std::env::var("SKIP_MIGRATIONS")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        if skip_migrations {
+            tracing::info!("SKIP_MIGRATIONS=true; skipping sqlx::migrate! at startup.");
         } else {
+            school_core::common::tenant_context::with_system_rls_bypass(
+                sqlx::migrate!("../migrations").run(&pool),
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!("Database migration failed: {:?}", e);
+                anyhow::anyhow!("Database migration failed: {e}")
+            })?;
             tracing::info!("Database schema migrations up to date.");
         }
 
-        // Ensure critical new schema columns exist
-        if let Err(e) = sqlx::query("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT;")
+        // Consolidated schema migrations live in `backend/migrations/`.
+        // Keep only idempotent uploaded_files guard wrapped in system RLS bypass without tenant-specific hardcoded data cleanup.
+        school_core::common::tenant_context::with_system_rls_bypass(async {
+            if let Err(e) = sqlx::query(
+                "CREATE TABLE IF NOT EXISTS uploaded_files (filename VARCHAR(255) PRIMARY KEY, mime_type VARCHAR(100) NOT NULL, file_data BYTEA NOT NULL, tenant_id UUID, is_public BOOLEAN NOT NULL DEFAULT true, created_at TIMESTAMPTZ DEFAULT NOW());",
+            )
             .execute(&pool)
             .await
-        {
-            tracing::warn!("Notice on avatar_url column check: {:?}", e);
-        }
-        if let Err(e) = sqlx::query("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_data BYTEA, ADD COLUMN IF NOT EXISTS avatar_mime VARCHAR(50);")
-            .execute(&pool)
-            .await
-        {
-            tracing::warn!("Notice on avatar_data/avatar_mime columns check: {:?}", e);
-        }
-        if let Err(e) = sqlx::query("ALTER TABLE student_documents ADD COLUMN IF NOT EXISTS file_data BYTEA;")
-            .execute(&pool)
-            .await
-        {
-            tracing::warn!("Notice on student_documents.file_data column check: {:?}", e);
-        }
-        if let Err(e) = sqlx::query(
-            "ALTER TABLE academic_years ADD COLUMN IF NOT EXISTS current_semester SMALLINT NOT NULL DEFAULT 1, ADD COLUMN IF NOT EXISTS report_date DATE;"
-        )
-        .execute(&pool)
-        .await
-        {
-            tracing::warn!("Notice on academic_years column check: {:?}", e);
-        }
-        if let Err(e) = sqlx::query(
-            "ALTER TABLE schools \
-             ADD COLUMN IF NOT EXISTS headmaster_name VARCHAR(255), \
-             ADD COLUMN IF NOT EXISTS headmaster_nip VARCHAR(50), \
-             ADD COLUMN IF NOT EXISTS village VARCHAR(100), \
-             ADD COLUMN IF NOT EXISTS district VARCHAR(100), \
-             ADD COLUMN IF NOT EXISTS regency VARCHAR(100), \
-             ADD COLUMN IF NOT EXISTS province VARCHAR(100), \
-             ADD COLUMN IF NOT EXISTS postal_code VARCHAR(20), \
-             ADD COLUMN IF NOT EXISTS website VARCHAR(255);"
-        )
-        .execute(&pool)
-        .await
-        {
-            tracing::warn!("Notice on schools metadata column check: {:?}", e);
-        }
-        if let Err(e) = sqlx::query(
-            "CREATE TABLE IF NOT EXISTS uploaded_files (filename VARCHAR(255) PRIMARY KEY, mime_type VARCHAR(100) NOT NULL, file_data BYTEA NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW());"
-        )
-        .execute(&pool)
-        .await
-        {
-            tracing::warn!("Notice on uploaded_files table check: {:?}", e);
-        }
-        if let Err(e) = sqlx::query(
-            "ALTER TABLE inquiry_messages ADD COLUMN IF NOT EXISTS attachment_url TEXT, ADD COLUMN IF NOT EXISTS attachment_type VARCHAR(50);"
-        )
-        .execute(&pool)
-        .await
-        {
-            tracing::warn!("Notice on inquiry_messages attachment columns check: {:?}", e);
-        }
-
-        // Deduplicate HUSNUL CHATIM vs HUSNUL CHATIM, S.Pd in teachers & inquiry_threads
-        let dedup_husnul_sql = r#"
-        DO $$
-        DECLARE
-            r RECORD;
-            keep_id UUID;
-            keep_user_id UUID;
-        BEGIN
-            FOR r IN (
-                SELECT tenant_id
-                FROM teachers
-                WHERE deleted_at IS NULL AND full_name ILIKE '%HUSNUL CHATIM%'
-                GROUP BY tenant_id
-            ) LOOP
-                SELECT id, user_id INTO keep_id, keep_user_id
-                FROM teachers
-                WHERE tenant_id = r.tenant_id
-                  AND deleted_at IS NULL
-                  AND full_name ILIKE '%HUSNUL CHATIM%'
-                ORDER BY (user_id IS NOT NULL) DESC, (nuptk IS NOT NULL) DESC, updated_at DESC, created_at ASC
-                LIMIT 1;
-
-                IF keep_id IS NOT NULL THEN
-                    UPDATE classes
-                    SET homeroom_teacher_id = keep_id, updated_at = NOW()
-                    WHERE tenant_id = r.tenant_id
-                      AND homeroom_teacher_id IN (
-                          SELECT id FROM teachers
-                          WHERE tenant_id = r.tenant_id AND full_name ILIKE '%HUSNUL CHATIM%' AND id != keep_id
-                      );
-
-                    UPDATE class_schedules
-                    SET teacher_id = keep_id, updated_at = NOW()
-                    WHERE tenant_id = r.tenant_id
-                      AND teacher_id IN (
-                          SELECT id FROM teachers
-                          WHERE tenant_id = r.tenant_id AND full_name ILIKE '%HUSNUL CHATIM%' AND id != keep_id
-                      );
-
-                    UPDATE learning_sessions
-                    SET teacher_id = keep_id, updated_at = NOW()
-                    WHERE tenant_id = r.tenant_id
-                      AND teacher_id IN (
-                          SELECT id FROM teachers
-                          WHERE tenant_id = r.tenant_id AND full_name ILIKE '%HUSNUL CHATIM%' AND id != keep_id
-                      );
-
-                    UPDATE learning_materials
-                    SET teacher_id = keep_id, updated_at = NOW()
-                    WHERE tenant_id = r.tenant_id
-                      AND teacher_id IN (
-                          SELECT id FROM teachers
-                          WHERE tenant_id = r.tenant_id AND full_name ILIKE '%HUSNUL CHATIM%' AND id != keep_id
-                      );
-
-                    UPDATE assignments
-                    SET teacher_id = keep_id, updated_at = NOW()
-                    WHERE tenant_id = r.tenant_id
-                      AND teacher_id IN (
-                          SELECT id FROM teachers
-                          WHERE tenant_id = r.tenant_id AND full_name ILIKE '%HUSNUL CHATIM%' AND id != keep_id
-                      );
-
-                    UPDATE quizzes
-                    SET teacher_id = keep_id, updated_at = NOW()
-                    WHERE tenant_id = r.tenant_id
-                      AND teacher_id IN (
-                          SELECT id FROM teachers
-                          WHERE tenant_id = r.tenant_id AND full_name ILIKE '%HUSNUL CHATIM%' AND id != keep_id
-                      );
-
-                    UPDATE inquiry_threads
-                    SET teacher_id = COALESCE(keep_user_id, keep_id),
-                        teacher_name = 'HUSNUL CHATIM',
-                        updated_at = NOW()
-                    WHERE tenant_id = r.tenant_id
-                      AND (
-                          teacher_name ILIKE '%HUSNUL CHATIM%'
-                          OR teacher_id IN (
-                              SELECT id FROM teachers
-                              WHERE tenant_id = r.tenant_id AND full_name ILIKE '%HUSNUL CHATIM%'
-                          )
-                      );
-
-                    DELETE FROM teachers
-                    WHERE tenant_id = r.tenant_id
-                      AND full_name ILIKE '%HUSNUL CHATIM%'
-                      AND id != keep_id;
-
-                    UPDATE teachers
-                    SET full_name = 'HUSNUL CHATIM',
-                        subject = COALESCE(NULLIF(TRIM(subject), ''), 'Seni Budaya'),
-                        updated_at = NOW()
-                    WHERE id = keep_id;
-
-                    IF keep_user_id IS NOT NULL THEN
-                        UPDATE users
-                        SET full_name = 'HUSNUL CHATIM',
-                            updated_at = NOW()
-                        WHERE id = keep_user_id AND full_name ILIKE '%HUSNUL CHATIM%';
-                    END IF;
-                END IF;
-            END LOOP;
-        END $$;
-        "#;
-        if let Err(e) = sqlx::query(dedup_husnul_sql).execute(&pool).await {
-            tracing::warn!("Notice on Husnul Chatim deduplication: {:?}", e);
-        }
+            {
+                tracing::warn!("Notice on uploaded_files table check: {:?}", e);
+            }
+        })
+        .await;
 
         // Infrastructure
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
@@ -542,7 +421,8 @@ impl Bootstrap {
         tokio::spawn({
             let dispatcher = outbox_dispatcher.clone();
             async move {
-                dispatcher.start().await;
+                school_core::common::tenant_context::with_system_rls_bypass(dispatcher.start())
+                    .await;
             }
         });
 
@@ -569,7 +449,10 @@ impl Bootstrap {
                     component = "idempotency_cleanup",
                     "Starting idempotency cleanup service"
                 );
-                cleanup_service.start().await;
+                school_core::common::tenant_context::with_system_rls_bypass(
+                    cleanup_service.start(),
+                )
+                .await;
             }
         });
 
@@ -584,11 +467,12 @@ impl Bootstrap {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
             loop {
                 interval.tick().await;
-                if let Err(e) =
+                if let Err(e) = school_core::common::tenant_context::with_system_rls_bypass(
                     crate::infrastructure::smart_reminder_worker::SmartReminderWorker::run_reminder_cycle(
                         &reminder_pool,
-                    )
-                    .await
+                    ),
+                )
+                .await
                 {
                     tracing::warn!(
                         component = "smart_reminder_worker",
@@ -610,11 +494,12 @@ impl Bootstrap {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
             loop {
                 interval.tick().await;
-                if let Err(e) =
+                if let Err(e) = school_core::common::tenant_context::with_system_rls_bypass(
                     crate::infrastructure::scheduled_publish_worker::ScheduledPublishWorker::run_publish_cycle(
                         &publish_worker_pool,
-                    )
-                    .await
+                    ),
+                )
+                .await
                 {
                     tracing::warn!(
                         component = "scheduled_publish_worker",
@@ -637,13 +522,15 @@ impl Bootstrap {
             let mut interval = tokio::time::interval(Duration::from_secs(86400));
             loop {
                 interval.tick().await;
-                let res = sqlx::query(
-                    r#"
-                    DELETE FROM outbox_events
-                    WHERE status = 'succeeded' AND processed_at < NOW() - INTERVAL '7 days'
-                    "#,
+                let res = school_core::common::tenant_context::with_system_rls_bypass(
+                    sqlx::query(
+                        r#"
+                        DELETE FROM outbox_events
+                        WHERE status = 'succeeded' AND processed_at < NOW() - INTERVAL '7 days'
+                        "#,
+                    )
+                    .execute(&outbox_cleanup_pool),
                 )
-                .execute(&outbox_cleanup_pool)
                 .await;
                 match res {
                     Ok(r) => {
@@ -1042,7 +929,13 @@ impl Bootstrap {
                     auth_middleware,
                 )),
             )
-            .nest("/api/v1/tenants", tenant_routes())
+            .nest(
+                "/api/v1/tenants",
+                tenant_routes().layer(axum::middleware::from_fn_with_state(
+                    context.clone(),
+                    auth_middleware,
+                )),
+            )
             // Public school info (no auth required) — used by mobile login screen
             .route(
                 "/api/v1/schools/info",
@@ -1434,10 +1327,7 @@ impl Bootstrap {
             )
             .nest(
                 "/api/v1/announcements",
-                announcement_routes().layer(axum::middleware::from_fn_with_state(
-                    context.clone(),
-                    auth_middleware,
-                )),
+                announcement_routes(context.clone()),
             )
             .nest(
                 "/api/v1/dapodik",
@@ -1460,19 +1350,106 @@ impl Bootstrap {
                     )),
             )
             .nest("/api/v1/system", system_routes(context.clone()))
-            .nest("/api/v1/youtube", youtube_routes())
+            .nest(
+                "/api/v1/youtube",
+                youtube_routes().layer(axum::middleware::from_fn_with_state(
+                    context.clone(),
+                    auth_middleware,
+                )),
+            )
             .nest("/health", health_routes())
             .route(
                 "/uploads/{*path}",
                 get(crate::presentation::learning::materials::controller::serve_uploaded_file)
                     .with_state(context.clone()),
             )
-            .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
+            .merge({
+                let is_prod = std::env::var("RAILWAY_ENVIRONMENT")
+                    .or_else(|_| std::env::var("APP_ENV"))
+                    .or_else(|_| std::env::var("RUST_ENV"))
+                    .map(|v| v.eq_ignore_ascii_case("production"))
+                    .unwrap_or(false);
+                let enable_swagger = std::env::var("ENABLE_SWAGGER")
+                    .map(|v| v == "true" || v == "1")
+                    .unwrap_or(!is_prod);
+                if enable_swagger {
+                    let ui: axum::Router<ApplicationContext> =
+                        SwaggerUi::new("/swagger-ui")
+                            .url("/api-docs/openapi.json", ApiDoc::openapi())
+                            .into();
+                    ui
+                } else {
+                    axum::Router::new()
+                }
+            })
             .route(
                 "/metrics",
                 get(metrics_handler).with_state(prometheus_handle),
             )
-            .layer(CorsLayer::permissive())
+            .layer({
+                use axum::http::{header, HeaderName, HeaderValue, Method};
+                use tower_http::cors::AllowOrigin;
+
+                let raw_origins = std::env::var("CORS_ALLOWED_ORIGINS").unwrap_or_else(|_| {
+                    "https://akselerasi-edu.id,https://www.akselerasi-edu.id,https://app.akselerasi-edu.id,https://pkbm-as-salafiyah.akselerasi-edu.id,https://schoolos.vercel.app,http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000"
+                        .to_string()
+                });
+                let explicit_origins: Vec<String> = raw_origins
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.trim_end_matches('/').to_ascii_lowercase())
+                    .collect();
+
+                CorsLayer::new()
+                    .allow_origin(AllowOrigin::predicate(
+                        move |origin: &HeaderValue, _parts: &axum::http::request::Parts| {
+                            let Ok(raw) = origin.to_str() else {
+                                return false;
+                            };
+                            let normalized = raw.trim().trim_end_matches('/').to_ascii_lowercase();
+                            if explicit_origins.iter().any(|allowed| allowed == &normalized) {
+                                return true;
+                            }
+                            // Allow tenant subdomains on akselerasi-edu.id over HTTPS
+                            if let Some(rest) = normalized.strip_prefix("https://") {
+                                if rest == "akselerasi-edu.id"
+                                    || (rest.ends_with(".akselerasi-edu.id")
+                                        && !rest.contains('/')
+                                        && !rest.contains('@'))
+                                {
+                                    return true;
+                                }
+                            }
+                            false
+                        },
+                    ))
+                    .allow_methods([
+                        Method::GET,
+                        Method::POST,
+                        Method::PUT,
+                        Method::PATCH,
+                        Method::DELETE,
+                        Method::OPTIONS,
+                    ])
+                    .allow_headers([
+                        header::AUTHORIZATION,
+                        header::CONTENT_TYPE,
+                        header::ACCEPT,
+                        HeaderName::from_static("x-tenant-id"),
+                        HeaderName::from_static("x-idempotency-key"),
+                        HeaderName::from_static("idempotency-key"),
+                        HeaderName::from_static("x-request-id"),
+                        HeaderName::from_static("x-correlation-id"),
+                        HeaderName::from_static("x-school-slug"),
+                    ])
+                    .expose_headers([
+                        HeaderName::from_static("x-request-id"),
+                        HeaderName::from_static("x-correlation-id"),
+                        HeaderName::from_static("x-idempotent-replayed"),
+                    ])
+                    .allow_credentials(true)
+            })
             .layer(axum::middleware::from_fn(metrics_middleware))
             .layer(axum::middleware::from_fn(tracing_middleware))
             .layer(TraceLayer::new_for_http())

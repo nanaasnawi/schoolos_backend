@@ -84,6 +84,23 @@ impl SmartReminderWorker {
     /// Evaluates scheduled classes 15 minutes before session starts and sends deduplicated reminders.
     /// Strictly restricted to school operational hours (06:00 - 21:00 WIB) and targeted to the assigned teacher.
     pub async fn run_reminder_cycle(pool: &PgPool) -> Result<usize, sqlx::Error> {
+        let mut lock_conn = pool.acquire().await?;
+        let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(8842002)")
+            .fetch_one(&mut *lock_conn)
+            .await
+            .unwrap_or(false);
+        if !locked {
+            return Ok(0);
+        }
+
+        let cycle_res = Self::run_reminder_cycle_inner(pool).await;
+        let _ = sqlx::query("SELECT pg_advisory_unlock(8842002)")
+            .execute(&mut *lock_conn)
+            .await;
+        cycle_res
+    }
+
+    async fn run_reminder_cycle_inner(pool: &PgPool) -> Result<usize, sqlx::Error> {
         let now = Utc::now();
         // Shift to WIB (UTC+7)
         let wib_now = now + chrono::Duration::hours(7);
@@ -196,7 +213,7 @@ impl SmartReminderWorker {
                 )
             };
 
-            let notif_id = Uuid::new_v4();
+            let notif_id = Uuid::now_v7();
             let scheduled_at = Self::compute_delivery_time(now, false);
 
             let result = sqlx::query(
@@ -226,6 +243,7 @@ impl SmartReminderWorker {
                 let fcm_title = title.clone();
                 let fcm_body = body.clone();
                 crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                    tenant_id,
                     fcm_title,
                     fcm_body,
                     crate::infrastructure::fcm::FcmCategory::Reminder,

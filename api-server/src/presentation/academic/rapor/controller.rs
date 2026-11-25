@@ -463,11 +463,59 @@ fn is_admin_or_staff_role(role_name: &str) -> bool {
 
 fn is_teacher_role(role_name: &str) -> bool {
     let lower = role_name.to_lowercase();
-    lower.contains("guru")
+    (lower.contains("guru")
         || lower.contains("teacher")
-        || lower.contains("wali")
+        || lower.contains("wali kelas")
         || lower.contains("tutor")
-        || lower.contains("pengajar")
+        || lower.contains("pengajar"))
+        && !lower.contains("wali siswa")
+}
+
+fn compute_rapor_hmac(
+    secret: &str,
+    tenant_id: Uuid,
+    student_id: Uuid,
+    academic_year_name: &str,
+    sem_str: &str,
+) -> String {
+    // RFC 2104 HMAC-SHA256 keyed with JWT secret
+    let msg = format!("{}:{}:{}:{}", tenant_id, student_id, academic_year_name, sem_str);
+    let key_bytes = secret.as_bytes();
+    let mut key_block = [0u8; 64];
+    if key_bytes.len() > 64 {
+        let hashed = Sha256::digest(key_bytes);
+        key_block[..hashed.len()].copy_from_slice(&hashed);
+    } else {
+        key_block[..key_bytes.len()].copy_from_slice(key_bytes);
+    }
+    let mut o_key_pad = [0x5cu8; 64];
+    let mut i_key_pad = [0x36u8; 64];
+    for i in 0..64 {
+        o_key_pad[i] ^= key_block[i];
+        i_key_pad[i] ^= key_block[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(i_key_pad);
+    inner.update(msg.as_bytes());
+    let inner_digest = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(o_key_pad);
+    outer.update(inner_digest);
+    hex::encode(&outer.finalize()[..16])
+}
+
+fn constant_time_eq_ascii(a: &str, b: &str) -> bool {
+    let ab = a.as_bytes();
+    let bb = b.as_bytes();
+    if ab.len() != bb.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (&x, &y) in ab.iter().zip(bb.iter()) {
+        diff |= x.to_ascii_lowercase() ^ y.to_ascii_lowercase();
+    }
+    diff == 0
 }
 
 /// Retrieve unified e-Rapor cards for students in the active academic context.
@@ -587,13 +635,10 @@ pub async fn get_report_cards(
         let user_id = req_ctx.actor.as_ref().map(|a| a.id).unwrap_or_default();
         teacher_id_opt = sqlx::query_scalar::<_, Uuid>(
             r#"
-            SELECT id FROM teachers 
-            WHERE (
-                user_id = $1 
-                OR lower(trim(full_name)) = (SELECT lower(trim(full_name)) FROM users WHERE id = $1)
-                OR (email IS NOT NULL AND lower(trim(email)) = (SELECT lower(trim(email)) FROM users WHERE id = $1))
-            )
-            AND tenant_id = $2 AND deleted_at IS NULL
+            SELECT id FROM teachers
+            WHERE user_id = $1
+              AND tenant_id = $2
+              AND deleted_at IS NULL
             LIMIT 1
             "#,
         )
@@ -603,6 +648,23 @@ pub async fn get_report_cards(
         .await
         .unwrap_or(None);
     }
+
+    // Fail closed if caller is an unlinked teacher, or strictly scope students/guardians to their own student rows
+    let scoped_actor_user_id: Option<Uuid> = if is_admin_or_staff || is_teacher {
+        None
+    } else {
+        let actor = req_ctx.actor.as_ref().ok_or_else(|| {
+            ApiError::new(
+                ApplicationError::Unauthorized(
+                    school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                    "Sesi tidak valid untuk mengakses data rapor.".to_string(),
+                ),
+                &req_ctx.request_id,
+            )
+        })?;
+        Some(actor.id)
+    };
+    let force_empty = is_teacher && teacher_id_opt.is_none();
 
     // 3. Query Students with Class, Teacher, and Guardian (Case-Insensitive Active Filter & Valid Join Columns)
     let student_rows = sqlx::query(
@@ -640,11 +702,13 @@ pub async fn get_report_cards(
             LEFT JOIN guardians g
               ON g.id = s.guardian_id
              AND g.tenant_id = s.tenant_id
-            WHERE s.tenant_id = $1 
+            WHERE NOT $5::boolean
+              AND s.tenant_id = $1
               AND s.deleted_at IS NULL
               AND COALESCE(s.is_active, true) = true
               AND (s.status IS NULL OR TRIM(s.status) = '' OR LOWER(TRIM(s.status)) IN ('active', 'aktif'))
               AND ($2::uuid IS NULL OR c.id = $2)
+              AND ($4::uuid IS NULL OR s.user_id = $4 OR g.user_id = $4)
               AND (
                   $3::uuid IS NULL OR
                   c.homeroom_teacher_id = $3 OR
@@ -682,6 +746,8 @@ pub async fn get_report_cards(
     .bind(req_ctx.tenant_id)
     .bind(params.class_id)
     .bind(teacher_id_opt)
+    .bind(scoped_actor_user_id)
+    .bind(force_empty)
     .fetch_all(&ctx.pool)
     .await
     .map_err(|e| ApiError::new(ApplicationError::Infrastructure(school_core::common::error::InfrastructureError::Database(e)), &req_ctx.request_id))?;
@@ -772,6 +838,10 @@ pub async fn get_report_cards(
             "PILIHAN".to_string()
         } else if subj_lower.contains("muatan lokal")
             || subj_lower.contains("daerah")
+            || subj_lower.contains("lokal")
+            || subj_lower.contains("sunda")
+            || subj_lower.contains("jawa")
+            || subj_lower.contains("bali")
             || subj_lower.contains("cirebon")
         {
             "MUATAN_LOKAL".to_string()
@@ -930,9 +1000,8 @@ pub async fn get_report_cards(
 
         let secret = std::env::var("JWT_SECRET")
             .unwrap_or_else(|_| "schoolos_rapor_secret_key_default".to_string());
-        let mut hasher = Sha256::new();
-        hasher.update(format!("{}:{}:{}:{}:{}", secret, req_ctx.tenant_id, s.student_id, active_year_name, active_semester));
-        let hmac_hex = hex::encode(&hasher.finalize()[..10]);
+        let sem_str = active_semester.to_string();
+        let hmac_hex = compute_rapor_hmac(&secret, req_ctx.tenant_id, s.student_id, &active_year_name, &sem_str);
         let qr_token = format!("RPR-{}.{}.{}", s.student_id, active_semester, hmac_hex);
 
         let card_status = if has_scores {
@@ -1047,8 +1116,9 @@ pub async fn verify_rapor_token(
     let sem_str = parts[1];
     let given_sig = parts[2];
 
-    let student_record = sqlx::query(
-        r#"
+    let student_record = crate::db_tenant::with_system_rls_bypass(
+        sqlx::query(
+            r#"
         SELECT 
             s.id AS student_id,
             s.tenant_id,
@@ -1071,9 +1141,10 @@ pub async fn verify_rapor_token(
         WHERE s.id = $1 AND s.deleted_at IS NULL
         LIMIT 1
         "#,
+        )
+        .bind(student_id)
+        .fetch_optional(&ctx.pool),
     )
-    .bind(student_id)
-    .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| {
         ApiError::new(
@@ -1107,11 +1178,9 @@ pub async fn verify_rapor_token(
 
     let secret = std::env::var("JWT_SECRET")
         .unwrap_or_else(|_| "schoolos_rapor_secret_key_default".to_string());
-    let mut hasher = Sha256::new();
-    hasher.update(format!("{}:{}:{}:{}:{}", secret, tenant_id, student_id, academic_year_name, sem_str));
-    let expected_sig = hex::encode(&hasher.finalize()[..10]);
+    let expected_sig = compute_rapor_hmac(&secret, tenant_id, student_id, &academic_year_name, sem_str);
 
-    if !expected_sig.eq_ignore_ascii_case(given_sig) {
+    if !constant_time_eq_ascii(&expected_sig, given_sig) {
         return Err(ApiError::new(
             ApplicationError::Unauthorized(
                 school_core::common::error_code::ErrorCode::AuthInvalidCredentials,
@@ -1151,4 +1220,29 @@ pub async fn verify_rapor_token(
         },
         Uuid::now_v7().to_string(),
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wali_siswa_never_treated_as_teacher() {
+        assert!(!is_teacher_role("Wali Siswa"));
+        assert!(!is_teacher_role("Wali Siswa / Orang Tua"));
+        assert!(is_teacher_role("Guru"));
+        assert!(is_teacher_role("Wali Kelas"));
+    }
+
+    #[test]
+    fn rapor_hmac_signature_is_deterministic_and_constant_time() {
+        let tid = Uuid::now_v7();
+        let sid = Uuid::now_v7();
+        let sig1 = compute_rapor_hmac("test-secret", tid, sid, "2026/2027", "1");
+        let sig2 = compute_rapor_hmac("test-secret", tid, sid, "2026/2027", "1");
+        let sig_other = compute_rapor_hmac("test-secret", tid, sid, "2026/2027", "2");
+        assert_eq!(sig1.len(), 32);
+        assert!(constant_time_eq_ascii(&sig1, &sig2));
+        assert!(!constant_time_eq_ascii(&sig1, &sig_other));
+    }
 }

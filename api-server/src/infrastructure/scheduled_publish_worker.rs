@@ -6,35 +6,9 @@ use uuid::Uuid;
 
 static PRE_START_DISPATCH_SCHEMA_READY: OnceCell<()> = OnceCell::const_new();
 
-async fn ensure_exam_pre_start_dispatch_schema(pool: &PgPool) {
-    PRE_START_DISPATCH_SCHEMA_READY
-        .get_or_init(|| async {
-            let statements = [
-                r#"
-                CREATE TABLE IF NOT EXISTS quiz_pre_start_notices (
-                    quiz_id UUID PRIMARY KEY REFERENCES quizzes(id) ON DELETE CASCADE,
-                    tenant_id UUID NOT NULL,
-                    start_bucket VARCHAR(32) NOT NULL,
-                    notified_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-                )
-                "#,
-                r#"
-                CREATE TABLE IF NOT EXISTS quiz_executive_pre_start_batches (
-                    tenant_id UUID NOT NULL,
-                    user_id UUID NOT NULL,
-                    start_bucket VARCHAR(32) NOT NULL,
-                    sent_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-                    PRIMARY KEY (tenant_id, user_id, start_bucket)
-                )
-                "#,
-            ];
-            for sql in statements {
-                if let Err(e) = sqlx::query(sql).execute(pool).await {
-                    tracing::warn!("ensure_exam_pre_start_dispatch_schema notice: {e}");
-                }
-            }
-        })
-        .await;
+async fn ensure_exam_pre_start_dispatch_schema(_pool: &PgPool) {
+    // Schema managed exclusively via SQLx migrations (see 20261125020000_add_multitenant_hot_indexes_and_analytics_projection.sql).
+    PRE_START_DISPATCH_SCHEMA_READY.get_or_init(|| async {}).await;
 }
 
 /// Resets the 5-minute pre-start dispatch guard when an exam schedule is changed.
@@ -301,6 +275,7 @@ async fn dispatch_upcoming_exam_5min_notifications(pool: &PgPool) {
                 .await;
 
                 crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                    tenant_id,
                     exec_title.clone(),
                     exec_body.clone(),
                     crate::infrastructure::fcm::FcmCategory::Quiz,
@@ -397,6 +372,7 @@ async fn dispatch_upcoming_exam_5min_notifications(pool: &PgPool) {
             .await;
 
             crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                tenant_id,
                 t_title,
                 t_body,
                 crate::infrastructure::fcm::FcmCategory::Quiz,
@@ -448,6 +424,7 @@ async fn dispatch_upcoming_exam_5min_notifications(pool: &PgPool) {
 
                 if pushed_student_classes.insert((cid, ex.start_bucket.clone())) {
                     crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                        ex.tenant_id,
                         s_title,
                         s_body,
                         crate::infrastructure::fcm::FcmCategory::Quiz,
@@ -486,6 +463,7 @@ async fn dispatch_upcoming_exam_5min_notifications(pool: &PgPool) {
                 .await;
 
                 crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                    ex.tenant_id,
                     s_title,
                     s_body,
                     crate::infrastructure::fcm::FcmCategory::Quiz,
@@ -501,6 +479,23 @@ pub struct ScheduledPublishWorker;
 
 impl ScheduledPublishWorker {
     pub async fn run_publish_cycle(pool: &PgPool) -> Result<(), sqlx::Error> {
+        let mut lock_conn = pool.acquire().await?;
+        let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(8842001)")
+            .fetch_one(&mut *lock_conn)
+            .await
+            .unwrap_or(false);
+        if !locked {
+            return Ok(());
+        }
+
+        let cycle_res = Self::run_publish_cycle_inner(pool).await;
+        let _ = sqlx::query("SELECT pg_advisory_unlock(8842001)")
+            .execute(&mut *lock_conn)
+            .await;
+        cycle_res
+    }
+
+    async fn run_publish_cycle_inner(pool: &PgPool) -> Result<(), sqlx::Error> {
         close_expired_quizzes(pool).await;
         dispatch_upcoming_exam_5min_notifications(pool).await;
         // ── 1. Publish & Notify Scheduled Learning Materials ──
@@ -586,6 +581,7 @@ impl ScheduledPublishWorker {
                 let sibling_cids = vec![cid];
 
                 crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                    tenant_id,
                     notif_title,
                     notif_body,
                     crate::infrastructure::fcm::FcmCategory::Material,
@@ -594,6 +590,7 @@ impl ScheduledPublishWorker {
                 );
             } else {
                 crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                    tenant_id,
                     notif_title,
                     notif_body,
                     crate::infrastructure::fcm::FcmCategory::Material,
@@ -710,6 +707,7 @@ impl ScheduledPublishWorker {
                 let sibling_cids = vec![cid];
 
                 crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                    tenant_id,
                     notif_title,
                     notif_body,
                     crate::infrastructure::fcm::FcmCategory::Assignment,
@@ -718,6 +716,7 @@ impl ScheduledPublishWorker {
                 );
             } else {
                 crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                    tenant_id,
                     notif_title,
                     notif_body,
                     crate::infrastructure::fcm::FcmCategory::Assignment,
@@ -816,6 +815,7 @@ impl ScheduledPublishWorker {
                 let sibling_cids = vec![cid];
 
                 crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                    tenant_id,
                     notif_title,
                     notif_body,
                     crate::infrastructure::fcm::FcmCategory::Quiz,
@@ -824,6 +824,7 @@ impl ScheduledPublishWorker {
                 );
             } else {
                 crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                    tenant_id,
                     notif_title,
                     notif_body,
                     crate::infrastructure::fcm::FcmCategory::Quiz,

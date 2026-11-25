@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 pub struct EndSessionCommand {
     pub session_id: Uuid,
+    pub tenant_id: Uuid,
 }
 
 pub struct EndSessionUseCase {
@@ -39,6 +40,7 @@ impl EndSessionUseCase {
             .session_repo
             .find_by_id(command.session_id)
             .await?
+            .filter(|s| s.tenant_id == command.tenant_id)
             .ok_or_else(|| {
                 ApplicationError::NotFound(
                     ErrorCode::SessionNotFound,

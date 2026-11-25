@@ -1,14 +1,18 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
+    http::{header, HeaderMap, StatusCode},
+    middleware,
     response::sse::{Event, KeepAlive, Sse},
-    routing::{get, patch},
+    routing::{get, patch, post},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::LazyLock;
-use tokio::sync::broadcast;
+use std::time::{Duration, Instant};
+use tokio::sync::{broadcast, RwLock};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
 use uuid::Uuid;
@@ -124,12 +128,58 @@ static ANNOUNCEMENT_BROADCAST: LazyLock<broadcast::Sender<AnnouncementBroadcastE
         tx
     });
 
-pub fn announcement_routes() -> Router<ApplicationContext> {
+static STREAM_TICKETS: LazyLock<RwLock<HashMap<String, (Uuid, Instant)>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+#[derive(Deserialize)]
+pub struct AnnouncementStreamQuery {
+    pub ticket: Option<String>,
+}
+
+pub fn announcement_routes(context: ApplicationContext) -> Router<ApplicationContext> {
     Router::new()
-        .route("/", get(list).post(create))
         .route("/stream", get(stream_announcements))
-        .route("/{id}", get(get_announcement_by_id).delete(delete_announcement))
-        .route("/{id}/pin", patch(toggle_pin))
+        .merge(
+            Router::new()
+                .route("/", get(list).post(create))
+                .route("/stream-ticket", post(create_stream_ticket))
+                .route("/{id}", get(get_announcement_by_id).delete(delete_announcement))
+                .route("/{id}/pin", patch(toggle_pin))
+                .layer(middleware::from_fn_with_state(
+                    context,
+                    crate::middleware::auth_middleware,
+                )),
+        )
+}
+
+async fn create_stream_ticket(
+    req_ctx: RequestContext,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    if req_ctx.actor.is_none() || req_ctx.tenant_id.is_nil() {
+        return Err(ApiError::new(
+            ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthInvalidToken,
+                "Authentication required".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
+    let ticket = format!("{}{}", Uuid::now_v7().simple(), Uuid::new_v4().simple());
+    {
+        let mut guard = STREAM_TICKETS.write().await;
+        let ttl = Duration::from_secs(45);
+        guard.retain(|_, (_, created_at)| created_at.elapsed() < ttl);
+        guard.insert(ticket.clone(), (req_ctx.tenant_id, Instant::now()));
+    }
+
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({
+            "ticket": ticket,
+            "expires_in_seconds": 45
+        }),
+        req_ctx.request_id,
+    )))
 }
 
 async fn get_announcement_by_id(
@@ -195,9 +245,37 @@ async fn get_announcement_by_id(
 }
 
 async fn stream_announcements(
-    req_ctx: RequestContext,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let tenant_id = req_ctx.tenant_id;
+    State(ctx): State<ApplicationContext>,
+    headers: HeaderMap,
+    Query(query): Query<AnnouncementStreamQuery>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StatusCode> {
+    let tenant_id = if let Some(raw_ticket) = query.ticket.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        let mut guard = STREAM_TICKETS.write().await;
+        let ttl = Duration::from_secs(45);
+        guard.retain(|_, (_, created_at)| created_at.elapsed() < ttl);
+        match guard.remove(raw_ticket) {
+            Some((tid, created_at)) if created_at.elapsed() < ttl && !tid.is_nil() => tid,
+            _ => return Err(StatusCode::UNAUTHORIZED),
+        }
+    } else if let Some(bearer) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .and_then(|s| s.strip_prefix("Bearer ").or_else(|| s.strip_prefix("bearer ")))
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        let (actor, _) = crate::middleware::authenticate_jwt_token(&ctx, bearer)
+            .await
+            .map_err(|(status, _, _)| status)?;
+        if actor.tenant_id.is_nil() {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        actor.tenant_id
+    } else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+
     let rx = ANNOUNCEMENT_BROADCAST.subscribe();
 
     let stream = BroadcastStream::new(rx).filter_map(move |item| match item {
@@ -212,7 +290,7 @@ async fn stream_announcements(
         _ => None,
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 async fn list(
@@ -428,6 +506,7 @@ async fn create(
         };
 
         crate::infrastructure::fcm::trigger_fcm_push_targeted(
+            row.tenant_id,
             format!("📢 {}", row.title),
             row.content.clone(),
             crate::infrastructure::fcm::FcmCategory::Announcement,

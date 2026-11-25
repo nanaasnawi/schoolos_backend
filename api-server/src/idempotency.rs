@@ -39,8 +39,11 @@ pub async fn idempotency_middleware(
 
     let headers = req.headers().clone();
     let idempotency_key = headers
-        .get("x-idempotency-key")
+        .get("idempotency-key")
+        .or_else(|| headers.get("x-idempotency-key"))
         .and_then(|h| h.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
 
     if idempotency_key.is_none() {
@@ -72,6 +75,12 @@ pub async fn idempotency_middleware(
                 .filter(|tid| !tid.is_nil())
         });
 
+    let actor_id = req
+        .extensions()
+        .get::<school_core::authorization::domain::actor::Actor>()
+        .map(|a| a.id)
+        .filter(|uid| !uid.is_nil());
+
     let tenant_id = actor_tenant_id.unwrap_or_else(|| {
         headers
             .get("x-tenant-id")
@@ -80,10 +89,13 @@ pub async fn idempotency_middleware(
             .unwrap_or_default()
     });
 
+    if tenant_id.is_nil() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     let (parts, body) = req.into_parts();
 
-    // Baca body dengan batas ukuran — kalau lebih besar dari MAX_BODY_HASH_SIZE,
-    // body tidak bisa di-hash dan idempotency key tidak disimpan.
+    // Baca body dengan batas ukuran
     let bytes = match to_bytes(body, MAX_BODY_HASH_SIZE).await {
         Ok(b) => b,
         Err(_) => {
@@ -92,25 +104,52 @@ pub async fn idempotency_middleware(
     };
 
     let hash = hex::encode(Sha256::digest(&bytes));
+    let scoped_key = format!("{}:{}", tenant_id, idempotency_key);
 
-    let existing: Option<(i32, Value, String)> = sqlx::query_as(
-        "SELECT response_status, response_body, request_hash FROM idempotency_keys WHERE idempotency_key = $1 AND tenant_id = $2",
-    )
-    .bind(&idempotency_key)
-    .bind(tenant_id)
-    .fetch_optional(&state.pool)
+    // Atomic in-progress reservation to prevent concurrent duplicate execution race conditions
+    let acquired = crate::db_tenant::with_tenant_db_scope(tenant_id, async {
+        sqlx::query_scalar::<_, String>(
+            r#"
+            INSERT INTO idempotency_keys (idempotency_key, tenant_id, actor_id, request_hash, response_status, response_body)
+            VALUES ($1, $2, $3, $4, 102, '{}'::jsonb)
+            ON CONFLICT (idempotency_key) DO NOTHING
+            RETURNING idempotency_key
+            "#,
+        )
+        .bind(&scoped_key)
+        .bind(tenant_id)
+        .bind(actor_id)
+        .bind(&hash)
+        .fetch_optional(&state.pool)
+        .await
+    })
     .await
-    .unwrap_or(None);
+    .ok()
+    .flatten();
 
-    if let Some((status, response_body, request_hash)) = existing {
-        if request_hash != hash {
-            return Err(StatusCode::CONFLICT);
+    if acquired.is_none() {
+        let existing: Option<(i32, Value, String)> =
+            crate::db_tenant::with_tenant_db_scope(tenant_id, async {
+                sqlx::query_as(
+                    "SELECT response_status, response_body, request_hash FROM idempotency_keys WHERE idempotency_key = $1 AND tenant_id = $2",
+                )
+                .bind(&scoped_key)
+                .bind(tenant_id)
+                .fetch_optional(&state.pool)
+                .await
+            })
+            .await
+            .unwrap_or(None);
+
+        if let Some((status, response_body, request_hash)) = existing {
+            if request_hash != hash || status == 102 {
+                return Err(StatusCode::CONFLICT);
+            }
+            let status_code =
+                StatusCode::from_u16(status as u16).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            return Ok((status_code, axum::Json(response_body)).into_response());
         }
-
-        let status_code =
-            StatusCode::from_u16(status as u16).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        let resp = (status_code, axum::Json(response_body)).into_response();
-        return Ok(resp);
+        return Err(StatusCode::CONFLICT);
     }
 
     let req = Request::from_parts(parts, Body::from(bytes));
@@ -122,21 +161,55 @@ pub async fn idempotency_middleware(
 
         if let Ok(resp_bytes) = to_bytes(resp_body, MAX_BODY_HASH_SIZE).await {
             if let Ok(resp_json) = serde_json::from_slice::<Value>(&resp_bytes) {
-                let _ = sqlx::query(
-                    "INSERT INTO idempotency_keys (idempotency_key, tenant_id, request_hash, response_status, response_body) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
-                )
-                .bind(&idempotency_key)
-                .bind(tenant_id)
-                .bind(hash)
-                .bind(status as i32)
-                .bind(resp_json)
-                .execute(&state.pool)
+                let _ = crate::db_tenant::with_tenant_db_scope(tenant_id, async {
+                    sqlx::query(
+                        "UPDATE idempotency_keys SET response_status = $1, response_body = $2 WHERE idempotency_key = $3 AND tenant_id = $4",
+                    )
+                    .bind(status as i32)
+                    .bind(resp_json)
+                    .bind(&scoped_key)
+                    .bind(tenant_id)
+                    .execute(&state.pool)
+                    .await
+                })
+                .await;
+            } else {
+                let _ = crate::db_tenant::with_tenant_db_scope(tenant_id, async {
+                    sqlx::query(
+                        "DELETE FROM idempotency_keys WHERE idempotency_key = $1 AND tenant_id = $2 AND response_status = 102",
+                    )
+                    .bind(&scoped_key)
+                    .bind(tenant_id)
+                    .execute(&state.pool)
+                    .await
+                })
                 .await;
             }
             response = Response::from_parts(resp_parts, Body::from(resp_bytes));
         } else {
+            let _ = crate::db_tenant::with_tenant_db_scope(tenant_id, async {
+                sqlx::query(
+                    "DELETE FROM idempotency_keys WHERE idempotency_key = $1 AND tenant_id = $2 AND response_status = 102",
+                )
+                .bind(&scoped_key)
+                .bind(tenant_id)
+                .execute(&state.pool)
+                .await
+            })
+            .await;
             response = Response::from_parts(resp_parts, Body::empty());
         }
+    } else {
+        let _ = crate::db_tenant::with_tenant_db_scope(tenant_id, async {
+            sqlx::query(
+                "DELETE FROM idempotency_keys WHERE idempotency_key = $1 AND tenant_id = $2 AND response_status = 102",
+            )
+            .bind(&scoped_key)
+            .bind(tenant_id)
+            .execute(&state.pool)
+            .await
+        })
+        .await;
     }
 
     Ok(response)

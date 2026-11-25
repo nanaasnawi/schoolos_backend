@@ -783,12 +783,23 @@ async fn get_inquiry_detail(
         .await;
         teacher_read_at = Some(now);
 
+        let rtdb_tid = req_ctx.tenant_id.to_string();
         let rtdb_th_id = id.to_string();
         let rtdb_now_ms = now.timestamp_millis();
         tokio::spawn(async move {
-            let client = reqwest::Client::new();
+            let client = crate::infrastructure::fcm::get_http_client();
+            let token_res = crate::infrastructure::fcm::get_firebase_rtdb_access_token().await;
             let base_url = "https://akselerasi-edu-default-rtdb.asia-southeast1.firebasedatabase.app";
-            let summary_url = format!("{}/inquiries/{}/summary.json", base_url, rtdb_th_id);
+            let summary_url = match token_res {
+                Ok(token) => format!(
+                    "{}/tenants/{}/inquiries/{}/summary.json?auth={}",
+                    base_url, rtdb_tid, rtdb_th_id, token
+                ),
+                Err(_) => format!(
+                    "{}/tenants/{}/inquiries/{}/summary.json",
+                    base_url, rtdb_tid, rtdb_th_id
+                ),
+            };
             let summary_payload = serde_json::json!({
                 "teacherLastReadAt": rtdb_now_ms,
                 "readStatusLabel": "✓ Dibaca Guru",
@@ -1536,6 +1547,7 @@ async fn create_inquiry(
 
                 // Trigger HIGH-PRIORITY FCM push notification targeted exclusively to teacher
                 crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                    resolved_tenant_id,
                     notif_title,
                     notif_body,
                     crate::infrastructure::fcm::FcmCategory::Inquiry,
@@ -1978,6 +1990,7 @@ async fn send_message(
 
                 // Trigger HIGH-PRIORITY FCM push targeted exclusively to student
                 crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                    effective_tenant_id,
                     notif_title,
                     notif_body,
                     crate::infrastructure::fcm::FcmCategory::Inquiry,
@@ -2024,6 +2037,7 @@ async fn send_message(
 
                 // Trigger HIGH-PRIORITY FCM push targeted exclusively to teacher
                 crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                    effective_tenant_id,
                     notif_title,
                     notif_body,
                     crate::infrastructure::fcm::FcmCategory::Inquiry,
@@ -2397,6 +2411,27 @@ async fn upload_chat_attachment(
                 };
             }
 
+            const ALLOWED_CHAT_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif", "pdf", "doc", "docx"];
+            if !ALLOWED_CHAT_EXTS.contains(&ext.as_str()) {
+                return Err(ApiError::new(
+                    ApplicationError::Domain(school_core::common::error::DomainError::Validation(
+                        format!("Format berkas .{ext} tidak diizinkan untuk lampiran obrolan. Gunakan JPG, PNG, WEBP, GIF, PDF, atau Word."),
+                    )),
+                    &req_ctx.request_id,
+                ));
+            }
+
+            let canonical_mime = match ext.as_str() {
+                "jpg" | "jpeg" => "image/jpeg",
+                "png" => "image/png",
+                "webp" => "image/webp",
+                "gif" => "image/gif",
+                "pdf" => "application/pdf",
+                "doc" => "application/msword",
+                "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                _ => "application/octet-stream",
+            };
+
             let unique_name = format!("chat_{}_{}.{ext}", Uuid::now_v7(), chrono::Utc::now().timestamp_millis());
             let file_path = uploads_dir.join(&unique_name);
 
@@ -2416,6 +2451,33 @@ async fn upload_chat_attachment(
                 ));
             }
 
+            if bytes.len() > 15 * 1024 * 1024 {
+                return Err(ApiError::new(
+                    ApplicationError::Domain(school_core::common::error::DomainError::Validation(
+                        "Ukuran lampiran melebihi batas maksimal 15 MB".to_string(),
+                    )),
+                    &req_ctx.request_id,
+                ));
+            }
+
+            // Basic magic byte verification to reject mismatched active scripts disguised as images/PDFs
+            let valid_magic = match ext.as_str() {
+                "jpg" | "jpeg" => bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
+                "png" => bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
+                "gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+                "webp" => bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
+                "pdf" => bytes.starts_with(b"%PDF"),
+                _ => true,
+            };
+            if !valid_magic {
+                return Err(ApiError::new(
+                    ApplicationError::Domain(school_core::common::error::DomainError::Validation(
+                        "Isi berkas tidak sesuai dengan format gambar/PDF yang valid".to_string(),
+                    )),
+                    &req_ctx.request_id,
+                ));
+            }
+
             tokio::fs::write(&file_path, &bytes).await.map_err(|e| {
                 ApiError::new(
                     ApplicationError::Internal(format!("Failed to save file: {e}")),
@@ -2423,17 +2485,11 @@ async fn upload_chat_attachment(
                 )
             })?;
 
-            let mime = if !content_type.is_empty() {
-                content_type
-            } else {
-                format!("image/{ext}")
-            };
-
             let _ = sqlx::query(
                 "INSERT INTO uploaded_files (filename, mime_type, file_data) VALUES ($1, $2, $3) ON CONFLICT (filename) DO UPDATE SET file_data = EXCLUDED.file_data"
             )
             .bind(&unique_name)
-            .bind(&mime)
+            .bind(canonical_mime)
             .bind(bytes.as_ref())
             .execute(&ctx.pool)
             .await;

@@ -6,3 +6,9 @@ scratch/
 *.log
 uploads/
 .git
+*firebase*.json
+*-adminsdk-*.json
+**/schoolos-agent.json
+**/*.exe
+scripts/
+

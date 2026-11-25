@@ -233,11 +233,12 @@ async fn get_by_id(
         r#"
         SELECT id, name, start_date, end_date, is_active
         FROM academic_years
-        WHERE id = $1 AND deleted_at IS NULL
+        WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
         LIMIT 1
         "#,
     )
     .bind(id)
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| {
@@ -294,16 +295,17 @@ async fn update(
         r#"
         UPDATE academic_years
         SET 
-            name = COALESCE($2, name),
-            start_date = COALESCE($3, start_date),
-            end_date = COALESCE($4, end_date),
-            is_active = COALESCE($5, is_active),
+            name = COALESCE($3, name),
+            start_date = COALESCE($4, start_date),
+            end_date = COALESCE($5, end_date),
+            is_active = COALESCE($6, is_active),
             updated_at = NOW()
-        WHERE id = $1 AND deleted_at IS NULL
+        WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
         RETURNING id, name, start_date, end_date, is_active
         "#,
     )
     .bind(id)
+    .bind(req_ctx.tenant_id)
     .bind(payload.name)
     .bind(start_date)
     .bind(end_date)

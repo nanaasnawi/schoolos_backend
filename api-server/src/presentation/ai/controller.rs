@@ -1078,7 +1078,7 @@ async fn prepare_tanya_ai_context(
         .as_ref()
         .and_then(|r| r.try_get::<String, _>("name").ok())
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "PKBM AS-SALAFIYAH".to_string());
+        .unwrap_or_else(|| "Sekolah Anda".to_string());
 
     let mut db_headmaster_name = school_meta
         .as_ref()
@@ -1135,14 +1135,25 @@ async fn prepare_tanya_ai_context(
     let subject = payload.subject_name.as_deref().unwrap_or("Umum").to_string();
     let grade = payload.grade_level.as_deref().unwrap_or("Siswa").to_string();
 
-    let is_principal = grade.to_uppercase().contains("KEPALA")
-        || grade.to_uppercase().contains("PRINCIPAL")
-        || subject.to_uppercase().contains("SUPERVISI");
+    // Trust ONLY authenticated actor roles (never client-supplied grade_level/subject_name) for privileged school analytics
+    let is_principal = req_ctx.actor.as_ref().is_some_and(|a| {
+        a.roles.iter().any(|r| {
+            let n = r.name.trim().to_ascii_lowercase();
+            n.contains("kepala")
+                || n.contains("principal")
+                || n.contains("headmaster")
+                || n.contains("admin")
+                || n.contains("operator")
+        })
+    });
 
-    let is_teacher = grade.to_uppercase().contains("GURU")
-        || grade.to_uppercase().contains("TEACHER")
-        || subject.to_uppercase().contains("WORKSTATION")
-        || subject.to_uppercase().contains("PEDAGOGIK");
+    let _is_teacher = is_principal
+        || req_ctx.actor.as_ref().is_some_and(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.trim().to_ascii_lowercase();
+                n.contains("guru") || n.contains("teacher") || n.contains("tutor") || n.contains("pamong")
+            })
+        });
 
     let grounded_sources = if !is_principal {
         fetch_grounded_curriculum_sources(pool, req_ctx.tenant_id, &question, &subject, &grade).await
@@ -1428,37 +1439,9 @@ async fn tanya_ai_stream(
 
 static AI_FEEDBACK_TABLE_READY: OnceCell<()> = OnceCell::const_new();
 
-async fn ensure_ai_feedback_table(pool: &sqlx::PgPool) {
-    AI_FEEDBACK_TABLE_READY
-        .get_or_init(|| async {
-            let ddl = r#"
-                CREATE TABLE IF NOT EXISTS ai_feedback_logs (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-                    user_id UUID NOT NULL,
-                    thread_id VARCHAR(120) NOT NULL,
-                    message_id VARCHAR(120) NOT NULL,
-                    rating VARCHAR(20) NOT NULL CHECK (rating IN ('UP', 'DOWN')),
-                    question_text TEXT,
-                    ai_reply_text TEXT NOT NULL,
-                    subject_name VARCHAR(120),
-                    grade_level VARCHAR(120),
-                    model_name VARCHAR(120),
-                    reason TEXT,
-                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-                    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-                )
-            "#;
-            if let Err(e) = sqlx::query(ddl).execute(pool).await {
-                tracing::warn!("ensure_ai_feedback_table DDL failed: {e}");
-            }
-            let _ = sqlx::query(
-                "CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_feedback_user_msg ON ai_feedback_logs(tenant_id, user_id, message_id)"
-            )
-            .execute(pool)
-            .await;
-        })
-        .await;
+async fn ensure_ai_feedback_table(_pool: &sqlx::PgPool) {
+    // Schema managed exclusively via SQLx migrations (20261117180000_create_ai_feedback_logs.sql).
+    AI_FEEDBACK_TABLE_READY.get_or_init(|| async {}).await;
 }
 
 async fn submit_ai_feedback(

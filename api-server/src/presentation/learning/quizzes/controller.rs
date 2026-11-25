@@ -30,22 +30,9 @@ use school_core::learning::application::quiz::{
 
 static QUIZ_VARIATIF_SCHEMA_READY: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
-pub(super) async fn ensure_quiz_variatif_schema(pool: &sqlx::PgPool) {
-    QUIZ_VARIATIF_SCHEMA_READY
-        .get_or_init(|| async {
-            let statements = [
-                "ALTER TABLE quiz_questions ALTER COLUMN question_type TYPE VARCHAR(40)",
-                "ALTER TABLE quiz_questions ADD COLUMN IF NOT EXISTS interaction_config JSONB DEFAULT NULL",
-                "ALTER TABLE attempt_answers ADD COLUMN IF NOT EXISTS teacher_feedback TEXT DEFAULT NULL",
-                "ALTER TABLE quizzes ADD COLUMN IF NOT EXISTS notification_dispatched BOOLEAN DEFAULT FALSE",
-            ];
-            for sql in statements {
-                if let Err(e) = sqlx::query(sql).execute(pool).await {
-                    tracing::warn!("ensure_quiz_variatif_schema notice on `{sql}`: {e}");
-                }
-            }
-        })
-        .await;
+/// Variatif quiz schema is managed via migrations; zero-DDL compatibility shim.
+pub(super) async fn ensure_quiz_variatif_schema(_pool: &sqlx::PgPool) {
+    QUIZ_VARIATIF_SCHEMA_READY.get_or_init(|| async {}).await;
 }
 
 /// Atomically claims notification dispatch once per quiz and sends targeted in-app + FCM
@@ -120,6 +107,7 @@ async fn dispatch_quiz_published_notifications(
         crate::infrastructure::fcm::FcmTarget::Roles(vec!["student".to_string()])
     };
     crate::infrastructure::fcm::trigger_fcm_push_targeted(
+        tenant_id,
         notif_title,
         notif_body,
         crate::infrastructure::fcm::FcmCategory::Quiz,
@@ -406,7 +394,7 @@ async fn create(
         let q_count = questions.len() as i32;
         let mut total_pts = 0;
         for (idx, q) in questions.into_iter().enumerate() {
-            let q_id = Uuid::new_v4();
+            let q_id = Uuid::now_v7();
             let q_type = q.question_type.unwrap_or_else(|| "MULTIPLE_CHOICE".to_string());
             let points = q.points.unwrap_or(10);
             total_pts += points;
@@ -431,7 +419,7 @@ async fn create(
 
             if let Some(choices) = q.choices {
                 for (c_idx, c) in choices.into_iter().enumerate() {
-                    let c_id = Uuid::new_v4();
+                    let c_id = Uuid::now_v7();
                     let is_corr = c.is_correct.unwrap_or(false);
                     let c_order = c.order_index.unwrap_or(c_idx as i32 + 1);
                     let _ = sqlx::query(
@@ -1291,7 +1279,10 @@ async fn publish(
         )
     })?;
 
-    let command = PublishQuizCommand { quiz_id: id };
+    let command = PublishQuizCommand {
+        quiz_id: id,
+        tenant_id: req_ctx.tenant_id,
+    };
     let quiz = ctx
         .publish_quiz
         .execute(command)
@@ -2197,6 +2188,7 @@ async fn grade_attempt(
                 crate::infrastructure::fcm::FcmTarget::Roles(vec!["student".to_string()])
             };
             crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                req_ctx.tenant_id,
                 t, b,
                 crate::infrastructure::fcm::FcmCategory::Grade,
                 attempt_id,
@@ -2454,6 +2446,7 @@ async fn auto_grade_attempts(
             .await;
 
             crate::infrastructure::fcm::trigger_fcm_push_targeted(
+                req_ctx.tenant_id,
                 notif_title,
                 notif_body,
                 crate::infrastructure::fcm::FcmCategory::Grade,

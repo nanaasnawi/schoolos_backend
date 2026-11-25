@@ -123,11 +123,80 @@ async fn get_my_progress(
     Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
 }
 
+async fn authorize_student_progress_access(
+    pool: &sqlx::PgPool,
+    req_ctx: &RequestContext,
+    target_student_id: Uuid,
+) -> Result<(), ApiError> {
+    let actor = req_ctx.actor.as_ref().ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Sesi tidak valid.".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let is_staff_or_teacher = actor.roles.iter().any(|r| {
+        let n = r.name.to_lowercase();
+        n.contains("admin")
+            || n.contains("kepala")
+            || n.contains("principal")
+            || n.contains("operator")
+            || n.contains("staff")
+            || n.contains("staf")
+            || n.contains("tata usaha")
+            || n.contains("bendahara")
+            || n.contains("guru")
+            || n.contains("teacher")
+            || n.contains("tutor")
+            || n.contains("wali kelas")
+            || n.contains("pengajar")
+    });
+    if is_staff_or_teacher {
+        return Ok(());
+    }
+
+    let is_owner = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM students s
+            LEFT JOIN guardians g ON g.id = s.guardian_id AND g.tenant_id = s.tenant_id
+            WHERE s.id = $1
+              AND s.tenant_id = $3
+              AND (s.user_id = $2 OR g.user_id = $2)
+        )
+        "#,
+    )
+    .bind(target_student_id)
+    .bind(actor.id)
+    .bind(req_ctx.tenant_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if !is_owner {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Forbidden(
+                school_core::common::error_code::ErrorCode::AuthPermissionDenied,
+                "Akses ditolak: Anda hanya diizinkan melihat progres belajar milik sendiri.".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
+    Ok(())
+}
+
 async fn get_student_progress_by_id(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
     Path(student_id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<ProgressResponse>>, ApiError> {
+    authorize_student_progress_access(&ctx.pool, &req_ctx, student_id).await?;
+
     let class_id = sqlx::query_scalar!(
         r#"
         SELECT en.class_id
@@ -438,6 +507,8 @@ async fn get_progress(
         )
     })?;
 
+    authorize_student_progress_access(&ctx.pool, &req_ctx, student_id).await?;
+
     let query = GetProgressQuery {
         student_id,
         class_id,
@@ -479,6 +550,7 @@ async fn get_weekly_activity(
     Query(query): Query<WeeklyActivityQuery>,
 ) -> Result<Json<ApiResponse<WeeklyActivityResponse>>, ApiError> {
     let student_id = if let Some(sid) = query.student_id {
+        authorize_student_progress_access(&ctx.pool, &req_ctx, sid).await?;
         sid
     } else {
         let actor_id = req_ctx.actor.as_ref().map(|a| a.id).ok_or_else(|| {
@@ -569,6 +641,7 @@ async fn get_student_weekly_activity_by_id(
     req_ctx: RequestContext,
     Path(student_id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<WeeklyActivityResponse>>, ApiError> {
+    authorize_student_progress_access(&ctx.pool, &req_ctx, student_id).await?;
     let resp = calculate_student_weekly_activity(&ctx, req_ctx.tenant_id, student_id)
         .await
         .map_err(|e| {
@@ -901,6 +974,7 @@ async fn get_student_study_tracker_by_id(
     req_ctx: RequestContext,
     Path(student_id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<StudyTrackerResponse>>, ApiError> {
+    authorize_student_progress_access(&ctx.pool, &req_ctx, student_id).await?;
     let resp = calculate_student_study_tracker(&ctx, req_ctx.tenant_id, student_id)
         .await
         .map_err(|e| {

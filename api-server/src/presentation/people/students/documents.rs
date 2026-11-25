@@ -308,6 +308,67 @@ pub async fn get_student_documents(
     req_ctx: RequestContext,
     Path(student_id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<StudentDossierOverviewResponse>>, ApiError> {
+    let actor = req_ctx.actor.as_ref().ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                ErrorCode::AuthInvalidToken,
+                "Authentication required".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let is_staff_or_teacher = actor.roles.iter().any(|r| {
+        let lower = r.name.trim().to_lowercase();
+        lower.contains("admin")
+            || lower.contains("operator")
+            || lower.contains("kepala")
+            || lower.contains("staff")
+            || lower.contains("tata usaha")
+            || lower == "tu"
+            || lower.contains("guru")
+            || lower.contains("tutor")
+            || lower.contains("pamong")
+            || lower.contains("wali")
+            || lower.contains("teacher")
+    });
+
+    if !is_staff_or_teacher {
+        let owns_student = sqlx::query(
+            r#"
+            SELECT 1 FROM students s
+            LEFT JOIN guardians g ON g.id = s.guardian_id
+            WHERE s.id = $1 AND s.tenant_id = $2
+              AND (s.user_id = $3 OR g.user_id = $3)
+            LIMIT 1
+            "#,
+        )
+        .bind(student_id)
+        .bind(req_ctx.tenant_id)
+        .bind(actor.id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?
+        .is_some();
+
+        if !owns_student {
+            return Err(ApiError::new(
+                school_core::common::error::ApplicationError::Forbidden(
+                    ErrorCode::AuthPermissionDenied,
+                    "Anda tidak memiliki izin mengakses berkas siswa ini".to_string(),
+                ),
+                &req_ctx.request_id,
+            ));
+        }
+    }
+
     let tenant_id = req_ctx.tenant_id;
     let dossier = build_student_dossier_response(&ctx.pool, tenant_id, student_id)
         .await
@@ -386,12 +447,32 @@ pub async fn get_my_documents(
 /// Stream student document file directly from PostgreSQL BYTEA or local disk cache
 pub async fn stream_student_document_file(
     State(ctx): State<ApplicationContext>,
+    req_ctx: RequestContext,
     Path(doc_id): Path<Uuid>,
 ) -> Result<axum::response::Response, ApiError> {
+    let actor = req_ctx.actor.as_ref().ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                ErrorCode::AuthInvalidToken,
+                "Authentication required".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
     let row = sqlx::query(
-        "SELECT file_data, file_url, file_name, mime_type FROM student_documents WHERE id = $1",
+        r#"
+        SELECT sd.file_data, sd.file_url, sd.file_name, sd.mime_type,
+               s.user_id AS student_user_id,
+               g.user_id AS guardian_user_id
+        FROM student_documents sd
+        JOIN students s ON s.id = sd.student_id
+        LEFT JOIN guardians g ON g.id = s.guardian_id
+        WHERE sd.id = $1 AND sd.tenant_id = $2
+        "#,
     )
     .bind(doc_id)
+    .bind(req_ctx.tenant_id)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| {
@@ -399,14 +480,52 @@ pub async fn stream_student_document_file(
             school_core::common::error::ApplicationError::Infrastructure(
                 school_core::common::error::InfrastructureError::Database(e),
             ),
-            &Uuid::new_v4().to_string(),
+            &req_ctx.request_id,
         )
     })?;
 
     if let Some(r) = row {
+        let is_staff_or_teacher = actor.roles.iter().any(|role| {
+            let lower = role.name.trim().to_lowercase();
+            lower.contains("admin")
+                || lower.contains("operator")
+                || lower.contains("kepala")
+                || lower.contains("staff")
+                || lower.contains("tata usaha")
+                || lower == "tu"
+                || lower.contains("guru")
+                || lower.contains("tutor")
+                || lower.contains("pamong")
+                || lower.contains("wali")
+                || lower.contains("teacher")
+        });
+        let student_user_id: Option<Uuid> = r.try_get("student_user_id").ok().flatten();
+        let guardian_user_id: Option<Uuid> = r.try_get("guardian_user_id").ok().flatten();
+
+        if !is_staff_or_teacher
+            && student_user_id != Some(actor.id)
+            && guardian_user_id != Some(actor.id)
+        {
+            return Err(ApiError::new(
+                school_core::common::error::ApplicationError::Forbidden(
+                    ErrorCode::AuthPermissionDenied,
+                    "Anda tidak memiliki izin melihat berkas dokumen siswa ini".to_string(),
+                ),
+                &req_ctx.request_id,
+            ));
+        }
+
         let file_data: Option<Vec<u8>> = r.try_get("file_data").ok().flatten();
-        let mime_type: String = r.try_get("mime_type").unwrap_or_else(|_| "application/pdf".to_string());
-        let file_name: String = r.try_get("file_name").unwrap_or_else(|_| "dokumen".to_string());
+        let raw_mime: String = r.try_get("mime_type").unwrap_or_else(|_| "application/pdf".to_string());
+        let mime_type = match raw_mime.trim().to_ascii_lowercase().as_str() {
+            "application/pdf" => "application/pdf",
+            "image/png" => "image/png",
+            "image/webp" => "image/webp",
+            "image/jpeg" | "image/jpg" => "image/jpeg",
+            _ => "application/octet-stream",
+        };
+        let raw_file_name: String = r.try_get("file_name").unwrap_or_else(|_| "dokumen".to_string());
+        let safe_file_name = raw_file_name.replace(['"', '\r', '\n'], "");
 
         if let Some(bytes) = file_data {
             if !bytes.is_empty() {
@@ -415,8 +534,9 @@ pub async fn stream_student_document_file(
                     .header(axum::http::header::CONTENT_TYPE, mime_type)
                     .header(
                         axum::http::header::CONTENT_DISPOSITION,
-                        format!("inline; filename=\"{file_name}\""),
+                        format!("inline; filename=\"{safe_file_name}\""),
                     )
+                    .header(axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
                     .header(axum::http::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
                     .header(axum::http::header::PRAGMA, "no-cache")
                     .header(axum::http::header::EXPIRES, "0")
@@ -424,36 +544,38 @@ pub async fn stream_student_document_file(
                     .map_err(|e| {
                         ApiError::new(
                             school_core::common::error::ApplicationError::Internal(e.to_string()),
-                            &Uuid::new_v4().to_string(),
+                            &req_ctx.request_id,
                         )
                     })?;
                 return Ok(resp);
             }
         }
 
-        // Fallback: check disk
+        // Fallback: check disk safely within uploads/documents
         if let Ok(furl) = r.try_get::<String, _>("file_url") {
-            let relative_path = furl.trim_start_matches('/');
-            let disk_path = std::path::PathBuf::from(relative_path);
-            if let Ok(bytes) = tokio::fs::read(&disk_path).await {
-                let resp = axum::response::Response::builder()
-                    .status(axum::http::StatusCode::OK)
-                    .header(axum::http::header::CONTENT_TYPE, mime_type)
-                    .header(
-                        axum::http::header::CONTENT_DISPOSITION,
-                        format!("inline; filename=\"{file_name}\""),
-                    )
-                    .header(axum::http::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
-                    .header(axum::http::header::PRAGMA, "no-cache")
-                    .header(axum::http::header::EXPIRES, "0")
-                    .body(axum::body::Body::from(bytes))
-                    .map_err(|e| {
-                        ApiError::new(
-                            school_core::common::error::ApplicationError::Internal(e.to_string()),
-                            &Uuid::new_v4().to_string(),
+            if let Some(fname) = std::path::Path::new(furl.trim()).file_name().and_then(|f| f.to_str()) {
+                let disk_path = std::path::PathBuf::from("uploads").join("documents").join(fname);
+                if let Ok(bytes) = tokio::fs::read(&disk_path).await {
+                    let resp = axum::response::Response::builder()
+                        .status(axum::http::StatusCode::OK)
+                        .header(axum::http::header::CONTENT_TYPE, mime_type)
+                        .header(
+                            axum::http::header::CONTENT_DISPOSITION,
+                            format!("inline; filename=\"{safe_file_name}\""),
                         )
-                    })?;
-                return Ok(resp);
+                        .header(axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+                        .header(axum::http::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
+                        .header(axum::http::header::PRAGMA, "no-cache")
+                        .header(axum::http::header::EXPIRES, "0")
+                        .body(axum::body::Body::from(bytes))
+                        .map_err(|e| {
+                            ApiError::new(
+                                school_core::common::error::ApplicationError::Internal(e.to_string()),
+                                &req_ctx.request_id,
+                            )
+                        })?;
+                    return Ok(resp);
+                }
             }
         }
     }
@@ -463,7 +585,7 @@ pub async fn stream_student_document_file(
             school_core::common::error_code::ErrorCode::StudentNotFound,
             "Berkas dokumen tidak ditemukan di server".to_string(),
         ),
-        &Uuid::new_v4().to_string(),
+        &req_ctx.request_id,
     ))
 }
 
@@ -671,6 +793,62 @@ pub async fn upload_student_document(
     Path(student_id): Path<Uuid>,
     multipart: Multipart,
 ) -> Result<Json<ApiResponse<DocumentItemDto>>, ApiError> {
+    let actor = req_ctx.actor.as_ref().ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                ErrorCode::AuthInvalidToken,
+                "Authentication required".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let is_staff_admin = actor.roles.iter().any(|r| {
+        let lower = r.name.trim().to_lowercase();
+        lower.contains("admin")
+            || lower.contains("operator")
+            || lower.contains("kepala")
+            || lower.contains("staff")
+            || lower.contains("tata usaha")
+            || lower == "tu"
+    });
+
+    if !is_staff_admin {
+        let owns_student = sqlx::query(
+            r#"
+            SELECT 1 FROM students s
+            LEFT JOIN guardians g ON g.id = s.guardian_id
+            WHERE s.id = $1 AND s.tenant_id = $2
+              AND (s.user_id = $3 OR g.user_id = $3)
+            LIMIT 1
+            "#,
+        )
+        .bind(student_id)
+        .bind(req_ctx.tenant_id)
+        .bind(actor.id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                school_core::common::error::ApplicationError::Infrastructure(
+                    school_core::common::error::InfrastructureError::Database(e),
+                ),
+                &req_ctx.request_id,
+            )
+        })?
+        .is_some();
+
+        if !owns_student {
+            return Err(ApiError::new(
+                school_core::common::error::ApplicationError::Forbidden(
+                    ErrorCode::AuthPermissionDenied,
+                    "Anda tidak memiliki izin mengunggah berkas untuk siswa ini".to_string(),
+                ),
+                &req_ctx.request_id,
+            ));
+        }
+    }
+
     let result = process_document_upload(
         &ctx.pool,
         req_ctx.tenant_id,
@@ -845,8 +1023,9 @@ pub async fn verify_student_document(
 
     // Send push / in-app notification to student if rejected
     if new_status == "REJECTED" {
-        let student_user = sqlx::query("SELECT user_id, full_name FROM students WHERE id = $1")
+        let student_user = sqlx::query("SELECT user_id, full_name FROM students WHERE id = $1 AND tenant_id = $2")
             .bind(student_id)
+            .bind(req_ctx.tenant_id)
             .fetch_optional(&ctx.pool)
             .await
             .ok()
@@ -901,6 +1080,40 @@ pub async fn get_rekap_rombel(
     req_ctx: RequestContext,
     Query(query): Query<RekapQuery>,
 ) -> Result<Json<ApiResponse<RekapRombelDossierResponse>>, ApiError> {
+    let actor = req_ctx.actor.as_ref().ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                ErrorCode::AuthInvalidToken,
+                "Authentication required".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let is_staff_or_teacher = actor.roles.iter().any(|r| {
+        let lower = r.name.trim().to_lowercase();
+        lower.contains("admin")
+            || lower.contains("operator")
+            || lower.contains("kepala")
+            || lower.contains("staff")
+            || lower.contains("tata usaha")
+            || lower == "tu"
+            || lower.contains("guru")
+            || lower.contains("tutor")
+            || lower.contains("pamong")
+            || lower.contains("wali")
+            || lower.contains("teacher")
+    });
+    if !is_staff_or_teacher {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Hanya Operator, TU, Kepala Sekolah, atau Guru/Tutor yang dapat melihat rekap pemberkasan rombel".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     let tenant_id = req_ctx.tenant_id;
 
     // 1. Fetch all active classes in tenant
@@ -1141,6 +1354,39 @@ pub async fn broadcast_document_reminder(
     req_ctx: RequestContext,
     Json(payload): Json<BroadcastReminderPayload>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let actor = req_ctx.actor.as_ref().ok_or_else(|| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Unauthorized(
+                ErrorCode::AuthInvalidToken,
+                "Authentication required".to_string(),
+            ),
+            &req_ctx.request_id,
+        )
+    })?;
+
+    let is_authorized_sender = actor.roles.iter().any(|r| {
+        let lower = r.name.trim().to_lowercase();
+        lower.contains("admin")
+            || lower.contains("operator")
+            || lower.contains("kepala")
+            || lower.contains("staff")
+            || lower.contains("tata usaha")
+            || lower == "tu"
+            || lower.contains("guru")
+            || lower.contains("tutor")
+            || lower.contains("pamong")
+            || lower.contains("wali")
+    });
+    if !is_authorized_sender {
+        return Err(ApiError::new(
+            school_core::common::error::ApplicationError::Forbidden(
+                ErrorCode::AuthPermissionDenied,
+                "Hanya Operator, TU, Kepala Sekolah, atau Guru/Tutor yang dapat mengirim pengingat berkas".to_string(),
+            ),
+            &req_ctx.request_id,
+        ));
+    }
+
     let tenant_id = req_ctx.tenant_id;
 
     // Find all students in class (or tenant) whose documents are not verified

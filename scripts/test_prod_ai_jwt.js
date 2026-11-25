@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const https = require('https');
 
-const secret = 'REDACTED_JWT_SECRET';
+const secret = process.env.JWT_SECRET;
 
 function base64Url(str) {
   return Buffer.from(str).toString('base64').replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');

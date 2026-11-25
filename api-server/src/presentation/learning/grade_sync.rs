@@ -5,25 +5,9 @@ use uuid::Uuid;
 
 static GRADE_SYNC_SCHEMA_READY: OnceCell<()> = OnceCell::const_new();
 
-/// Ensures additive columns & indexes for assessment categorization and gradebook sync exist.
-pub async fn ensure_grade_sync_schema(pool: &PgPool) {
-    GRADE_SYNC_SCHEMA_READY
-        .get_or_init(|| async {
-            let statements = [
-                "ALTER TABLE assignments ADD COLUMN IF NOT EXISTS assessment_category VARCHAR(32) NOT NULL DEFAULT 'FORMATIVE'",
-                "ALTER TABLE quizzes ADD COLUMN IF NOT EXISTS assessment_category VARCHAR(32) NOT NULL DEFAULT 'FORMATIVE'",
-                "ALTER TABLE pedagogical_assessments ADD COLUMN IF NOT EXISTS source_type VARCHAR(32) DEFAULT NULL",
-                "ALTER TABLE pedagogical_assessments ADD COLUMN IF NOT EXISTS source_id UUID DEFAULT NULL",
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_ped_assess_source_unique ON pedagogical_assessments(tenant_id, source_type, source_id) WHERE source_id IS NOT NULL AND deleted_at IS NULL",
-                "ALTER TABLE gradebook_snapshots ADD COLUMN IF NOT EXISTS ats_score NUMERIC(5,2) DEFAULT NULL",
-            ];
-            for sql in statements {
-                if let Err(e) = sqlx::query(sql).execute(pool).await {
-                    tracing::warn!("ensure_grade_sync_schema notice on `{sql}`: {e}");
-                }
-            }
-        })
-        .await;
+/// Schema is maintained exclusively by migrations; kept as a zero-DDL compatibility shim.
+pub async fn ensure_grade_sync_schema(_pool: &PgPool) {
+    GRADE_SYNC_SCHEMA_READY.get_or_init(|| async {}).await;
 }
 
 /// Normalizes an explicit or title-inferred assessment category into canonical values:
