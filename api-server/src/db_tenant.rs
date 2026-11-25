@@ -36,7 +36,7 @@ pub async fn begin_system_tx<'a>(pool: &'a PgPool) -> Result<Transaction<'a, Pos
     sqlx::query(
         "SELECT set_config('app.current_tenant_id', '', true), set_config('app.bypass_rls', 'on', true)",
     )
-    .execute(&mut **tx)
+    .execute(&mut *tx)
     .await?;
     Ok(tx)
 }

@@ -438,7 +438,7 @@ async fn save_gradebook(
     use crate::middleware::require_permission;
     use school_core::permission::domain::permission_registry::Permission;
     require_permission(&req_ctx.actor, Permission::LearningAssessmentConfigure)
-        .or_else(|_| require_permission(&req_ctx.actor, Permission::LearningAssessmentGrade))
+        .or_else(|_| require_permission(&req_ctx.actor, Permission::AssessmentInput))
         .or_else(|_| require_permission(&req_ctx.actor, Permission::AcademicManage))
         .map_err(|_| {
             ApiError::new(
@@ -1327,11 +1327,11 @@ async fn get_gradebook(
         None => {
             if !is_admin_or_staff && !is_teacher {
                 if let Some(aid) = actor_id {
-                    let sid = sqlx::query_scalar!(
+                    let sid = sqlx::query_scalar::<_, Uuid>(
                         r#"SELECT id FROM students WHERE user_id = $1 AND tenant_id = $2 LIMIT 1"#,
-                        aid,
-                        req_ctx.tenant_id
                     )
+                    .bind(aid)
+                    .bind(req_ctx.tenant_id)
                     .fetch_optional(&ctx.pool)
                     .await
                     .ok()
@@ -1341,7 +1341,7 @@ async fn get_gradebook(
                         sid
                     } else {
                         // Check if guardian
-                        sqlx::query_scalar!(
+                        sqlx::query_scalar::<_, Uuid>(
                             r#"
                             SELECT s.id
                             FROM guardians g
@@ -1349,9 +1349,9 @@ async fn get_gradebook(
                             WHERE g.user_id = $1 AND g.tenant_id = $2
                             LIMIT 1
                             "#,
-                            aid,
-                            req_ctx.tenant_id
                         )
+                        .bind(aid)
+                        .bind(req_ctx.tenant_id)
                         .fetch_optional(&ctx.pool)
                         .await
                         .ok()
@@ -1487,7 +1487,7 @@ async fn sync_gradebook_sources(
     use crate::middleware::require_permission;
     use school_core::permission::domain::permission_registry::Permission;
     require_permission(&req_ctx.actor, Permission::LearningAssessmentConfigure)
-        .or_else(|_| require_permission(&req_ctx.actor, Permission::LearningAssessmentGrade))
+        .or_else(|_| require_permission(&req_ctx.actor, Permission::AssessmentInput))
         .or_else(|_| require_permission(&req_ctx.actor, Permission::AcademicManage))
         .map_err(|_| {
             ApiError::new(

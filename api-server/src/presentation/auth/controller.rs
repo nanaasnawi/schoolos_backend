@@ -65,21 +65,6 @@ pub fn auth_routes(context: ApplicationContext) -> Router<ApplicationContext> {
 ///
 /// This endpoint verifies the user's email and password against the provided tenant.
 /// Upon successful verification, it returns an access token valid for 24 hours.
-#[utoipa::path(
-    post,
-    operation_id = "login",
-    path = "/api/v1/auth/login",
-    request_body = LoginRequest,
-    responses(
-        (status = 200, description = "Login successful", body = inline(ApiResponse<LoginResponse>)),
-        (status = 401, description = "Invalid credentials"),
-        (status = 403, description = "Missing tenant ID")
-    ),
-    security(
-        ()
-    ),
-    tag = "Auth"
-)]
 async fn issue_tracked_refresh_token(
     pool: &sqlx::PgPool,
     jwt_secret: &str,
@@ -141,7 +126,22 @@ async fn issue_tracked_refresh_token(
     Some(token)
 }
 
-async fn login(
+#[utoipa::path(
+    post,
+    operation_id = "login",
+    path = "/api/v1/auth/login",
+    request_body = LoginRequest,
+    responses(
+        (status = 200, description = "Login successful", body = inline(ApiResponse<LoginResponse>)),
+        (status = 401, description = "Invalid credentials"),
+        (status = 403, description = "Missing tenant ID")
+    ),
+    security(
+        ()
+    ),
+    tag = "Auth"
+)]
+pub async fn login(
     State(ctx): State<ApplicationContext>,
     req_ctx: RequestContext,
     headers: axum::http::HeaderMap,
@@ -2657,8 +2657,8 @@ async fn get_firebase_custom_token(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     let actor = req_ctx.actor.as_ref().ok_or_else(|| {
         ApiError::new(
-            ApplicationError::Unauthorized(
-                ErrorCode::AuthTokenExpired,
+            school_core::common::error::ApplicationError::Unauthorized(
+                school_core::common::error_code::ErrorCode::AuthTokenExpired,
                 "Autentikasi diperlukan".to_string(),
             ),
             &req_ctx.request_id,
@@ -2677,7 +2677,7 @@ async fn get_firebase_custom_token(
     )
     .map_err(|e| {
         ApiError::new(
-            ApplicationError::Infrastructure(
+            school_core::common::error::ApplicationError::Infrastructure(
                 school_core::common::error::InfrastructureError::Internal(e),
             ),
             &req_ctx.request_id,

@@ -1147,7 +1147,7 @@ async fn prepare_tanya_ai_context(
         })
     });
 
-    let _is_teacher = is_principal
+    let is_teacher = is_principal
         || req_ctx.actor.as_ref().is_some_and(|a| {
             a.roles.iter().any(|r| {
                 let n = r.name.trim().to_ascii_lowercase();

@@ -386,7 +386,10 @@ impl Bootstrap {
             .await
             .map_err(|e| {
                 tracing::error!("Database migration failed: {:?}", e);
-                anyhow::anyhow!("Database migration failed: {e}")
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Database migration failed: {e}"),
+                )
             })?;
             tracing::info!("Database schema migrations up to date.");
         }
