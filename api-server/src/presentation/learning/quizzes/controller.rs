@@ -371,7 +371,41 @@ async fn create(
             .await
             .ok()
             .flatten();
+        resp.total_students = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(DISTINCT en.student_id)::bigint
+            FROM enrollments en
+            JOIN students s ON s.id = en.student_id
+            WHERE en.class_id = $1
+              AND s.tenant_id = $2
+              AND (en.status ILIKE 'active' OR en.status IS NULL)
+              AND (s.is_active = true OR s.is_active IS NULL)
+              AND (s.status ILIKE 'active' OR s.status IS NULL)
+              AND s.deleted_at IS NULL
+            "#,
+        )
+        .bind(cid)
+        .bind(req_ctx.tenant_id)
+        .fetch_one(&ctx.pool)
+        .await
+        .ok();
+    } else {
+        resp.total_students = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(DISTINCT s.id)::bigint
+            FROM students s
+            WHERE s.tenant_id = $1
+              AND (s.is_active = true OR s.is_active IS NULL)
+              AND (s.status ILIKE 'active' OR s.status IS NULL)
+              AND s.deleted_at IS NULL
+            "#,
+        )
+        .bind(req_ctx.tenant_id)
+        .fetch_one(&ctx.pool)
+        .await
+        .ok();
     }
+    resp.participants_count = Some(0);
     if let Some(sid) = subject_id {
         resp.subject_name = sqlx::query_scalar!(r#"SELECT name FROM subjects WHERE id = $1"#, sid)
             .fetch_optional(&ctx.pool)
@@ -555,50 +589,15 @@ async fn list(
             .is_some());
 
     let items: Vec<QuizResponse> = if is_teacher {
-        let rows = sqlx::query(
-            r#"
-            SELECT 
-                q.id, q.tenant_id, q.lesson_id, q.title, q.description, q.time_limit_minutes,
-                q.passing_score, q.max_score, q.max_attempts, q.shuffle_questions, q.shuffle_choices,
-                q.start_at, q.end_at, 
-                CASE
-                    WHEN q.end_at IS NOT NULL AND q.end_at <= NOW() AND (LOWER(COALESCE(q.status, '')) != 'draft' OR COALESCE(q.questions_count, 0) > 0) THEN 'closed'
-                    WHEN COALESCE(q.release_at, q.start_at) > NOW() THEN 'draft'
-                    ELSE q.status
-                END as status, 
-                q.questions_count, q.is_active,
-                q.created_at, q.updated_at,
-                q.class_id, q.teacher_id,
-                q.session_id, q.exam_mode, q.assessment_category, q.exam_token, q.token_expires_at, q.max_token_attempts,
-                q.release_at,
-                c.name as class_name,
-                sub.name as subject_name,
-                t.full_name as teacher_name
-            FROM quizzes q
-            LEFT JOIN classes c ON c.id = q.class_id
-            LEFT JOIN subjects sub ON sub.id = q.subject_id
-            LEFT JOIN teachers t ON t.id = q.teacher_id
-            WHERE q.tenant_id = $1 
-              AND q.deleted_at IS NULL
-              AND (
-                  q.created_by = $2 
-                  OR q.teacher_id IN (SELECT id FROM teachers WHERE (user_id = $2 OR id = $2) AND tenant_id = $1)
-                  OR q.teacher_id = $2
-              )
-            ORDER BY q.created_at DESC
-            "#,
+        list_staff_quizzes(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            true,
+            actor_id,
+            now_utc,
+            &req_ctx.request_id,
         )
-        .bind(req_ctx.tenant_id)
-        .bind(actor_id)
-        .fetch_all(&ctx.pool)
-        .await
-        .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
-            school_core::common::error::InfrastructureError::Database(e)
-        ), &req_ctx.request_id))?;
-
-        rows.iter()
-            .map(|r| build_quiz_response_from_list_row(r, false, false, now_utc))
-            .collect()
+        .await?
     } else if is_student || is_parent {
         let rows = sqlx::query(
             r#"
@@ -725,43 +724,15 @@ async fn list(
             .map(|r| build_quiz_response_from_list_row(r, true, true, now_utc))
             .collect()
     } else {
-        let rows = sqlx::query(
-            r#"
-            SELECT 
-                q.id, q.tenant_id, q.lesson_id, q.title, q.description, q.time_limit_minutes,
-                q.passing_score, q.max_score, q.max_attempts, q.shuffle_questions, q.shuffle_choices,
-                q.start_at, q.end_at, 
-                CASE
-                    WHEN q.end_at IS NOT NULL AND q.end_at <= NOW() AND (LOWER(COALESCE(q.status, '')) != 'draft' OR COALESCE(q.questions_count, 0) > 0) THEN 'closed'
-                    WHEN COALESCE(q.release_at, q.start_at) > NOW() THEN 'draft'
-                    ELSE q.status
-                END as status, 
-                q.questions_count, q.is_active,
-                q.created_at, q.updated_at,
-                q.class_id, q.teacher_id,
-                q.session_id, q.exam_mode, q.assessment_category, q.exam_token, q.token_expires_at, q.max_token_attempts,
-                q.release_at,
-                c.name as class_name,
-                sub.name as subject_name,
-                t.full_name as teacher_name
-            FROM quizzes q
-            LEFT JOIN classes c ON c.id = q.class_id
-            LEFT JOIN subjects sub ON sub.id = q.subject_id
-            LEFT JOIN teachers t ON t.id = q.teacher_id
-            WHERE q.tenant_id = $1 AND q.deleted_at IS NULL
-            ORDER BY q.created_at DESC
-            "#,
+        list_staff_quizzes(
+            &ctx.pool,
+            req_ctx.tenant_id,
+            false,
+            actor_id,
+            now_utc,
+            &req_ctx.request_id,
         )
-        .bind(req_ctx.tenant_id)
-        .fetch_all(&ctx.pool)
-        .await
-        .map_err(|e| ApiError::new(school_core::common::error::ApplicationError::Infrastructure(
-            school_core::common::error::InfrastructureError::Database(e)
-        ), &req_ctx.request_id))?;
-
-        rows.iter()
-            .map(|r| build_quiz_response_from_list_row(r, false, false, now_utc))
-            .collect()
+        .await?
     };
 
     Ok(Json(ApiResponse::success(items, req_ctx.request_id)))
@@ -941,6 +912,88 @@ pub(super) async fn get_by_id(
         resp.student_has_completed = Some(is_completed);
         resp.student_last_score = score;
         resp.student_last_attempt_id = att_id;
+    }
+
+    if !is_student_or_parent {
+        if let Ok(Some(stats_row)) = sqlx::query(
+            r#"
+            WITH latest_attempts AS (
+                SELECT DISTINCT ON (COALESCE(s.id, qa.student_id))
+                    qa.status,
+                    qa.score,
+                    qa.total_points
+                FROM quiz_attempts qa
+                LEFT JOIN students s
+                    ON s.tenant_id = qa.tenant_id
+                   AND (s.id = qa.student_id OR s.user_id = qa.student_id)
+                WHERE qa.quiz_id = $1
+                  AND qa.tenant_id = $2
+                  AND LOWER(COALESCE(qa.status, '')) NOT IN ('unsubmitted', 'cancelled', 'deleted')
+                ORDER BY
+                    COALESCE(s.id, qa.student_id),
+                    (CASE WHEN LOWER(COALESCE(qa.status, '')) IN ('graded', 'reviewed') THEN 0 ELSE 1 END) ASC,
+                    qa.created_at DESC
+            )
+            SELECT
+                GREATEST(
+                    COALESCE(
+                        CASE
+                            WHEN $3::uuid IS NOT NULL THEN (
+                                SELECT COUNT(DISTINCT en.student_id)::bigint
+                                FROM enrollments en
+                                JOIN students s ON s.id = en.student_id
+                                WHERE en.class_id = $3
+                                  AND s.tenant_id = $2
+                                  AND (en.status ILIKE 'active' OR en.status IS NULL)
+                                  AND (s.is_active = true OR s.is_active IS NULL)
+                                  AND (s.status ILIKE 'active' OR s.status IS NULL)
+                                  AND s.deleted_at IS NULL
+                            )
+                            ELSE (
+                                SELECT COUNT(DISTINCT s.id)::bigint
+                                FROM students s
+                                WHERE s.tenant_id = $2
+                                  AND (s.is_active = true OR s.is_active IS NULL)
+                                  AND (s.status ILIKE 'active' OR s.status IS NULL)
+                                  AND s.deleted_at IS NULL
+                            )
+                        END,
+                        0
+                    ),
+                    (SELECT COUNT(*)::bigint FROM latest_attempts)
+                )::bigint AS total_students,
+                (SELECT COUNT(*)::bigint FROM latest_attempts) AS participants_count,
+                (
+                    SELECT ROUND(
+                        AVG(
+                            LEAST(
+                                100::numeric,
+                                GREATEST(
+                                    0::numeric,
+                                    (la.score::numeric * 100.0)
+                                    / GREATEST(1::numeric, COALESCE(NULLIF(la.total_points, 0), NULLIF($4, 0), 100)::numeric)
+                                )
+                            )
+                        ) FILTER (
+                            WHERE LOWER(COALESCE(la.status, '')) IN ('graded', 'reviewed')
+                              AND la.score IS NOT NULL
+                        )
+                    )::float8
+                    FROM latest_attempts la
+                ) AS avg_score
+            "#,
+        )
+        .bind(id)
+        .bind(req_ctx.tenant_id)
+        .bind(meta_class_id)
+        .bind(resp.max_score)
+        .fetch_optional(&ctx.pool)
+        .await
+        {
+            resp.total_students = stats_row.try_get::<i64, _>("total_students").ok();
+            resp.participants_count = stats_row.try_get::<i64, _>("participants_count").ok();
+            resp.avg_score = stats_row.try_get::<Option<f64>, _>("avg_score").ok().flatten();
+        }
     }
 
     resp.apply_schedule_evaluation(chrono::Utc::now());
@@ -3449,9 +3502,155 @@ fn build_quiz_response_from_list_row(
         is_open_for_student: false,
         seconds_until_start: None,
         seconds_remaining: None,
+        total_students: r.try_get::<i64, _>("total_students").ok(),
+        participants_count: r.try_get::<i64, _>("participants_count").ok(),
+        avg_score: r.try_get::<Option<f64>, _>("avg_score").ok().flatten(),
     };
     resp.apply_schedule_evaluation(now_utc);
     resp
+}
+
+async fn list_staff_quizzes(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+    is_teacher_scoped: bool,
+    actor_id: Option<Uuid>,
+    now_utc: chrono::DateTime<chrono::Utc>,
+    request_id: &str,
+) -> Result<Vec<QuizResponse>, ApiError> {
+    let rows = sqlx::query(
+        r#"
+        WITH tenant_student_count AS (
+            SELECT COUNT(DISTINCT s.id)::bigint AS total_active_students
+            FROM students s
+            WHERE s.tenant_id = $1
+              AND s.deleted_at IS NULL
+              AND (s.is_active = true OR s.is_active IS NULL)
+              AND (s.status ILIKE 'active' OR s.status IS NULL)
+        ),
+        class_roster_counts AS (
+            SELECT
+                en.class_id,
+                COUNT(DISTINCT s.id)::bigint AS enrolled_count
+            FROM enrollments en
+            JOIN students s ON s.id = en.student_id
+            WHERE s.tenant_id = $1
+              AND s.deleted_at IS NULL
+              AND (s.is_active = true OR s.is_active IS NULL)
+              AND (s.status ILIKE 'active' OR s.status IS NULL)
+              AND (en.status ILIKE 'active' OR en.status IS NULL)
+            GROUP BY en.class_id
+        ),
+        latest_attempts AS (
+            SELECT DISTINCT ON (qa.quiz_id, COALESCE(s.id, qa.student_id))
+                qa.quiz_id,
+                COALESCE(s.id, qa.student_id) AS canonical_student_id,
+                qa.status,
+                qa.score,
+                qa.total_points
+            FROM quiz_attempts qa
+            LEFT JOIN students s
+                ON s.tenant_id = qa.tenant_id
+               AND (s.id = qa.student_id OR s.user_id = qa.student_id)
+            WHERE qa.tenant_id = $1
+              AND LOWER(COALESCE(qa.status, '')) NOT IN ('unsubmitted', 'cancelled', 'deleted')
+            ORDER BY
+                qa.quiz_id,
+                COALESCE(s.id, qa.student_id),
+                (CASE WHEN LOWER(COALESCE(qa.status, '')) IN ('graded', 'reviewed') THEN 0 ELSE 1 END) ASC,
+                qa.created_at DESC
+        ),
+        attempt_stats AS (
+            SELECT
+                la.quiz_id,
+                COUNT(*)::bigint AS participants_count,
+                ROUND(
+                    AVG(
+                        LEAST(
+                            100::numeric,
+                            GREATEST(
+                                0::numeric,
+                                (la.score::numeric * 100.0)
+                                / GREATEST(1::numeric, COALESCE(NULLIF(la.total_points, 0), NULLIF(q.max_score, 0), 100)::numeric)
+                            )
+                        )
+                    ) FILTER (
+                        WHERE LOWER(COALESCE(la.status, '')) IN ('graded', 'reviewed')
+                          AND la.score IS NOT NULL
+                    )
+                )::float8 AS avg_score
+            FROM latest_attempts la
+            JOIN quizzes q ON q.id = la.quiz_id AND q.tenant_id = $1
+            GROUP BY la.quiz_id
+        )
+        SELECT
+            q.id, q.tenant_id, q.lesson_id, q.title, q.description, q.time_limit_minutes,
+            q.passing_score, q.max_score, q.max_attempts, q.shuffle_questions, q.shuffle_choices,
+            q.start_at, q.end_at,
+            CASE
+                WHEN q.end_at IS NOT NULL AND q.end_at <= NOW() AND (LOWER(COALESCE(q.status, '')) != 'draft' OR COALESCE(q.questions_count, 0) > 0) THEN 'closed'
+                WHEN COALESCE(q.release_at, q.start_at) > NOW() THEN 'draft'
+                ELSE q.status
+            END as status,
+            q.questions_count, q.is_active,
+            q.created_at, q.updated_at,
+            q.class_id, q.teacher_id,
+            q.session_id, q.exam_mode, q.assessment_category, q.exam_token, q.token_expires_at, q.max_token_attempts,
+            q.release_at,
+            c.name as class_name,
+            sub.name as subject_name,
+            t.full_name as teacher_name,
+            GREATEST(
+                COALESCE(
+                    CASE
+                        WHEN q.class_id IS NOT NULL THEN COALESCE(crc.enrolled_count, 0)
+                        ELSE (SELECT total_active_students FROM tenant_student_count)
+                    END,
+                    0
+                ),
+                COALESCE(ats.participants_count, 0)
+            )::bigint AS total_students,
+            COALESCE(ats.participants_count, 0)::bigint AS participants_count,
+            ats.avg_score
+        FROM quizzes q
+        LEFT JOIN classes c ON c.id = q.class_id
+        LEFT JOIN subjects sub ON sub.id = q.subject_id
+        LEFT JOIN teachers t ON t.id = q.teacher_id
+        LEFT JOIN class_roster_counts crc ON crc.class_id = q.class_id
+        LEFT JOIN attempt_stats ats ON ats.quiz_id = q.id
+        WHERE q.tenant_id = $1
+          AND q.deleted_at IS NULL
+          AND (
+              $2 = FALSE
+              OR (
+                  $3::uuid IS NOT NULL AND (
+                      q.created_by = $3
+                      OR q.teacher_id IN (SELECT id FROM teachers WHERE (user_id = $3 OR id = $3) AND tenant_id = $1)
+                      OR q.teacher_id = $3
+                  )
+              )
+          )
+        ORDER BY q.created_at DESC
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(is_teacher_scoped)
+    .bind(actor_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            school_core::common::error::ApplicationError::Infrastructure(
+                school_core::common::error::InfrastructureError::Database(e),
+            ),
+            request_id,
+        )
+    })?;
+
+    Ok(rows
+        .iter()
+        .map(|r| build_quiz_response_from_list_row(r, false, false, now_utc))
+        .collect())
 }
 
 pub(super) async fn score_single_choice_pg_answers(pool: &sqlx::PgPool, attempt_id: Uuid) {

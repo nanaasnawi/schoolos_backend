@@ -70,6 +70,12 @@ pub struct QuizResponse {
     pub seconds_until_start: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seconds_remaining: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_students: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub participants_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_score: Option<f64>,
 }
 
 fn default_exam_mode() -> Option<String> {
@@ -159,6 +165,9 @@ impl From<Quiz> for QuizResponse {
             is_open_for_student: false,
             seconds_until_start: None,
             seconds_remaining: None,
+            total_students: None,
+            participants_count: None,
+            avg_score: None,
         };
         resp.apply_schedule_evaluation(Utc::now());
         resp

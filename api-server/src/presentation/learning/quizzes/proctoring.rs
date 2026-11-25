@@ -457,6 +457,9 @@ pub async fn get_proctor_monitor(
         is_open_for_student: false,
         seconds_until_start: None,
         seconds_remaining: None,
+        total_students: None,
+        participants_count: None,
+        avg_score: None,
     };
     quiz_resp.apply_schedule_evaluation(now);
 
@@ -682,6 +685,9 @@ pub async fn get_proctor_monitor(
         flagged_count,
         total_violations,
     };
+    quiz_resp.total_students = Some(participants.len() as i64);
+    quiz_resp.participants_count =
+        Some((in_progress_count + need_grading_count + completed_count) as i64);
 
     Ok(Json(ApiResponse::success(
         ProctorMonitorResponse {
