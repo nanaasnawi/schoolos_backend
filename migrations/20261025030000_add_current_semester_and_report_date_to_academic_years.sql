@@ -5,8 +5,9 @@ ALTER TABLE academic_years
     ADD COLUMN IF NOT EXISTS current_semester SMALLINT NOT NULL DEFAULT 1,
     ADD COLUMN IF NOT EXISTS report_date DATE;
 
--- Set default values for active academic years
+-- Set default values only when report_date is unset (safe for already-configured academic years)
 UPDATE academic_years 
-SET current_semester = 1,
+SET current_semester = COALESCE(current_semester, 1),
     report_date = '2026-12-19'
-WHERE name = '2026/2027';
+WHERE name = '2026/2027'
+  AND report_date IS NULL;

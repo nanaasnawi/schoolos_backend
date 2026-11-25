@@ -241,6 +241,7 @@ BEGIN
             EXECUTE format('DROP POLICY IF EXISTS %I_tenant_isolation ON %I', tbl, tbl);
             EXECUTE format('DROP POLICY IF EXISTS %I_tenant_select ON %I', tbl, tbl);
             EXECUTE format('DROP POLICY IF EXISTS %I_tenant_modify ON %I', tbl, tbl);
+            EXECUTE format('DROP POLICY IF EXISTS %I_public_read ON %I', tbl, tbl);
             EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', tbl);
             EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', tbl);
             EXECUTE format(
