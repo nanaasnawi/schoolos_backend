@@ -145,7 +145,7 @@ async fn list(
     use school_core::permission::domain::permission_registry::Permission;
     require_permission(&req_ctx.actor, Permission::LearningMaterialRead).map_err(|_| {
         ApiError::new(
-            school_core::common::error::ApplicationError::Unauthorized(
+            school_core::common::error::ApplicationError::Forbidden(
                 school_core::common::error_code::ErrorCode::AuthPermissionDenied,
                 "Insufficient permissions".to_string(),
             ),
@@ -154,7 +154,25 @@ async fn list(
     })?;
 
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
-    let is_teacher = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Guru")).unwrap_or(false);
+    let is_teacher = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                (n.contains("guru")
+                    || n.contains("teacher")
+                    || n.contains("tutor")
+                    || n.contains("pamong")
+                    || n.contains("pendidik")
+                    || n.contains("pengajar"))
+                    && !n.contains("kepala")
+                    && !n.contains("admin")
+                    && !n.contains("operator")
+                    && !n.contains("staff")
+            })
+        })
+        .unwrap_or(false);
     let is_student = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Siswa")).unwrap_or(false);
 
     let items: Vec<LearningMaterialResponse> = if is_teacher {
@@ -303,7 +321,7 @@ async fn get_by_id(
     use school_core::permission::domain::permission_registry::Permission;
     require_permission(&req_ctx.actor, Permission::LearningMaterialRead).map_err(|_| {
         ApiError::new(
-            school_core::common::error::ApplicationError::Unauthorized(
+            school_core::common::error::ApplicationError::Forbidden(
                 school_core::common::error_code::ErrorCode::AuthPermissionDenied,
                 "Insufficient permissions".to_string(),
             ),
@@ -312,7 +330,25 @@ async fn get_by_id(
     })?;
 
     let actor_id = req_ctx.actor.as_ref().map(|a| a.id);
-    let is_teacher = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Guru")).unwrap_or(false);
+    let is_teacher = req_ctx
+        .actor
+        .as_ref()
+        .map(|a| {
+            a.roles.iter().any(|r| {
+                let n = r.name.to_lowercase();
+                (n.contains("guru")
+                    || n.contains("teacher")
+                    || n.contains("tutor")
+                    || n.contains("pamong")
+                    || n.contains("pendidik")
+                    || n.contains("pengajar"))
+                    && !n.contains("kepala")
+                    && !n.contains("admin")
+                    && !n.contains("operator")
+                    && !n.contains("staff")
+            })
+        })
+        .unwrap_or(false);
     let is_student = req_ctx.actor.as_ref().map(|a| a.roles.iter().any(|r| r.name == "Siswa")).unwrap_or(false);
 
     // Resolve teacher_id if actor is a teacher

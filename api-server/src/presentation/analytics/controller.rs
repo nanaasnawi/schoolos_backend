@@ -188,7 +188,7 @@ async fn get_overview(
     use school_core::permission::domain::permission_registry::Permission;
     require_permission(&req_ctx.actor, Permission::SchoolUpdate).map_err(|_| {
         ApiError::new(
-            school_core::common::error::ApplicationError::Unauthorized(
+            school_core::common::error::ApplicationError::Forbidden(
                 school_core::common::error_code::ErrorCode::AuthPermissionDenied,
                 "Insufficient permissions".to_string(),
             ),

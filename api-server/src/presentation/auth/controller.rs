@@ -103,25 +103,54 @@ async fn issue_tracked_refresh_token(
     .ok()?;
 
     let token_hash = hex::encode(Sha256::digest(token.as_bytes()));
-    let _ = crate::db_tenant::with_tenant_db_scope(tenant_id, async {
-        sqlx::query(
-            r#"
-            INSERT INTO refresh_tokens (id, jti, family_id, tenant_id, user_id, token_hash, parent_jti, expires_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            "#,
-        )
-        .bind(uuid::Uuid::now_v7())
-        .bind(jti)
-        .bind(fam)
-        .bind(tenant_id)
-        .bind(user_id)
-        .bind(token_hash)
-        .bind(parent_jti)
-        .bind(expires_at)
-        .execute(pool)
-        .await
-    })
-    .await;
+    let mut tx = match crate::db_tenant::begin_tenant_tx(pool, tenant_id).await {
+        Ok(tx) => tx,
+        Err(err) => {
+            tracing::warn!(
+                error = ?err,
+                user_id = %user_id,
+                tenant_id = %tenant_id,
+                "Failed to begin tenant tx while issuing tracked refresh token"
+            );
+            return None;
+        }
+    };
+
+    if let Err(err) = sqlx::query(
+        r#"
+        INSERT INTO refresh_tokens (id, jti, family_id, tenant_id, user_id, token_hash, parent_jti, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        "#,
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(jti)
+    .bind(fam)
+    .bind(tenant_id)
+    .bind(user_id)
+    .bind(token_hash)
+    .bind(parent_jti)
+    .bind(expires_at)
+    .execute(&mut *tx)
+    .await
+    {
+        tracing::warn!(
+            error = ?err,
+            user_id = %user_id,
+            tenant_id = %tenant_id,
+            "Failed to persist tracked refresh token"
+        );
+        return None;
+    }
+
+    if let Err(err) = tx.commit().await {
+        tracing::warn!(
+            error = ?err,
+            user_id = %user_id,
+            tenant_id = %tenant_id,
+            "Failed to commit tracked refresh token"
+        );
+        return None;
+    }
 
     Some(token)
 }
