@@ -457,41 +457,44 @@ pub async fn get_at_risk_students(
     // 2. UNREAD_MATERIAL
     let mat_rows = sqlx::query(
         r#"
-        SELECT DISTINCT ON (s.id, m.id)
-            s.id as student_id,
-            s.full_name as student_name,
-            COALESCE(s.nisn, u.username, '-') as nisn,
-            c.id as class_id,
-            c.name as class_name,
-            m.id as material_id,
-            m.title as material_title,
-            COALESCE(rp.current_page, 1) as current_page,
-            COALESCE(rp.last_read_at, m.created_at) as updated_at
-        FROM learning_materials m
-        JOIN classes c ON c.id = m.class_id
-        JOIN enrollments en ON en.class_id = c.id AND (en.status ILIKE 'active' OR en.status IS NULL)
-        JOIN students s ON s.id = en.student_id AND s.deleted_at IS NULL AND s.is_active = true
-        LEFT JOIN users u ON u.id = s.user_id
-        LEFT JOIN student_material_completions smc ON smc.student_id = s.id AND smc.material_id = m.id
-        LEFT JOIN reading_progress rp ON rp.student_id = s.id AND rp.material_id = m.id
-        WHERE m.tenant_id = $1
-          AND m.deleted_at IS NULL
-          AND m.is_active = true
-          AND (m.visibility = 'published' OR m.visibility = 'active')
-          AND (m.release_at IS NULL OR m.release_at <= NOW())
-          AND ($2::uuid IS NULL OR m.class_id = $2)
-          AND (
-              $3::bool = true 
-              OR m.created_by = $4 
-              OR ($5::uuid IS NOT NULL AND m.teacher_id = $5)
-              OR m.teacher_id = $4
-          )
-          AND ($6::uuid IS NULL OR s.id = $6)
-          AND smc.id IS NULL
-          AND (rp.is_completed IS NULL OR rp.is_completed = false)
-          AND COALESCE(rp.current_page, 1) < 3
-        ORDER BY s.id, m.id, m.created_at DESC
-        LIMIT 60
+        SELECT * FROM (
+            SELECT DISTINCT ON (s.id, m.id)
+                s.id as student_id,
+                s.full_name as student_name,
+                COALESCE(s.nisn, u.username, '-') as nisn,
+                c.id as class_id,
+                c.name as class_name,
+                m.id as material_id,
+                m.title as material_title,
+                COALESCE(rp.current_page, 1) as current_page,
+                COALESCE(rp.last_read_at, m.created_at) as updated_at
+            FROM learning_materials m
+            JOIN classes c ON c.id = m.class_id
+            JOIN enrollments en ON en.class_id = c.id AND (en.status ILIKE 'active' OR en.status IS NULL)
+            JOIN students s ON s.id = en.student_id AND s.deleted_at IS NULL AND s.is_active = true
+            LEFT JOIN users u ON u.id = s.user_id
+            LEFT JOIN student_material_completions smc ON smc.student_id = s.id AND smc.material_id = m.id
+            LEFT JOIN reading_progress rp ON rp.student_id = s.id AND rp.material_id = m.id
+            WHERE m.tenant_id = $1
+              AND m.deleted_at IS NULL
+              AND m.is_active = true
+              AND (m.visibility = 'published' OR m.visibility = 'active')
+              AND (m.release_at IS NULL OR m.release_at <= NOW())
+              AND ($2::uuid IS NULL OR m.class_id = $2)
+              AND (
+                  $3::bool = true 
+                  OR m.created_by = $4 
+                  OR ($5::uuid IS NOT NULL AND m.teacher_id = $5)
+                  OR m.teacher_id = $4
+              )
+              AND ($6::uuid IS NULL OR s.id = $6)
+              AND smc.id IS NULL
+              AND (rp.is_completed IS NULL OR rp.is_completed = false)
+              AND COALESCE(rp.current_page, 1) < 3
+            ORDER BY s.id, m.id, m.created_at DESC
+        ) dedup
+        ORDER BY updated_at DESC
+        LIMIT 120
         "#,
     )
     .bind(req_ctx.tenant_id)
@@ -540,38 +543,41 @@ pub async fn get_at_risk_students(
     // 3. OVERDUE_ASSIGNMENT (Siswa belum mengumpulkan tugas aktif)
     let assign_rows = sqlx::query(
         r#"
-        SELECT DISTINCT ON (s.id, a.id)
-            s.id as student_id,
-            s.full_name as student_name,
-            COALESCE(s.nisn, u.username, '-') as nisn,
-            c.id as class_id,
-            c.name as class_name,
-            a.id as assignment_id,
-            a.title as assignment_title,
-            a.due_at,
-            a.created_at as updated_at
-        FROM assignments a
-        JOIN classes c ON c.id = a.class_id
-        JOIN enrollments en ON en.class_id = c.id AND (en.status ILIKE 'active' OR en.status IS NULL)
-        JOIN students s ON s.id = en.student_id AND s.deleted_at IS NULL AND s.is_active = true
-        LEFT JOIN users u ON u.id = s.user_id
-        LEFT JOIN assignment_submissions sub ON sub.assignment_id = a.id AND (sub.student_id = s.id OR (s.user_id IS NOT NULL AND sub.student_id = s.user_id))
-        WHERE a.tenant_id = $1
-          AND a.deleted_at IS NULL
-          AND a.is_active = true
-          AND (a.status = 'published' OR a.status = 'active')
-          AND (a.release_at IS NULL OR a.release_at <= NOW())
-          AND ($2::uuid IS NULL OR a.class_id = $2)
-          AND (
-              $3::bool = true 
-              OR a.created_by = $4 
-              OR ($5::uuid IS NOT NULL AND a.teacher_id = $5)
-              OR a.teacher_id = $4
-          )
-          AND ($6::uuid IS NULL OR s.id = $6)
-          AND (sub.id IS NULL OR sub.status = 'unsubmitted' OR sub.submitted_at IS NULL)
-        ORDER BY s.id, a.id, a.created_at DESC
-        LIMIT 60
+        SELECT * FROM (
+            SELECT DISTINCT ON (s.id, a.id)
+                s.id as student_id,
+                s.full_name as student_name,
+                COALESCE(s.nisn, u.username, '-') as nisn,
+                c.id as class_id,
+                c.name as class_name,
+                a.id as assignment_id,
+                a.title as assignment_title,
+                a.due_at,
+                a.created_at as updated_at
+            FROM assignments a
+            JOIN classes c ON c.id = a.class_id
+            JOIN enrollments en ON en.class_id = c.id AND (en.status ILIKE 'active' OR en.status IS NULL)
+            JOIN students s ON s.id = en.student_id AND s.deleted_at IS NULL AND s.is_active = true
+            LEFT JOIN users u ON u.id = s.user_id
+            LEFT JOIN assignment_submissions sub ON sub.assignment_id = a.id AND (sub.student_id = s.id OR (s.user_id IS NOT NULL AND sub.student_id = s.user_id))
+            WHERE a.tenant_id = $1
+              AND a.deleted_at IS NULL
+              AND a.is_active = true
+              AND (a.status = 'published' OR a.status = 'active')
+              AND (a.release_at IS NULL OR a.release_at <= NOW())
+              AND ($2::uuid IS NULL OR a.class_id = $2)
+              AND (
+                  $3::bool = true 
+                  OR a.created_by = $4 
+                  OR ($5::uuid IS NOT NULL AND a.teacher_id = $5)
+                  OR a.teacher_id = $4
+              )
+              AND ($6::uuid IS NULL OR s.id = $6)
+              AND (sub.id IS NULL OR sub.status = 'unsubmitted' OR sub.submitted_at IS NULL)
+            ORDER BY s.id, a.id, a.created_at DESC
+        ) dedup
+        ORDER BY updated_at DESC
+        LIMIT 120
         "#,
     )
     .bind(req_ctx.tenant_id)
@@ -703,44 +709,47 @@ pub async fn get_at_risk_students(
     // 5. QUIZ_ALERT (Kuis & Ujian CBT: Belum Mengerjakan atau Nilai di bawah KKM)
     let quiz_rows = sqlx::query(
         r#"
-        SELECT DISTINCT ON (s.id, q.id)
-            s.id as student_id,
-            s.full_name as student_name,
-            COALESCE(s.nisn, u.username, '-') as nisn,
-            c.id as class_id,
-            c.name as class_name,
-            q.id as quiz_id,
-            q.title as quiz_title,
-            q.passing_score,
-            q.max_score,
-            qa.score as attempt_score,
-            CASE WHEN qa.id IS NULL THEN 'UNATTEMPTED' ELSE 'LOW_SCORE' END as alert_sub_type,
-            COALESCE(qa.completed_at, qa.started_at, q.created_at) as updated_at
-        FROM quizzes q
-        JOIN classes c ON c.id = q.class_id
-        JOIN enrollments en ON en.class_id = c.id AND (en.status ILIKE 'active' OR en.status IS NULL)
-        JOIN students s ON s.id = en.student_id AND s.deleted_at IS NULL AND s.is_active = true
-        LEFT JOIN users u ON u.id = s.user_id
-        LEFT JOIN quiz_attempts qa ON qa.quiz_id = q.id AND (qa.student_id = s.id OR (s.user_id IS NOT NULL AND qa.student_id = s.user_id))
-        WHERE q.tenant_id = $1
-          AND q.deleted_at IS NULL
-          AND q.is_active = true
-          AND (q.status = 'published' OR q.status = 'active')
-          AND (COALESCE(q.release_at, q.start_at) IS NULL OR COALESCE(q.release_at, q.start_at) <= NOW())
-          AND ($2::uuid IS NULL OR q.class_id = $2)
-          AND (
-              $3::bool = true 
-              OR q.created_by = $4 
-              OR ($5::uuid IS NOT NULL AND q.teacher_id = $5)
-              OR q.teacher_id = $4
-          )
-          AND ($6::uuid IS NULL OR s.id = $6)
-          AND (
-              qa.id IS NULL 
-              OR (qa.score IS NOT NULL AND qa.score < COALESCE(NULLIF(q.passing_score, 0), 70))
-          )
-        ORDER BY s.id, q.id, q.created_at DESC
-        LIMIT 60
+        SELECT * FROM (
+            SELECT DISTINCT ON (s.id, q.id)
+                s.id as student_id,
+                s.full_name as student_name,
+                COALESCE(s.nisn, u.username, '-') as nisn,
+                c.id as class_id,
+                c.name as class_name,
+                q.id as quiz_id,
+                q.title as quiz_title,
+                q.passing_score,
+                q.max_score,
+                qa.score as attempt_score,
+                CASE WHEN qa.id IS NULL THEN 'UNATTEMPTED' ELSE 'LOW_SCORE' END as alert_sub_type,
+                COALESCE(qa.completed_at, qa.started_at, q.created_at) as updated_at
+            FROM quizzes q
+            JOIN classes c ON c.id = q.class_id
+            JOIN enrollments en ON en.class_id = c.id AND (en.status ILIKE 'active' OR en.status IS NULL)
+            JOIN students s ON s.id = en.student_id AND s.deleted_at IS NULL AND s.is_active = true
+            LEFT JOIN users u ON u.id = s.user_id
+            LEFT JOIN quiz_attempts qa ON qa.quiz_id = q.id AND (qa.student_id = s.id OR (s.user_id IS NOT NULL AND qa.student_id = s.user_id))
+            WHERE q.tenant_id = $1
+              AND q.deleted_at IS NULL
+              AND q.is_active = true
+              AND (q.status = 'published' OR q.status = 'active')
+              AND (COALESCE(q.release_at, q.start_at) IS NULL OR COALESCE(q.release_at, q.start_at) <= NOW())
+              AND ($2::uuid IS NULL OR q.class_id = $2)
+              AND (
+                  $3::bool = true 
+                  OR q.created_by = $4 
+                  OR ($5::uuid IS NOT NULL AND q.teacher_id = $5)
+                  OR q.teacher_id = $4
+              )
+              AND ($6::uuid IS NULL OR s.id = $6)
+              AND (
+                  qa.id IS NULL 
+                  OR (qa.score IS NOT NULL AND qa.score < COALESCE(NULLIF(q.passing_score, 0), 70))
+              )
+            ORDER BY s.id, q.id, q.created_at DESC
+        ) dedup
+        ORDER BY updated_at DESC
+        LIMIT 120
         "#,
     )
     .bind(req_ctx.tenant_id)
@@ -803,6 +812,32 @@ pub async fn get_at_risk_students(
             });
         }
     }
+
+    // Prioritize HIGH urgency and academic interventions before unread material flags
+    fn risk_rank(lvl: &str) -> u8 {
+        match lvl {
+            "HIGH" => 0,
+            "MEDIUM" => 1,
+            _ => 2,
+        }
+    }
+    fn category_rank(cat: &str) -> u8 {
+        match cat {
+            "LOW_SCORE" => 0,
+            "OVERDUE_ASSIGNMENT" => 1,
+            "QUIZ_ALERT" => 2,
+            "LOW_ATTENDANCE" | "ATTENDANCE" => 3,
+            "UNREAD_MATERIAL" => 4,
+            _ => 5,
+        }
+    }
+    results.sort_by(|a, b| {
+        risk_rank(&a.risk_level)
+            .cmp(&risk_rank(&b.risk_level))
+            .then_with(|| category_rank(&a.category).cmp(&category_rank(&b.category)))
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+            .then_with(|| a.student_name.cmp(&b.student_name))
+    });
 
     Ok(Json(ApiResponse::success(results, req_ctx.request_id)))
 }
