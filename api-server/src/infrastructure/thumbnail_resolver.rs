@@ -35,18 +35,28 @@ fn is_valid_youtube_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
-/// Extracts a YouTube video ID from watch, short, embed, shorts, live, or youtu.be URLs.
+/// Extracts a YouTube video ID from watch, short, embed, shorts, live, or youtu.be URLs
+/// (including HTML iframe snippets and URL-encoded query parameters).
 pub fn extract_youtube_video_id(raw_url: &str) -> Option<String> {
     let url = raw_url.trim();
     if url.is_empty() {
         return None;
     }
-    let lower = url.to_ascii_lowercase();
+    let decoded = url
+        .replace("%3F", "?")
+        .replace("%3f", "?")
+        .replace("%26", "&")
+        .replace("%3D", "=")
+        .replace("%3d", "=")
+        .replace("%2F", "/")
+        .replace("%2f", "/");
+    let lower = decoded.to_ascii_lowercase();
+    let delims = ['?', '&', '#', '/', '"', '\'', '<', '>', ' ', '\r', '\n', ')', ']', ';', ','];
 
     // 1. youtu.be/<id>
     if let Some(pos) = lower.find("youtu.be/") {
-        let rest = &url[pos + "youtu.be/".len()..];
-        let id = rest.split(['?', '&', '#', '/']).next().unwrap_or("").trim();
+        let rest = &decoded[pos + "youtu.be/".len()..];
+        let id = rest.split(delims).next().unwrap_or("").trim();
         if is_valid_youtube_id(id) {
             return Some(id.to_string());
         }
@@ -54,12 +64,12 @@ pub fn extract_youtube_video_id(raw_url: &str) -> Option<String> {
 
     // 2. youtube.com/watch?v=<id> or &v=<id>
     if lower.contains("youtube.com") || lower.contains("youtube-nocookie.com") {
-        if let Some(query_pos) = url.find('?') {
-            let query = &url[query_pos + 1..];
+        if let Some(query_pos) = decoded.find('?') {
+            let query = &decoded[query_pos + 1..];
             for pair in query.split('&') {
                 if let Some((k, v)) = pair.split_once('=') {
                     if k.eq_ignore_ascii_case("v") {
-                        let id = v.split('#').next().unwrap_or("").trim();
+                        let id = v.split(delims).next().unwrap_or("").trim();
                         if is_valid_youtube_id(id) {
                             return Some(id.to_string());
                         }
@@ -68,11 +78,11 @@ pub fn extract_youtube_video_id(raw_url: &str) -> Option<String> {
             }
         }
 
-        // 3. /embed/<id>, /shorts/<id>, /live/<id>, /v/<id>
-        for marker in ["/embed/", "/shorts/", "/live/", "/v/"] {
+        // 3. /embed/<id>, /shorts/<id>, /live/<id>, /v/<id>, /watch/<id>
+        for marker in ["/embed/", "/shorts/", "/live/", "/v/", "/watch/"] {
             if let Some(pos) = lower.find(marker) {
-                let rest = &url[pos + marker.len()..];
-                let id = rest.split(['?', '&', '#', '/']).next().unwrap_or("").trim();
+                let rest = &decoded[pos + marker.len()..];
+                let id = rest.split(delims).next().unwrap_or("").trim();
                 if is_valid_youtube_id(id) {
                     return Some(id.to_string());
                 }
@@ -216,7 +226,9 @@ pub fn resolve_deterministic_material_thumbnail(
         library_book_id,
     );
     match fmt.as_str() {
-        "VIDEO" => extract_youtube_thumbnail(external_url),
+        "VIDEO" => {
+            extract_youtube_thumbnail(external_url).or_else(|| extract_youtube_thumbnail(description))
+        }
         "INFOGRAPHIC" => extract_infographic_cover_thumbnail(description, external_url),
         _ => None,
     }
@@ -400,37 +412,29 @@ pub async fn ensure_material_thumbnail_on_publish(pool: PgPool, material_id: Uui
     .flatten();
 
     if let Some(reused) = sibling_url.and_then(|u| normalize_image_url(&u)) {
-        let _ = with_system_rls_bypass(
-            sqlx::query(
-                r#"
-                UPDATE learning_materials
-                SET thumbnail_url = $1,
-                    thumbnail_status = 'ready'
-                WHERE id = $2
-                  AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '')
-                "#,
-            )
-            .bind(&reused)
-            .bind(material_id)
-            .execute(&pool),
+        propagate_material_thumbnail_to_siblings(
+            &pool,
+            tenant_id,
+            material_id,
+            library_book_id,
+            &title,
+            &material_type,
+            &reused,
         )
         .await;
         return Some(reused);
     }
 
-    // Only ARTICLE and PDF (Buku & PDF) trigger 1x FLUX AI on publish.
-    if fmt != "ARTICLE" && fmt != "PDF" {
-        return None;
-    }
     if !cloudflare_ai::is_configured() {
         if let Some(fallback_cover) = library_cover_url {
-            let _ = with_system_rls_bypass(
-                sqlx::query(
-                    "UPDATE learning_materials SET thumbnail_url = $1, thumbnail_status = 'ready' WHERE id = $2 AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '')",
-                )
-                .bind(&fallback_cover)
-                .bind(material_id)
-                .execute(&pool),
+            propagate_material_thumbnail_to_siblings(
+                &pool,
+                tenant_id,
+                material_id,
+                library_book_id,
+                &title,
+                &material_type,
+                &fallback_cover,
             )
             .await;
             return Some(fallback_cover);
@@ -438,7 +442,190 @@ pub async fn ensure_material_thumbnail_on_publish(pool: PgPool, material_id: Uui
         return None;
     }
 
-    // Atomic compare-and-set claim guarantees FLUX runs AT MOST ONCE per material.
+    let pool_clone = pool.clone();
+    tokio::spawn(async move {
+        let _ = run_single_material_flux_generation(
+            &pool_clone,
+            material_id,
+            tenant_id,
+            library_book_id,
+            material_type,
+            fmt,
+            title,
+            subject_name,
+            class_name,
+            description,
+            library_cover_url,
+        )
+        .await;
+    });
+
+    None
+}
+
+async fn propagate_material_thumbnail_to_siblings(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    material_id: Uuid,
+    library_book_id: Option<Uuid>,
+    title: &str,
+    material_type: &str,
+    url: &str,
+) {
+    let _ = with_system_rls_bypass(
+        sqlx::query(
+            r#"
+            UPDATE learning_materials
+            SET thumbnail_url = $1,
+                thumbnail_status = 'ready'
+            WHERE (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '')
+              AND (
+                  id = $2
+                  OR (
+                      tenant_id = $3
+                      AND deleted_at IS NULL
+                      AND (
+                          ($4::uuid IS NOT NULL AND library_book_id = $4)
+                          OR (LOWER(TRIM(title)) = LOWER(TRIM($5)) AND LOWER(TRIM(material_type)) = LOWER(TRIM($6)))
+                      )
+                  )
+              )
+            "#,
+        )
+        .bind(url)
+        .bind(material_id)
+        .bind(tenant_id)
+        .bind(library_book_id)
+        .bind(title)
+        .bind(material_type)
+        .execute(pool),
+    )
+    .await;
+}
+
+async fn propagate_assignment_thumbnail_to_siblings(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    assignment_id: Uuid,
+    title: &str,
+    url: &str,
+) {
+    let _ = with_system_rls_bypass(
+        sqlx::query(
+            r#"
+            UPDATE assignments
+            SET thumbnail_url = $1,
+                thumbnail_status = 'ready'
+            WHERE (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '')
+              AND (
+                  id = $2
+                  OR (
+                      tenant_id = $3
+                      AND deleted_at IS NULL
+                      AND LOWER(TRIM(title)) = LOWER(TRIM($4))
+                  )
+              )
+            "#,
+        )
+        .bind(url)
+        .bind(assignment_id)
+        .bind(tenant_id)
+        .bind(title)
+        .execute(pool),
+    )
+    .await;
+}
+
+async fn run_single_material_flux_generation(
+    pool: &PgPool,
+    material_id: Uuid,
+    tenant_id: Uuid,
+    library_book_id: Option<Uuid>,
+    material_type: String,
+    fmt: String,
+    title: String,
+    subject_name: String,
+    class_name: String,
+    description: Option<String>,
+    library_cover_url: Option<String>,
+) -> bool {
+    let sibling_ready: Option<String> = with_system_rls_bypass(
+        sqlx::query_scalar::<_, Option<String>>(
+            r#"
+            SELECT thumbnail_url
+            FROM learning_materials
+            WHERE tenant_id = $1
+              AND id != $2
+              AND deleted_at IS NULL
+              AND thumbnail_status = 'ready'
+              AND thumbnail_url IS NOT NULL
+              AND BTRIM(thumbnail_url) != ''
+              AND (
+                  ($3::uuid IS NOT NULL AND library_book_id = $3)
+                  OR (LOWER(TRIM(title)) = LOWER(TRIM($4)) AND LOWER(TRIM(material_type)) = LOWER(TRIM($5)))
+              )
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(material_id)
+        .bind(library_book_id)
+        .bind(&title)
+        .bind(&material_type)
+        .fetch_optional(pool),
+    )
+    .await
+    .ok()
+    .flatten()
+    .flatten();
+
+    if let Some(reused) = sibling_ready.and_then(|u| normalize_image_url(&u)) {
+        propagate_material_thumbnail_to_siblings(
+            pool,
+            tenant_id,
+            material_id,
+            library_book_id,
+            &title,
+            &material_type,
+            &reused,
+        )
+        .await;
+        return true;
+    }
+
+    // Prevent concurrent sibling rombels (e.g. 12A and 12B) from issuing duplicate FLUX requests.
+    let sibling_processing: bool = with_system_rls_bypass(
+        sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM learning_materials
+                WHERE tenant_id = $1
+                  AND id != $2
+                  AND deleted_at IS NULL
+                  AND thumbnail_status = 'processing'
+                  AND (
+                      ($3::uuid IS NOT NULL AND library_book_id = $3)
+                      OR (LOWER(TRIM(title)) = LOWER(TRIM($4)) AND LOWER(TRIM(material_type)) = LOWER(TRIM($5)))
+                  )
+            )
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(material_id)
+        .bind(library_book_id)
+        .bind(&title)
+        .bind(&material_type)
+        .fetch_one(pool),
+    )
+    .await
+    .unwrap_or(false);
+
+    if sibling_processing {
+        return false;
+    }
+
+    // Atomic compare-and-set claim guarantees FLUX runs AT MOST ONCE per material group.
     let claimed = with_system_rls_bypass(
         sqlx::query_scalar::<_, Uuid>(
             r#"
@@ -451,7 +638,7 @@ pub async fn ensure_material_thumbnail_on_publish(pool: PgPool, material_id: Uui
             "#,
         )
         .bind(material_id)
-        .fetch_optional(&pool),
+        .fetch_optional(pool),
     )
     .await
     .ok()
@@ -459,79 +646,215 @@ pub async fn ensure_material_thumbnail_on_publish(pool: PgPool, material_id: Uui
     .is_some();
 
     if !claimed {
-        return None;
+        return false;
     }
 
     let snippet = summarize_context_for_prompt(description.as_deref());
-    tokio::spawn(async move {
-        let res = with_system_rls_bypass(cloudflare_ai::generate_module_thumbnail_image(
-            &pool,
-            &fmt,
-            &title,
-            &subject_name,
-            &class_name,
-            snippet.as_deref(),
-        ))
-        .await;
+    let res = with_system_rls_bypass(cloudflare_ai::generate_module_thumbnail_image(
+        pool,
+        &fmt,
+        &title,
+        &subject_name,
+        &class_name,
+        snippet.as_deref(),
+    ))
+    .await;
 
-        match res {
-            Ok(url) => {
-                let _ = with_system_rls_bypass(
-                    sqlx::query(
-                        r#"
-                        UPDATE learning_materials
-                        SET thumbnail_url = $1,
-                            thumbnail_status = 'ready'
-                        WHERE id = $2
-                          AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '')
-                        "#,
-                    )
-                    .bind(&url)
-                    .bind(material_id)
-                    .execute(&pool),
+    match res {
+        Ok(url) => {
+            propagate_material_thumbnail_to_siblings(
+                pool,
+                tenant_id,
+                material_id,
+                library_book_id,
+                &title,
+                &material_type,
+                &url,
+            )
+            .await;
+            true
+        }
+        Err(cloudflare_ai::ThumbnailGenError::NotConfigured) => {
+            let _ = with_system_rls_bypass(
+                sqlx::query(
+                    "UPDATE learning_materials SET thumbnail_status = 'pending' WHERE id = $1 AND thumbnail_status = 'processing'",
+                )
+                .bind(material_id)
+                .execute(pool),
+            )
+            .await;
+            false
+        }
+        Err(cloudflare_ai::ThumbnailGenError::Failed(err)) => {
+            tracing::warn!(
+                material_id = %material_id,
+                "FLUX thumbnail generation failed cleanly: {err}"
+            );
+            if let Some(fallback_cover) = library_cover_url {
+                propagate_material_thumbnail_to_siblings(
+                    pool,
+                    tenant_id,
+                    material_id,
+                    library_book_id,
+                    &title,
+                    &material_type,
+                    &fallback_cover,
                 )
                 .await;
-            }
-            Err(cloudflare_ai::ThumbnailGenError::NotConfigured) => {
+                true
+            } else {
                 let _ = with_system_rls_bypass(
                     sqlx::query(
-                        "UPDATE learning_materials SET thumbnail_status = 'pending' WHERE id = $1 AND thumbnail_status = 'processing'",
+                        "UPDATE learning_materials SET thumbnail_status = 'failed' WHERE id = $1 AND thumbnail_status = 'processing'",
                     )
                     .bind(material_id)
-                    .execute(&pool),
+                    .execute(pool),
                 )
                 .await;
-            }
-            Err(cloudflare_ai::ThumbnailGenError::Failed(err)) => {
-                tracing::warn!(
-                    material_id = %material_id,
-                    "FLUX thumbnail generation failed cleanly: {err}"
-                );
-                if let Some(fallback_cover) = library_cover_url {
-                    let _ = with_system_rls_bypass(
-                        sqlx::query(
-                            "UPDATE learning_materials SET thumbnail_url = $1, thumbnail_status = 'ready' WHERE id = $2",
-                        )
-                        .bind(&fallback_cover)
-                        .bind(material_id)
-                        .execute(&pool),
-                    )
-                    .await;
-                } else {
-                    let _ = with_system_rls_bypass(
-                        sqlx::query(
-                            "UPDATE learning_materials SET thumbnail_status = 'failed' WHERE id = $1 AND thumbnail_status = 'processing'",
-                        )
-                        .bind(material_id)
-                        .execute(&pool),
-                    )
-                    .await;
-                }
+                false
             }
         }
-    });
+    }
+}
 
-    None
+async fn run_single_assignment_flux_generation(
+    pool: &PgPool,
+    assignment_id: Uuid,
+    tenant_id: Uuid,
+    title: String,
+    subject_name: String,
+    class_name: String,
+    context: Option<String>,
+) -> bool {
+    let sibling_ready: Option<String> = with_system_rls_bypass(
+        sqlx::query_scalar::<_, Option<String>>(
+            r#"
+            SELECT thumbnail_url
+            FROM assignments
+            WHERE tenant_id = $1
+              AND id != $2
+              AND deleted_at IS NULL
+              AND thumbnail_status = 'ready'
+              AND thumbnail_url IS NOT NULL
+              AND BTRIM(thumbnail_url) != ''
+              AND LOWER(TRIM(title)) = LOWER(TRIM($3))
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(assignment_id)
+        .bind(&title)
+        .fetch_optional(pool),
+    )
+    .await
+    .ok()
+    .flatten()
+    .flatten();
+
+    if let Some(reused) = sibling_ready.and_then(|u| normalize_image_url(&u)) {
+        propagate_assignment_thumbnail_to_siblings(pool, tenant_id, assignment_id, &title, &reused)
+            .await;
+        return true;
+    }
+
+    let sibling_processing: bool = with_system_rls_bypass(
+        sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM assignments
+                WHERE tenant_id = $1
+                  AND id != $2
+                  AND deleted_at IS NULL
+                  AND thumbnail_status = 'processing'
+                  AND LOWER(TRIM(title)) = LOWER(TRIM($3))
+            )
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(assignment_id)
+        .bind(&title)
+        .fetch_one(pool),
+    )
+    .await
+    .unwrap_or(false);
+
+    if sibling_processing {
+        return false;
+    }
+
+    let claimed = with_system_rls_bypass(
+        sqlx::query_scalar::<_, Uuid>(
+            r#"
+            UPDATE assignments
+            SET thumbnail_status = 'processing'
+            WHERE id = $1
+              AND thumbnail_status = 'pending'
+              AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '')
+            RETURNING id
+            "#,
+        )
+        .bind(assignment_id)
+        .fetch_optional(pool),
+    )
+    .await
+    .ok()
+    .flatten()
+    .is_some();
+
+    if !claimed {
+        return false;
+    }
+
+    let res = with_system_rls_bypass(cloudflare_ai::generate_module_thumbnail_image(
+        pool,
+        "ASSIGNMENT",
+        &title,
+        &subject_name,
+        &class_name,
+        context.as_deref(),
+    ))
+    .await;
+
+    match res {
+        Ok(url) => {
+            propagate_assignment_thumbnail_to_siblings(
+                pool,
+                tenant_id,
+                assignment_id,
+                &title,
+                &url,
+            )
+            .await;
+            true
+        }
+        Err(cloudflare_ai::ThumbnailGenError::NotConfigured) => {
+            let _ = with_system_rls_bypass(
+                sqlx::query(
+                    "UPDATE assignments SET thumbnail_status = 'pending' WHERE id = $1 AND thumbnail_status = 'processing'",
+                )
+                .bind(assignment_id)
+                .execute(pool),
+            )
+            .await;
+            false
+        }
+        Err(cloudflare_ai::ThumbnailGenError::Failed(err)) => {
+            tracing::warn!(
+                assignment_id = %assignment_id,
+                "FLUX assignment thumbnail generation failed cleanly: {err}"
+            );
+            let _ = with_system_rls_bypass(
+                sqlx::query(
+                    "UPDATE assignments SET thumbnail_status = 'failed' WHERE id = $1 AND thumbnail_status = 'processing'",
+                )
+                .bind(assignment_id)
+                .execute(pool),
+            )
+            .await;
+            false
+        }
+    }
 }
 
 /// Spawns a 1x FLUX thumbnail task when an assignment is published (never on drafts or GET reads).
@@ -592,12 +915,12 @@ pub async fn ensure_assignment_thumbnail_on_publish(pool: PgPool, assignment_id:
         && release_at.is_none_or(|r| r <= chrono::Utc::now())
         && (status.eq_ignore_ascii_case("published")
             || status.eq_ignore_ascii_case("active")
+            || status.eq_ignore_ascii_case("closed")
             || release_at.is_some_and(|r| r <= chrono::Utc::now()));
     if !is_live || thumbnail_status != "pending" {
         return None;
     }
 
-    // Reuse sibling assignment thumbnail if published with the exact same title across multi-rombel.
     let sibling_url: Option<String> = with_system_rls_bypass(
         sqlx::query_scalar::<_, Option<String>>(
             r#"
@@ -625,21 +948,8 @@ pub async fn ensure_assignment_thumbnail_on_publish(pool: PgPool, assignment_id:
     .flatten();
 
     if let Some(reused) = sibling_url.and_then(|u| normalize_image_url(&u)) {
-        let _ = with_system_rls_bypass(
-            sqlx::query(
-                r#"
-                UPDATE assignments
-                SET thumbnail_url = $1,
-                    thumbnail_status = 'ready'
-                WHERE id = $2
-                  AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '')
-                "#,
-            )
-            .bind(&reused)
-            .bind(assignment_id)
-            .execute(&pool),
-        )
-        .await;
+        propagate_assignment_thumbnail_to_siblings(&pool, tenant_id, assignment_id, &title, &reused)
+            .await;
         return Some(reused);
     }
 
@@ -647,97 +957,106 @@ pub async fn ensure_assignment_thumbnail_on_publish(pool: PgPool, assignment_id:
         return None;
     }
 
-    let claimed = with_system_rls_bypass(
-        sqlx::query_scalar::<_, Uuid>(
-            r#"
-            UPDATE assignments
-            SET thumbnail_status = 'processing'
-            WHERE id = $1
-              AND thumbnail_status = 'pending'
-              AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '')
-            RETURNING id
-            "#,
-        )
-        .bind(assignment_id)
-        .fetch_optional(&pool),
-    )
-    .await
-    .ok()
-    .flatten()
-    .is_some();
-
-    if !claimed {
-        return None;
-    }
-
     let context = summarize_context_for_prompt(description.as_deref().or(instructions.as_deref()));
+    let pool_clone = pool.clone();
     tokio::spawn(async move {
-        let res = with_system_rls_bypass(cloudflare_ai::generate_module_thumbnail_image(
-            &pool,
-            "ASSIGNMENT",
-            &title,
-            &subject_name,
-            &class_name,
-            context.as_deref(),
-        ))
+        let _ = run_single_assignment_flux_generation(
+            &pool_clone,
+            assignment_id,
+            tenant_id,
+            title,
+            subject_name,
+            class_name,
+            context,
+        )
         .await;
-
-        match res {
-            Ok(url) => {
-                let _ = with_system_rls_bypass(
-                    sqlx::query(
-                        r#"
-                        UPDATE assignments
-                        SET thumbnail_url = $1,
-                            thumbnail_status = 'ready'
-                        WHERE id = $2
-                          AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '')
-                        "#,
-                    )
-                    .bind(&url)
-                    .bind(assignment_id)
-                    .execute(&pool),
-                )
-                .await;
-            }
-            Err(cloudflare_ai::ThumbnailGenError::NotConfigured) => {
-                let _ = with_system_rls_bypass(
-                    sqlx::query(
-                        "UPDATE assignments SET thumbnail_status = 'pending' WHERE id = $1 AND thumbnail_status = 'processing'",
-                    )
-                    .bind(assignment_id)
-                    .execute(&pool),
-                )
-                .await;
-            }
-            Err(cloudflare_ai::ThumbnailGenError::Failed(err)) => {
-                tracing::warn!(
-                    assignment_id = %assignment_id,
-                    "FLUX assignment thumbnail generation failed cleanly: {err}"
-                );
-                let _ = with_system_rls_bypass(
-                    sqlx::query(
-                        "UPDATE assignments SET thumbnail_status = 'failed' WHERE id = $1 AND thumbnail_status = 'processing'",
-                    )
-                    .bind(assignment_id)
-                    .execute(&pool),
-                )
-                .await;
-            }
-        }
     });
 
     None
 }
 
-/// Runs once per worker cycle for already-published items that still have `thumbnail_status = 'pending'`.
-/// Uses atomic `'pending' -> 'processing'` claims so every item can invoke FLUX at most once ever.
-pub async fn backfill_published_thumbnails_batch(pool: &PgPool) {
-    // 1. Zero-token deterministic backfill for VIDEO & INFOGRAPHIC materials
+async fn propagate_all_ready_siblings_sql(pool: &PgPool) {
+    let _ = with_system_rls_bypass(
+        sqlx::query(
+            r#"
+            UPDATE learning_materials m
+            SET thumbnail_url = src.thumbnail_url,
+                thumbnail_status = 'ready'
+            FROM (
+                SELECT DISTINCT ON (tenant_id, LOWER(TRIM(title)), LOWER(TRIM(material_type)))
+                    tenant_id,
+                    LOWER(TRIM(title)) AS norm_title,
+                    LOWER(TRIM(material_type)) AS norm_type,
+                    library_book_id,
+                    thumbnail_url
+                FROM learning_materials
+                WHERE deleted_at IS NULL
+                  AND thumbnail_status = 'ready'
+                  AND thumbnail_url IS NOT NULL
+                  AND BTRIM(thumbnail_url) != ''
+                ORDER BY tenant_id, LOWER(TRIM(title)), LOWER(TRIM(material_type)), updated_at DESC
+            ) src
+            WHERE m.tenant_id = src.tenant_id
+              AND m.deleted_at IS NULL
+              AND (m.thumbnail_url IS NULL OR BTRIM(m.thumbnail_url) = '')
+              AND (
+                  (m.library_book_id IS NOT NULL AND m.library_book_id = src.library_book_id)
+                  OR (
+                      LOWER(TRIM(m.title)) = src.norm_title
+                      AND LOWER(TRIM(m.material_type)) = src.norm_type
+                  )
+              )
+            "#,
+        )
+        .execute(pool),
+    )
+    .await;
+
+    let _ = with_system_rls_bypass(
+        sqlx::query(
+            r#"
+            UPDATE assignments a
+            SET thumbnail_url = src.thumbnail_url,
+                thumbnail_status = 'ready'
+            FROM (
+                SELECT DISTINCT ON (tenant_id, LOWER(TRIM(title)))
+                    tenant_id,
+                    LOWER(TRIM(title)) AS norm_title,
+                    thumbnail_url
+                FROM assignments
+                WHERE deleted_at IS NULL
+                  AND thumbnail_status = 'ready'
+                  AND thumbnail_url IS NOT NULL
+                  AND BTRIM(thumbnail_url) != ''
+                ORDER BY tenant_id, LOWER(TRIM(title)), updated_at DESC
+            ) src
+            WHERE a.tenant_id = src.tenant_id
+              AND a.deleted_at IS NULL
+              AND (a.thumbnail_url IS NULL OR BTRIM(a.thumbnail_url) = '')
+              AND LOWER(TRIM(a.title)) = src.norm_title
+            "#,
+        )
+        .execute(pool),
+    )
+    .await;
+}
+
+/// Runs a bounded synchronous/sequential backfill pass over published materials & assignments.
+/// Deduplicates across sibling rombels before calling FLUX, and immediately propagates each
+/// generated cover to every matching rombel copy. Returns count of unique FLUX groups attempted.
+pub async fn backfill_published_thumbnails_with_limits(
+    pool: &PgPool,
+    max_materials: i64,
+    max_assignments: i64,
+) -> usize {
+    // 0. Zero-token propagation from already-ready siblings (including multi-rombel copies).
+    propagate_all_ready_siblings_sql(pool).await;
+
+    // 1. Zero-token deterministic backfill for VIDEO & INFOGRAPHIC materials.
     if let Ok(mat_rows) = with_system_rls_bypass(
         sqlx::query(
             r#"
-            SELECT id, material_type, description, source_type, library_book_id,
+            SELECT id, tenant_id, title, material_type, description, source_type, library_book_id,
                    COALESCE(
                        NULLIF(TRIM(external_url), ''),
                        CASE
@@ -753,12 +1072,13 @@ pub async fn backfill_published_thumbnails_batch(pool: &PgPool) {
               AND thumbnail_status = 'pending'
               AND (
                   LOWER(COALESCE(material_type, '')) IN ('video', 'image', 'infographic')
-                  OR LOWER(COALESCE(external_url, '')) LIKE '%youtube%'
-                  OR LOWER(COALESCE(external_url, '')) LIKE '%youtu.be%'
+                  OR LOWER(COALESCE(external_url, '')) LIKE '%youtu%'
+                  OR LOWER(COALESCE(description, '')) LIKE '%youtu%'
+                  OR COALESCE(description, '') LIKE '%![%'
                   OR LTRIM(COALESCE(description, '')) LIKE '[%'
               )
             ORDER BY updated_at DESC
-            LIMIT 40
+            LIMIT 250
             "#,
         )
         .fetch_all(pool),
@@ -767,6 +1087,8 @@ pub async fn backfill_published_thumbnails_batch(pool: &PgPool) {
     {
         for r in mat_rows {
             let id: Uuid = r.get("id");
+            let tenant_id: Uuid = r.get("tenant_id");
+            let title: String = r.get("title");
             let m_type: String = r.get("material_type");
             let desc: Option<String> = r.try_get("description").ok().flatten();
             let src_type: Option<String> = r.try_get("source_type").ok().flatten();
@@ -780,13 +1102,8 @@ pub async fn backfill_published_thumbnails_batch(pool: &PgPool) {
                 src_type.as_deref(),
                 lib_id,
             ) {
-                let _ = with_system_rls_bypass(
-                    sqlx::query(
-                        "UPDATE learning_materials SET thumbnail_url = $1, thumbnail_status = 'ready' WHERE id = $2",
-                    )
-                    .bind(&url)
-                    .bind(id)
-                    .execute(pool),
+                propagate_material_thumbnail_to_siblings(
+                    pool, tenant_id, id, lib_id, &title, &m_type, &url,
                 )
                 .await;
             }
@@ -794,58 +1111,248 @@ pub async fn backfill_published_thumbnails_batch(pool: &PgPool) {
     }
 
     if !cloudflare_ai::is_configured() {
+        return 0;
+    }
+
+    let mut processed = 0usize;
+
+    // 2. Sequential awaited FLUX generation grouped by unique (tenant, title, type) so parallel
+    // rombels (e.g. 12A and 12B) NEVER spend duplicate FLUX tokens.
+    if let Ok(mat_rows) = with_system_rls_bypass(
+        sqlx::query(
+            r#"
+            SELECT
+                m.id, m.tenant_id, m.material_type, m.title, m.description,
+                COALESCE(
+                    NULLIF(TRIM(m.external_url), ''),
+                    CASE
+                        WHEN m.storage_key LIKE '/uploads/%' OR m.storage_key LIKE 'http%' THEN m.storage_key
+                        WHEN m.storage_key LIKE 'uploads/%' THEN '/' || m.storage_key
+                        ELSE NULL
+                    END,
+                    lb.file_url
+                ) AS resolved_external_url,
+                m.source_type, m.library_book_id,
+                COALESCE(s.name, lb.subject_name, t.subject, 'Umum') AS subject_name,
+                COALESCE(c.name, 'SMA/Paket C') AS class_name,
+                lb.cover_url AS library_cover_url
+            FROM (
+                SELECT DISTINCT ON (tenant_id, LOWER(TRIM(title)), LOWER(TRIM(material_type)))
+                    id, updated_at
+                FROM learning_materials
+                WHERE deleted_at IS NULL
+                  AND is_active = true
+                  AND thumbnail_status = 'pending'
+                  AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '')
+                  AND (release_at IS NULL OR release_at <= NOW())
+                  AND (visibility IN ('published', 'active') OR (release_at IS NOT NULL AND release_at <= NOW()))
+                ORDER BY tenant_id, LOWER(TRIM(title)), LOWER(TRIM(material_type)), updated_at DESC
+            ) picked
+            JOIN learning_materials m ON m.id = picked.id
+            LEFT JOIN classes c ON c.id = m.class_id
+            LEFT JOIN subjects s ON s.id = m.subject_id
+            LEFT JOIN teachers t ON t.id = m.teacher_id
+            LEFT JOIN library_books lb ON lb.id = m.library_book_id
+            ORDER BY picked.updated_at DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(max_materials)
+        .fetch_all(pool),
+    )
+    .await
+    {
+        for r in mat_rows {
+            let id: Uuid = r.get("id");
+            let tenant_id: Uuid = r.get("tenant_id");
+            let m_type: String = r.get("material_type");
+            let title: String = r.get("title");
+            let desc: Option<String> = r.try_get("description").ok().flatten();
+            let ext_url: Option<String> = r.try_get("resolved_external_url").ok().flatten();
+            let src_type: Option<String> = r.try_get("source_type").ok().flatten();
+            let lib_id: Option<Uuid> = r.try_get("library_book_id").ok().flatten();
+            let subject_name: String = r
+                .try_get::<String, _>("subject_name")
+                .unwrap_or_else(|_| "Umum".to_string());
+            let class_name: String = r
+                .try_get::<String, _>("class_name")
+                .unwrap_or_else(|_| "SMA/Paket C".to_string());
+            let lib_cover: Option<String> = r
+                .try_get::<Option<String>, _>("library_cover_url")
+                .ok()
+                .flatten()
+                .and_then(|u| normalize_image_url(&u));
+
+            if let Some(det_url) = resolve_deterministic_material_thumbnail(
+                &m_type,
+                ext_url.as_deref(),
+                desc.as_deref(),
+                src_type.as_deref(),
+                lib_id,
+            ) {
+                propagate_material_thumbnail_to_siblings(
+                    pool, tenant_id, id, lib_id, &title, &m_type, &det_url,
+                )
+                .await;
+                processed += 1;
+                continue;
+            }
+
+            let fmt = determine_material_format(
+                &m_type,
+                ext_url.as_deref(),
+                desc.as_deref(),
+                src_type.as_deref(),
+                lib_id,
+            );
+
+            let ok = run_single_material_flux_generation(
+                pool,
+                id,
+                tenant_id,
+                lib_id,
+                m_type,
+                fmt,
+                title,
+                subject_name,
+                class_name,
+                desc,
+                lib_cover,
+            )
+            .await;
+            if ok {
+                processed += 1;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+    }
+
+    // 3. Sequential awaited FLUX generation grouped by unique assignment title (published / active / closed).
+    if let Ok(asg_rows) = with_system_rls_bypass(
+        sqlx::query(
+            r#"
+            SELECT
+                a.id, a.tenant_id, a.title, a.description, a.instructions,
+                COALESCE(sub.name, t.subject, 'Umum') AS subject_name,
+                COALESCE(c.name, 'SMA/Paket C') AS class_name
+            FROM (
+                SELECT DISTINCT ON (tenant_id, LOWER(TRIM(title)))
+                    id, updated_at
+                FROM assignments
+                WHERE deleted_at IS NULL
+                  AND is_active = true
+                  AND thumbnail_status = 'pending'
+                  AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '')
+                  AND (release_at IS NULL OR release_at <= NOW())
+                  AND (status IN ('published', 'active', 'closed') OR (release_at IS NOT NULL AND release_at <= NOW()))
+                ORDER BY tenant_id, LOWER(TRIM(title)), updated_at DESC
+            ) picked
+            JOIN assignments a ON a.id = picked.id
+            LEFT JOIN classes c ON c.id = a.class_id
+            LEFT JOIN subjects sub ON sub.id = a.subject_id
+            LEFT JOIN teachers t ON t.id = a.teacher_id
+            ORDER BY picked.updated_at DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(max_assignments)
+        .fetch_all(pool),
+    )
+    .await
+    {
+        for r in asg_rows {
+            let id: Uuid = r.get("id");
+            let tenant_id: Uuid = r.get("tenant_id");
+            let title: String = r.get("title");
+            let description: Option<String> = r.try_get("description").ok().flatten();
+            let instructions: Option<String> = r.try_get("instructions").ok().flatten();
+            let subject_name: String = r
+                .try_get::<String, _>("subject_name")
+                .unwrap_or_else(|_| "Umum".to_string());
+            let class_name: String = r
+                .try_get::<String, _>("class_name")
+                .unwrap_or_else(|_| "SMA/Paket C".to_string());
+            let context =
+                summarize_context_for_prompt(description.as_deref().or(instructions.as_deref()));
+
+            let ok = run_single_assignment_flux_generation(
+                pool,
+                id,
+                tenant_id,
+                title,
+                subject_name,
+                class_name,
+                context,
+            )
+            .await;
+            if ok {
+                processed += 1;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+    }
+
+    processed
+}
+
+/// Runs once per worker cycle for newly published / pending items without quota spikes.
+pub async fn backfill_published_thumbnails_batch(pool: &PgPool) {
+    let _ = backfill_published_thumbnails_with_limits(pool, 6, 6).await;
+}
+
+/// Drains all already-published historical materials and assignments rapidly on server boot
+/// under an advisory lock so every existing module & assignment receives a 1x cached thumbnail.
+pub async fn run_startup_thumbnail_catchup(pool: PgPool) {
+    let Ok(mut lock_conn) = pool.acquire().await else {
+        return;
+    };
+    let locked: bool = with_system_rls_bypass(
+        sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock(8842009)")
+            .fetch_one(&mut *lock_conn),
+    )
+    .await
+    .unwrap_or(false);
+    if !locked {
         return;
     }
 
-    // 2. Bounded batch (max 3 materials + max 3 assignments per tick) for already-published
-    // Artikel / Buku & PDF / Assignments so existing rows populate cleanly without quota spikes.
-    if let Ok(mat_ids) = with_system_rls_bypass(
-        sqlx::query_scalar::<_, Uuid>(
-            r#"
-            SELECT id
-            FROM learning_materials
-            WHERE deleted_at IS NULL
-              AND is_active = true
-              AND thumbnail_status = 'pending'
-              AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '')
-              AND (release_at IS NULL OR release_at <= NOW())
-              AND (visibility IN ('published', 'active') OR (release_at IS NOT NULL AND release_at <= NOW()))
-            ORDER BY updated_at DESC
-            LIMIT 3
-            "#,
+    // Recover any interrupted 'processing' or previously transient 'failed' rows with empty URLs.
+    let _ = with_system_rls_bypass(
+        sqlx::query(
+            "UPDATE learning_materials SET thumbnail_status = 'pending' WHERE deleted_at IS NULL AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '') AND thumbnail_status IN ('processing', 'failed')",
         )
-        .fetch_all(pool),
+        .execute(&pool),
     )
-    .await
-    {
-        for mid in mat_ids {
-            let _ = ensure_material_thumbnail_on_publish(pool.clone(), mid).await;
+    .await;
+    let _ = with_system_rls_bypass(
+        sqlx::query(
+            "UPDATE assignments SET thumbnail_status = 'pending' WHERE deleted_at IS NULL AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '') AND thumbnail_status IN ('processing', 'failed')",
+        )
+        .execute(&pool),
+    )
+    .await;
+
+    let mut total_done = 0usize;
+    // Hard safety cap of 120 iterations (~1000+ unique titles) per boot cycle.
+    for _ in 0..120 {
+        let progressed = backfill_published_thumbnails_with_limits(&pool, 8, 8).await;
+        total_done += progressed;
+        if progressed == 0 {
+            break;
         }
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     }
 
-    if let Ok(asg_ids) = with_system_rls_bypass(
-        sqlx::query_scalar::<_, Uuid>(
-            r#"
-            SELECT id
-            FROM assignments
-            WHERE deleted_at IS NULL
-              AND is_active = true
-              AND thumbnail_status = 'pending'
-              AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '')
-              AND (release_at IS NULL OR release_at <= NOW())
-              AND (status IN ('published', 'active', 'closed') OR (release_at IS NOT NULL AND release_at <= NOW()))
-            ORDER BY updated_at DESC
-            LIMIT 3
-            "#,
-        )
-        .fetch_all(pool),
+    let _ = with_system_rls_bypass(
+        sqlx::query("SELECT pg_advisory_unlock(8842009)").execute(&mut *lock_conn),
     )
-    .await
-    {
-        for aid in asg_ids {
-            let _ = ensure_assignment_thumbnail_on_publish(pool.clone(), aid).await;
-        }
-    }
+    .await;
+
+    tracing::info!(
+        component = "thumbnail_catchup",
+        total_done,
+        "Completed startup historical thumbnail catch-up"
+    );
 }
 
 #[cfg(test)]

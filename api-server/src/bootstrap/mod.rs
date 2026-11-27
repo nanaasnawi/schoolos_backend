@@ -550,6 +550,14 @@ impl Bootstrap {
             }
         });
 
+        // ── Historical Thumbnail Catch-Up Worker ────────────────────────────
+        // Mengisi thumbnail materi & tugas lama yang sudah terbit tepat 1x per grup judul.
+        let catchup_pool = pool.clone();
+        tokio::spawn(async move {
+            crate::infrastructure::thumbnail_resolver::run_startup_thumbnail_catchup(catchup_pool)
+                .await;
+        });
+
         // ── Outbox Cleanup Worker ───────────────────────────────────────────
         // Menghapus event outbox yang berstatus 'succeeded' lebih dari 7 hari
         // untuk mencegah table bloat pada database PostgreSQL.
