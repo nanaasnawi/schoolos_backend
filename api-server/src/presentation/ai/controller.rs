@@ -1007,26 +1007,7 @@ async fn fetch_principal_at_risk_breakdown_context(
 }
 
 fn normalize_ai_reply_typos(raw: &str) -> String {
-    raw.replace("Produkturnya", "Produktivitasnya")
-        .replace("produkturnya", "produktivitasnya")
-        .replace("Produktifitasnya", "Produktivitasnya")
-        .replace("produktifitasnya", "produktivitasnya")
-        .replace("Produktifitas", "Produktivitas")
-        .replace("produktifitas", "produktivitas")
-        .replace("Memprodukkan", "Memproduksi")
-        .replace("memprodukkan", "memproduksi")
-        .replace("Produkkan", "Produksi")
-        .replace("produkkan", "produksi")
-        .replace("Komarasi", "Kolaborasi")
-        .replace("komarasi", "kolaborasi")
-        .replace("Aktifitas", "Aktivitas")
-        .replace("aktifitas", "aktivitas")
-        .replace("Efektifitas", "Efektivitas")
-        .replace("efektifitas", "efektivitas")
-        .replace("Kwalitas", "Kualitas")
-        .replace("kwalitas", "kualitas")
-        .replace("Sistim", "Sistem")
-        .replace("sistim", "sistem")
+    nvidia_ai::normalize_ai_indonesian_typos(raw)
 }
 
 async fn prepare_tanya_ai_context(
@@ -1196,6 +1177,13 @@ async fn prepare_tanya_ai_context(
         format!("\n        - Pengguna Sesi Chat Saat Ini: {actor_user_name} (Peran: {actor_roles})")
     };
 
+    let is_english = nvidia_ai::is_english_subject(&subject);
+    let puebi_guardrail = if is_english {
+        ""
+    } else {
+        nvidia_ai::build_indonesian_puebi_and_logic_guardrail(true)
+    };
+
     let authoritative_db_directive = format!(
         "[KONTEKS OTORITATIF DATABASE REALTIME & ANTI-HALUSINASI]\n\
         - Satuan Pendidikan: {db_school_name}\n\
@@ -1203,14 +1191,13 @@ async fn prepare_tanya_ai_context(
         - ATURAN IDENTITAS PIMPINAN: Kepala Sekolah resmi {db_school_name} adalah {db_headmaster_name}. JANGAN pernah menyebut operator, staf, atau guru lain (termasuk {actor_user_name}) sebagai Kepala Sekolah apabila bukan {db_headmaster_name}!\n\
         - Tahun Ajaran Aktif Resmi di Database: T.A {db_academic_year} (Semester {sem_label})\n\
         - INSTRUKSI KETAT: Seluruh analisis, rekomendasi, dan jawaban WAJIB merujuk ke Tahun Ajaran resmi aktif di database yaitu T.A {db_academic_year} (Semester {sem_label}). DILARANG MENGGUNAKAN tahun kadaluarsa seperti 2024/2025.\n\
-        - BAHASA & FORMAT TABEL: Gunakan ejaan Bahasa Indonesia baku (PUEBI) tanpa typo (tulis 'Produktivitas', 'Aktivitas', 'Kolaborasi', 'Efektivitas', 'Produksi'; JANGAN tulis 'produkkan') dan pastikan setiap sel tabel terisi lengkap (tidak ada sel kolom yang dibiarkan kosong).\n\
-        - KEJUJURAN AKADEMIK & SITASI SUMBER: Jika ragu pada fakta spesifik, katakan terus terang jangan mengarang angka taksiran. Akhiri setiap jawaban edukatif/analitis dengan bagian singkat:\n  📚 **Sumber:** ...\n\
+        - BAHASA, KAIDAH PUEBI/EYD V & FORMAT TABEL: Gunakan ejaan Bahasa Indonesia baku sesuai EYD V / PUEBI & KBBI tanpa typo ('Produktivitas', 'Aktivitas', 'Kolaborasi', 'Efektivitas', 'Produksi', 'memengaruhi', 'mengubah', 'praktik', 'analisis', 'risiko'; JANGAN tulis 'produkkan') dan pastikan setiap sel tabel Markdown terisi lengkap serta rapi agar dapat dicetak ke PDF dengan sempurna.\n\
+        {puebi_guardrail}\n\
+        - KEJUJURAN AKADEMIK & SITASI SUMBER: Jika ragu pada fakta spesifik, katakan terus terang jangan mengarang angka taksiran atau mengarang aturan tata bahasa. Akhiri setiap jawaban edukatif/analitis dengan bagian singkat:\n  📚 **Sumber:** ...\n\
         {sources_block}\n\
         {principal_teacher_breakdown}\n\
         {principal_at_risk_breakdown}"
     );
-
-    let is_english = nvidia_ai::is_english_subject(&subject);
     let system_prompt = if is_principal {
         format!(
             "Anda adalah 'AI Analitik Kepala Sekolah' (Executive Academic & Operational Intelligence Advisor) di SchoolOS (Akselerasi Edu). \
@@ -1336,7 +1323,7 @@ async fn tanya_ai(
         })
         .collect();
 
-    let raw_reply = match nvidia_ai::call_nvidia_nim(msg_refs, 0.7, 1500).await {
+    let raw_reply = match nvidia_ai::call_nvidia_nim(msg_refs, 0.35, 2200).await {
         Ok(r) => r,
         Err(err) => {
             tracing::warn!("NVIDIA NIM call failed for tanya-ai: {err:?}");
@@ -1396,7 +1383,7 @@ async fn tanya_ai_stream(
             sent_any
         });
 
-        let stream_result = nvidia_ai::stream_nvidia_nim(prepared.messages, 0.7, 1500, delta_tx).await;
+        let stream_result = nvidia_ai::stream_nvidia_nim(prepared.messages, 0.35, 2200, delta_tx).await;
         let sent_any = forward_task.await.unwrap_or(false);
 
         let used_model = match stream_result {

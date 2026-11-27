@@ -406,6 +406,55 @@ pub fn is_english_subject(subject: &str) -> bool {
     lower.contains("inggris") || lower.contains("english")
 }
 
+/// Normalisasi kata tidak baku / halusinasi ejaan khas LLM tanpa merusak kontras contoh soal PUEBI.
+pub fn normalize_ai_indonesian_typos(raw: &str) -> String {
+    raw.replace("Produkturnya", "Produktivitasnya")
+        .replace("produkturnya", "produktivitasnya")
+        .replace("Produktifitasnya", "Produktivitasnya")
+        .replace("produktifitasnya", "produktivitasnya")
+        .replace("Produktifitas", "Produktivitas")
+        .replace("produktifitas", "produktivitas")
+        .replace("Memprodukkan", "Memproduksi")
+        .replace("memprodukkan", "memproduksi")
+        .replace("Produkkan", "Produksi")
+        .replace("produkkan", "produksi")
+        .replace("Komarasi", "Kolaborasi")
+        .replace("komarasi", "kolaborasi")
+        .replace("Mengklafisikasikan", "Mengklasifikasikan")
+        .replace("mengklafisikasikan", "mengklasifikasikan")
+        .replace("Efektifitas", "Efektivitas")
+        .replace("efektifitas", "efektivitas")
+        .replace("Kwalitas", "Kualitas")
+        .replace("kwalitas", "kualitas")
+        .replace("Sistim", "Sistem")
+        .replace("sistim", "sistem")
+}
+
+/// Guardrail ketat kaidah PUEBI / EYD Edisi V & anti-halusinasi logika untuk AI Bahasa Indonesia / soal.
+pub fn build_indonesian_puebi_and_logic_guardrail(for_assessment: bool) -> &'static str {
+    if for_assessment {
+        r#"### GUARDRAIL KETAT KAIDAH PUEBI / EYD V & ANTI-HALUSINASI LOGIKA SOAL:
+1. PEMBUKTIAN LOGIKA INTERNAL (WAJIB SEBELUM MENENTUKAN KUNCI):
+   - Selesaikan perhitungan matematis, analisis ilmiah, atau penelaahan kaidah PUEBI secara langkah demi langkah dan tuliskan buktinya dengan jelas di field "explanation".
+   - Cocokkan "correct_key" / "is_correct" / "accepted_answers" agar 100% KONSISTEN dengan hasil pembuktian di "explanation".
+   - DILARANG membuat premis soal yang saling berkontradiksi, angka yang menghasilkan jawaban tidak ada di opsi A-D, atau opsi kembar/sinonim yang sama-sama benar.
+   - Untuk PG (MULTIPLE_CHOICE): WAJIB TEPAT 1 opsi benar dan 3 pengecoh (distraktor) masuk akal namun terbukti salah secara faktual/kaidah.
+2. KAIDAH BAKU PUEBI / EYD EDISI V & KBBI (DILARANG KERAS MENGARANG ATURAN TATA BAHASA!):
+   - Kata depan "di", "ke", "dari" penunjuk tempat/arah/asal WAJIB ditulis terpisah ("di sekolah", "ke pasar", "dari rumah"); awalan/imbuhan pasif "di-" dan "ke-" WAJIB serangkai ("ditulis", "dibaca", "kelima", "kehendak").
+   - Partikel "-lah", "-kah", "-tah" ditulis serangkai; partikel "pun" ditulis TERPISAH ("apa pun", "siapa pun", "satu pun"), KECUALI 12 kata penghubung padu ("adapun, andaipun, ataupun, bagaimanapun, biarpun, kalaupun, kendatipun, maupun, meskipun, sekalipun [bermakna walaupun], sungguhpun, walaupun").
+   - Gabungan kata hanya mendapat awalan ATAU akhiran saja ditulis TERPISAH ("bertanggung jawab", "bertepuk tangan", "garis bawahi", "sebar luaskan"); ditulis SERANGKAI hanya jika mendapat awalan DAN akhiran sekaligus ("dipertanggungjawabkan", "menggarisbawahi", "menyebarluaskan").
+   - Peluluhan K-T-S-P ("meN-" + kata dasar k/t/s/p + vokal) WAJIB luluh ("memengaruhi", "memesona", "menafsirkan", "mengonsumsi", "menerjemahkan", "menyukseskan"), KECUALI gugus konsonan ("mengkritik", "memproduksi", "memproses").
+   - Huruf kapital dipakai untuk nama diri/geografi/bulan/hari/jabatan diikuti nama/sapaan ("Bapak, Ibu, Saudara, Anda"); nama jenis seperti "gula jawa", "pisang ambon", "kacang bogor" tetap huruf kecil.
+   - Tanda baca: koma wajib sebelum konjungsi pertentangan intrakalimat ("melainkan", "sedangkan", "tetapi"), di belakang penghubung antarkalimat ("Oleh karena itu,", "Namun,"), serta sebelum "dan/atau" pada rincian >= 3 unsur; DILARANG koma sebelum "bahwa/agar/supaya/karena" jika anak kalimat setelah induk; DILARANG titik dua (":") tepat setelah kata kerja transitif/kopula ("adalah:", "meliputi:") di kalimat formal.
+   - Kosakata baku KBBI: gunakan "aktivitas", "analisis", "apotek", "atlet", "diagnosis", "efektivitas", "hakikat", "hipotesis", "izin", "jadwal", "karier", "kualitas", "konkret", "kreativitas", "metode", "nasihat", "objek", "praktik", "produksi", "produktivitas", "risiko", "sekadar", "sistem", "subjek", "teknik", "mengubah", "memengaruhi".
+   - Khusus soal tata bahasa/PUEBI: JANGAN pernah membuat soal ambigu dengan 2 jawaban benar atau mengklaim kaidah PUEBI palsu!"#
+    } else {
+        r#"### GUARDRAIL KAIDAH PUEBI / EYD EDISI V & KBBI BAKU:
+- Patuhi 100% pedoman EYD Edisi V & KBBI (jangan pernah mengarang aturan tata bahasa): bedakan kata depan "di/ke/dari" (terpisah: "di rumah") vs imbuhan "di-/ke-" (serangkai: "ditulis"); pisahkan partikel "pun" kecuali 12 kata hubung padu; terapkan peluluhan K-T-S-P ("memengaruhi", "memesona", "menerjemahkan", "mengonsumsi", bukan "mempengaruhi/mempesona"); gunakan kosakata baku ("aktivitas", "analisis", "efektivitas", "produktivitas", "produksi", "praktik", "risiko", "sistem", "kualitas", "teknik", "objek", "metode", "izin", "nasihat", "jadwal", "sekadar", "mengubah").
+- Jangan menulis typo AI seperti "produkkan", "komarasi", "efektifitas", "produktifitas", atau "mengklafisikasikan"."#
+    }
+}
+
 pub fn build_subject_pedagogical_instructions(subject: &str, grade: &str) -> String {
     if is_english_subject(subject) {
         return format!(
@@ -457,9 +506,11 @@ pub fn build_subject_pedagogical_instructions(subject: &str, grade: &str) -> Str
         )
     } else if lower_subject.contains("indonesia") {
         format!(
-            r#"### ATURAN WAJIB MAPEL (BAHASA INDONESIA):
-- Fokus pada keterampilan literasi berbahasa: pemahaman teks, kaidah kebahasaan (PUEBI/EYD), struktur jenis teks, majas, dan kosakata baku sesuai jenjang {grade}.
-- Soal kuis & tugas harus menguji kemampuan analisis teks, ide pokok, kalimat efektif, dan penalaran kritis."#
+            r#"### ATURAN WAJIB MAPEL (BAHASA INDONESIA — PATUH KETAT EYD V / PUEBI & KBBI):
+- Fokus pada keterampilan literasi berbahasa: pemahaman teks, kaidah kebahasaan (EYD Edisi V / PUEBI & KBBI VI), struktur jenis teks, kalimat efektif, majas, dan kosakata baku sesuai jenjang {grade}.
+- DILARANG KERAS mengarang aturan tata bahasa PUEBI/EYD palsu! Pastikan kaidah kata depan vs awalan ("di sekolah" vs "ditulis"), partikel ("apa pun" vs "walaupun"), peluluhan K-T-S-P ("memengaruhi", "memesona"), tanda baca koma/titik dua/petik, serta huruf kapital/miring sesuai EYD V resmi.
+- Untuk soal PUEBI/ejaan/kata baku, HANYA boleh ada 1 opsi yang benar secara mutlak, dan bagian "explanation" wajib mengutip kaidah EYD V/KBBI yang akurat.
+- Soal kuis & tugas harus menguji kemampuan analisis teks, ide pokok, kalimat efektif, penyuntingan ejaan baku, dan penalaran kritis."#
         )
     } else if lower_subject.contains("agama")
         || lower_subject.contains("pai")
@@ -1091,11 +1142,14 @@ Every field — title, description, and the entire markdown_article — MUST be 
 Make sure the writing is thorough, clear, well-escaped valid JSON with properly closed quotes and braces. Output ONLY JSON with no other text."#
         )
     } else {
+        let puebi_guard = build_indonesian_puebi_and_logic_guardrail(false);
         format!(
             r#"Anda adalah guru ahli Kurikulum Merdeka di Indonesia.
 Tuliskan naskah ARTIKEL PEMBELAJARAN lengkap untuk jenjang {grade_level} mata pelajaran {subject_name} dengan topik: "{topic}".
 
 {subject_guideline}
+
+{puebi_guard}
 
 Format output HARUS berupa JSON murni dengan HANYA 3 key ini saja: "title", "description", dan "markdown_article" (DILARANG menambahkan key JSON tambahan seperti "glossary", "soal_essay", "soal_pilihan_ganda", atau "questions" di luar maupun di dalam "markdown_article"; masukkan glosarium langsung sebagai teks Markdown di dalam markdown_article). Jika membuat tabel perbandingan Markdown, tuliskan SETIAP baris tabel di baris baru yang dipisah \n (bukan digabung dalam satu baris).
 {{
@@ -1863,11 +1917,14 @@ STRICT REQUIREMENTS:
 - Output ONLY pure JSON with escaped newlines (\n) inside strings."#
         )
     } else {
+        let puebi_logic_guard = build_indonesian_puebi_and_logic_guardrail(true);
         format!(
-            r#"Anda adalah pengembang asesmen resmi Kurikulum Merdeka Indonesia.
+            r#"Anda adalah pengembang asesmen resmi Kurikulum Merdeka Indonesia yang patuh penuh pada kaidah PUEBI / EYD V & KBBI.
 Buatkan paket penugasan siswa terstruktur untuk mata pelajaran: "{subject_name}", topik: "{topic}", jenjang: "{grade_level}", tingkat kesulitan: "{difficulty}" (Batch ID: {now_ts}).
 
 {subject_guideline}
+
+{puebi_logic_guard}
 
 ATURAN WAJIB MATA UANG INDONESIA (RUPIAH):
 - Jika soal melibatkan uang, harga, biaya, modal, untung/rugi, atau anggaran, WAJIB menggunakan Rupiah ("Rp " atau "Rupiah", contoh: "Rp 10.000", "Rp 50.000", "Rp 100.000", "Rp 150.000", "Rp 1.000.000").
@@ -1899,7 +1956,7 @@ Format output HARUS berupa JSON murni dengan skema:
         {{ "choice_text": "Pilihan C", "is_correct": false }},
         {{ "choice_text": "Pilihan D", "is_correct": false }}
       ],
-      "explanation": "Pembahasan kunci jawaban..."
+      "explanation": "Pembuktian langkah hitung / analisis kaidah EYD V kunci jawaban..."
     }},
     {{
       "id": "q2",
@@ -1913,7 +1970,7 @@ Format output HARUS berupa JSON murni dengan skema:
 }}
 
 PENTING & WAJIB:
-- Pastikan teks soal dan pilihan jawaban SESUAI ATURAN MAPEL ({subject_name}).
+- Pastikan teks soal, pembuktian di explanation, dan pilihan jawaban 100% konsisten secara logika dan sesuai kaidah PUEBI / EYD V serta aturan mapel ({subject_name}).
 - 'question_text' HANYA BERISI TEKS PERTANYAAN UTAMA / STIMULUS SOAL. DILARANG KERAS MENYISIPKAN OPSI PILIHAN JAWABAN (A, B, C, D) KE DALAM 'question_text'. Seluruh opsi pilihan HANYA boleh ada di dalam array 'choices'!
 - Nilai 'choice_text' di dalam 'choices' HANYA berisi kalimat jawaban tanpa menyertakan label prefix 'A.', 'B.', 'C.', atau 'D.'.
 - Array 'questions' HARUS berisi TEPAT {total_questions} butir soal sesuai instruksi komposisi di atas. Jangan berhenti menulis sebelum mencapai {total_questions} butir!
@@ -1926,7 +1983,7 @@ PENTING & WAJIB:
     let system_prompt = if is_english {
         "You are an expert English curriculum assessor creating 100% English student assignments and interactive learning games in strict JSON with zero Indonesian."
     } else {
-        "You are an educational assessor creating student assignments strictly adhering to Indonesian Kurikulum Merdeka in strict JSON."
+        "You are an expert educational assessor creating logically verified Indonesian Kurikulum Merdeka student assignments strictly compliant with PUEBI / EYD V and KBBI grammar rules in valid JSON."
     };
 
     let messages = vec![
@@ -1940,7 +1997,7 @@ PENTING & WAJIB:
         },
     ];
 
-    let raw = match call_nvidia_nim(messages, 0.65, 3800).await {
+    let raw = match call_nvidia_nim(messages, 0.25, 4200).await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("call_nvidia_nim failed for assignment: {e}. Utilizing pedagogical fallback.");
@@ -2098,7 +2155,9 @@ PENTING & WAJIB:
                     .get("correct_key")
                     .and_then(|k| k.as_str())
                     .unwrap_or("A");
-                for (k, v) in map {
+                let mut entries: Vec<(&String, &serde_json::Value)> = map.iter().collect();
+                entries.sort_by_key(|(k, _)| k.trim().to_uppercase());
+                for (k, v) in entries {
                     let raw_v = json_value_to_string(v);
                     let c_text = clean_choice_text(&raw_v);
                     let is_correct = k.trim().eq_ignore_ascii_case(correct_key.trim());
@@ -3704,18 +3763,22 @@ Output MUST be pure JSON matching this schema:
 Output ONLY pure JSON with no extra text."#
         )
     } else {
+        let puebi_logic_guard = build_indonesian_puebi_and_logic_guardrail(true);
         format!(
-            r#"Anda adalah tim pembuat bank soal ujian CBT resmi sekolah (Kurikulum Merdeka).
-Buatkan TEPAT {total_questions} butir soal yang BERBEDA, DINAMIS, dan BERVARIASI untuk jenjang {grade_level} mata pelajaran {subject_name} dengan topik: "{topic}" tingkat kesulitan: {difficulty} (ID Batch: {now_ts}).
+            r#"Anda adalah tim pembuat bank soal ujian CBT resmi sekolah (Kurikulum Merdeka) yang taat mutlak terhadap logika ilmiah serta kaidah PUEBI / EYD Edisi V & KBBI.
+Buatkan TEPAT {total_questions} butir soal yang BERBEDA, SAHIH SECARA LOGIKA, DINAMIS, dan BERVARIASI untuk jenjang {grade_level} mata pelajaran {subject_name} dengan topik: "{topic}" tingkat kesulitan: {difficulty} (ID Batch: {now_ts}).
 
 {subject_guideline}
+
+{puebi_logic_guard}
 
 {composition_instruction}
 {visual_instructions}
 
 PENTING & WAJIB:
 - Array 'questions' HARUS BERISI TEPAT {total_questions} BUTIR SOAL LENGKAP.
-- Setiap soal harus unik, kontekstual, dan menguji aspek pemahaman yang mendalam dari materi {topic}.
+- Setiap soal harus unik, kontekstual, non-ambigu, dan menguji pemahaman mendalam dari materi {topic}.
+- Lakukan verifikasi jawaban terlebih dahulu dan tuliskan pembuktian lengkapnya di 'explanation' agar 'correct_key' / 'is_correct' 100% cocok dengan pembahasan.
 - Kunci jawaban PG (correct_key) harus didistribusikan secara acak dan seimbang antara 'A', 'B', 'C', dan 'D'.
 
 Format output HARUS berupa JSON murni dengan skema:
@@ -3734,7 +3797,7 @@ Format output HARUS berupa JSON murni dengan skema:
         "D": "Pilihan D"
       }},
       "correct_key": "B",
-      "explanation": "Pembahasan lengkap kenapa B benar...",
+      "explanation": "Pembuktian langkah logis / kaidah EYD V lengkap mengapa B benar dan A/C/D salah...",
       "bloom_level": "C3",
       "points": 10
     }},
@@ -3749,7 +3812,7 @@ Format output HARUS berupa JSON murni dengan skema:
         "D": "Pilihan D"
       }},
       "correct_key": "C",
-      "explanation": "Pedoman jawaban dan rubrik penskoran...",
+      "explanation": "Pedoman jawaban, analisis logis, dan rubrik penskoran...",
       "bloom_level": "C4",
       "points": {sample_second_pts}
     }}
@@ -3761,9 +3824,9 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
     };
 
     let system_prompt = if is_english {
-        "You are a professional English CBT exam author producing 100% English question banks in strict valid JSON with zero Indonesian."
+        "You are a professional English CBT exam author producing 100% English question banks in strict valid JSON with zero Indonesian and logically verified single-correct answer keys."
     } else {
-        "You are a professional CBT exam author producing valid JSON question banks strictly respecting the subject matter rules and producing the exact requested count of distinct questions."
+        "You are a professional Indonesian CBT exam author producing logically verified JSON question banks strictly adhering to PUEBI / EYD V and KBBI grammar rules, with complete step-by-step explanations matching every answer key."
     };
 
     let messages = vec![
@@ -3777,7 +3840,7 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
         },
     ];
 
-    let raw = match call_nvidia_nim(messages, 0.65, 4500).await {
+    let raw = match call_nvidia_nim(messages, 0.25, 4800).await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("call_nvidia_nim failed for CBT quiz: {e}. Utilizing pedagogical fallback.");
@@ -3881,14 +3944,18 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
 
         if let Some(opts) = raw_choices_val {
             if let Some(map) = opts.as_object() {
-                for (key, val) in map {
+                let mut entries: Vec<(&String, &serde_json::Value)> = map.iter().collect();
+                entries.sort_by_key(|(k, _)| k.trim().to_uppercase());
+                for (key, val) in entries {
                     let k_upper = key.trim().to_uppercase();
                     let is_correct = k_upper == correct_key;
                     let clean_val = clean_choice_text(&json_value_to_string(val));
-                    choices.push(CbtQuestionChoiceDto {
-                        choice_text: clean_val,
-                        is_correct,
-                    });
+                    if !clean_val.trim().is_empty() {
+                        choices.push(CbtQuestionChoiceDto {
+                            choice_text: clean_val,
+                            is_correct,
+                        });
+                    }
                 }
             } else if let Some(arr) = opts.as_array() {
                 for (c_idx, c_item) in arr.iter().enumerate() {
@@ -3896,6 +3963,7 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
                     let c_text_raw = if let Some(obj) = c_item.as_object() {
                         obj.get("choice_text")
                             .or_else(|| obj.get("text"))
+                            .or_else(|| obj.get("statement"))
                             .map(json_value_to_string)
                             .unwrap_or_else(|| json_value_to_string(c_item))
                     } else {
@@ -3903,15 +3971,19 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
                     };
                     let is_correct = if let Some(obj) = c_item.as_object() {
                         obj.get("is_correct")
+                            .or_else(|| obj.get("isCorrect"))
                             .and_then(|b| b.as_bool())
                             .unwrap_or(letter == correct_key)
                     } else {
                         letter == correct_key
                     };
-                    choices.push(CbtQuestionChoiceDto {
-                        choice_text: clean_choice_text(&c_text_raw),
-                        is_correct,
-                    });
+                    let clean_val = clean_choice_text(&c_text_raw);
+                    if !clean_val.trim().is_empty() {
+                        choices.push(CbtQuestionChoiceDto {
+                            choice_text: clean_val,
+                            is_correct,
+                        });
+                    }
                 }
             }
         }
@@ -4146,16 +4218,55 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
             }
         }
 
-        // Ensure single-choice PG has a key if choices exist; preserve multi-key for TRUE_FALSE_MATRIX / MULTIPLE_SELECT
-        if resolved_qtype == "MULTIPLE_CHOICE" && !choices.is_empty() && !choices.iter().any(|c| c.is_correct) {
-            let target_idx = match correct_key.as_str() {
-                "B" if choices.len() > 1 => 1,
-                "C" if choices.len() > 2 => 2,
-                "D" if choices.len() > 3 => 3,
-                _ => 0,
+        // Enforce choice uniqueness, strictly 1 correct answer for PG, and >= 2 for PG Kompleks
+        if resolved_qtype == "MULTIPLE_CHOICE" || resolved_qtype == "MULTIPLE_SELECT" {
+            let mut deduped: Vec<CbtQuestionChoiceDto> = Vec::with_capacity(choices.len());
+            let mut seen_texts = std::collections::HashSet::new();
+            for c in choices {
+                let norm = c.choice_text.trim().to_lowercase();
+                if norm.is_empty() || !seen_texts.insert(norm) {
+                    continue;
+                }
+                deduped.push(c);
+            }
+            choices = deduped;
+        }
+
+        if resolved_qtype == "MULTIPLE_CHOICE" {
+            if choices.len() < 2 {
+                continue;
+            }
+            let true_count = choices.iter().filter(|c| c.is_correct).count();
+            let winner_idx = if true_count == 1 {
+                choices.iter().position(|c| c.is_correct).unwrap_or(0)
+            } else {
+                let key_idx = match correct_key.as_str() {
+                    "B" if choices.len() > 1 => Some(1),
+                    "C" if choices.len() > 2 => Some(2),
+                    "D" if choices.len() > 3 => Some(3),
+                    "E" if choices.len() > 4 => Some(4),
+                    "A" => Some(0),
+                    _ => None,
+                };
+                key_idx
+                    .or_else(|| choices.iter().position(|c| c.is_correct))
+                    .unwrap_or(0)
             };
-            if let Some(c) = choices.get_mut(target_idx) {
-                c.is_correct = true;
+            for (c_idx, c) in choices.iter_mut().enumerate() {
+                c.is_correct = c_idx == winner_idx;
+            }
+            correct_key = ((b'A' + (winner_idx as u8).min(25)) as char).to_string();
+        } else if resolved_qtype == "MULTIPLE_SELECT" {
+            let true_count = choices.iter().filter(|c| c.is_correct).count();
+            if true_count == 1 && choices.len() >= 2 {
+                resolved_qtype = "MULTIPLE_CHOICE";
+            } else if true_count == choices.len() && choices.len() >= 3 {
+                if let Some(last) = choices.last_mut() {
+                    last.is_correct = false;
+                }
+            } else if true_count == 0 && choices.len() >= 3 {
+                choices[0].is_correct = true;
+                choices[1].is_correct = true;
             }
         } else if resolved_qtype == "ESSAY" {
             choices.clear();
