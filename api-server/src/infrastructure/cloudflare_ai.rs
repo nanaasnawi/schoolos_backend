@@ -436,8 +436,42 @@ fn build_module_thumbnail_prompt(
     )
 }
 
-/// Generates a landscape 3:2 thumbnail image ONCE when an Artikel, Buku & PDF, or Assignment is published
-/// via Cloudflare Workers AI (`@cf/black-forest-labs/flux-1-schnell`) and persists it in `/uploads/`.
+fn build_safe_fallback_module_prompt(kind: &str, subject_name: &str, grade_level: &str) -> String {
+    let subj_lower = subject_name.to_lowercase();
+    let visual_theme = if kind.eq_ignore_ascii_case("INFOGRAPHIC") {
+        "Minimalist colorful 3D isometric educational visual cards and geometric icons on a warm light tabletop"
+    } else if subj_lower.contains("sejarah")
+        || subj_lower.contains("ips")
+        || subj_lower.contains("geografi")
+        || subj_lower.contains("sosiologi")
+        || subj_lower.contains("pancasila")
+        || subj_lower.contains("ppkn")
+        || subj_lower.contains("ekonomi")
+    {
+        "Warm studio still-life photograph of a vintage brass globe, classic hardcover notebook, fountain pen, and warm wooden library desk in soft natural morning light"
+    } else if subj_lower.contains("agama") || subj_lower.contains("pai") || subj_lower.contains("akhlak") {
+        "Serene warm natural still-life photograph of an open classic leather-bound book beside a brass lantern and olive branch on clean stone table in soft sunlight"
+    } else if subj_lower.contains("matematika")
+        || subj_lower.contains("fisika")
+        || subj_lower.contains("kimia")
+        || subj_lower.contains("biologi")
+        || subj_lower.contains("ipa")
+        || subj_lower.contains("informatika")
+    {
+        "Clean studio-lit minimalist 3D scientific apparatus, glass flasks, geometric wooden blocks, and crisp grid paper on bright light desk"
+    } else {
+        "Modern cozy study desk photography with stacked clean hardcover notebooks, compass, and soft daylight foliage shadow"
+    };
+
+    format!(
+        "{visual_theme} representing high school subject {subject_name} ({grade_level}).\n\
+        Landscape 3:2 editorial cover composition, peaceful academic atmosphere.\n\
+        Strict constraints: strictly no text, no words, no letters, no numbers, no people, no faces, no watermarks."
+    )
+}
+
+/// Generates a landscape 3:2 thumbnail image ONCE when an Artikel, Buku & PDF, Infografis, or Assignment is published
+/// via Cloudflare Workers AI (`@cf/black-forest-labs/flux-1-schnell`) and persists it in `/uploads/` and `uploaded_files`.
 pub async fn generate_module_thumbnail_image(
     pool: &PgPool,
     kind: &str,
@@ -454,16 +488,32 @@ pub async fn generate_module_thumbnail_image(
     let (mime, bytes) = match first_attempt {
         Ok(res) => res,
         Err(FluxCallError::Transient(_)) => {
-            // Brief backoff on rate-limit (429) or transient 5xx before conceding.
+            // Brief backoff on rate-limit (429) or transient 5xx before conceding batch slot.
             tokio::time::sleep(Duration::from_secs(6)).await;
-            call_cloudflare_flux_once(client, &cfg, &prompt)
+            match call_cloudflare_flux_once(client, &cfg, &prompt).await {
+                Ok(res) => res,
+                Err(FluxCallError::Transient(msg)) => return Err(ThumbnailGenError::Transient(msg)),
+                Err(FluxCallError::Permanent(_)) => {
+                    let safe_prompt = build_safe_fallback_module_prompt(kind, subject_name, grade_level);
+                    call_cloudflare_flux_once(client, &cfg, &safe_prompt)
+                        .await
+                        .map_err(|e| match e {
+                            FluxCallError::Transient(msg) => ThumbnailGenError::Transient(msg),
+                            FluxCallError::Permanent(msg) => ThumbnailGenError::Failed(msg),
+                        })?
+                }
+            }
+        }
+        Err(FluxCallError::Permanent(_)) => {
+            // Retry with a sanitized academic prompt when a topic keyword trips Cloudflare's content filter.
+            let safe_prompt = build_safe_fallback_module_prompt(kind, subject_name, grade_level);
+            call_cloudflare_flux_once(client, &cfg, &safe_prompt)
                 .await
                 .map_err(|e| match e {
                     FluxCallError::Transient(msg) => ThumbnailGenError::Transient(msg),
                     FluxCallError::Permanent(msg) => ThumbnailGenError::Failed(msg),
                 })?
         }
-        Err(FluxCallError::Permanent(msg)) => return Err(ThumbnailGenError::Failed(msg)),
     };
 
     tracing::info!(kind = %kind, model = %cfg.model, "Generated 1x publish thumbnail via Cloudflare FLUX");

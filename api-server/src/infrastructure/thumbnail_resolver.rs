@@ -1095,6 +1095,101 @@ async fn propagate_all_ready_siblings_sql(pool: &PgPool) {
     .await;
 }
 
+async fn heal_broken_and_stale_thumbnail_states(pool: &PgPool, processing_max_age_mins: i32) {
+    // 1. Reset orphaned `/uploads/...` thumbnail URLs that no longer exist on disk or in `uploaded_files`.
+    for table in ["learning_materials", "assignments"] {
+        let query = format!(
+            r#"
+            SELECT id, thumbnail_url
+            FROM {table}
+            WHERE deleted_at IS NULL
+              AND thumbnail_url IS NOT NULL
+              AND BTRIM(thumbnail_url) != ''
+              AND thumbnail_url LIKE '/uploads/%'
+              AND NOT EXISTS (
+                  SELECT 1 FROM uploaded_files uf
+                  WHERE uf.filename = regexp_replace(thumbnail_url, '^/uploads/', '')
+              )
+            LIMIT 500
+            "#
+        );
+        if let Ok(rows) = with_system_rls_bypass(sqlx::query(&query).fetch_all(pool)).await {
+            for r in rows {
+                let id: Uuid = r.get("id");
+                let raw_url: String = r.get("thumbnail_url");
+                let clean_name = std::path::Path::new(&raw_url)
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or("");
+                let disk_exists = !clean_name.is_empty()
+                    && std::path::PathBuf::from("uploads").join(clean_name).is_file();
+                if !disk_exists {
+                    let reset_sql = format!(
+                        "UPDATE {table} SET thumbnail_url = NULL, thumbnail_status = 'pending' WHERE id = $1"
+                    );
+                    let _ = with_system_rls_bypass(
+                        sqlx::query(&reset_sql).bind(id).execute(pool),
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
+    // 2. Clear empty-URL rows stuck in `'ready'`, `'processing'`, or unknown states.
+    if processing_max_age_mins <= 0 {
+        let _ = with_system_rls_bypass(
+            sqlx::query(
+                "UPDATE learning_materials SET thumbnail_status = 'pending' WHERE deleted_at IS NULL AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '') AND thumbnail_status != 'pending'",
+            )
+            .execute(pool),
+        )
+        .await;
+        let _ = with_system_rls_bypass(
+            sqlx::query(
+                "UPDATE assignments SET thumbnail_status = 'pending' WHERE deleted_at IS NULL AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '') AND thumbnail_status != 'pending'",
+            )
+            .execute(pool),
+        )
+        .await;
+    } else {
+        let _ = with_system_rls_bypass(
+            sqlx::query(
+                r#"
+                UPDATE learning_materials
+                SET thumbnail_status = 'pending'
+                WHERE deleted_at IS NULL
+                  AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '')
+                  AND (
+                      thumbnail_status = 'ready'
+                      OR (thumbnail_status = 'processing' AND updated_at < NOW() - ($1::int * INTERVAL '1 minute'))
+                  )
+                "#,
+            )
+            .bind(processing_max_age_mins)
+            .execute(pool),
+        )
+        .await;
+        let _ = with_system_rls_bypass(
+            sqlx::query(
+                r#"
+                UPDATE assignments
+                SET thumbnail_status = 'pending'
+                WHERE deleted_at IS NULL
+                  AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '')
+                  AND (
+                      thumbnail_status = 'ready'
+                      OR (thumbnail_status = 'processing' AND updated_at < NOW() - ($1::int * INTERVAL '1 minute'))
+                  )
+                "#,
+            )
+            .bind(processing_max_age_mins)
+            .execute(pool),
+        )
+        .await;
+    }
+}
+
 async fn backfill_published_thumbnails_with_limits_inner(
     pool: &PgPool,
     max_materials: i64,
@@ -1199,7 +1294,10 @@ async fn backfill_published_thumbnails_with_limits_inner(
                   AND thumbnail_status = 'pending'
                   AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '')
                   AND (release_at IS NULL OR release_at <= NOW())
-                  AND LOWER(COALESCE(visibility, 'published')) NOT IN ('draft', 'scheduled', 'archived')
+                  AND (
+                      LOWER(COALESCE(visibility, 'published')) NOT IN ('draft', 'scheduled', 'archived')
+                      OR (release_at IS NOT NULL AND release_at <= NOW() AND LOWER(COALESCE(visibility, '')) != 'archived')
+                  )
                 ORDER BY tenant_id, LOWER(TRIM(title)), LOWER(TRIM(material_type)), updated_at DESC
             ) picked
             JOIN learning_materials m ON m.id = picked.id
@@ -1306,7 +1404,10 @@ async fn backfill_published_thumbnails_with_limits_inner(
                       AND thumbnail_status = 'pending'
                       AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '')
                       AND (release_at IS NULL OR release_at <= NOW())
-                      AND LOWER(COALESCE(status, 'published')) NOT IN ('draft', 'scheduled', 'archived')
+                      AND (
+                          LOWER(COALESCE(status, 'published')) NOT IN ('draft', 'scheduled', 'archived')
+                          OR (release_at IS NOT NULL AND release_at <= NOW() AND LOWER(COALESCE(status, '')) != 'archived')
+                      )
                     ORDER BY tenant_id, LOWER(TRIM(title)), updated_at DESC
                 ) picked
                 JOIN assignments a ON a.id = picked.id
@@ -1387,7 +1488,10 @@ async fn count_remaining_pending_thumbnails(pool: &PgPool) -> i64 {
               AND thumbnail_status = 'pending'
               AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '')
               AND (release_at IS NULL OR release_at <= NOW())
-              AND LOWER(COALESCE(visibility, 'published')) NOT IN ('draft', 'scheduled', 'archived')
+              AND (
+                  LOWER(COALESCE(visibility, 'published')) NOT IN ('draft', 'scheduled', 'archived')
+                  OR (release_at IS NOT NULL AND release_at <= NOW() AND LOWER(COALESCE(visibility, '')) != 'archived')
+              )
             "#,
         )
         .fetch_one(pool),
@@ -1405,7 +1509,10 @@ async fn count_remaining_pending_thumbnails(pool: &PgPool) -> i64 {
               AND thumbnail_status = 'pending'
               AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '')
               AND (release_at IS NULL OR release_at <= NOW())
-              AND LOWER(COALESCE(status, 'published')) NOT IN ('draft', 'scheduled', 'archived')
+              AND (
+                  LOWER(COALESCE(status, 'published')) NOT IN ('draft', 'scheduled', 'archived')
+                  OR (release_at IS NOT NULL AND release_at <= NOW() AND LOWER(COALESCE(status, '')) != 'archived')
+              )
             "#,
         )
         .fetch_one(pool),
@@ -1417,52 +1524,52 @@ async fn count_remaining_pending_thumbnails(pool: &PgPool) -> i64 {
 }
 
 /// Runs once per worker cycle for newly published / pending items without quota spikes.
-/// Also gently re-queues up to 2 stale `'failed'` items per table when pending queue is empty.
+/// Self-heals dead `/uploads/...` URLs, stale `'processing'` rows, and up to 4 `'failed'` rows per cycle.
 pub async fn backfill_published_thumbnails_batch(pool: &PgPool) {
-    let (progressed, _) = backfill_published_thumbnails_with_limits_inner(pool, 6, 6).await;
-    if progressed == 0 && cloudflare_ai::is_configured() {
-        let remaining = count_remaining_pending_thumbnails(pool).await;
-        if remaining == 0 {
-            let _ = with_system_rls_bypass(
-                sqlx::query(
-                    r#"
-                    UPDATE learning_materials
-                    SET thumbnail_status = 'pending'
-                    WHERE id IN (
-                        SELECT id FROM learning_materials
-                        WHERE deleted_at IS NULL
-                          AND is_active = true
-                          AND thumbnail_status = 'failed'
-                          AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '')
-                          AND updated_at < NOW() - INTERVAL '10 minutes'
-                        LIMIT 2
-                    )
-                    "#,
+    heal_broken_and_stale_thumbnail_states(pool, 5).await;
+
+    if cloudflare_ai::is_configured() {
+        let _ = with_system_rls_bypass(
+            sqlx::query(
+                r#"
+                UPDATE learning_materials
+                SET thumbnail_status = 'pending'
+                WHERE id IN (
+                    SELECT id FROM learning_materials
+                    WHERE deleted_at IS NULL
+                      AND is_active = true
+                      AND thumbnail_status = 'failed'
+                      AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '')
+                      AND updated_at < NOW() - INTERVAL '5 minutes'
+                    LIMIT 4
                 )
-                .execute(pool),
+                "#,
             )
-            .await;
-            let _ = with_system_rls_bypass(
-                sqlx::query(
-                    r#"
-                    UPDATE assignments
-                    SET thumbnail_status = 'pending'
-                    WHERE id IN (
-                        SELECT id FROM assignments
-                        WHERE deleted_at IS NULL
-                          AND is_active = true
-                          AND thumbnail_status = 'failed'
-                          AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '')
-                          AND updated_at < NOW() - INTERVAL '10 minutes'
-                        LIMIT 2
-                    )
-                    "#,
+            .execute(pool),
+        )
+        .await;
+        let _ = with_system_rls_bypass(
+            sqlx::query(
+                r#"
+                UPDATE assignments
+                SET thumbnail_status = 'pending'
+                WHERE id IN (
+                    SELECT id FROM assignments
+                    WHERE deleted_at IS NULL
+                      AND is_active = true
+                      AND thumbnail_status = 'failed'
+                      AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '')
+                      AND updated_at < NOW() - INTERVAL '5 minutes'
+                    LIMIT 4
                 )
-                .execute(pool),
+                "#,
             )
-            .await;
-        }
+            .execute(pool),
+        )
+        .await;
     }
+
+    let _ = backfill_published_thumbnails_with_limits_inner(pool, 6, 6).await;
 }
 
 /// Drains all already-published historical materials and assignments cleanly on server boot
@@ -1481,26 +1588,13 @@ pub async fn run_startup_thumbnail_catchup(pool: PgPool) {
         return;
     }
 
-    // Recover any interrupted 'processing', previously 'failed', or empty-URL rows back to 'pending'.
-    let _ = with_system_rls_bypass(
-        sqlx::query(
-            "UPDATE learning_materials SET thumbnail_status = 'pending' WHERE deleted_at IS NULL AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '') AND thumbnail_status != 'pending'",
-        )
-        .execute(&pool),
-    )
-    .await;
-    let _ = with_system_rls_bypass(
-        sqlx::query(
-            "UPDATE assignments SET thumbnail_status = 'pending' WHERE deleted_at IS NULL AND (thumbnail_url IS NULL OR BTRIM(thumbnail_url) = '') AND thumbnail_status != 'pending'",
-        )
-        .execute(&pool),
-    )
-    .await;
+    // Recover any broken /uploads/... links, interrupted 'processing', or previously 'failed' rows back to 'pending'.
+    heal_broken_and_stale_thumbnail_states(&pool, 0).await;
 
     let mut total_done = 0usize;
     let mut backoff_cycles = 0usize;
-    // Bounded up to 360 iterations (~2000+ unique titles) with rate-limit bucket cooldowns.
-    for _ in 0..360 {
+    // Bounded up to 500 iterations (~3000 unique titles) with resilient rate-limit cooldowns.
+    for _ in 0..500 {
         let (progressed, hit_rate_limit) =
             backfill_published_thumbnails_with_limits_inner(&pool, 6, 6).await;
         total_done += progressed;
@@ -1510,7 +1604,7 @@ pub async fn run_startup_thumbnail_catchup(pool: PgPool) {
                 break;
             }
             backoff_cycles += 1;
-            if backoff_cycles >= 36 {
+            if backoff_cycles >= 120 {
                 tracing::warn!(
                     component = "thumbnail_catchup",
                     remaining,
@@ -1519,11 +1613,11 @@ pub async fn run_startup_thumbnail_catchup(pool: PgPool) {
                 );
                 break;
             }
-            let sleep_secs = if backoff_cycles >= 3 { 45 } else { 25 };
+            let sleep_secs = if backoff_cycles >= 4 { 30 } else { 15 };
             tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
         } else {
             backoff_cycles = 0;
-            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(850)).await;
         }
     }
 
