@@ -76,6 +76,7 @@ pub fn is_configured() -> bool {
 #[derive(Debug, Clone)]
 pub enum ThumbnailGenError {
     NotConfigured,
+    Transient(String),
     Failed(String),
 }
 
@@ -191,11 +192,25 @@ fn extract_cloudflare_error_message(txt: &str, status_code: u16) -> String {
     }
 }
 
-async fn call_cloudflare_flux(
+#[derive(Debug, Clone)]
+enum FluxCallError {
+    Transient(String),
+    Permanent(String),
+}
+
+impl std::fmt::Display for FluxCallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FluxCallError::Transient(msg) | FluxCallError::Permanent(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+async fn call_cloudflare_flux_once(
     client: &Client,
     cfg: &CloudflareImageConfig,
     prompt: &str,
-) -> Result<(String, Vec<u8>), String> {
+) -> Result<(String, Vec<u8>), FluxCallError> {
     let url = format!(
         "https://api.cloudflare.com/client/v4/accounts/{}/ai/run/{}",
         cfg.account_id, cfg.model
@@ -213,7 +228,7 @@ async fn call_cloudflare_flux(
         .json(&payload)
         .send()
         .await
-        .map_err(|e| format!("Network error ({}): {e}", cfg.model))?;
+        .map_err(|e| FluxCallError::Transient(format!("Network error ({}): {e}", cfg.model)))?;
 
     let status = resp.status();
     let content_type = resp
@@ -226,7 +241,7 @@ async fn call_cloudflare_flux(
     let raw_bytes = resp
         .bytes()
         .await
-        .map_err(|e| format!("Failed reading response ({}): {e}", cfg.model))?;
+        .map_err(|e| FluxCallError::Transient(format!("Failed reading response ({}): {e}", cfg.model)))?;
 
     if status.is_success() && content_type.starts_with("image/") && !raw_bytes.is_empty() {
         return Ok((content_type, raw_bytes.to_vec()));
@@ -245,11 +260,30 @@ async fn call_cloudflare_flux(
                 return Ok(("image/jpeg".to_string(), bytes));
             }
         }
-        return Err(format!("{}: respon 200 tetapi tidak berisi byte gambar", cfg.model));
+        return Err(FluxCallError::Transient(format!(
+            "{}: respon 200 tetapi tidak berisi byte gambar",
+            cfg.model
+        )));
     }
 
     let err_msg = extract_cloudflare_error_message(&txt, status.as_u16());
-    Err(format!("Cloudflare: {} -> {}", cfg.model, err_msg))
+    let formatted = format!("Cloudflare: {} -> {}", cfg.model, err_msg);
+    let code = status.as_u16();
+    if code == 429 || code == 408 || code >= 500 {
+        Err(FluxCallError::Transient(formatted))
+    } else {
+        Err(FluxCallError::Permanent(formatted))
+    }
+}
+
+async fn call_cloudflare_flux(
+    client: &Client,
+    cfg: &CloudflareImageConfig,
+    prompt: &str,
+) -> Result<(String, Vec<u8>), String> {
+    call_cloudflare_flux_once(client, cfg, prompt)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 async fn persist_image(pool: &PgPool, prefix: &str, mime: &str, bytes: Vec<u8>) -> String {
@@ -365,7 +399,9 @@ fn build_module_thumbnail_prompt(
     context_snippet: Option<&str>,
 ) -> String {
     let subj_lower = subject_name.to_lowercase();
-    let style_directive = if subj_lower.contains("sejarah")
+    let style_directive = if kind.eq_ignore_ascii_case("INFOGRAPHIC") {
+        "Vibrant clean 3D editorial infographic magazine cover illustration with rich visual storytelling and warm studio lighting, clean framing"
+    } else if subj_lower.contains("sejarah")
         || subj_lower.contains("ips")
         || subj_lower.contains("geografi")
         || subj_lower.contains("sosiologi")
@@ -414,9 +450,21 @@ pub async fn generate_module_thumbnail_image(
     let client = get_cloudflare_client();
     let prompt = build_module_thumbnail_prompt(kind, title, subject_name, grade_level, context_snippet);
 
-    let (mime, bytes) = call_cloudflare_flux(client, &cfg, &prompt)
-        .await
-        .map_err(ThumbnailGenError::Failed)?;
+    let first_attempt = call_cloudflare_flux_once(client, &cfg, &prompt).await;
+    let (mime, bytes) = match first_attempt {
+        Ok(res) => res,
+        Err(FluxCallError::Transient(_)) => {
+            // Brief backoff on rate-limit (429) or transient 5xx before conceding.
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            call_cloudflare_flux_once(client, &cfg, &prompt)
+                .await
+                .map_err(|e| match e {
+                    FluxCallError::Transient(msg) => ThumbnailGenError::Transient(msg),
+                    FluxCallError::Permanent(msg) => ThumbnailGenError::Failed(msg),
+                })?
+        }
+        Err(FluxCallError::Permanent(msg)) => return Err(ThumbnailGenError::Failed(msg)),
+    };
 
     tracing::info!(kind = %kind, model = %cfg.model, "Generated 1x publish thumbnail via Cloudflare FLUX");
     let url = persist_image(pool, "ai_thumb", &mime, bytes).await;

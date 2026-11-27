@@ -1037,12 +1037,22 @@ async fn calculate_student_study_tracker(
             lm.id::text as id,
             lm.title,
             COALESCE(lm.material_type, 'DOCUMENT') as sub_type,
+            lm.material_type,
+            lm.external_url,
+            lm.description,
+            lm.source_type,
+            lm.library_book_id,
+            lm.thumbnail_url,
+            COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(ut.full_name), ''), NULLIF(TRIM(uc.full_name), '')) as teacher_name,
             COALESCE(s.name, 'Mata Pelajaran') as subject_name,
             to_char(COALESCE(smc.completed_at, smc.created_at) AT TIME ZONE 'Asia/Jakarta', 'DD Mon YYYY, HH24:MI') as date_str,
             to_char(COALESCE(smc.completed_at, smc.created_at), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso
         FROM student_material_completions smc
         JOIN learning_materials lm ON lm.id = smc.material_id
         LEFT JOIN subjects s ON s.id = lm.subject_id
+        LEFT JOIN teachers t ON t.id = lm.teacher_id
+        LEFT JOIN users ut ON ut.id = t.user_id
+        LEFT JOIN users uc ON uc.id = lm.created_by
         WHERE smc.student_id = $1
           AND lm.tenant_id = $2
           AND lm.deleted_at IS NULL
@@ -1057,6 +1067,27 @@ async fn calculate_student_study_tracker(
 
     for r in mat_rows {
         let id: String = r.get("id");
+        let m_type: String = r.get("material_type");
+        let ext_url: Option<String> = r.try_get("external_url").ok().flatten();
+        let desc: Option<String> = r.try_get("description").ok().flatten();
+        let src_type: Option<String> = r.try_get("source_type").ok().flatten();
+        let lib_id: Option<Uuid> = r.try_get("library_book_id").ok().flatten();
+        let stored_thumb = r
+            .try_get::<Option<String>, _>("thumbnail_url")
+            .ok()
+            .flatten()
+            .and_then(|s| crate::infrastructure::thumbnail_resolver::normalize_image_url(&s))
+            .or_else(|| {
+                crate::infrastructure::thumbnail_resolver::resolve_deterministic_material_thumbnail(
+                    &m_type,
+                    ext_url.as_deref(),
+                    desc.as_deref(),
+                    src_type.as_deref(),
+                    lib_id,
+                )
+            });
+        let teacher_name: Option<String> = r.try_get("teacher_name").ok().flatten();
+
         history_items.push(TrackerItem {
             action_url: format!("/student/materials/{}", id),
             id,
@@ -1072,6 +1103,8 @@ async fn calculate_student_study_tracker(
             status_badge: "Tuntas 100%".to_string(),
             badge_variant: "success".to_string(),
             reason_note: Some("Materi pembelajaran ini telah kamu selesaikan.".to_string()),
+            thumbnail_url: stored_thumb,
+            teacher_name,
         });
     }
 
@@ -1083,6 +1116,7 @@ async fn calculate_student_study_tracker(
             q.title,
             COALESCE(q.exam_mode, 'QUIZ') as sub_type,
             COALESCE(s.name, 'Mata Pelajaran') as subject_name,
+            COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(ut.full_name), '')) as teacher_name,
             qa.score::float8 as score,
             q.max_score::float8 as max_score,
             to_char(COALESCE(qa.completed_at, qa.updated_at) AT TIME ZONE 'Asia/Jakarta', 'DD Mon YYYY, HH24:MI') as date_str,
@@ -1090,6 +1124,8 @@ async fn calculate_student_study_tracker(
         FROM quiz_attempts qa
         JOIN quizzes q ON q.id = qa.quiz_id
         LEFT JOIN subjects s ON s.id = q.subject_id
+        LEFT JOIN teachers t ON t.id = q.teacher_id
+        LEFT JOIN users ut ON ut.id = t.user_id
         WHERE qa.student_id = $1
           AND q.tenant_id = $2
           AND q.deleted_at IS NULL
@@ -1107,6 +1143,7 @@ async fn calculate_student_study_tracker(
         let id: String = r.get("id");
         let score: Option<f64> = r.get("score");
         let max_score: Option<f64> = r.get("max_score");
+        let teacher_name: Option<String> = r.try_get("teacher_name").ok().flatten();
         let badge = match (score, max_score) {
             (Some(s), Some(m)) if m > 0.0 => format!("Nilai: {:.0}/{:.0}", s, m),
             (Some(s), _) => format!("Nilai: {:.0}", s),
@@ -1127,6 +1164,8 @@ async fn calculate_student_study_tracker(
             status_badge: badge,
             badge_variant: "success".to_string(),
             reason_note: Some("Hasil evaluasi kuis telah tersimpan di rapor.".to_string()),
+            thumbnail_url: None,
+            teacher_name,
         });
     }
 
@@ -1138,6 +1177,8 @@ async fn calculate_student_study_tracker(
             a.title,
             COALESCE(a.assignment_type, 'TUGAS') as sub_type,
             COALESCE(s.name, 'Mata Pelajaran') as subject_name,
+            a.thumbnail_url,
+            COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(ut.full_name), ''), NULLIF(TRIM(uc.full_name), '')) as teacher_name,
             asb.score::float8 as score,
             a.max_score::float8 as max_score,
             asb.status as submission_status,
@@ -1146,6 +1187,9 @@ async fn calculate_student_study_tracker(
         FROM assignment_submissions asb
         JOIN assignments a ON a.id = asb.assignment_id
         LEFT JOIN subjects s ON s.id = a.subject_id
+        LEFT JOIN teachers t ON t.id = a.teacher_id
+        LEFT JOIN users ut ON ut.id = t.user_id
+        LEFT JOIN users uc ON uc.id = a.created_by
         WHERE asb.student_id = $1
           AND a.tenant_id = $2
           AND a.deleted_at IS NULL
@@ -1164,6 +1208,12 @@ async fn calculate_student_study_tracker(
         let score: Option<f64> = r.get("score");
         let max_score: Option<f64> = r.get("max_score");
         let sub_status: String = r.get("submission_status");
+        let thumb = r
+            .try_get::<Option<String>, _>("thumbnail_url")
+            .ok()
+            .flatten()
+            .and_then(|s| crate::infrastructure::thumbnail_resolver::normalize_image_url(&s));
+        let teacher_name: Option<String> = r.try_get("teacher_name").ok().flatten();
         let badge = if sub_status == "graded" {
             match (score, max_score) {
                 (Some(s), Some(m)) if m > 0.0 => format!("Dinilai: {:.0}/{:.0}", s, m),
@@ -1188,6 +1238,8 @@ async fn calculate_student_study_tracker(
             status_badge: badge,
             badge_variant: "success".to_string(),
             reason_note: Some("Lembar tugas berhasil dikirimkan ke guru.".to_string()),
+            thumbnail_url: thumb,
+            teacher_name,
         });
     }
 
@@ -1206,11 +1258,21 @@ async fn calculate_student_study_tracker(
             lm.id::text as id,
             lm.title,
             COALESCE(lm.material_type, 'DOCUMENT') as sub_type,
+            lm.material_type,
+            lm.external_url,
+            lm.description,
+            lm.source_type,
+            lm.library_book_id,
+            lm.thumbnail_url,
+            COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(ut.full_name), ''), NULLIF(TRIM(uc.full_name), '')) as teacher_name,
             COALESCE(s.name, 'Mata Pelajaran') as subject_name,
             to_char(COALESCE(lm.release_at, lm.created_at) AT TIME ZONE 'Asia/Jakarta', 'DD Mon') as date_str,
             to_char(COALESCE(lm.release_at, lm.created_at), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso
         FROM learning_materials lm
         LEFT JOIN subjects s ON s.id = lm.subject_id
+        LEFT JOIN teachers t ON t.id = lm.teacher_id
+        LEFT JOIN users ut ON ut.id = t.user_id
+        LEFT JOIN users uc ON uc.id = lm.created_by
         WHERE lm.tenant_id = $1 
           AND lm.deleted_at IS NULL 
           AND lm.is_active = true
@@ -1248,6 +1310,26 @@ async fn calculate_student_study_tracker(
 
     for r in unread_mat_rows {
         let id: String = r.get("id");
+        let m_type: String = r.get("material_type");
+        let ext_url: Option<String> = r.try_get("external_url").ok().flatten();
+        let desc: Option<String> = r.try_get("description").ok().flatten();
+        let src_type: Option<String> = r.try_get("source_type").ok().flatten();
+        let lib_id: Option<Uuid> = r.try_get("library_book_id").ok().flatten();
+        let stored_thumb = r
+            .try_get::<Option<String>, _>("thumbnail_url")
+            .ok()
+            .flatten()
+            .and_then(|s| crate::infrastructure::thumbnail_resolver::normalize_image_url(&s))
+            .or_else(|| {
+                crate::infrastructure::thumbnail_resolver::resolve_deterministic_material_thumbnail(
+                    &m_type,
+                    ext_url.as_deref(),
+                    desc.as_deref(),
+                    src_type.as_deref(),
+                    lib_id,
+                )
+            });
+        let teacher_name: Option<String> = r.try_get("teacher_name").ok().flatten();
         missed_items.push(TrackerItem {
             action_url: format!("/student/materials/{}", id),
             id,
@@ -1263,6 +1345,8 @@ async fn calculate_student_study_tracker(
             status_badge: "Belum Dibuka".to_string(),
             badge_variant: "warning".to_string(),
             reason_note: Some("Materi sebelum hari ini belum pernah kamu buka. Klik untuk membaca modul.".to_string()),
+            thumbnail_url: stored_thumb,
+            teacher_name,
         });
     }
 
@@ -1274,10 +1358,15 @@ async fn calculate_student_study_tracker(
             a.title,
             COALESCE(a.assignment_type, 'TUGAS') as sub_type,
             COALESCE(s.name, 'Mata Pelajaran') as subject_name,
+            a.thumbnail_url,
+            COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(ut.full_name), ''), NULLIF(TRIM(uc.full_name), '')) as teacher_name,
             to_char(a.due_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') as date_str,
             to_char(a.due_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso
         FROM assignments a
         LEFT JOIN subjects s ON s.id = a.subject_id
+        LEFT JOIN teachers t ON t.id = a.teacher_id
+        LEFT JOIN users ut ON ut.id = t.user_id
+        LEFT JOIN users uc ON uc.id = a.created_by
         WHERE a.tenant_id = $1 
           AND a.deleted_at IS NULL 
           AND a.is_active = true
@@ -1310,6 +1399,12 @@ async fn calculate_student_study_tracker(
 
     for r in overdue_assign_rows {
         let id: String = r.get("id");
+        let thumb = r
+            .try_get::<Option<String>, _>("thumbnail_url")
+            .ok()
+            .flatten()
+            .and_then(|s| crate::infrastructure::thumbnail_resolver::normalize_image_url(&s));
+        let teacher_name: Option<String> = r.try_get("teacher_name").ok().flatten();
         missed_items.push(TrackerItem {
             action_url: format!("/student/assignments/{}", id),
             id,
@@ -1325,6 +1420,8 @@ async fn calculate_student_study_tracker(
             status_badge: "Lewat Tenggat".to_string(),
             badge_variant: "danger".to_string(),
             reason_note: Some("Tenggat waktu pengumpulan telah lewat. Segera kerjakan dan serahkan kepada guru.".to_string()),
+            thumbnail_url: thumb,
+            teacher_name,
         });
     }
 
@@ -1336,10 +1433,13 @@ async fn calculate_student_study_tracker(
             q.title,
             COALESCE(q.exam_mode, 'QUIZ') as sub_type,
             COALESCE(s.name, 'Mata Pelajaran') as subject_name,
+            COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(ut.full_name), '')) as teacher_name,
             to_char(COALESCE(q.end_at, q.release_at, q.start_at, q.created_at) AT TIME ZONE 'Asia/Jakarta', 'DD Mon') as date_str,
             to_char(COALESCE(q.end_at, q.release_at, q.start_at, q.created_at), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso
         FROM quizzes q
         LEFT JOIN subjects s ON s.id = q.subject_id
+        LEFT JOIN teachers t ON t.id = q.teacher_id
+        LEFT JOIN users ut ON ut.id = t.user_id
         WHERE q.tenant_id = $1 
           AND q.deleted_at IS NULL 
           AND (q.is_active = true OR LOWER(COALESCE(q.status, '')) = 'closed')
@@ -1389,6 +1489,7 @@ async fn calculate_student_study_tracker(
 
     for r in missed_quiz_rows {
         let id: String = r.get("id");
+        let teacher_name: Option<String> = r.try_get("teacher_name").ok().flatten();
         missed_items.push(TrackerItem {
             action_url: format!("/student/quizzes/{}", id),
             id,
@@ -1404,6 +1505,8 @@ async fn calculate_student_study_tracker(
             status_badge: "Kuis Terlewat".to_string(),
             badge_variant: "danger".to_string(),
             reason_note: Some("Kuis telah lewat jadwal atau sebelum hari ini namun belum kamu kerjakan.".to_string()),
+            thumbnail_url: None,
+            teacher_name,
         });
     }
 
@@ -1459,6 +1562,8 @@ async fn calculate_student_study_tracker(
             status_badge: badge.to_string(),
             badge_variant: "warning".to_string(),
             reason_note: Some(note.to_string()),
+            thumbnail_url: None,
+            teacher_name: None,
         });
     }
 
@@ -1476,6 +1581,13 @@ async fn calculate_student_study_tracker(
             lm.id::text as id,
             lm.title,
             COALESCE(lm.material_type, 'DOCUMENT') as sub_type,
+            lm.material_type,
+            lm.external_url,
+            lm.description,
+            lm.source_type,
+            lm.library_book_id,
+            lm.thumbnail_url,
+            COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(ut.full_name), ''), NULLIF(TRIM(uc.full_name), '')) as teacher_name,
             COALESCE(s.name, 'Mata Pelajaran') as subject_name,
             COALESCE(rp.current_page, 1) as current_page,
             GREATEST(1, COALESCE(lm.end_page, 20) - COALESCE(lm.start_page, 1) + 1) as total_pages,
@@ -1483,6 +1595,9 @@ async fn calculate_student_study_tracker(
         FROM reading_progress rp
         JOIN learning_materials lm ON lm.id = rp.material_id
         LEFT JOIN subjects s ON s.id = lm.subject_id
+        LEFT JOIN teachers t ON t.id = lm.teacher_id
+        LEFT JOIN users ut ON ut.id = t.user_id
+        LEFT JOIN users uc ON uc.id = lm.created_by
         WHERE rp.student_id = $1 
           AND lm.tenant_id = $2
           AND lm.deleted_at IS NULL
@@ -1505,6 +1620,26 @@ async fn calculate_student_study_tracker(
         let page: i32 = r.get("current_page");
         let total_pages: i32 = r.get("total_pages");
         let estimated_pct = (((page as f64) / (total_pages as f64)) * 100.0).clamp(10.0, 95.0) as i32;
+        let m_type: String = r.get("material_type");
+        let ext_url: Option<String> = r.try_get("external_url").ok().flatten();
+        let desc: Option<String> = r.try_get("description").ok().flatten();
+        let src_type: Option<String> = r.try_get("source_type").ok().flatten();
+        let lib_id: Option<Uuid> = r.try_get("library_book_id").ok().flatten();
+        let stored_thumb = r
+            .try_get::<Option<String>, _>("thumbnail_url")
+            .ok()
+            .flatten()
+            .and_then(|s| crate::infrastructure::thumbnail_resolver::normalize_image_url(&s))
+            .or_else(|| {
+                crate::infrastructure::thumbnail_resolver::resolve_deterministic_material_thumbnail(
+                    &m_type,
+                    ext_url.as_deref(),
+                    desc.as_deref(),
+                    src_type.as_deref(),
+                    lib_id,
+                )
+            });
+        let teacher_name: Option<String> = r.try_get("teacher_name").ok().flatten();
         in_progress_items.push(TrackerItem {
             action_url: format!("/student/materials/{}", id),
             id,
@@ -1520,6 +1655,8 @@ async fn calculate_student_study_tracker(
             status_badge: format!("Dibaca {}%", estimated_pct),
             badge_variant: "info".to_string(),
             reason_note: Some("Materi baru kamu baca sebagian. Klik untuk melanjutkan membaca.".to_string()),
+            thumbnail_url: stored_thumb,
+            teacher_name,
         });
     }
 
@@ -1531,6 +1668,8 @@ async fn calculate_student_study_tracker(
             a.title,
             COALESCE(a.assignment_type, 'TUGAS') as sub_type,
             COALESCE(s.name, 'Mata Pelajaran') as subject_name,
+            a.thumbnail_url,
+            COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(ut.full_name), ''), NULLIF(TRIM(uc.full_name), '')) as teacher_name,
             asb.status as submission_status,
             asb.feedback,
             to_char(COALESCE(asb.updated_at, asb.submitted_at, asb.created_at) AT TIME ZONE 'Asia/Jakarta', 'DD Mon YYYY') as date_str,
@@ -1538,6 +1677,9 @@ async fn calculate_student_study_tracker(
         FROM assignment_submissions asb
         JOIN assignments a ON a.id = asb.assignment_id
         LEFT JOIN subjects s ON s.id = a.subject_id
+        LEFT JOIN teachers t ON t.id = a.teacher_id
+        LEFT JOIN users ut ON ut.id = t.user_id
+        LEFT JOIN users uc ON uc.id = a.created_by
         WHERE asb.student_id = $1 
           AND a.tenant_id = $2
           AND a.deleted_at IS NULL
@@ -1555,6 +1697,12 @@ async fn calculate_student_study_tracker(
         let id: String = r.get("id");
         let sub_status: String = r.get("submission_status");
         let fb: Option<String> = r.get("feedback");
+        let thumb = r
+            .try_get::<Option<String>, _>("thumbnail_url")
+            .ok()
+            .flatten()
+            .and_then(|s| crate::infrastructure::thumbnail_resolver::normalize_image_url(&s));
+        let teacher_name: Option<String> = r.try_get("teacher_name").ok().flatten();
         let is_revision = sub_status == "returned";
         let note = if is_revision {
             fb.map(|f| format!("Catatan Guru: {}", f))
@@ -1581,6 +1729,8 @@ async fn calculate_student_study_tracker(
             status_badge: if is_revision { "Perlu Perbaikan".to_string() } else { "Draf".to_string() },
             badge_variant: if is_revision { "danger".to_string() } else { "warning".to_string() },
             reason_note: Some(note),
+            thumbnail_url: thumb,
+            teacher_name,
         });
     }
 
@@ -1592,11 +1742,14 @@ async fn calculate_student_study_tracker(
             q.title,
             COALESCE(q.exam_mode, 'QUIZ') as sub_type,
             COALESCE(s.name, 'Mata Pelajaran') as subject_name,
+            COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(ut.full_name), '')) as teacher_name,
             to_char(qa.started_at AT TIME ZONE 'Asia/Jakarta', 'DD Mon YYYY, HH24:MI') as date_str,
             to_char(qa.started_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso
         FROM quiz_attempts qa
         JOIN quizzes q ON q.id = qa.quiz_id
         LEFT JOIN subjects s ON s.id = q.subject_id
+        LEFT JOIN teachers t ON t.id = q.teacher_id
+        LEFT JOIN users ut ON ut.id = t.user_id
         WHERE qa.student_id = $1 
           AND q.tenant_id = $2
           AND q.deleted_at IS NULL
@@ -1612,6 +1765,7 @@ async fn calculate_student_study_tracker(
 
     for r in ongoing_quiz_rows {
         let id: String = r.get("id");
+        let teacher_name: Option<String> = r.try_get("teacher_name").ok().flatten();
         in_progress_items.push(TrackerItem {
             action_url: format!("/student/quizzes/{}/attempt", id),
             id,
@@ -1627,6 +1781,8 @@ async fn calculate_student_study_tracker(
             status_badge: "Sedang Berlangsung".to_string(),
             badge_variant: "info".to_string(),
             reason_note: Some("Sesi kuis sedang berjalan. Segera selesaikan dan kumpulkan jawabanmu.".to_string()),
+            thumbnail_url: None,
+            teacher_name,
         });
     }
 
@@ -1638,11 +1794,16 @@ async fn calculate_student_study_tracker(
             a.title,
             COALESCE(a.assignment_type, 'TUGAS') as sub_type,
             COALESCE(s.name, 'Mata Pelajaran') as subject_name,
+            a.thumbnail_url,
+            COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(ut.full_name), ''), NULLIF(TRIM(uc.full_name), '')) as teacher_name,
             (a.due_at IS NOT NULL) as has_due_at,
             to_char(COALESCE(a.due_at, a.release_at, a.created_at) AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') as date_str,
             to_char(COALESCE(a.due_at, a.release_at, a.created_at), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso
         FROM assignments a
         LEFT JOIN subjects s ON s.id = a.subject_id
+        LEFT JOIN teachers t ON t.id = a.teacher_id
+        LEFT JOIN users ut ON ut.id = t.user_id
+        LEFT JOIN users uc ON uc.id = a.created_by
         WHERE a.tenant_id = $1 
           AND a.deleted_at IS NULL 
           AND a.is_active = true
@@ -1676,6 +1837,12 @@ async fn calculate_student_study_tracker(
         let id: String = r.get("id");
         let has_due_at: bool = r.get("has_due_at");
         let date_str: String = r.get("date_str");
+        let thumb = r
+            .try_get::<Option<String>, _>("thumbnail_url")
+            .ok()
+            .flatten()
+            .and_then(|s| crate::infrastructure::thumbnail_resolver::normalize_image_url(&s));
+        let teacher_name: Option<String> = r.try_get("teacher_name").ok().flatten();
         in_progress_items.push(TrackerItem {
             action_url: format!("/student/assignments/{}", id),
             id,
@@ -1691,6 +1858,8 @@ async fn calculate_student_study_tracker(
             status_badge: "Belum Dikerjakan".to_string(),
             badge_variant: "warning".to_string(),
             reason_note: Some("Tugas aktif belum kamu kumpulkan. Buka untuk melihat petunjuk dan soal.".to_string()),
+            thumbnail_url: thumb,
+            teacher_name,
         });
     }
 
@@ -1702,10 +1871,13 @@ async fn calculate_student_study_tracker(
             q.title,
             COALESCE(q.exam_mode, 'QUIZ') as sub_type,
             COALESCE(s.name, 'Mata Pelajaran') as subject_name,
+            COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(ut.full_name), '')) as teacher_name,
             to_char(COALESCE(q.end_at, q.release_at, q.start_at, q.created_at) AT TIME ZONE 'Asia/Jakarta', 'DD Mon') as date_str,
             to_char(COALESCE(q.end_at, q.release_at, q.start_at, q.created_at), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso
         FROM quizzes q
         LEFT JOIN subjects s ON s.id = q.subject_id
+        LEFT JOIN teachers t ON t.id = q.teacher_id
+        LEFT JOIN users ut ON ut.id = t.user_id
         WHERE q.tenant_id = $1 
           AND q.deleted_at IS NULL 
           AND q.is_active = true
@@ -1753,6 +1925,7 @@ async fn calculate_student_study_tracker(
 
     for r in active_quiz_rows {
         let id: String = r.get("id");
+        let teacher_name: Option<String> = r.try_get("teacher_name").ok().flatten();
         in_progress_items.push(TrackerItem {
             action_url: format!("/student/quizzes/{}", id),
             id,
@@ -1768,6 +1941,8 @@ async fn calculate_student_study_tracker(
             status_badge: "Kuis Aktif".to_string(),
             badge_variant: "warning".to_string(),
             reason_note: Some("Kuis evaluasi aktif tersedia untuk kamu kerjakan.".to_string()),
+            thumbnail_url: None,
+            teacher_name,
         });
     }
 
@@ -1778,11 +1953,21 @@ async fn calculate_student_study_tracker(
             lm.id::text as id,
             lm.title,
             COALESCE(lm.material_type, 'DOCUMENT') as sub_type,
+            lm.material_type,
+            lm.external_url,
+            lm.description,
+            lm.source_type,
+            lm.library_book_id,
+            lm.thumbnail_url,
+            COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(ut.full_name), ''), NULLIF(TRIM(uc.full_name), '')) as teacher_name,
             COALESCE(s.name, 'Mata Pelajaran') as subject_name,
             to_char(COALESCE(lm.release_at, lm.created_at) AT TIME ZONE 'Asia/Jakarta', 'DD Mon') as date_str,
             to_char(COALESCE(lm.release_at, lm.created_at), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as date_iso
         FROM learning_materials lm
         LEFT JOIN subjects s ON s.id = lm.subject_id
+        LEFT JOIN teachers t ON t.id = lm.teacher_id
+        LEFT JOIN users ut ON ut.id = t.user_id
+        LEFT JOIN users uc ON uc.id = lm.created_by
         WHERE lm.tenant_id = $1 
           AND lm.deleted_at IS NULL 
           AND lm.is_active = true
@@ -1820,6 +2005,26 @@ async fn calculate_student_study_tracker(
 
     for r in today_mat_rows {
         let id: String = r.get("id");
+        let m_type: String = r.get("material_type");
+        let ext_url: Option<String> = r.try_get("external_url").ok().flatten();
+        let desc: Option<String> = r.try_get("description").ok().flatten();
+        let src_type: Option<String> = r.try_get("source_type").ok().flatten();
+        let lib_id: Option<Uuid> = r.try_get("library_book_id").ok().flatten();
+        let stored_thumb = r
+            .try_get::<Option<String>, _>("thumbnail_url")
+            .ok()
+            .flatten()
+            .and_then(|s| crate::infrastructure::thumbnail_resolver::normalize_image_url(&s))
+            .or_else(|| {
+                crate::infrastructure::thumbnail_resolver::resolve_deterministic_material_thumbnail(
+                    &m_type,
+                    ext_url.as_deref(),
+                    desc.as_deref(),
+                    src_type.as_deref(),
+                    lib_id,
+                )
+            });
+        let teacher_name: Option<String> = r.try_get("teacher_name").ok().flatten();
         in_progress_items.push(TrackerItem {
             action_url: format!("/student/materials/{}", id),
             id,
@@ -1835,6 +2040,8 @@ async fn calculate_student_study_tracker(
             status_badge: "Materi Hari Ini".to_string(),
             badge_variant: "info".to_string(),
             reason_note: Some("Materi baru dirilis untuk hari ini. Buka untuk belajar & mencatat presensi.".to_string()),
+            thumbnail_url: stored_thumb,
+            teacher_name,
         });
     }
 

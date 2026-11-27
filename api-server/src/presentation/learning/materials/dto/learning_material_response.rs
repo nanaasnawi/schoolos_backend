@@ -74,7 +74,7 @@ pub fn determine_material_format(
     }
 
     // 3. Infographic (interactive magazine / image concepts)
-    if m_type == "image" || m_type == "infographic" {
+    if m_type == "image" || m_type == "infographic" || m_type == "infografis" {
         return "INFOGRAPHIC".to_string();
     }
 

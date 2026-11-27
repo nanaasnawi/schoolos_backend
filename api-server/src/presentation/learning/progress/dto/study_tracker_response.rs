@@ -36,5 +36,9 @@ pub struct TrackerItem {
     pub badge_variant: String,        // "success", "warning", "danger", "info", "neutral"
     pub reason_note: Option<String>,  // Friendly Indonesian note for student
     pub action_url: String,           // Direct Next.js student route / Android deep link
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thumbnail_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub teacher_name: Option<String>,
 }
 
