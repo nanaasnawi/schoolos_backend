@@ -753,6 +753,13 @@ impl ScheduledPublishWorker {
             .execute(pool)
             .await;
 
+            // Generate/resolve thumbnail ONCE when scheduled material transitions to published.
+            let _ = crate::infrastructure::thumbnail_resolver::ensure_material_thumbnail_on_publish(
+                pool.clone(),
+                m_id,
+            )
+            .await;
+
             let notif_title = format!("📚 Materi Baru: {}", title);
             let notif_body = if let Some(ref c_name) = class_name {
                 format!("{} telah menerbitkan modul pembelajaran baru untuk kelas {}. Pelajari sekarang!", teacher_name, c_name)
@@ -861,6 +868,13 @@ impl ScheduledPublishWorker {
             )
             .bind(a_id)
             .execute(pool)
+            .await;
+
+            // Generate 1x cover thumbnail via FLUX AI when scheduled assignment goes live.
+            let _ = crate::infrastructure::thumbnail_resolver::ensure_assignment_thumbnail_on_publish(
+                pool.clone(),
+                a_id,
+            )
             .await;
 
             // Auto-archive any older active assignments for this class & subject
@@ -1051,6 +1065,9 @@ impl ScheduledPublishWorker {
                 "Activated and dispatched scheduled quiz"
             );
         }
+
+        // Backfill already-published items that still have pending thumbnails (strictly capped + 1x claimed).
+        crate::infrastructure::thumbnail_resolver::backfill_published_thumbnails_batch(pool).await;
 
         Ok(())
     }

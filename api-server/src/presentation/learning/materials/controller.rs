@@ -69,6 +69,84 @@ fn actor_has_teacher_material_role(actor: &Option<Actor>) -> bool {
     actor_has_role_keyword(actor, &["guru", "teacher", "pengajar"])
 }
 
+fn map_material_row(
+    r: &sqlx::postgres::PgRow,
+    is_completed: Option<bool>,
+    progress_percent: Option<i32>,
+    completed_count: Option<i64>,
+) -> LearningMaterialResponse {
+    let m_type: String = r.get("material_type");
+    let ext_url: Option<String> = r.get("external_url");
+    let desc: Option<String> = r.get("description");
+    let src_type: Option<String> = r.try_get::<Option<String>, _>("source_type").ok().flatten();
+    let lib_id: Option<Uuid> = r.try_get::<Option<Uuid>, _>("library_book_id").ok().flatten();
+    let lib_cover: Option<String> = r
+        .try_get::<Option<String>, _>("library_cover_url")
+        .ok()
+        .flatten();
+    let fmt = determine_material_format(
+        &m_type,
+        ext_url.as_deref(),
+        desc.as_deref(),
+        src_type.as_deref(),
+        lib_id,
+    );
+    let stored_thumb = r
+        .try_get::<Option<String>, _>("thumbnail_url")
+        .ok()
+        .flatten()
+        .and_then(|s| crate::infrastructure::thumbnail_resolver::normalize_image_url(&s));
+    let resolved_thumb = stored_thumb
+        .or_else(|| {
+            crate::infrastructure::thumbnail_resolver::resolve_deterministic_material_thumbnail(
+                &m_type,
+                ext_url.as_deref(),
+                desc.as_deref(),
+                src_type.as_deref(),
+                lib_id,
+            )
+        })
+        .or_else(|| {
+            lib_cover
+                .as_deref()
+                .and_then(crate::infrastructure::thumbnail_resolver::normalize_image_url)
+        });
+
+    LearningMaterialResponse {
+        id: r.get("id"),
+        tenant_id: r.get("tenant_id"),
+        lesson_id: r.get("lesson_id"),
+        material_type: m_type,
+        format: fmt.clone(),
+        content_type: fmt,
+        title: r.get("title"),
+        description: desc,
+        storage_key: r.get("storage_key"),
+        external_url: ext_url,
+        thumbnail_url: resolved_thumb,
+        order_index: r.get("order_index"),
+        visibility: r.get("visibility"),
+        is_active: r.get("is_active"),
+        created_at: r.get("created_at"),
+        updated_at: r.get("updated_at"),
+        is_completed,
+        progress_percent,
+        completed_count,
+        teacher_name: r.get("teacher_name"),
+        teacher_id: r.get("teacher_id"),
+        class_name: r.get("class_name"),
+        class_id: r.get("class_id"),
+        subject_name: r.get("subject_name"),
+        start_page: r.get("start_page"),
+        end_page: r.get("end_page"),
+        session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
+        release_at: r
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at")
+            .ok()
+            .flatten(),
+    }
+}
+
 pub fn material_routes() -> Router<ApplicationContext> {
     Router::new()
         .route("/", post(create).get(list))
@@ -472,6 +550,18 @@ async fn create(
     }
     }
 
+    // Resolve or schedule 1x thumbnail generation ONLY when material publishes immediately.
+    if !is_scheduled
+        && (initial_visibility.eq_ignore_ascii_case("published")
+            || initial_visibility.eq_ignore_ascii_case("active"))
+    {
+        let _ = crate::infrastructure::thumbnail_resolver::ensure_material_thumbnail_on_publish(
+            ctx.pool.clone(),
+            material.id,
+        )
+        .await;
+    }
+
     let full_created = sqlx::query(
         r#"
         SELECT 
@@ -486,6 +576,7 @@ async fn create(
                 END,
                 lb.file_url
             ) as external_url,
+            m.thumbnail_url, m.source_type, m.library_book_id, lb.cover_url as library_cover_url,
             m.order_index, m.visibility, m.is_active, 
             m.created_at, m.updated_at,
             m.class_id, c.name as class_name,
@@ -512,41 +603,7 @@ async fn create(
     .flatten();
 
     let resp = match full_created {
-        Some(r) => {
-            let m_type: String = r.get("material_type");
-            let ext_url: Option<String> = r.get("external_url");
-            let desc: Option<String> = r.get("description");
-            let fmt = determine_material_format(&m_type, ext_url.as_deref(), desc.as_deref(), None, None);
-            LearningMaterialResponse {
-                id: r.get("id"),
-                tenant_id: r.get("tenant_id"),
-                lesson_id: r.get("lesson_id"),
-                material_type: m_type,
-                format: fmt.clone(),
-                content_type: fmt,
-                title: r.get("title"),
-                description: desc,
-                storage_key: r.get("storage_key"),
-                external_url: ext_url,
-                order_index: r.get("order_index"),
-                visibility: r.get("visibility"),
-                is_active: r.get("is_active"),
-                created_at: r.get("created_at"),
-                updated_at: r.get("updated_at"),
-                is_completed: None,
-                progress_percent: None,
-                completed_count: Some(0),
-                teacher_name: r.get("teacher_name"),
-                teacher_id: r.get("teacher_id"),
-                class_name: r.get("class_name"),
-                class_id: r.get("class_id"),
-                subject_name: r.get("subject_name"),
-                start_page: r.get("start_page"),
-                end_page: r.get("end_page"),
-                session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
-                release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
-            }
-        }
+        Some(r) => map_material_row(&r, None, None, Some(0)),
         None => LearningMaterialResponse::from(material),
     };
 
@@ -656,6 +713,7 @@ async fn list(
                 COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(ut.full_name), ''), uc.full_name, 'Guru Pengampu') as teacher_name,
                 COALESCE(s.name, lb.subject_name, t.subject, 'Umum') as subject_name,
                 m.start_page, m.end_page,
+                m.thumbnail_url, m.source_type, m.library_book_id, lb.cover_url as library_cover_url,
                 m.session_id, m.release_at,
                 (SELECT COUNT(*)::bigint FROM student_material_completions smc WHERE smc.material_id = m.id) as completed_count
             FROM learning_materials m
@@ -703,39 +761,8 @@ async fn list(
 
         rows.into_iter()
             .map(|r| {
-                let m_type: String = r.get("material_type");
-                let ext_url: Option<String> = r.get("external_url");
-                let desc: Option<String> = r.get("description");
-                let fmt = determine_material_format(&m_type, ext_url.as_deref(), desc.as_deref(), None, None);
-                LearningMaterialResponse {
-                    id: r.get("id"),
-                    tenant_id: r.get("tenant_id"),
-                    lesson_id: r.get("lesson_id"),
-                    material_type: m_type,
-                    format: fmt.clone(),
-                    content_type: fmt,
-                    title: r.get("title"),
-                    description: desc,
-                    storage_key: r.get("storage_key"),
-                    external_url: ext_url,
-                    order_index: r.get("order_index"),
-                    visibility: r.get("visibility"),
-                    is_active: r.get("is_active"),
-                    created_at: r.get("created_at"),
-                    updated_at: r.get("updated_at"),
-                    is_completed: None,
-                    progress_percent: None,
-                    completed_count: r.get("completed_count"),
-                    teacher_name: r.get("teacher_name"),
-                    teacher_id: r.get("teacher_id"),
-                    class_name: r.get("class_name"),
-                    class_id: r.get("class_id"),
-                    subject_name: r.get("subject_name"),
-                    start_page: r.get("start_page"),
-                    end_page: r.get("end_page"),
-                    session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
-                    release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
-                }
+                let completed: Option<i64> = r.get("completed_count");
+                map_material_row(&r, None, None, completed)
             })
             .collect()
     } else if is_student && !is_admin {
@@ -763,6 +790,7 @@ async fn list(
                 COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(ut.full_name), ''), uc.full_name, 'Guru Pengampu') as teacher_name,
                 COALESCE(s.name, lb.subject_name, t.subject, 'Umum') as subject_name,
                 m.start_page, m.end_page,
+                m.thumbnail_url, m.source_type, m.library_book_id, lb.cover_url as library_cover_url,
                 m.session_id, m.release_at,
                 (smc.id IS NOT NULL) as is_completed,
                 CASE
@@ -826,39 +854,9 @@ async fn list(
 
         rows.into_iter()
             .map(|r| {
-                let m_type: String = r.get("material_type");
-                let ext_url: Option<String> = r.get("external_url");
-                let desc: Option<String> = r.get("description");
-                let fmt = determine_material_format(&m_type, ext_url.as_deref(), desc.as_deref(), None, None);
-                LearningMaterialResponse {
-                    id: r.get("id"),
-                    tenant_id: r.get("tenant_id"),
-                    lesson_id: r.get("lesson_id"),
-                    material_type: m_type,
-                    format: fmt.clone(),
-                    content_type: fmt,
-                    title: r.get("title"),
-                    description: desc,
-                    storage_key: r.get("storage_key"),
-                    external_url: ext_url,
-                    order_index: r.get("order_index"),
-                    visibility: r.get("visibility"),
-                    is_active: r.get("is_active"),
-                    created_at: r.get("created_at"),
-                    updated_at: r.get("updated_at"),
-                    is_completed: Some(r.get("is_completed")),
-                    progress_percent: r.try_get::<Option<i32>, _>("progress_percent").ok().flatten(),
-                    completed_count: None,
-                    teacher_name: r.get("teacher_name"),
-                    teacher_id: r.get("teacher_id"),
-                    class_name: r.get("class_name"),
-                    class_id: r.get("class_id"),
-                    subject_name: r.get("subject_name"),
-                    start_page: r.get("start_page"),
-                    end_page: r.get("end_page"),
-                    session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
-                    release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
-                }
+                let is_comp: bool = r.get("is_completed");
+                let prog = r.try_get::<Option<i32>, _>("progress_percent").ok().flatten();
+                map_material_row(&r, Some(is_comp), prog, None)
             })
             .collect()
     } else if is_admin {
@@ -886,6 +884,7 @@ async fn list(
                 COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(ut.full_name), ''), uc.full_name, 'Guru Pengampu') as teacher_name,
                 COALESCE(s.name, lb.subject_name, t.subject, 'Umum') as subject_name,
                 m.start_page, m.end_page,
+                m.thumbnail_url, m.source_type, m.library_book_id, lb.cover_url as library_cover_url,
                 m.session_id, m.release_at,
                 (SELECT COUNT(*)::bigint FROM student_material_completions smc WHERE smc.material_id = m.id) as completed_count
             FROM learning_materials m
@@ -921,39 +920,8 @@ async fn list(
 
         rows.into_iter()
             .map(|r| {
-                let m_type: String = r.get("material_type");
-                let ext_url: Option<String> = r.get("external_url");
-                let desc: Option<String> = r.get("description");
-                let fmt = determine_material_format(&m_type, ext_url.as_deref(), desc.as_deref(), None, None);
-                LearningMaterialResponse {
-                    id: r.get("id"),
-                    tenant_id: r.get("tenant_id"),
-                    lesson_id: r.get("lesson_id"),
-                    material_type: m_type,
-                    format: fmt.clone(),
-                    content_type: fmt,
-                    title: r.get("title"),
-                    description: desc,
-                    storage_key: r.get("storage_key"),
-                    external_url: ext_url,
-                    order_index: r.get("order_index"),
-                    visibility: r.get("visibility"),
-                    is_active: r.get("is_active"),
-                    created_at: r.get("created_at"),
-                    updated_at: r.get("updated_at"),
-                    is_completed: None,
-                    progress_percent: None,
-                    completed_count: r.get("completed_count"),
-                    teacher_name: r.get("teacher_name"),
-                    teacher_id: r.get("teacher_id"),
-                    class_name: r.get("class_name"),
-                    class_id: r.get("class_id"),
-                    subject_name: r.get("subject_name"),
-                    start_page: r.get("start_page"),
-                    end_page: r.get("end_page"),
-                    session_id: r.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
-                    release_at: r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
-                }
+                let completed: Option<i64> = r.get("completed_count");
+                map_material_row(&r, None, None, completed)
             })
             .collect()
     } else {
@@ -1116,6 +1084,7 @@ async fn get_by_id(
             COALESCE(NULLIF(TRIM(t.full_name), ''), NULLIF(TRIM(ut.full_name), ''), uc.full_name, 'Guru Pengampu') as teacher_name,
             COALESCE(s.name, lb.subject_name, t.subject, 'Umum') as subject_name,
             m.start_page, m.end_page,
+            m.thumbnail_url, m.source_type, m.library_book_id, lb.cover_url as library_cover_url,
             m.session_id, m.release_at
         FROM learning_materials m
         LEFT JOIN classes c ON c.id = m.class_id
@@ -1184,40 +1153,7 @@ async fn get_by_id(
     .await
     .ok();
 
-    let m_type: String = row.get("material_type");
-    let ext_url: Option<String> = row.get("external_url");
-    let desc: Option<String> = row.get("description");
-    let fmt = determine_material_format(&m_type, ext_url.as_deref(), desc.as_deref(), None, None);
-
-    let resp = LearningMaterialResponse {
-        id: row.get("id"),
-        tenant_id: row.get("tenant_id"),
-        lesson_id: row.get("lesson_id"),
-        material_type: m_type,
-        format: fmt.clone(),
-        content_type: fmt,
-        title: row.get("title"),
-        description: desc,
-        storage_key: row.get("storage_key"),
-        external_url: ext_url,
-        order_index: row.get("order_index"),
-        visibility: row.get("visibility"),
-        is_active: row.get("is_active"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-        is_completed,
-        progress_percent: None,
-        completed_count,
-        teacher_name: row.get("teacher_name"),
-        teacher_id: row.get("teacher_id"),
-        class_name: row.get("class_name"),
-        class_id: row.get("class_id"),
-        subject_name: row.get("subject_name"),
-        start_page: row.get("start_page"),
-        end_page: row.get("end_page"),
-        session_id: row.try_get::<Option<Uuid>, _>("session_id").ok().flatten(),
-        release_at: row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("release_at").ok().flatten(),
-    };
+    let resp = map_material_row(&row, is_completed, None, completed_count);
 
     Ok(Json(ApiResponse::success(resp, req_ctx.request_id)))
 }
@@ -1987,7 +1923,14 @@ async fn update(
         }
     }
 
+    let updated_thumb = crate::infrastructure::thumbnail_resolver::ensure_material_thumbnail_on_publish(
+        ctx.pool.clone(),
+        id,
+    )
+    .await;
+
     let mut resp = LearningMaterialResponse::from(material);
+    resp.thumbnail_url = updated_thumb;
     if payload.start_page.is_some() {
         resp.start_page = payload.start_page;
     }

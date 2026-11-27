@@ -417,6 +417,16 @@ async fn create(
         tracing::error!("Failed to update assignment metadata: {:?}", e);
     }
 
+    let created_thumb = if is_live_published {
+        crate::infrastructure::thumbnail_resolver::ensure_assignment_thumbnail_on_publish(
+            ctx.pool.clone(),
+            assignment.id,
+        )
+        .await
+    } else {
+        None
+    };
+
     // Auto-archive previous active assignments for this class & subject if requested or if publishing live
     if payload.replace_previous.unwrap_or(true) && is_live_published {
         if let (Some(cid), Some(sid)) = (target_class_id, subject_id) {
@@ -486,6 +496,7 @@ async fn create(
     };
 
     let mut resp = AssignmentResponse::from(assignment);
+    resp.thumbnail_url = created_thumb;
     resp.status = initial_status;
     resp.release_at = payload.release_at.or_else(|| Some(chrono::Utc::now()));
     resp.class_id = target_class_id;
@@ -637,7 +648,7 @@ async fn list(
                 (a.due_at IS NOT NULL AND a.due_at <= NOW()) as is_past_due,
                 a.is_active,
                 a.created_at, a.updated_at,
-                a.class_id, a.session_id, a.release_at, a.allow_late_submission, a.assessment_category,
+                a.class_id, a.session_id, a.release_at, a.allow_late_submission, a.assessment_category, a.thumbnail_url,
                 c.name as class_name,
                 sub.name as subject_name,
                 COALESCE(
@@ -725,6 +736,7 @@ async fn list(
                 title: r.get("title"),
                 description: r.get("description"),
                 instructions: r.get("instructions"),
+                thumbnail_url: r.try_get::<Option<String>, _>("thumbnail_url").ok().flatten(),
                 max_score: r.get("max_score"),
                 due_at: r.get("due_at"),
                 assignment_type: r.get("assignment_type"),
@@ -782,7 +794,7 @@ async fn list(
                 (a.due_at IS NOT NULL AND a.due_at <= NOW()) as is_past_due,
                 a.is_active,
                 a.created_at, a.updated_at,
-                a.class_id, a.session_id, a.release_at, a.allow_late_submission, a.assessment_category,
+                a.class_id, a.session_id, a.release_at, a.allow_late_submission, a.assessment_category, a.thumbnail_url,
                 c.name as class_name,
                 sub.name as subject_name,
                 COALESCE(
@@ -866,6 +878,7 @@ async fn list(
                 title: r.get("title"),
                 description: r.get("description"),
                 instructions: r.get("instructions"),
+                thumbnail_url: r.try_get::<Option<String>, _>("thumbnail_url").ok().flatten(),
                 max_score: r.get("max_score"),
                 due_at: r.get("due_at"),
                 assignment_type: r.get("assignment_type"),
@@ -907,7 +920,7 @@ async fn list(
                 (a.due_at IS NOT NULL AND a.due_at <= NOW()) as is_past_due,
                 a.is_active,
                 a.created_at, a.updated_at,
-                a.class_id, a.session_id, a.release_at, a.allow_late_submission, a.assessment_category,
+                a.class_id, a.session_id, a.release_at, a.allow_late_submission, a.assessment_category, a.thumbnail_url,
                 c.name as class_name,
                 sub.name as subject_name,
                 COALESCE(
@@ -991,6 +1004,7 @@ async fn list(
                 title: r.get("title"),
                 description: r.get("description"),
                 instructions: r.get("instructions"),
+                thumbnail_url: r.try_get::<Option<String>, _>("thumbnail_url").ok().flatten(),
                 max_score: r.get("max_score"),
                 due_at: r.get("due_at"),
                 assignment_type: r.get("assignment_type"),
@@ -1110,7 +1124,7 @@ async fn get_by_id(
                 (a.due_at IS NOT NULL AND a.due_at <= NOW()) as is_past_due,
                 a.is_active,
                 a.created_at, a.updated_at,
-                a.class_id, a.teacher_id, a.created_by, a.session_id, a.release_at, a.allow_late_submission, a.assessment_category,
+                a.class_id, a.teacher_id, a.created_by, a.session_id, a.release_at, a.allow_late_submission, a.assessment_category, a.thumbnail_url,
                 c.name as class_name,
                 sub.name as subject_name,
                 COALESCE(
@@ -1226,6 +1240,7 @@ async fn get_by_id(
                 title: r.get("title"),
                 description: r.get("description"),
                 instructions: r.get("instructions"),
+                thumbnail_url: r.try_get::<Option<String>, _>("thumbnail_url").ok().flatten(),
                 max_score: r.get("max_score"),
                 due_at: r.get("due_at"),
                 assignment_type: r.get("assignment_type"),
@@ -1421,10 +1436,17 @@ async fn update(
         let _ = persist_assignment_questions(&ctx.pool, req_ctx.tenant_id, id, questions).await;
     }
 
+    let updated_thumb = crate::infrastructure::thumbnail_resolver::ensure_assignment_thumbnail_on_publish(
+        ctx.pool.clone(),
+        id,
+    )
+    .await;
+
     let questions = fetch_assignment_questions(&ctx.pool, id, false)
         .await
         .unwrap_or_default();
     let mut resp = AssignmentResponse::from(assignment);
+    resp.thumbnail_url = updated_thumb;
     resp.has_game_questions = questions
         .iter()
         .any(|q| is_interactive_game_type(&q.question_type));
@@ -1461,6 +1483,12 @@ async fn publish(
         .await
         .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
 
+    let thumb_url = crate::infrastructure::thumbnail_resolver::ensure_assignment_thumbnail_on_publish(
+        ctx.pool.clone(),
+        assignment.id,
+    )
+    .await;
+
     // FCM saat tugas di-PUBLISH (kasus guru buat draft lalu publish).
     {
         let target_class_id: Option<Uuid> = sqlx::query_scalar(
@@ -1490,8 +1518,10 @@ async fn publish(
         );
     }
 
+    let mut resp = AssignmentResponse::from(assignment);
+    resp.thumbnail_url = thumb_url;
     Ok(Json(ApiResponse::success(
-        AssignmentResponse::from(assignment),
+        resp,
         req_ctx.request_id,
     )))
 }

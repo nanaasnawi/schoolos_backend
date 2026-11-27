@@ -909,6 +909,15 @@ async fn assign_reading_material(
         )
     })?;
 
+    // Resolve or schedule 1x thumbnail generation ONLY when library reading material publishes live.
+    if !is_scheduled {
+        let _ = crate::infrastructure::thumbnail_resolver::ensure_material_thumbnail_on_publish(
+            ctx.pool.clone(),
+            material_id,
+        )
+        .await;
+    }
+
     // Auto-archive previous duplicate reading materials for this class & book
     if !is_scheduled {
         let _ = sqlx::query(

@@ -68,6 +68,17 @@ fn get_cloudflare_config() -> Result<CloudflareImageConfig, String> {
     })
 }
 
+/// Returns true when Cloudflare Workers AI image credentials are configured.
+pub fn is_configured() -> bool {
+    get_cloudflare_config().is_ok()
+}
+
+#[derive(Debug, Clone)]
+pub enum ThumbnailGenError {
+    NotConfigured,
+    Failed(String),
+}
+
 /// Zero-dependency standard + URL-safe Base64 decoder so Cargo.lock stays unchanged.
 fn decode_base64(input: &str) -> Option<Vec<u8>> {
     let trimmed = input.trim();
@@ -344,4 +355,70 @@ pub async fn try_generate_scene_image(
         .await
         .ok()
         .map(|(url, _)| url)
+}
+
+fn build_module_thumbnail_prompt(
+    kind: &str,
+    title: &str,
+    subject_name: &str,
+    grade_level: &str,
+    context_snippet: Option<&str>,
+) -> String {
+    let subj_lower = subject_name.to_lowercase();
+    let style_directive = if subj_lower.contains("sejarah")
+        || subj_lower.contains("ips")
+        || subj_lower.contains("geografi")
+        || subj_lower.contains("sosiologi")
+        || subj_lower.contains("ekonomi")
+    {
+        "Warm atmospheric editorial documentary still-life photograph, rich authentic textures, natural side daylight, museum-grade composition"
+    } else if subj_lower.contains("matematika")
+        || subj_lower.contains("math")
+        || subj_lower.contains("fisika")
+        || subj_lower.contains("kimia")
+        || subj_lower.contains("biologi")
+        || subj_lower.contains("ipa")
+        || subj_lower.contains("informatika")
+    {
+        "Clean studio-lit minimalist 3D geometric and scientific editorial scene on crisp light educational tabletop, tactile physical models, subtle grid paper depth"
+    } else if kind.eq_ignore_ascii_case("PDF") {
+        "Tactile modern textbook cover still-life photography with symbolic academic props cleanly arranged in warm soft studio light"
+    } else {
+        "Crisp modern educational editorial illustration and still-life focal scene, warm natural daylight, balanced framing"
+    };
+
+    let snippet_line = context_snippet
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!("\nCurriculum context: {s}."))
+        .unwrap_or_default();
+
+    format!(
+        "{style_directive}.\n\
+        Topic: \"{title}\" for subject {subject_name} ({grade_level}).{snippet_line}\n\
+        Square 1:1 cover thumbnail composition with strong central focal subject.\n\
+        Strict constraints: clean visual scene only, strictly no readable overlay banners, no watermarks, no signatures, no cluttered text blocks."
+    )
+}
+
+/// Generates a 1:1 thumbnail image ONCE when an Artikel, Buku & PDF, or Assignment is published
+/// via Cloudflare Workers AI (`@cf/black-forest-labs/flux-1-schnell`) and persists it in `/uploads/`.
+pub async fn generate_module_thumbnail_image(
+    pool: &PgPool,
+    kind: &str,
+    title: &str,
+    subject_name: &str,
+    grade_level: &str,
+    context_snippet: Option<&str>,
+) -> Result<String, ThumbnailGenError> {
+    let cfg = get_cloudflare_config().map_err(|_| ThumbnailGenError::NotConfigured)?;
+    let client = get_cloudflare_client();
+    let prompt = build_module_thumbnail_prompt(kind, title, subject_name, grade_level, context_snippet);
+
+    let (mime, bytes) = call_cloudflare_flux(client, &cfg, &prompt)
+        .await
+        .map_err(ThumbnailGenError::Failed)?;
+
+    tracing::info!(kind = %kind, model = %cfg.model, "Generated 1x publish thumbnail via Cloudflare FLUX");
+    let url = persist_image(pool, "ai_thumb", &mime, bytes).await;
+    Ok(url)
 }
