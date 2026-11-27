@@ -395,12 +395,12 @@ fn build_module_thumbnail_prompt(
     format!(
         "{style_directive}.\n\
         Topic: \"{title}\" for subject {subject_name} ({grade_level}).{snippet_line}\n\
-        Square 1:1 cover thumbnail composition with strong central focal subject.\n\
+        Landscape 3:2 editorial cover thumbnail composition with strong central focal subject.\n\
         Strict constraints: clean visual scene only, strictly no readable overlay banners, no watermarks, no signatures, no cluttered text blocks."
     )
 }
 
-/// Generates a 1:1 thumbnail image ONCE when an Artikel, Buku & PDF, or Assignment is published
+/// Generates a landscape 3:2 thumbnail image ONCE when an Artikel, Buku & PDF, or Assignment is published
 /// via Cloudflare Workers AI (`@cf/black-forest-labs/flux-1-schnell`) and persists it in `/uploads/`.
 pub async fn generate_module_thumbnail_image(
     pool: &PgPool,
