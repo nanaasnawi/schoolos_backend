@@ -534,6 +534,7 @@ fn build_substantive_assessment_rules(
         format!(
             "{context_block}\n### STRICT ANTI-HALLUCINATION & SUBSTANTIVE ITEM RULES:\n\
             - FORBIDDEN META-QUESTIONS: NEVER write vague meta-questions asking \"What is the fundamental concept of topic X?\" or \"How should ethics/collaboration be applied while studying X?\". Every question MUST test concrete English grammar, vocabulary, reading comprehension, or communication skills appropriate for {grade_level}.\n\
+            - NEVER EMBED GRADE/PROGRAM LABELS IN QUESTION TEXT: Keep `{grade_level}`, `Paket A`, `Paket B`, `Paket C`, `PKBM`, or class metadata ONLY as calibration for difficulty — NEVER mention them as characters or subjects inside `question_text` or options. Use natural student names (e.g., Rani, Budi, a study group).\n\
             - NEVER copy batch/scope metadata labels (like `(Bagian 2/4)`, `Cakupan:`, or date ranges) into any question stem or answer choice."
         )
     } else {
@@ -553,7 +554,9 @@ fn build_substantive_assessment_rules(
         };
         format!(
             "{context_block}\n### ATURAN MUTLAK ANTI-HALUSINASI BUTIR SOAL ({subject_name} • {grade_level}):\n\
-            - DILARANG KERAS SOAL META-GENERIK: Jangan pernah membuat soal abstrak kosong seperti \"Konsep fundamental yang menjadi inti bahasan materi...\", \"Ciri utama penguasaan kompetensi...\", \"Tindakan awal permasalahan kontekstual mengenai...\", atau \"Penerapan etika/kolaborasi saat mempelajari...\".\n\
+            - DILARANG KERAS MENYEBUT LABEL JENJANG/KELAS/PAKET DI DALAM TEKS SOAL: Parameter jenjang (`{grade_level}`, seperti \"Paket A\", \"Paket A kelas IV\", \"Paket B\", \"Paket C\", \"Kelas IV SD\", \"PKBM\", \"Rombel ...\") HANYA acuan kalibrasi kesulitan bagi pembuat soal — DILARANG KERAS ditulis di dalam `question_text` maupun opsi jawaban! Gunakan subjek alami seperti nama tokoh atau siswa (\"Rani\", \"Budi\", \"Dimas dan teman-temannya\", \"Para siswa\", \"Sebuah kelompok belajar\"); JANGAN pernah menulis kalimat tidak profesional seperti \"Paket A kelas IV melakukan aktivitas kelompok...\".\n\
+            - DILARANG SOAL META-GENERIK & FRASA \"dalam materi\": Jangan menulis soal abstrak kosong (\"Konsep fundamental yang menjadi inti bahasan...\") atau frasa kaku \"sebagaimana diajarkan dalam materi\" / typo \"sahabat karakternya\"; sajikan stimulus cerita/kasus konkret secara alami.\n\
+            - KETEPATAN KUNCI JAWABAN TERHADAP INTI PERTANYAAN: Opsi yang ditandai benar (`is_correct: true` / `correct_key`) WAJIB menjawab inti pertanyaan secara spesifik dan tepat sasaran (misal bila soal menanyakan \"aturan kelas yang menghormati perbedaan\", opsi benar HARUS tentang menghargai perbedaan/keragaman teman, BUKAN aturan disiplin umum seperti \"Dilarang bicara saat guru sedang menjelaskan\").\n\
             - WAJIB MENGUJI MATERI NYATA: Setiap butir soal HARUS menyajikan stimulus konkret (kutipan paragraf/kalimat, data, kasus, perhitungan, atau konsep spesifik {subject_name}) yang langsung menguji kompetensi topik.\n\
             - DILARANG MENYALIN METADATA UI: Jangan menulis label teknis seperti `(Bagian 1/4)`, `Cakupan: SAS / PAS`, rentang tanggal periodik, atau `Materi: ... — Sumatif...` di dalam teks soal atau opsi A-D.{elementary_guard}"
         )
@@ -726,6 +729,17 @@ pub fn normalize_ai_indonesian_typos(raw: &str) -> String {
         ("kosa kata", "kosakata"),
         ("Kosa kata", "Kosakata"),
         ("bantu buku gambar", "bantuan buku gambar"),
+        ("sahabat karakternya", "sahabat karibnya"),
+        ("Sahabat karakternya", "Sahabat karibnya"),
+        ("bantuans", "bantuan"),
+        ("Bantuans", "Bantuan"),
+        ("intrigue", "konflik"),
+        ("Intrigue", "Konflik"),
+        ("vocab kunci", "kosakata kunci"),
+        ("memahami vocab", "memahami kosakata"),
+        ("Membuat Collage", "Membuat kolase"),
+        ("membuat Collage", "membuat kolase"),
+        ("Capaian Pembelajaran CP Tercapai", "Capaian Pembelajaran (CP) Tercapai"),
         ("( selama", "(selama"),
         ("0: belum ", "0: Belum "),
         ("1: belum ", "1: Belum "),
@@ -768,6 +782,19 @@ pub fn normalize_ai_indonesian_typos(raw: &str) -> String {
     if out.contains("📚Sumber:") {
         out = out.replace("📚Sumber:", "📚 Sumber:");
     }
+    // Hapus duplikasi baris beruntun `📚 **Sumber:**` atau `📚 Sumber:`
+    out = out
+        .replace("📚 **Sumber:**\n\n📚 **Sumber:**", "📚 **Sumber:**")
+        .replace("📚 **Sumber:**\n📚 **Sumber:**", "📚 **Sumber:**")
+        .replace("📚 Sumber:\n\n📚 Sumber:", "📚 Sumber:")
+        .replace("📚 Sumber:\n📚 Sumber:", "📚 Sumber:");
+
+    // Hapus catatan meta-verifikasi prompt yang bocor di akhir output LLM
+    if let Some(meta_idx) = out.find("*Catatan: Semua komponen di atas telah diverifikasi") {
+        out = out[..meta_idx].trim_end().to_string();
+    } else if let Some(meta_idx) = out.find("Catatan: Semua komponen di atas telah diverifikasi") {
+        out = out[..meta_idx].trim_end().to_string();
+    }
     out
 }
 
@@ -792,7 +819,7 @@ pub fn build_indonesian_puebi_and_logic_guardrail(for_assessment: bool) -> &'sta
    - DILARANG mengarang istilah/typo AI atau terjemahan kaku seperti "PELaksanaan", "aktifasi", "Menyalurkan motivasi", "masalah kata (story problem)", "Mengerjakan masalah menyelenggarakan...", "Tata Tertib Analisis Selanjutnya", "Capai Pembelajaran", "CP Capai", "Assesmen", "Skeletasi", "Gurunya:", "rumpun nilai", "rangkuman nilai", atau "produkkan".
    - Khusus soal tata bahasa/PUEBI: JANGAN pernah membuat soal ambigu dengan 2 jawaban benar atau mengklaim kaidah PUEBI palsu!
 3. KONSISTENSI KURIKULUM MERDEKA, IDENTITAS SISTEM, BATAS KKTP & FORMAT PDF BERSIH:
-   - KONSISTENSI ALOKASI WAKTU, PENOMORAN, ATP, MAPEL & CERITA RPP/MODUL AJAR: Jika menyusun RPP/Modul Ajar: (1) VALIDASI MAPEL & SUMBER: pastikan Mata Pelajaran di Identitas Modul, Kode Modul (`MOD-MTK` vs `MOD-BIN`), Topik/Materi, dan Buku SIBI/referensi 100% cocok mapel & jenjang/fasenya — JANGAN mencampur mapel `Matematika` dengan topik `Teks Fiksi`, JANGAN mengutip buku SMP/SMA untuk Paket A/SD, dan DILARANG merasionalisasi sumber yang salah dengan kalimat pembelaan (`meskipun mata pelajaran Matematika, konsep intrinsik...`); (2) cantumkan Alokasi Waktu Total (`70 menit (2 x 35 menit)`) cukup SEKALI di Identitas Modul tanpa diulang-ulang di Rencana Pembelajaran Berdiferensiasi, sementara penjumlahan sub-menit pada header, tabel, dan Langkah Pelaksanaan (`20 + 20 = 40 menit`) harus cocok 100% serta tiap sub-bagian memulai penomoran dari `1.`, dan pakai nama komponen formal (`Pendahuluan`, `Kegiatan Inti`, `Praktik Terbimbing`, `Penutup` — BUKAN `Ini Atau Itu`, `Ujian Capai`, `ketataman hati`, `penyanyi cerita`); (3) bagian **Alur Tujuan Pembelajaran (ATP)** WAJIB berisi urutan bertahap tujuan belajar siswa (misal `1. Mengidentifikasi... -> 2. Menganalisis... -> 3. Menyajikan...`), BUKAN langkah administratif guru menyusun RPP (`Menetapkan CP`, `Mendesain Alur`, `Menyusun KKTP`); (4) DILARANG menulis himpunan bagian melebihi totalnya (`17 siswa aktif (termasuk 46 siswa butuh pendampingan...)`), selalu bedakan jumlah siswa di kelas diampu vs tingkat sekolah; (5) teks bacaan/soal cerita Asesmen Sumatif wajib otentik sesuai jenjang, TIDAK mendaur ulang contoh klise (`Ali & Mimi`) dengan nama tokoh inkonsisten (`Mimi` berubah menjadi `Miku`), dan semua huruf awal deskripsi skor rubrik (`0: Belum...`, `1: Mengidentifikasi...`) ditulis kapital baku. Cantumkan `📚 **Sumber:**` CUKUP SATU KALI di akhir dokumen.
+   - KONSISTENSI ALOKASI WAKTU, PENOMORAN, ATP, MAPEL & CERITA RPP/MODUL AJAR: Jika menyusun RPP/Modul Ajar: (1) VALIDASI MAPEL & SUMBER: pastikan Mata Pelajaran di Identitas Modul, Kode Modul (`MOD-MTK` vs `MOD-BIN`), Topik/Materi, dan Buku SIBI/referensi 100% cocok mapel & jenjang/fasenya — JANGAN mencampur mapel `Matematika` dengan topik `Teks Fiksi`, JANGAN mengutip buku PAUD/SMP/SMA atau materi Pecahan/Pra Aljabar jika topik berbeda, dan DILARANG merasionalisasi sumber yang salah dengan kalimat pembelaan (`meskipun mata pelajaran Matematika, konsep intrinsik...`); (2) DURASI PRESISI & PENOMORAN: cantumkan Alokasi Waktu Total (`70 menit (2 x 35 menit)`) cukup SEKALI di Identitas Modul, lalu pastikan rincian sub-menit pada SEMUA tahap (Pendahuluan, Inti, Penutup) dijumlahkan tepat sama dengan durasi tahap & total sesi (contoh: Pendahuluan 10 menit [5+5] + Inti 50 menit [15+20+15] + Penutup 10 menit [5+5] = 70 menit; DILARANG menulis `Pendahuluan (35 menit)` jika sub-kegiatannya hanya 20 menit, dan WAJIB tulis rincian menit pada Tahap Inti!), setiap sub-bagian memulai penomoran dari `1.`, serta pakai istilah Indonesia formal baku (`Pendahuluan`, `Kegiatan Inti`, `Praktik Terbimbing`, `Penutup`, `konflik`, `bantuan`, `kosakata`, `kolase` — BUKAN `Ini Atau Itu`, `Ujian Capai`, `ketataman hati`, `penyanyi cerita`, `intrigue`, `bantuans`, `vocab`, `Collage`); (3) bagian **Alur Tujuan Pembelajaran (ATP)** WAJIB berisi urutan bertahap tujuan belajar siswa (`1. Mengidentifikasi... -> 2. Menganalisis... -> 3. Menyajikan...`), BUKAN langkah administratif guru menyusun RPP; (4) DILARANG menulis himpunan bagian melebihi totalnya (`17 siswa aktif (termasuk 46 siswa butuh pendampingan...)`), selalu bedakan jumlah siswa di kelas diampu vs tingkat sekolah; (5) CONTOH SOAL NYATA (ANTI-PLACEHOLDER): DILARANG menulis contoh soal kosong seperti `[Teks Cerita Singkat]`, `A. B. C. D.`, atau `Kunci Jawaban: A` tanpa isi nyata! Tulis stimulus/teks singkat otentik dengan nama tokoh 100% konsisten, opsi A–D lengkap, kunci jawaban + alasan, dan huruf kapital di awal deskripsi rubrik (`0: Belum...`). Cantumkan `📚 **Sumber:**` CUKUP SATU KALI di akhir dokumen dan DILARANG menulis catatan meta-verifikasi prompt di akhir jawaban (`*Catatan: Semua komponen di atas telah diverifikasi...*`).
    - KOHERENSI INDIKATOR vs CONTOH SOAL MATEMATIKA: Contoh soal pada materi dan LKPD WAJIB 100% sesuai teknik pada Indikator! Jika indikator berbunyi "tanpa penukaran/menyimpan", pastikan penjumlahan setiap angka seletak <= 9 (misal `2.341 + 1.425`). Jika indikator berbunyi "tanpa pinjaman/meminjam", pastikan tiap angka yang dikurangi >= angka pengurang di seluruh nilai tempat (misal `7.580 - 2.450`). Sebaliknya jika menggunakan contoh dengan menyimpan/meminjam, ubah bunyi indikator menjadi "dengan teknik menyimpan/meminjam" agar tidak kontradiktif.
    - DILARANG mencampur istilah Kurikulum 2013 (K-13): JANGAN menulis "Kompetensi Dasar (KD)", "KD Inti", "KD-4", "KI/KD", atau "KKM (Kriteria Ketuntasan Minimal)" di dalam dokumen Kurikulum Merdeka. Gunakan secara konsisten: "Capaian Pembelajaran (CP)", "Tujuan Pembelajaran (TP)", "Alur Tujuan Pembelajaran (ATP)", dan "KKTP (Kriteria Ketercapaian Tujuan Pembelajaran)".
    - IDENTITAS SISTEM RESMI: Seluruh dokumen & sumber belajar platform ini merujuk ke "LMS Akselerasi Edu" dan asistennya "Akselerasi Edu AI" (huruf I kapital, BUKAN `Al`). DILARANG KERAS menulis nama lama "SchoolOS" atau "LMS SchoolOS".
@@ -1787,9 +1814,209 @@ pub fn clean_choice_text(raw: &str) -> String {
     trimmed.to_string()
 }
 
+fn is_grade_numeral_token(tok: &str) -> bool {
+    let clean = tok
+        .trim_end_matches(|c: char| !c.is_alphanumeric())
+        .to_ascii_lowercase();
+    matches!(
+        clean.as_str(),
+        "i" | "ii"
+            | "iii"
+            | "iv"
+            | "v"
+            | "vi"
+            | "vii"
+            | "viii"
+            | "ix"
+            | "x"
+            | "xi"
+            | "xii"
+            | "1"
+            | "2"
+            | "3"
+            | "4"
+            | "5"
+            | "6"
+            | "7"
+            | "8"
+            | "9"
+            | "10"
+            | "11"
+            | "12"
+    ) || {
+        let bytes = clean.as_bytes();
+        (bytes.len() == 2 && bytes[0].is_ascii_digit() && bytes[1].is_ascii_alphabetic())
+            || (bytes.len() == 3
+                && bytes[0] == b'1'
+                && matches!(bytes[1], b'0' | b'1' | b'2')
+                && bytes[2].is_ascii_alphabetic())
+    }
+}
+
+fn strip_parenthetical_grade_tags(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(open) = rest.find('(') {
+        out.push_str(&rest[..open]);
+        let after_open = &rest[open..];
+        if let Some(close) = after_open.find(')') {
+            let inner = after_open[1..close].trim().to_ascii_lowercase();
+            let is_grade_tag = inner.len() <= 40
+                && (inner.starts_with("paket a")
+                    || inner.starts_with("paket b")
+                    || inner.starts_with("paket c")
+                    || inner.starts_with("setara sd")
+                    || inner.starts_with("setara smp")
+                    || inner.starts_with("setara sma")
+                    || inner.starts_with("kelas ")
+                    || inner.starts_with("fase "));
+            if is_grade_tag {
+                rest = &after_open[close + 1..];
+                continue;
+            }
+        }
+        out.push('(');
+        rest = &rest[open + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Removes awkward leaked program/grade metadata (e.g. "Paket A kelas IV melakukan...")
+/// from generated student question stems without altering ordinary words like "paket buku".
+pub fn sanitize_grade_metadata_in_question_stem(raw: &str) -> String {
+    let no_parens = strip_parenthetical_grade_tags(raw);
+    let words: Vec<&str> = no_parens.split_whitespace().collect();
+    if words.is_empty() {
+        return String::new();
+    }
+
+    let mut out: Vec<String> = Vec::with_capacity(words.len());
+    let mut i = 0usize;
+    while i < words.len() {
+        let w_clean = words[i]
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_ascii_lowercase();
+        let next_is_abc = i + 1 < words.len()
+            && matches!(
+                words[i + 1]
+                    .trim_end_matches(|c: char| !c.is_alphanumeric())
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "a" | "b" | "c"
+            );
+
+        if w_clean == "paket" && next_is_abc {
+            let mut end = i + 2;
+            if end + 1 < words.len()
+                && words[end].eq_ignore_ascii_case("setara")
+                && matches!(
+                    words[end + 1]
+                        .trim_end_matches(|c: char| !c.is_alphanumeric())
+                        .to_ascii_lowercase()
+                        .as_str(),
+                    "sd" | "smp" | "sma" | "mi" | "mts" | "ma"
+                )
+            {
+                end += 2;
+            }
+            if end < words.len() && matches!(words[end], "•" | "-" | "/" | "|") {
+                end += 1;
+            }
+            if end + 1 < words.len()
+                && words[end].eq_ignore_ascii_case("kelas")
+                && is_grade_numeral_token(words[end + 1])
+            {
+                end += 2;
+            } else if end < words.len() && is_grade_numeral_token(words[end]) {
+                end += 1;
+            }
+
+            let last_tok = words[end - 1];
+            let trailing_punct: String = last_tok
+                .chars()
+                .rev()
+                .take_while(|c| !c.is_alphanumeric())
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
+
+            let prev_lower = out
+                .last()
+                .map(|p| {
+                    p.trim_matches(|c: char| !c.is_alphanumeric())
+                        .to_ascii_lowercase()
+                })
+                .unwrap_or_default();
+            let at_sentence_start = out.is_empty()
+                || out.last().is_some_and(|p| {
+                    p.ends_with('.') || p.ends_with('?') || p.ends_with('!') || p.ends_with(':')
+                });
+
+            if at_sentence_start {
+                out.push(format!("Para siswa{trailing_punct}"));
+            } else if matches!(
+                prev_lower.as_str(),
+                "siswa"
+                    | "peserta"
+                    | "didik"
+                    | "warga"
+                    | "belajar"
+                    | "murid"
+                    | "anak"
+                    | "anak-anak"
+                    | "teman-teman"
+                    | "kelas"
+                    | "rombel"
+                    | "kelompok"
+            ) {
+                if !trailing_punct.is_empty() {
+                    if let Some(last_out) = out.last_mut() {
+                        last_out.push_str(&trailing_punct);
+                    }
+                }
+            } else if prev_lower == "di" {
+                out.push(format!("kelas{trailing_punct}"));
+            } else {
+                out.push(format!("para siswa{trailing_punct}"));
+            }
+
+            i = end;
+            continue;
+        }
+
+        out.push(words[i].to_string());
+        i += 1;
+    }
+
+    let mut joined = out.join(" ");
+    for (bad, good) in [
+        ("sahabat karakternya", "sahabat karibnya"),
+        ("Sahabat karakternya", "Sahabat karibnya"),
+        ("sebagaimana diajarkan dalam materi adalah", "adalah"),
+        ("sebagaimana yang diajarkan dalam materi adalah", "adalah"),
+        ("sebagaimana diajarkan dalam materi,", ""),
+        ("sebagaimana diajarkan dalam materi", ""),
+        ("berdasarkan materi yang dipelajari adalah", "adalah"),
+        ("... .", "..."),
+        (".... .", "..."),
+    ] {
+        if joined.contains(bad) {
+            joined = joined.replace(bad, good);
+        }
+    }
+    joined
+        .replace(" ,", ",")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub fn clean_question_stem(raw: &str) -> String {
     let meta_cleaned = strip_leaked_meta_notes(raw);
-    let sanitized = sanitize_currency_to_idr(&meta_cleaned);
+    let grade_cleaned = sanitize_grade_metadata_in_question_stem(&meta_cleaned);
+    let sanitized = sanitize_currency_to_idr(&grade_cleaned);
     let lines: Vec<&str> = sanitized.lines().collect();
     if lines.len() <= 1 {
         return sanitized.trim().to_string();
@@ -3371,7 +3598,7 @@ pub fn generate_pedagogical_question_templates(
     } else if is_math {
         vec![
             (
-                format!("Dalam mempelajari konsep '{topic}' ({grade_level}), manakah pernyataan matematis berikut yang paling tepat menggambarkan relasi antar-variabelnya?"),
+                format!("Dalam mempelajari konsep '{topic}', manakah pernyataan matematis berikut yang paling tepat menggambarkan relasi antar-variabelnya?"),
                 vec![
                     "Relasi proporsional terstruktur yang menghubungkan input dan output secara konsisten".to_string(),
                     "Hubungan acak tanpa pola keteraturan matematis".to_string(),
@@ -3545,7 +3772,7 @@ pub fn generate_pedagogical_question_templates(
     } else {
         vec![
             (
-                format!("Konsep fundamental yang menjadi inti bahasan materi '{topic}' pada mata pelajaran {subject_name} ({grade_level}) adalah..."),
+                format!("Konsep fundamental yang menjadi inti bahasan materi '{topic}' pada mata pelajaran {subject_name} adalah..."),
                 vec![
                     "Landasan konseptual terstruktur yang menghubungkan pemahaman teori dengan pemecahan masalah kontekstual".to_string(),
                     "Kumpulan hafalan definisi tanpa kaitan dengan penerapan kehidupan nyata".to_string(),

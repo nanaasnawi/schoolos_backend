@@ -840,8 +840,22 @@ fn book_grade_band_compatible(title_or_meta: &str, grade: &str, question: &str) 
         || has_token(&target_tokens, "sd")
         || has_token(&target_tokens, "mi");
 
+    // Reject PAUD / Fase Fondasi guides when targeting SD/SMP/SMA or Paket A/B/C
+    let is_paud_book = lower.contains("fase fondasi")
+        || lower.contains("taman kanak")
+        || lower.contains("dasar-dasar literasi, matematika, sains")
+        || has_token(&tokens, "paud")
+        || has_token(&tokens, "tk");
+    if is_paud_book && !has_token(&target_tokens, "paud") && !has_token(&target_tokens, "tk") {
+        return false;
+    }
+
     if is_elementary_target {
         let higher_nums = ["vii", "viii", "ix", "x", "xi", "xii", "7", "8", "9", "10", "11", "12"];
+        let advanced_math_topics = [
+            "pra aljabar", "aljabar", "trigonometri", "kalkulus", "logaritma",
+            "matriks", "integral", "turunan", "vektor", "persamaan kuadrat", "pythagoras",
+        ];
         if has_pair(&tokens, "kelas", &higher_nums)
             || has_pair(&tokens, "fase", &["d", "e", "f"])
             || has_pair(&tokens, "paket", &["b", "c"])
@@ -850,6 +864,7 @@ fn book_grade_band_compatible(title_or_meta: &str, grade: &str, question: &str) 
             || has_token(&tokens, "sma")
             || has_token(&tokens, "smk")
             || has_token(&tokens, "ma")
+            || advanced_math_topics.iter().any(|t| lower.contains(t))
         {
             return false;
         }
@@ -936,6 +951,58 @@ fn source_subject_matches_effective(
     }
 
     true
+}
+
+fn sanitize_client_context_for_subject(
+    raw_ctx: &str,
+    effective_subject: &str,
+    question: &str,
+) -> String {
+    let q_lower = question.to_ascii_lowercase();
+    let asks_fiksi = q_lower.contains("fiksi") || q_lower.contains("intrinsik") || q_lower.contains("cerita");
+    let has_legacy_17_and_46 =
+        raw_ctx.contains("17 Siswa") && raw_ctx.contains("46 Siswa");
+
+    let mut clean_lines: Vec<String> = Vec::new();
+    for line in raw_ctx.lines() {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+
+        // Strip stale hardcoded frontend strings from older cached web clients
+        if lower.contains("unsur-unsur intrinsik teks fiksi bab 1") && !asks_fiksi {
+            continue;
+        }
+        if lower.contains("semua tugas sudah selesai dinilai (0 antrean)") {
+            continue;
+        }
+        if has_legacy_17_and_46
+            && (lower.contains("17 siswa") || lower.contains("46 siswa"))
+        {
+            continue;
+        }
+        // Strip cross-subject material references from client context if they contradict effective_subject
+        if (lower.starts_with("- materi/modul ajar terkini:")
+            || lower.starts_with("- referensi materi terbaru"))
+            && !source_subject_matches_effective("", trimmed, effective_subject)
+        {
+            continue;
+        }
+
+        clean_lines.push(line.to_string());
+    }
+    clean_lines.join("\n")
+}
+
+fn is_fresh_rpp_request(question: &str) -> bool {
+    let lower = question.to_ascii_lowercase();
+    (lower.contains("modul ajar") || lower.contains("rpp"))
+        && (lower.contains("buat") || lower.contains("susun") || lower.contains("rancang") || lower.contains("draf"))
+}
+
+fn is_poisoned_mixed_subject_turn(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    (lower.contains("matematika") && (lower.contains("teks fiksi") || lower.contains("unsur intrinsik") || lower.contains("unsur-unsur intrinsik")))
+        || (lower.contains("17 siswa") && lower.contains("46 siswa"))
 }
 
 async fn fetch_grounded_curriculum_sources(
@@ -1582,7 +1649,9 @@ async fn prepare_tanya_ai_context(
             })
         });
 
-    let context_grade_hint = payload.context.as_deref().unwrap_or("");
+    let raw_context_hint = payload.context.as_deref().unwrap_or("");
+    let sanitized_client_context =
+        sanitize_client_context_for_subject(raw_context_hint, &subject, &question);
     let grounded_sources = if !is_principal {
         fetch_grounded_curriculum_sources(
             pool,
@@ -1590,7 +1659,7 @@ async fn prepare_tanya_ai_context(
             &question,
             &subject,
             &grade,
-            context_grade_hint,
+            &sanitized_client_context,
         )
         .await
     } else {
@@ -1658,7 +1727,7 @@ async fn prepare_tanya_ai_context(
         - Tahun Ajaran Aktif Resmi di Database: T.A {db_academic_year} (Semester {sem_label})\n\
         - INSTRUKSI KETAT: Seluruh analisis, rekomendasi, dan jawaban WAJIB merujuk ke Tahun Ajaran resmi aktif di database yaitu T.A {db_academic_year} (Semester {sem_label}). DILARANG MENGGUNAKAN tahun kadaluarsa seperti 2024/2025.\n\
         - IDENTITAS PLATFORM & ISTILAH KURIKULUM: Nama resmi sistem/LMS ini adalah **LMS Akselerasi Edu** dan asisten AI-nya adalah **Akselerasi Edu AI** (DILARANG KERAS menulis `SchoolOS`, `LMS SchoolOS`, atau `Akselerasi Edu Al`). Patuhi Kurikulum Merdeka sepenuhnya: gunakan **CP, TP, ATP, dan KKTP** (DILARANG mencampur istilah K-13 seperti `Kompetensi Dasar (KD)`, `KD-4`, `KD Inti`, atau `KKM`).\n\
-        - VALIDASI KETAT MAPEL vs TOPIK vs KODE MODUL vs SUMBER SIBI: Jika menyusun Modul Ajar / RPP, **Mata Pelajaran** di Identitas Modul, **Kode Modul** (`MOD-MTK` untuk Matematika, `MOD-BIN` untuk Bahasa Indonesia), **Topik/Materi**, dan seluruh kegiatan WAJIB berasal dari satu rumpun mata pelajaran yang sama! DILARANG KERAS menulis `Mata Pelajaran: Matematika (Umum)` dengan topik `Unsur Intrinsik Teks Fiksi` atau sebaliknya. Jika ada referensi Buku SIBI/Materi yang berbeda mapel atau berbeda jenjang/fase (misal buku SMP/MTs Kelas VII untuk Paket A/SD), **ABAIKAN dan JANGAN dicantumkan maupun dirasionalisasi** dengan kalimat seperti 'meskipun mata pelajaran Matematika...'. Cantumkan `📚 **Sumber:**` CUKUP SATU KALI di bagian paling akhir tanpa menduplikasinya.\n\
+        - VALIDASI KETAT MAPEL vs TOPIK vs KODE MODUL vs SUMBER SIBI: Jika menyusun Modul Ajar / RPP, **Mata Pelajaran** di Identitas Modul, **Kode Modul** (`MOD-MTK` untuk Matematika, `MOD-BIN` untuk Bahasa Indonesia, `MOD-IPAS` untuk IPAS), **Topik/Materi**, seluruh kegiatan, dan **Sumber** WAJIB 100% berasal dari satu rumpun mata pelajaran yang sama! Karena mata pelajaran fokus sesi ini adalah **{subject}**, pilih/bahas topik yang 100% sesuai rumpun **{subject}** (DILARANG KERAS menulis `Mata Pelajaran: Matematika (Umum)` dengan topik `Unsur Intrinsik Teks Fiksi`, atau sebaliknya). HANYA kutip Buku SIBI / Materi Ajar dari daftar apabila judul dan materinya benar-benar membahas **topik dan jenjang yang sama** (JANGAN mengutip buku PAUD, SMP/MTs, SMA/SMK, atau materi Pecahan/Pra Aljabar jika topiknya berbeda; jika tidak ada judul yang cocok topiknya, cukup tulis acuan resmi Kurikulum Merdeka BSKAP saja). Cantumkan `📚 **Sumber:**` CUKUP SATU KALI di bagian paling akhir tanpa menduplikasi baris `📚 Sumber:`. DILARANG KERAS menulis catatan meta-verifikasi sistem di akhir dokumen seperti `*Catatan: Semua komponen di atas telah diverifikasi...*` atau menyebut aturan `Tag <br> dan kode LaTeX` di dalam output!\n\
         - BAHASA, KAIDAH PUEBI/EYD V, KONSISTENSI RPP, BATAS NILAI & FORMAT PDF BERSIH: Gunakan ejaan Bahasa Indonesia baku sesuai EYD V / PUEBI & KBBI tanpa typo ('RENCANA PELAKSANAAN PEMBELAJARAN', 'aktivasi', 'menumbuhkan motivasi', 'tokoh cerita', 'kesiapan belajar', 'praktik', 'saksama', 'soal cerita', 'Capaian Pembelajaran', 'Asesmen', 'Kerangka Pembelajaran', 'Nilai Tempat', 'Guru:', 'Produktivitas', 'Aktivitas', 'Kolaborasi', 'Efektivitas', 'Produksi', 'memengaruhi', 'mengubah', 'analisis', 'risiko'; JANGAN menulis 'PELaksanaan', 'aktifasi', 'Menyalurkan motivasi', 'penyanyi cerita', 'ketataman hati', 'Praktek', 'seksama', 'Ujian Capai', 'masalah kata (story problem)', 'Mengerjakan masalah menyelenggarakan...', 'Tata Tertib Analisis Selanjutnya', 'Capai Pembelajaran', 'CP Capai', 'Assesmen', 'Skeletasi', 'Gurunya:', 'rumpun nilai', 'rangkuman nilai', atau 'produkkan'). Jika menyusun Modul Ajar / RPP: (1) pastikan alokasi menit di header, tabel, dan sub-bagian Langkah Pelaksanaan cocok tepat 100%, (2) pastikan tiap sub-bagian A/B/C/D memulai penomoran dari 1., (3) pastikan contoh soal Matematika selaras 100% dengan indikator teknik hitung (tanpa menyimpan/meminjam vs dengan menyimpan/meminjam), (4) DILARANG menulis himpunan bagian melebihi totalnya seperti '17 siswa aktif (termasuk 46 siswa butuh pendampingan...)', dan (5) JANGAN mengklaim data at-risk sekolah umum ke satu rombel spesifik kecuali memang ada pada kombinasi (Kelas • Mapel). Untuk batas KKTP gunakan pertidaksamaan tegas tanpa celah (`≥ 70` vs `< 70`). DILARANG menulis tag `<br>` mentah dalam sel tabel Markdown atau token LaTeX (`\\dots`, `\\ldots`, `$...$`); gunakan simbol Unicode bersih (`...`, `< , > , =`, `≥`, `≤`).\n\
         {puebi_guardrail}\n\
         - KEJUJURAN AKADEMIK & SITASI SUMBER: Jika ragu pada fakta spesifik, katakan terus terang jangan mengarang angka taksiran atau mengarang aturan tata bahasa. Akhiri setiap jawaban edukatif/analitis dengan bagian singkat:\n  📚 **Sumber:** ...\n\
@@ -1722,15 +1791,14 @@ async fn prepare_tanya_ai_context(
         content: authoritative_db_directive,
     });
 
-    if let Some(ref ctx_str) = payload.context {
-        if !ctx_str.trim().is_empty() {
-            messages.push(OwnedChatMessage {
-                role: "system".to_string(),
-                content: ctx_str.clone(),
-            });
-        }
+    if !sanitized_client_context.trim().is_empty() {
+        messages.push(OwnedChatMessage {
+            role: "system".to_string(),
+            content: sanitized_client_context,
+        });
     }
 
+    let skip_poisoned_history = is_fresh_rpp_request(&question);
     let history_slice: &[TanyaAiMessageDto] = payload.history.as_deref().unwrap_or(&[]);
     let history_tail = if history_slice.len() > 6 {
         &history_slice[history_slice.len() - 6..]
@@ -1743,6 +1811,9 @@ async fn prepare_tanya_ai_context(
             "assistant" | "model" | "bot" => "assistant",
             _ => "user",
         };
+        if skip_poisoned_history && is_poisoned_mixed_subject_turn(&h.content) {
+            continue;
+        }
         let content = h.content.replace("2024/2025", &db_academic_year);
         messages.push(OwnedChatMessage {
             role: role.to_string(),
