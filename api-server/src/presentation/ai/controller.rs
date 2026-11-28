@@ -811,50 +811,128 @@ fn infer_effective_subject_from_question(question: &str, fallback_subject: &str)
     fallback_subject.to_string()
 }
 
-fn book_grade_band_compatible(book_title: &str, grade: &str, question: &str) -> bool {
+fn book_grade_band_compatible(title_or_meta: &str, grade: &str, question: &str) -> bool {
     let target = format!("{grade} {question}").to_ascii_lowercase();
-    let title_lower = book_title.to_ascii_lowercase();
+    let lower = title_or_meta.to_ascii_lowercase();
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let target_tokens: Vec<&str> = target
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
 
-    let is_elementary_target = target.contains("paket a")
-        || target.contains("setara sd")
-        || target.contains("fase a")
-        || target.contains("fase b")
-        || target.contains("fase c")
-        || target.contains("kelas i")
-        || target.contains("kelas 1")
-        || target.contains("kelas 2")
-        || target.contains("kelas 3")
-        || target.contains("kelas 4")
-        || target.contains("kelas iv")
-        || target.contains("kelas 5")
-        || target.contains("kelas v")
-        || target.contains("kelas 6")
-        || target.contains("kelas vi")
-        || target.contains(" sd");
+    let has_token = |toks: &[&str], needle: &str| toks.iter().any(|t| *t == needle);
+    let has_pair = |toks: &[&str], first: &str, seconds: &[&str]| {
+        toks.windows(2)
+            .any(|w| w[0] == first && seconds.contains(&w[1]))
+    };
+
+    let elem_nums = ["i", "ii", "iii", "iv", "v", "vi", "1", "2", "3", "4", "5", "6"];
+    let junior_nums = ["vii", "viii", "ix", "7", "8", "9"];
+    let senior_nums = ["x", "xi", "xii", "10", "11", "12"];
+
+    let is_elementary_target = has_pair(&target_tokens, "paket", &["a"])
+        || has_pair(&target_tokens, "setara", &["sd", "mi"])
+        || has_pair(&target_tokens, "fase", &["a", "b", "c"])
+        || has_pair(&target_tokens, "kelas", &elem_nums)
+        || has_token(&target_tokens, "sd")
+        || has_token(&target_tokens, "mi");
 
     if is_elementary_target {
-        let higher_grade_markers = [
-            "kelas vii", "kelas viii", "kelas ix", "kelas x", "kelas xi", "kelas xii",
-            "kelas 7", "kelas 8", "kelas 9", "kelas 10", "kelas 11", "kelas 12",
-            "fase d", "fase e", "fase f", " smp", " sma", " smk",
-        ];
-        if higher_grade_markers.iter().any(|m| title_lower.contains(m)) {
+        let higher_nums = ["vii", "viii", "ix", "x", "xi", "xii", "7", "8", "9", "10", "11", "12"];
+        if has_pair(&tokens, "kelas", &higher_nums)
+            || has_pair(&tokens, "fase", &["d", "e", "f"])
+            || has_pair(&tokens, "paket", &["b", "c"])
+            || has_token(&tokens, "smp")
+            || has_token(&tokens, "mts")
+            || has_token(&tokens, "sma")
+            || has_token(&tokens, "smk")
+            || has_token(&tokens, "ma")
+        {
             return false;
         }
     }
 
-    let is_junior_target = target.contains("paket b")
-        || target.contains("setara smp")
-        || target.contains("fase d")
-        || target.contains(" smp");
+    let is_junior_target = has_pair(&target_tokens, "paket", &["b"])
+        || has_pair(&target_tokens, "setara", &["smp", "mts"])
+        || has_pair(&target_tokens, "fase", &["d"])
+        || has_pair(&target_tokens, "kelas", &junior_nums)
+        || has_token(&target_tokens, "smp")
+        || has_token(&target_tokens, "mts");
     if is_junior_target {
-        let senior_markers = [
-            "kelas x", "kelas xi", "kelas xii", "kelas 10", "kelas 11", "kelas 12",
-            "fase e", "fase f", " sma", " smk",
-        ];
-        if senior_markers.iter().any(|m| title_lower.contains(m)) {
+        if has_pair(&tokens, "kelas", &senior_nums)
+            || has_pair(&tokens, "fase", &["e", "f"])
+            || has_pair(&tokens, "paket", &["c"])
+            || has_token(&tokens, "sma")
+            || has_token(&tokens, "smk")
+        {
             return false;
         }
+    }
+
+    true
+}
+
+fn source_subject_matches_effective(
+    item_subject: &str,
+    item_title: &str,
+    effective_subject: &str,
+) -> bool {
+    let eff = effective_subject.trim().to_ascii_lowercase();
+    if eff.is_empty() || eff == "umum" || eff.contains("workstation") {
+        return true;
+    }
+
+    let eff_root = eff.split('(').next().unwrap_or(&eff).trim();
+    let item_subj_clean = item_subject.trim().to_ascii_lowercase();
+    if !item_subj_clean.is_empty() {
+        let item_subj_root = item_subj_clean
+            .split('(')
+            .next()
+            .unwrap_or(&item_subj_clean)
+            .trim();
+        let ipa_pair = eff_root.contains("ipa") && item_subj_root.contains("ipa");
+        if !ipa_pair
+            && !item_subj_root.contains(eff_root)
+            && !eff_root.contains(item_subj_root)
+        {
+            return false;
+        }
+    }
+
+    let combined = format!("{item_subject} {item_title}").to_ascii_lowercase();
+
+    let is_eff_math = eff.contains("matematika") || eff.contains("math");
+    let is_eff_indo = eff.contains("indonesia") || eff.contains("sastra");
+    let is_eff_ipa = eff.contains("ipa") || eff.contains("biologi") || eff.contains("fisika") || eff.contains("kimia");
+    let is_eff_english = eff.contains("inggris") || eff.contains("english");
+
+    if is_eff_math {
+        let conflicting = [
+            "bahasa indonesia", "teks fiksi", "unsur intrinsik", "fabel", "puisi", "pantun",
+            "ipa", "ipas", "ips", "fisika", "kimia", "biologi", "bahasa inggris",
+            "ppkn", "pendidikan pancasila",
+        ];
+        return !conflicting.iter().any(|c| combined.contains(c));
+    }
+
+    if is_eff_indo {
+        let conflicting = [
+            "matematika", "kalkulus", "aljabar", "geometri", "trigonometri", "bilangan",
+            "ipas", "fisika", "kimia", "biologi", "bahasa inggris", "ppkn",
+        ];
+        return !conflicting.iter().any(|c| combined.contains(c));
+    }
+
+    if is_eff_ipa {
+        let conflicting = ["matematika", "bahasa indonesia", "teks fiksi", "bahasa inggris", "ppkn"];
+        return !conflicting.iter().any(|c| combined.contains(c));
+    }
+
+    if is_eff_english {
+        return combined.contains("english") || combined.contains("inggris");
     }
 
     true
@@ -866,9 +944,11 @@ async fn fetch_grounded_curriculum_sources(
     question: &str,
     subject: &str,
     grade: &str,
+    extra_grade_hint: &str,
 ) -> Vec<String> {
     let mut sources: Vec<String> = Vec::new();
     let effective_subject = infer_effective_subject_from_question(question, subject);
+    let combined_grade_target = format!("{grade} {extra_grade_hint}");
     let keywords = extract_meaningful_topic_keywords(question);
     let primary_keyword = keywords.first().cloned().unwrap_or_default();
     let subject_root = effective_subject
@@ -891,7 +971,7 @@ async fn fetch_grounded_curriculum_sources(
         format!("%{}%", primary_keyword)
     };
 
-    // 1. Real SIBI / Digital Library Books matching effective subject or topic keyword AND compatible grade band
+    // 1. Real SIBI / Digital Library Books matching effective subject or topic keyword, subject consistency, AND compatible grade band
     if !is_generic_subject || !primary_keyword.is_empty() {
         if let Ok(book_rows) = sqlx::query(
             r#"
@@ -903,7 +983,7 @@ async fn fetch_grounded_curriculum_sources(
             LEFT JOIN subjects s ON s.id = lb.subject_id
             WHERE (lb.title ILIKE $1 OR s.name ILIKE $1 OR lb.title ILIKE $2)
             ORDER BY CASE WHEN lb.title ILIKE $2 THEN 0 ELSE 1 END, lb.created_at DESC
-            LIMIT 8
+            LIMIT 10
             "#,
         )
         .bind(&subject_like)
@@ -916,7 +996,10 @@ async fn fetch_grounded_curriculum_sources(
                 let publisher: String = r.try_get("publisher").unwrap_or_else(|_| "SIBI Kemdikdasmen".to_string());
                 let total_pages: i32 = r.try_get("total_pages").unwrap_or(0);
                 let subj: String = r.try_get("subject_name").unwrap_or_default();
-                if !title.is_empty() && book_grade_band_compatible(&title, grade, question) {
+                if !title.is_empty()
+                    && book_grade_band_compatible(&title, &combined_grade_target, question)
+                    && source_subject_matches_effective(&subj, &title, &effective_subject)
+                {
                     sources.push(format!(
                         "Buku SIBI \"{title}\" ({publisher}{}{})",
                         if subj.is_empty() { String::new() } else { format!(", Mapel {subj}") },
@@ -930,22 +1013,25 @@ async fn fetch_grounded_curriculum_sources(
         }
     }
 
-    // 2. Real Teacher Learning Materials in this tenant
+    // 2. Real Teacher Learning Materials in this tenant (filtered by effective subject + grade band)
     if let Ok(mat_rows) = sqlx::query(
         r#"
         SELECT lm.title,
                COALESCE(t.full_name, '') AS teacher_name,
+               COALESCE(s.name, '') AS subject_name,
+               COALESCE(c.name, '') AS class_name,
                lm.start_page,
                lm.end_page
         FROM learning_materials lm
         LEFT JOIN teachers t ON t.id = lm.teacher_id
         LEFT JOIN subjects s ON s.id = lm.subject_id
+        LEFT JOIN classes c ON c.id = lm.class_id AND c.deleted_at IS NULL
         WHERE lm.tenant_id = $1
           AND lm.deleted_at IS NULL
           AND lm.is_active = true
           AND (lm.title ILIKE $2 OR s.name ILIKE $3 OR lm.description ILIKE $2)
         ORDER BY lm.updated_at DESC
-        LIMIT 3
+        LIMIT 8
         "#,
     )
     .bind(tenant_id)
@@ -957,8 +1043,17 @@ async fn fetch_grounded_curriculum_sources(
         for r in mat_rows {
             let title: String = r.try_get("title").unwrap_or_default();
             let teacher: String = r.try_get("teacher_name").unwrap_or_default();
+            let subj: String = r.try_get("subject_name").unwrap_or_default();
+            let cname: String = r.try_get("class_name").unwrap_or_default();
             let sp: Option<i32> = r.try_get("start_page").ok().flatten();
             let ep: Option<i32> = r.try_get("end_page").ok().flatten();
+            let grade_meta = format!("{title} {cname}");
+            if title.is_empty()
+                || !book_grade_band_compatible(&grade_meta, &combined_grade_target, question)
+                || !source_subject_matches_effective(&subj, &title, &effective_subject)
+            {
+                continue;
+            }
             let page_info = match (sp, ep) {
                 (Some(a), Some(b)) => format!(", Halaman {a}–{b}"),
                 (Some(a), None) => format!(", Halaman {a}"),
@@ -969,13 +1064,14 @@ async fn fetch_grounded_curriculum_sources(
             } else {
                 format!(" oleh {teacher}")
             };
-            if !title.is_empty() {
-                sources.push(format!("Materi Ajar \"{title}\"{teacher_info}{page_info}"));
+            sources.push(format!("Materi Ajar \"{title}\"{teacher_info}{page_info}"));
+            if sources.len() >= 5 {
+                break;
             }
         }
     }
 
-    // 3. Real Modul Ajar Kurikulum Merdeka authored by teachers
+    // 3. Real Modul Ajar Kurikulum Merdeka authored by teachers (filtered by subject + grade band)
     if let Ok(modul_rows) = sqlx::query(
         r#"
         SELECT ma.title,
@@ -988,7 +1084,7 @@ async fn fetch_grounded_curriculum_sources(
           AND ma.deleted_at IS NULL
           AND (ma.subject_name ILIKE $2 OR ma.title ILIKE $3 OR ma.grade_level ILIKE $4)
         ORDER BY ma.updated_at DESC
-        LIMIT 2
+        LIMIT 6
         "#,
     )
     .bind(tenant_id)
@@ -1001,10 +1097,18 @@ async fn fetch_grounded_curriculum_sources(
         for r in modul_rows {
             let title: String = r.try_get("title").unwrap_or_default();
             let m_grade: String = r.try_get("grade_level").unwrap_or_default();
+            let m_subj: String = r.try_get("subject_name").unwrap_or_default();
             let author: String = r.try_get("author_name").unwrap_or_default();
-            if !title.is_empty() {
+            let grade_meta = format!("{title} {m_grade}");
+            if !title.is_empty()
+                && book_grade_band_compatible(&grade_meta, &combined_grade_target, question)
+                && source_subject_matches_effective(&m_subj, &title, &effective_subject)
+            {
                 let by_author = if author.is_empty() { String::new() } else { format!(" ({author})") };
                 sources.push(format!("Modul Ajar \"{title}\" — {m_grade}{by_author}"));
+                if sources.len() >= 6 {
+                    break;
+                }
             }
         }
     }
@@ -1478,8 +1582,17 @@ async fn prepare_tanya_ai_context(
             })
         });
 
+    let context_grade_hint = payload.context.as_deref().unwrap_or("");
     let grounded_sources = if !is_principal {
-        fetch_grounded_curriculum_sources(pool, req_ctx.tenant_id, &question, &subject, &grade).await
+        fetch_grounded_curriculum_sources(
+            pool,
+            req_ctx.tenant_id,
+            &question,
+            &subject,
+            &grade,
+            context_grade_hint,
+        )
+        .await
     } else {
         Vec::new()
     };
@@ -1545,7 +1658,8 @@ async fn prepare_tanya_ai_context(
         - Tahun Ajaran Aktif Resmi di Database: T.A {db_academic_year} (Semester {sem_label})\n\
         - INSTRUKSI KETAT: Seluruh analisis, rekomendasi, dan jawaban WAJIB merujuk ke Tahun Ajaran resmi aktif di database yaitu T.A {db_academic_year} (Semester {sem_label}). DILARANG MENGGUNAKAN tahun kadaluarsa seperti 2024/2025.\n\
         - IDENTITAS PLATFORM & ISTILAH KURIKULUM: Nama resmi sistem/LMS ini adalah **LMS Akselerasi Edu** dan asisten AI-nya adalah **Akselerasi Edu AI** (DILARANG KERAS menulis `SchoolOS`, `LMS SchoolOS`, atau `Akselerasi Edu Al`). Patuhi Kurikulum Merdeka sepenuhnya: gunakan **CP, TP, ATP, dan KKTP** (DILARANG mencampur istilah K-13 seperti `Kompetensi Dasar (KD)`, `KD-4`, `KD Inti`, atau `KKM`).\n\
-        - BAHASA, KAIDAH PUEBI/EYD V, KONSISTENSI RPP, BATAS NILAI & FORMAT PDF BERSIH: Gunakan ejaan Bahasa Indonesia baku sesuai EYD V / PUEBI & KBBI tanpa typo ('RENCANA PELAKSANAAN PEMBELAJARAN', 'aktivasi', 'menumbuhkan motivasi', 'soal cerita', 'Capaian Pembelajaran', 'Asesmen', 'Kerangka Pembelajaran', 'Nilai Tempat', 'Guru:', 'Produktivitas', 'Aktivitas', 'Kolaborasi', 'Efektivitas', 'Produksi', 'memengaruhi', 'mengubah', 'praktik', 'analisis', 'risiko'; JANGAN menulis 'PELaksanaan', 'aktifasi', 'Menyalurkan motivasi', 'masalah kata (story problem)', 'Mengerjakan masalah menyelenggarakan...', 'Tata Tertib Analisis Selanjutnya', 'Capai Pembelajaran', 'CP Capai', 'Assesmen', 'Skeletasi', 'Gurunya:', 'rumpun nilai', 'rangkuman nilai', atau 'produkkan'). Jika menyusun Modul Ajar / RPP: (1) pastikan alokasi menit di header, tabel, dan sub-bagian Langkah Pelaksanaan cocok tepat 100%, (2) pastikan tiap sub-bagian A/B/C/D memulai penomoran dari 1., (3) pastikan contoh soal Matematika selaras 100% dengan indikator teknik hitung (tanpa menyimpan/meminjam vs dengan menyimpan/meminjam), dan (4) JANGAN mengklaim data at-risk sekolah umum ke satu rombel spesifik kecuali memang ada pada kombinasi (Kelas • Mapel). Untuk batas KKTP gunakan pertidaksamaan tegas tanpa celah (`≥ 70` vs `< 70`). DILARANG menulis tag `<br>` mentah dalam sel tabel Markdown atau token LaTeX (`\\dots`, `\\ldots`, `$...$`); gunakan simbol Unicode bersih (`...`, `< , > , =`, `≥`, `≤`).\n\
+        - VALIDASI KETAT MAPEL vs TOPIK vs KODE MODUL vs SUMBER SIBI: Jika menyusun Modul Ajar / RPP, **Mata Pelajaran** di Identitas Modul, **Kode Modul** (`MOD-MTK` untuk Matematika, `MOD-BIN` untuk Bahasa Indonesia), **Topik/Materi**, dan seluruh kegiatan WAJIB berasal dari satu rumpun mata pelajaran yang sama! DILARANG KERAS menulis `Mata Pelajaran: Matematika (Umum)` dengan topik `Unsur Intrinsik Teks Fiksi` atau sebaliknya. Jika ada referensi Buku SIBI/Materi yang berbeda mapel atau berbeda jenjang/fase (misal buku SMP/MTs Kelas VII untuk Paket A/SD), **ABAIKAN dan JANGAN dicantumkan maupun dirasionalisasi** dengan kalimat seperti 'meskipun mata pelajaran Matematika...'. Cantumkan `📚 **Sumber:**` CUKUP SATU KALI di bagian paling akhir tanpa menduplikasinya.\n\
+        - BAHASA, KAIDAH PUEBI/EYD V, KONSISTENSI RPP, BATAS NILAI & FORMAT PDF BERSIH: Gunakan ejaan Bahasa Indonesia baku sesuai EYD V / PUEBI & KBBI tanpa typo ('RENCANA PELAKSANAAN PEMBELAJARAN', 'aktivasi', 'menumbuhkan motivasi', 'tokoh cerita', 'kesiapan belajar', 'praktik', 'saksama', 'soal cerita', 'Capaian Pembelajaran', 'Asesmen', 'Kerangka Pembelajaran', 'Nilai Tempat', 'Guru:', 'Produktivitas', 'Aktivitas', 'Kolaborasi', 'Efektivitas', 'Produksi', 'memengaruhi', 'mengubah', 'analisis', 'risiko'; JANGAN menulis 'PELaksanaan', 'aktifasi', 'Menyalurkan motivasi', 'penyanyi cerita', 'ketataman hati', 'Praktek', 'seksama', 'Ujian Capai', 'masalah kata (story problem)', 'Mengerjakan masalah menyelenggarakan...', 'Tata Tertib Analisis Selanjutnya', 'Capai Pembelajaran', 'CP Capai', 'Assesmen', 'Skeletasi', 'Gurunya:', 'rumpun nilai', 'rangkuman nilai', atau 'produkkan'). Jika menyusun Modul Ajar / RPP: (1) pastikan alokasi menit di header, tabel, dan sub-bagian Langkah Pelaksanaan cocok tepat 100%, (2) pastikan tiap sub-bagian A/B/C/D memulai penomoran dari 1., (3) pastikan contoh soal Matematika selaras 100% dengan indikator teknik hitung (tanpa menyimpan/meminjam vs dengan menyimpan/meminjam), (4) DILARANG menulis himpunan bagian melebihi totalnya seperti '17 siswa aktif (termasuk 46 siswa butuh pendampingan...)', dan (5) JANGAN mengklaim data at-risk sekolah umum ke satu rombel spesifik kecuali memang ada pada kombinasi (Kelas • Mapel). Untuk batas KKTP gunakan pertidaksamaan tegas tanpa celah (`≥ 70` vs `< 70`). DILARANG menulis tag `<br>` mentah dalam sel tabel Markdown atau token LaTeX (`\\dots`, `\\ldots`, `$...$`); gunakan simbol Unicode bersih (`...`, `< , > , =`, `≥`, `≤`).\n\
         {puebi_guardrail}\n\
         - KEJUJURAN AKADEMIK & SITASI SUMBER: Jika ragu pada fakta spesifik, katakan terus terang jangan mengarang angka taksiran atau mengarang aturan tata bahasa. Akhiri setiap jawaban edukatif/analitis dengan bagian singkat:\n  📚 **Sumber:** ...\n\
         {sources_block}\n\
@@ -1677,7 +1791,7 @@ async fn tanya_ai(
         })
         .collect();
 
-    let raw_reply = match nvidia_ai::call_nvidia_nim(msg_refs, 0.35, 2200).await {
+    let raw_reply = match nvidia_ai::call_nvidia_nim(msg_refs, 0.35, 4096).await {
         Ok(r) => r,
         Err(err) => {
             tracing::warn!("NVIDIA NIM call failed for tanya-ai: {err:?}");
@@ -1737,7 +1851,7 @@ async fn tanya_ai_stream(
             sent_any
         });
 
-        let stream_result = nvidia_ai::stream_nvidia_nim(prepared.messages, 0.35, 2200, delta_tx).await;
+        let stream_result = nvidia_ai::stream_nvidia_nim(prepared.messages, 0.35, 4096, delta_tx).await;
         let sent_any = forward_task.await.unwrap_or(false);
 
         let used_model = match stream_result {
