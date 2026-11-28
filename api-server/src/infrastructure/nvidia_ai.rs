@@ -684,6 +684,8 @@ pub fn normalize_ai_indonesian_typos(raw: &str) -> String {
         ("produktifitasnya", "produktivitasnya"),
         ("Produktifitas", "Produktivitas"),
         ("produktifitas", "produktivitas"),
+        ("Aktifasi", "Aktivasi"),
+        ("aktifasi", "aktivasi"),
         ("Memprodukkan", "Memproduksi"),
         ("memprodukkan", "memproduksi"),
         ("Produkkan", "Produksi"),
@@ -698,6 +700,17 @@ pub fn normalize_ai_indonesian_typos(raw: &str) -> String {
         ("kwalitas", "kualitas"),
         ("Sistim", "Sistem"),
         ("sistim", "sistem"),
+        ("PELaksanaan", "PELAKSANAAN"),
+        ("Pelaksanaan Pembelajaran", "Pelaksanaan Pembelajaran"),
+        ("PEMBelajaran", "PEMBELAJARAN"),
+        ("Menyalurkan motivasi", "Menumbuhkan motivasi"),
+        ("menyalurkan motivasi", "menumbuhkan motivasi"),
+        ("Mengerjakan masalah menyelenggarakan operasi hitung", "Menyelesaikan soal menggunakan operasi hitung"),
+        ("mengerjakan masalah menyelenggarakan operasi hitung", "menyelesaikan soal menggunakan operasi hitung"),
+        ("masalah kata (story problem)", "soal cerita"),
+        ("Masalah kata (story problem)", "Soal cerita"),
+        ("Tata Tertib Analisis Selanjutnya", "Tindak Lanjut Analisis Selanjutnya"),
+        ("Akselerasi Edu Al", "Akselerasi Edu AI"),
         ("CAPAI PEMBELAJARAN", "CAPAIAN PEMBELAJARAN"),
         ("Capai Pembelajaran", "Capaian Pembelajaran"),
         ("capai pembelajaran", "capaian pembelajaran"),
@@ -755,19 +768,22 @@ pub fn build_indonesian_puebi_and_logic_guardrail(for_assessment: bool) -> &'sta
    - Peluluhan K-T-S-P ("meN-" + kata dasar k/t/s/p + vokal) WAJIB luluh ("memengaruhi", "memesona", "menafsirkan", "mengonsumsi", "menerjemahkan", "menyukseskan"), KECUALI gugus konsonan ("mengkritik", "memproduksi", "memproses").
    - Huruf kapital dipakai untuk nama diri/geografi/bulan/hari/jabatan diikuti nama/sapaan ("Bapak, Ibu, Saudara, Anda"); nama jenis seperti "gula jawa", "pisang ambon", "kacang bogor" tetap huruf kecil.
    - Tanda baca: koma wajib sebelum konjungsi pertentangan intrakalimat ("melainkan", "sedangkan", "tetapi"), di belakang penghubung antarkalimat ("Oleh karena itu,", "Namun,"), serta sebelum "dan/atau" pada rincian >= 3 unsur; DILARANG koma sebelum "bahwa/agar/supaya/karena" jika anak kalimat setelah induk; DILARANG titik dua (":") tepat setelah kata kerja transitif/kopula ("adalah:", "meliputi:") di kalimat formal.
-   - Kosakata baku KBBI: gunakan "aktivitas", "analisis", "apotek", "asesmen", "atlet", "capaian pembelajaran", "diagnosis", "efektivitas", "hakikat", "hipotesis", "izin", "jadwal", "karier", "kerangka", "kualitas", "konkret", "kreativitas", "metode", "nasihat", "nilai tempat", "objek", "praktik", "produksi", "produktivitas", "risiko", "sekadar", "sistem", "subjek", "teknik", "mengubah", "memengaruhi".
-   - DILARANG mengarang istilah/typo AI seperti "Capai Pembelajaran", "CP Capai", "Assesmen", "Skeletasi", "Gurunya:", "rumpun nilai", "rangkuman nilai", atau "produkkan".
+   - Kosakata baku KBBI: gunakan "aktivasi", "aktivitas", "analisis", "apotek", "asesmen", "atlet", "capaian pembelajaran", "diagnosis", "efektivitas", "hakikat", "hipotesis", "izin", "jadwal", "karier", "kerangka", "kualitas", "konkret", "kreativitas", "metode", "nasihat", "nilai tempat", "objek", "praktik", "produksi", "produktivitas", "risiko", "sekadar", "sistem", "soal cerita", "subjek", "teknik", "mengubah", "memengaruhi", "menumbuhkan motivasi".
+   - DILARANG mengarang istilah/typo AI atau terjemahan kaku seperti "PELaksanaan", "aktifasi", "Menyalurkan motivasi", "masalah kata (story problem)", "Mengerjakan masalah menyelenggarakan...", "Tata Tertib Analisis Selanjutnya", "Capai Pembelajaran", "CP Capai", "Assesmen", "Skeletasi", "Gurunya:", "rumpun nilai", "rangkuman nilai", atau "produkkan".
    - Khusus soal tata bahasa/PUEBI: JANGAN pernah membuat soal ambigu dengan 2 jawaban benar atau mengklaim kaidah PUEBI palsu!
 3. KONSISTENSI KURIKULUM MERDEKA, IDENTITAS SISTEM, BATAS KKTP & FORMAT PDF BERSIH:
+   - KONSISTENSI ALOKASI WAKTU & PENOMORAN RPP/MODUL AJAR: Jika menyusun RPP/Modul Ajar, penjumlahan menit pada seluruh komponen tabel Materi & Alokasi Waktu (misal 10 + 20 + 20 + 15 + 5 = 70 menit) HARUS 100% cocok dengan header Durasi Sesi (`2 x 35 menit`) DAN dengan label menit pada tiap sub-bagian Langkah Pelaksanaan (contoh: bila Penjelasan Materi 20 menit + Latihan Terbimbing 20 menit, sub-bagian B. Penjelasan Materi & Latihan WAJIB tertulis `40 menit`, bukan `30 menit`). Setiap sub-bagian langkah (A, B, C, D) WAJIB memulai penomoran dari `1.` secara runtut (jangan melompat dari `4.` langsung ke `13.`).
+   - KOHERENSI INDIKATOR vs CONTOH SOAL MATEMATIKA: Contoh soal pada materi dan LKPD WAJIB 100% sesuai teknik pada Indikator! Jika indikator berbunyi "tanpa penukaran/menyimpan", pastikan penjumlahan setiap angka seletak <= 9 (misal `2.341 + 1.425`). Jika indikator berbunyi "tanpa pinjaman/meminjam", pastikan tiap angka yang dikurangi >= angka pengurang di seluruh nilai tempat (misal `7.580 - 2.450`). Sebaliknya jika menggunakan contoh dengan menyimpan/meminjam, ubah bunyi indikator menjadi "dengan teknik menyimpan/meminjam" agar tidak kontradiktif.
    - DILARANG mencampur istilah Kurikulum 2013 (K-13): JANGAN menulis "Kompetensi Dasar (KD)", "KD Inti", "KD-4", "KI/KD", atau "KKM (Kriteria Ketuntasan Minimal)" di dalam dokumen Kurikulum Merdeka. Gunakan secara konsisten: "Capaian Pembelajaran (CP)", "Tujuan Pembelajaran (TP)", "Alur Tujuan Pembelajaran (ATP)", dan "KKTP (Kriteria Ketercapaian Tujuan Pembelajaran)".
-   - IDENTITAS SISTEM RESMI: Seluruh dokumen & sumber belajar platform ini merujuk ke "LMS Akselerasi Edu". DILARANG KERAS menulis nama lama "SchoolOS" atau "LMS SchoolOS".
+   - IDENTITAS SISTEM RESMI: Seluruh dokumen & sumber belajar platform ini merujuk ke "LMS Akselerasi Edu" dan asistennya "Akselerasi Edu AI" (huruf I kapital, BUKAN `Al`). DILARANG KERAS menulis nama lama "SchoolOS" atau "LMS SchoolOS".
    - BATAS NILAI KETUNTASAN TANPA CELAH (CLOSED INTERVAL): Jika menetapkan ambang ketuntasan (misal 70 atau 75), WAJIB pakai tanda pertidaksamaan tegas tanpa celah: "Skor ≥ 70 (70 ke atas): CP Tercapai / Tuntas KKTP" dan "Skor < 70 (di bawah 70): Perlu Intervensi / EWS Remedial". JANGAN menulis "di atas 70" dan "di bawah 70" secara ambigu!
-   - FORMAT MARKDOWN & PDF BERSIH: DILARANG menulis tag HTML mentah seperti `<br>` atau `<br/>` di dalam sel tabel Markdown maupun paragraf (tuliskan butir dalam satu sel dengan penomoran ringkas `1) ...; 2) ...`). DILARANG menulis sintaks LaTeX mentah seperti `\dots`, `\ldots`, atau pembungkus `$...$` / `$$...$$` untuk aritmetika biasa—gunakan simbol Unicode bersih dan utuh (`...`, `< , > , =`, `≥`, `≤`, `×`, `÷`, contoh: `4.899 ... 4.989` dan `2.345 + 4.567 = ...`, serta tulis rangkaian simbol perbandingan `<, >, atau =` secara utuh tanpa terputus). Selalu beri 1 spasi sesudah emoji (`📚 **Sumber:** ...`)."#
+   - FORMAT MARKDOWN & PDF BERSIH: Jaga kapitalisasi judul tetap konsisten ("RENCANA PELAKSANAAN PEMBELAJARAN (RPP)", jangan ada huruf campur seperti `PELaksanaan`). DILARANG menulis tag HTML mentah seperti `<br>` atau `<br/>` di dalam sel tabel Markdown maupun paragraf (tuliskan butir dalam satu sel dengan penomoran ringkas `1) ...; 2) ...`). DILARANG menulis sintaks LaTeX mentah seperti `\dots`, `\ldots`, atau pembungkus `$...$` / `$$...$$` untuk aritmetika biasa—gunakan simbol Unicode bersih dan utuh (`...`, `< , > , =`, `≥`, `≤`, `×`, `÷`, contoh: `4.899 ... 4.989` dan `2.345 + 4.567 = ...`, serta tulis rangkaian simbol perbandingan `<, >, atau =` secara utuh tanpa terputus). Selalu beri 1 spasi sesudah emoji (`📚 **Sumber:** ...`). JANGAN menutup dokumen resmi RPP/Modul Ajar dengan kalimat ajakan obrolan yang memicu halaman tambahan kosong seperti `"Tata Tertib Analisis Selanjutnya: ... hubungi saya untuk generate laporan terstruktur"`."#
     } else {
         r#"### GUARDRAIL KAIDAH PUEBI / EYD EDISI V, KURIKULUM MERDEKA & FORMAT BERSIH:
-- Patuhi 100% pedoman EYD Edisi V & KBBI (jangan mengarang aturan tata bahasa): bedakan kata depan "di/ke/dari" (terpisah) vs imbuhan "di-/ke-" (serangkai); pisahkan partikel "pun" kecuali 12 kata hubung padu; terapkan peluluhan K-T-S-P ("memengaruhi", "memesona", "menerjemahkan", "mengonsumsi"); gunakan kosakata baku ("aktivitas", "analisis", "asesmen", "efektivitas", "produktivitas", "produksi", "praktik", "risiko", "sistem", "kualitas", "teknik", "objek", "metode", "izin", "nasihat", "jadwal", "sekadar", "mengubah").
-- Jangan menulis typo/istilah palsu seperti "produkkan", "komarasi", "efektifitas", "produktifitas", "mengklafisikasikan", "Capai Pembelajaran", "Assesmen", "Skeletasi", "Gurunya:", "rumpun nilai", atau "rangkuman nilai".
-- Gunakan istilah Kurikulum Merdeka (CP, TP, ATP, KKTP; JANGAN campur KD atau KKM), merek resmi "LMS Akselerasi Edu" (bukan "SchoolOS"), batas nilai tegas (`≥` vs `<`), serta simbol matematika Unicode bersih tanpa tag HTML `<br>` atau kode LaTeX mentah (`\dots`, `$...$`)."#
+- Patuhi 100% pedoman EYD Edisi V & KBBI (jangan mengarang aturan tata bahasa): bedakan kata depan "di/ke/dari" (terpisah) vs imbuhan "di-/ke-" (serangkai); pisahkan partikel "pun" kecuali 12 kata hubung padu; terapkan peluluhan K-T-S-P ("memengaruhi", "memesona", "menerjemahkan", "mengonsumsi"); gunakan kosakata baku ("aktivasi", "aktivitas", "analisis", "asesmen", "efektivitas", "produktivitas", "produksi", "praktik", "risiko", "sistem", "soal cerita", "kualitas", "teknik", "objek", "metode", "izin", "nasihat", "jadwal", "sekadar", "mengubah", "menumbuhkan motivasi").
+- Jangan menulis typo/istilah palsu atau terjemahan mentah seperti "PELaksanaan", "aktifasi", "Menyalurkan motivasi", "masalah kata (story problem)", "Tata Tertib Analisis Selanjutnya", "produkkan", "komarasi", "efektifitas", "produktifitas", "mengklafisikasikan", "Capai Pembelajaran", "Assesmen", "Skeletasi", "Gurunya:", "rumpun nilai", atau "rangkuman nilai".
+- Untuk Modul Ajar / RPP: pastikan alokasi menit di header, tabel, dan sub-bagian cocok 100%, penomoran tiap sub-bagian mulai dari `1.`, serta contoh soal Matematika sesuai indikatornya (tanpa menyimpan/meminjam vs dengan menyimpan/meminjam).
+- Gunakan istilah Kurikulum Merdeka (CP, TP, ATP, KKTP; JANGAN campur KD atau KKM), merek resmi "LMS Akselerasi Edu" dan "Akselerasi Edu AI" (bukan "SchoolOS" atau "Akselerasi Edu Al"), batas nilai tegas (`≥` vs `<`), serta simbol matematika Unicode bersih tanpa tag HTML `<br>` atau kode LaTeX mentah (`\dots`, `$...$`)."#
     }
 }
 

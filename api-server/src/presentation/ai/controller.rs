@@ -997,6 +997,7 @@ async fn fetch_principal_at_risk_breakdown_context(
         low_quiz_res,
         by_class_res,
         by_subject_res,
+        by_class_subject_res,
     ) = tokio::join!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM students WHERE tenant_id = $1 AND status IN ('Active', 'active') AND deleted_at IS NULL",
@@ -1100,6 +1101,23 @@ async fn fetch_principal_at_risk_breakdown_context(
         )
         .bind(tenant_id)
         .fetch_all(pool),
+        sqlx::query(
+            r#"
+            SELECT
+                COALESCE(NULLIF(TRIM(c.name), ''), 'Kelas') AS class_name,
+                COALESCE(NULLIF(TRIM(s.name), ''), 'Mapel') AS subject_name,
+                COUNT(DISTINCT g.student_id)::bigint AS cnt
+            FROM gradebooks g
+            JOIN classes c ON c.id = g.class_id AND c.deleted_at IS NULL
+            JOIN subjects s ON s.id = g.subject_id AND s.deleted_at IS NULL
+            WHERE g.tenant_id = $1 AND g.passed = false
+            GROUP BY c.name, s.name
+            ORDER BY cnt DESC, c.name ASC, s.name ASC
+            LIMIT 25
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_all(pool),
     );
 
     let active_students = active_students_res.unwrap_or(0);
@@ -1134,6 +1152,21 @@ async fn fetch_principal_at_risk_breakdown_context(
         })
         .collect();
 
+    let class_subject_breakdown: Vec<String> = by_class_subject_res
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| {
+            let cname: String = r
+                .try_get("class_name")
+                .unwrap_or_else(|_| "Kelas".to_string());
+            let sname: String = r
+                .try_get("subject_name")
+                .unwrap_or_else(|_| "Mapel".to_string());
+            let cnt: i64 = r.try_get("cnt").unwrap_or(0);
+            format!("{cname} • {sname}: {cnt} siswa")
+        })
+        .collect();
+
     let class_line = if class_breakdown.is_empty() {
         "Belum ada rincian gradebook tidak tuntas per kelas.".to_string()
     } else {
@@ -1144,23 +1177,31 @@ async fn fetch_principal_at_risk_breakdown_context(
     } else {
         subject_breakdown.join(" | ")
     };
+    let class_subject_line = if class_subject_breakdown.is_empty() {
+        "Belum ada entri ketidak-tuntasan gradebook pada kombinasi kelas & mapel mana pun.".to_string()
+    } else {
+        class_subject_breakdown.join(" | ")
+    };
 
     Some(format!(
         "[RINCIAN INDIKATOR SISWA BUTUH INTERVENSI (AT-RISK / EWS) AKTUAL DARI DATABASE]\n\
-        - Populasi Siswa Aktif: {active_students} siswa\n\
-        - Siswa Belum Tuntas KKTP Rapor (gradebooks.passed = false, metrik KPI Dashboard): {gradebook_failed} siswa unik\n\
-        - Indikator Risiko Nyata Terukur per Metrik (siswa unik, dapat beririsan antar indikator):\n\
+        - Populasi Siswa Aktif (Seluruh Sekolah): {active_students} siswa\n\
+        - Siswa Belum Tuntas KKTP Rapor (gradebooks.passed = false, metrik KPI Dashboard seluruh sekolah): {gradebook_failed} siswa unik\n\
+        - Indikator Risiko Nyata Terukur per Metrik (agregat seluruh sekolah, BUKAN khusus satu kelas tertentu):\n\
           1) Belum Mengumpulkan Tugas Aktif: {unsubmitted_assign} siswa\n\
           2) Nilai Tugas di Bawah KKTP (< 70): {low_assign} siswa\n\
           3) Materi Wajib Belum Dibaca (< halaman 3): {unread_mat} siswa\n\
           4) Skor Kuis/CBT di Bawah 70: {low_quiz} siswa\n\
           5) Catatan Ketidakhadiran (Alfa/Absent): {absent_att} siswa\n\
-        - Sebaran Aktual Siswa Belum Tuntas Rapor Per Kelas: {class_line}\n\
-        - Sebaran Aktual Siswa Belum Tuntas Rapor Per Mata Pelajaran: {subject_line}\n\
-        GUARDRAIL WAJIB ANALISIS SISWA AT-RISK:\n\
+        - Sebaran Aktual Siswa Belum Tuntas Rapor Per Kelas (seluruh mapel): {class_line}\n\
+        - Sebaran Aktual Siswa Belum Tuntas Rapor Per Mata Pelajaran (agregat seluruh kelas): {subject_line}\n\
+        - Sebaran Aktual Spesifik Per Kombinasi (Kelas • Mata Pelajaran): {class_subject_line}\n\
+        GUARDRAIL WAJIB ANALISIS & KONSISTENSI DATA:\n\
+        - DILARANG KERAS mengatribusikan angka agregat mapel/sekolah ke satu rombel tertentu! Contoh: jika 'Matematika (Umum)' muncul secara agregat (misal 6 siswa), JANGAN mengklaim '6 siswa di Kelas IV Paket A' apabila kombinasi '(Paket A / Kelas IV • Matematika)' TIDAK ADA di daftar 'Sebaran Aktual Spesifik Per Kombinasi (Kelas • Mata Pelajaran)' di atas.\n\
+        - Jika rombel yang dibahas (misal Paket A Kelas IV) belum memiliki entri ketidak-tuntasan pada daftar kombinasi (Kelas • Mapel), nyatakan jujur bahwa nilai gradebook pada rombel tersebut belum terisi/belum tercatat tidak tuntas (atau sebut rombel nyata yang memang tercatat, misal Paket B).\n\
+        - Apabila pengguna meminta dokumen perangkat ajar murni (Modul Ajar / RPP / CP / ATP / Bank Soal), fokus penuh pada perangkat ajar Kurikulum Merdeka — JANGAN memaksakan menyisipkan metrik EWS global atau penutup 'Tata Tertib Analisis Selanjutnya' kecuali diminta.\n\
         - HANYA kutip angka aktual di atas! DILARANG membuat tabel korelasi fiktif memakai tanda '~' (misal '~45 siswa', '~80 siswa', '~41 siswa') atau mengasumsikan pembagian angka guru Bottom 3 ke total {gradebook_failed} siswa at-risk.\n\
-        - Klasifikasikan akar masalah berdasarkan indikator nyata sistem di atas (belum kumpul tugas, nilai < 70, belum baca materi, ketidakhadiran); DILARANG menebak-nebak alasan non-database seperti 'motivasi/rumah tangga' atau 'HP/internet pribadi' sebagai penyebab pasti.\n\
-        - Gunakan diksi Indonesia baku: tulis 'produksi'/'penyusunan' (BUKAN 'produkkan'), dan hindari kata 'rumah tangga'."
+        - Gunakan diksi Indonesia baku sesuai EYD V: 'aktivasi', 'produksi'/'penyusunan' (BUKAN 'produkkan'/'aktifasi'/'Tata Tertib Analisis Selanjutnya')."
     ))
 }
 
@@ -1365,8 +1406,8 @@ async fn prepare_tanya_ai_context(
         - ATURAN IDENTITAS PIMPINAN: Kepala Sekolah resmi {db_school_name} adalah {db_headmaster_name}. JANGAN pernah menyebut operator, staf, atau guru lain (termasuk {actor_user_name}) sebagai Kepala Sekolah apabila bukan {db_headmaster_name}!\n\
         - Tahun Ajaran Aktif Resmi di Database: T.A {db_academic_year} (Semester {sem_label})\n\
         - INSTRUKSI KETAT: Seluruh analisis, rekomendasi, dan jawaban WAJIB merujuk ke Tahun Ajaran resmi aktif di database yaitu T.A {db_academic_year} (Semester {sem_label}). DILARANG MENGGUNAKAN tahun kadaluarsa seperti 2024/2025.\n\
-        - IDENTITAS PLATFORM & ISTILAH KURIKULUM: Nama resmi sistem/LMS ini adalah **LMS Akselerasi Edu** (DILARANG KERAS menulis `SchoolOS` atau `LMS SchoolOS`). Patuhi Kurikulum Merdeka sepenuhnya: gunakan **CP, TP, ATP, dan KKTP** (DILARANG mencampur istilah K-13 seperti `Kompetensi Dasar (KD)`, `KD-4`, `KD Inti`, atau `KKM`).\n\
-        - BAHASA, KAIDAH PUEBI/EYD V, BATAS NILAI & FORMAT PDF BERSIH: Gunakan ejaan Bahasa Indonesia baku sesuai EYD V / PUEBI & KBBI tanpa typo ('Capaian Pembelajaran', 'Asesmen', 'Kerangka Pembelajaran', 'Nilai Tempat', 'Guru:', 'Produktivitas', 'Aktivitas', 'Kolaborasi', 'Efektivitas', 'Produksi', 'memengaruhi', 'mengubah', 'praktik', 'analisis', 'risiko'; JANGAN menulis 'Capai Pembelajaran', 'CP Capai', 'Assesmen', 'Skeletasi', 'Gurunya:', 'rumpun nilai', 'rangkuman nilai', atau 'produkkan'). Untuk batas KKTP gunakan pertidaksamaan tegas tanpa celah (`≥ 70` vs `< 70`). DILARANG menulis tag `<br>` mentah dalam sel tabel Markdown atau token LaTeX (`\\dots`, `\\ldots`, `$...$`); gunakan simbol Unicode bersih (`...`, `< , > , =`, `≥`, `≤`).\n\
+        - IDENTITAS PLATFORM & ISTILAH KURIKULUM: Nama resmi sistem/LMS ini adalah **LMS Akselerasi Edu** dan asisten AI-nya adalah **Akselerasi Edu AI** (DILARANG KERAS menulis `SchoolOS`, `LMS SchoolOS`, atau `Akselerasi Edu Al`). Patuhi Kurikulum Merdeka sepenuhnya: gunakan **CP, TP, ATP, dan KKTP** (DILARANG mencampur istilah K-13 seperti `Kompetensi Dasar (KD)`, `KD-4`, `KD Inti`, atau `KKM`).\n\
+        - BAHASA, KAIDAH PUEBI/EYD V, KONSISTENSI RPP, BATAS NILAI & FORMAT PDF BERSIH: Gunakan ejaan Bahasa Indonesia baku sesuai EYD V / PUEBI & KBBI tanpa typo ('RENCANA PELAKSANAAN PEMBELAJARAN', 'aktivasi', 'menumbuhkan motivasi', 'soal cerita', 'Capaian Pembelajaran', 'Asesmen', 'Kerangka Pembelajaran', 'Nilai Tempat', 'Guru:', 'Produktivitas', 'Aktivitas', 'Kolaborasi', 'Efektivitas', 'Produksi', 'memengaruhi', 'mengubah', 'praktik', 'analisis', 'risiko'; JANGAN menulis 'PELaksanaan', 'aktifasi', 'Menyalurkan motivasi', 'masalah kata (story problem)', 'Mengerjakan masalah menyelenggarakan...', 'Tata Tertib Analisis Selanjutnya', 'Capai Pembelajaran', 'CP Capai', 'Assesmen', 'Skeletasi', 'Gurunya:', 'rumpun nilai', 'rangkuman nilai', atau 'produkkan'). Jika menyusun Modul Ajar / RPP: (1) pastikan alokasi menit di header, tabel, dan sub-bagian Langkah Pelaksanaan cocok tepat 100%, (2) pastikan tiap sub-bagian A/B/C/D memulai penomoran dari 1., (3) pastikan contoh soal Matematika selaras 100% dengan indikator teknik hitung (tanpa menyimpan/meminjam vs dengan menyimpan/meminjam), dan (4) JANGAN mengklaim data at-risk sekolah umum ke satu rombel spesifik kecuali memang ada pada kombinasi (Kelas • Mapel). Untuk batas KKTP gunakan pertidaksamaan tegas tanpa celah (`≥ 70` vs `< 70`). DILARANG menulis tag `<br>` mentah dalam sel tabel Markdown atau token LaTeX (`\\dots`, `\\ldots`, `$...$`); gunakan simbol Unicode bersih (`...`, `< , > , =`, `≥`, `≤`).\n\
         {puebi_guardrail}\n\
         - KEJUJURAN AKADEMIK & SITASI SUMBER: Jika ragu pada fakta spesifik, katakan terus terang jangan mengarang angka taksiran atau mengarang aturan tata bahasa. Akhiri setiap jawaban edukatif/analitis dengan bagian singkat:\n  📚 **Sumber:** ...\n\
         {sources_block}\n\
