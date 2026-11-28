@@ -68,7 +68,7 @@ static SHARED_AI_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceL
 fn get_ai_client() -> &'static reqwest::Client {
     SHARED_AI_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .timeout(Duration::from_secs(25))
+            .timeout(Duration::from_secs(65))
             .pool_idle_timeout(Duration::from_secs(90))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new())
@@ -379,6 +379,274 @@ pub fn sanitize_json_control_chars(input: &str) -> String {
     out
 }
 
+/// Membersihkan `topic` penugasan/kuis dari metadata UI seperti `Materi: ...`, `— Sumatif...`,
+/// `(Bagian 2/4)`, `| Cakupan: ...`, atau `| Periode: ...`, lalu memisahkannya ke catatan konteks
+/// agar metadata batch tidak ikut tercetak mentah ke dalam soal maupun judul.
+pub fn extract_clean_assessment_topic(raw_topic: &str) -> (String, Option<String>) {
+    let mut notes: Vec<String> = Vec::new();
+    let mut pipe_parts = raw_topic.split('|');
+    let first_segment = pipe_parts.next().unwrap_or(raw_topic).trim();
+    for extra in pipe_parts {
+        let t = extra.trim();
+        if !t.is_empty() {
+            notes.push(t.to_string());
+        }
+    }
+
+    // Hapus penanda batch seperti `(Bagian 2/4)` dari judul utama topik
+    let mut base = first_segment.to_string();
+    loop {
+        let lower = base.to_lowercase();
+        let Some(pos) = lower.rfind("(bagian ") else {
+            break;
+        };
+        let Some(rel_end) = base[pos..].find(')') else {
+            break;
+        };
+        let end_idx = pos + rel_end + 1;
+        let inner = &base[pos + 8..pos + rel_end];
+        if inner.contains('/') {
+            let before = base[..pos].trim_end();
+            let after = base[end_idx..].trim_start();
+            base = if after.is_empty() {
+                before.to_string()
+            } else {
+                format!("{before} {after}")
+            };
+        } else {
+            break;
+        }
+    }
+
+    // Pisahkan suffix cakupan ujian seperti `— Sumatif Akhir Semester...` ke context_notes
+    for marker in [
+        " — Sumatif ",
+        " — Asesmen Tengah Semester ",
+        " — Ujian Sumatif ",
+        " — Evaluasi Kustom ",
+        " - Sumatif Akhir Semester",
+    ] {
+        if let Some(idx) = base.find(marker) {
+            let scope_tail = base[idx..].trim_start_matches([' ', '—', '-']).trim();
+            if !scope_tail.is_empty() {
+                notes.push(scope_tail.to_string());
+            }
+            base = base[..idx].trim().to_string();
+            break;
+        }
+    }
+
+    let cleaned = base
+        .trim()
+        .trim_start_matches("Materi:")
+        .trim_start_matches("Rangkuman Materi:")
+        .trim()
+        .trim_matches('.')
+        .trim()
+        .to_string();
+
+    let final_topic = if cleaned.is_empty() {
+        raw_topic.trim().to_string()
+    } else {
+        cleaned
+    };
+
+    let ctx_note = if notes.is_empty() {
+        None
+    } else {
+        Some(notes.join(" | "))
+    };
+    (final_topic, ctx_note)
+}
+
+/// Mendeteksi soal template meta-generik / halusinasi yang hanya mengulang judul materi
+/// atau menyisipkan opsi/metadata dummy.
+pub fn is_hallucinated_meta_question(
+    question_text: &str,
+    choices: &[CbtQuestionChoiceDto],
+) -> bool {
+    let lower_q = question_text.trim().to_lowercase();
+    if lower_q.is_empty() {
+        return true;
+    }
+
+    const FORBIDDEN_STEM_MARKERS: &[&str] = &[
+        "konsep fundamental yang menjadi inti bahasan materi",
+        "ciri utama yang menandai penguasaan kompetensi",
+        "dalam menghadapi permasalahan kontekstual mengenai",
+        "penerapan etika, integritas, dan kolaborasi positif saat mempelajari",
+        "langkah reflektif yang paling konstruktif untuk memperdalam pemahaman materi",
+        "what is the primary function of learning '",
+        "which of the following best exemplifies an accurate application of '",
+        "when analyzing a reading text concerning '",
+        "in communicative tasks, how should students evaluate their presentation on '",
+        "how does mastering '",
+        "cakupan: sas",
+        "cakupan: ats",
+        "(bagian 1/",
+        "(bagian 2/",
+        "(bagian 3/",
+        "(bagian 4/",
+        "(butir ",
+    ];
+
+    if FORBIDDEN_STEM_MARKERS
+        .iter()
+        .any(|marker| lower_q.contains(marker))
+    {
+        return true;
+    }
+
+    choices.iter().any(|c| {
+        let lc = c.choice_text.trim().to_lowercase();
+        lc == "opsi a (sesuai konsep kurikulum)"
+            || lc == "opsi b"
+            || lc == "opsi c"
+            || lc == "opsi d"
+            || lc == "landasan konseptual terstruktur yang menghubungkan pemahaman teori dengan pemecahan masalah kontekstual"
+            || lc == "kumpulan hafalan definisi tanpa kaitan dengan penerapan kehidupan nyata"
+    })
+}
+
+fn build_substantive_assessment_rules(
+    subject_name: &str,
+    grade_level: &str,
+    material_context: Option<&str>,
+    scope_notes: Option<&str>,
+    is_english: bool,
+) -> String {
+    let mut sections: Vec<String> = Vec::new();
+    if let Some(scope) = scope_notes.filter(|s| !s.trim().is_empty()) {
+        sections.push(format!("Cakupan Evaluasi: {scope}"));
+    }
+    if let Some(mat) = material_context.filter(|m| !m.trim().is_empty()) {
+        sections.push(format!(
+            "[SUMBER MATERI AKTUAL DARI DATABASE SEKOLAH — JADIKAN RUJUKAN UTAMA BUTIR SOAL]:\n{mat}"
+        ));
+    }
+    let context_block = if sections.is_empty() {
+        String::new()
+    } else {
+        format!("\n{}\n", sections.join("\n"))
+    };
+
+    if is_english {
+        format!(
+            "{context_block}\n### STRICT ANTI-HALLUCINATION & SUBSTANTIVE ITEM RULES:\n\
+            - FORBIDDEN META-QUESTIONS: NEVER write vague meta-questions asking \"What is the fundamental concept of topic X?\" or \"How should ethics/collaboration be applied while studying X?\". Every question MUST test concrete English grammar, vocabulary, reading comprehension, or communication skills appropriate for {grade_level}.\n\
+            - NEVER copy batch/scope metadata labels (like `(Bagian 2/4)`, `Cakupan:`, or date ranges) into any question stem or answer choice."
+        )
+    } else {
+        let grade_lower = grade_level.to_lowercase();
+        let elementary_guard = if grade_lower.contains("sd")
+            || grade_lower.contains("paket a")
+            || grade_lower.contains("kelas 1")
+            || grade_lower.contains("kelas 2")
+            || grade_lower.contains("kelas 3")
+            || grade_lower.contains("kelas 4")
+            || grade_lower.contains("kelas 5")
+            || grade_lower.contains("kelas 6")
+        {
+            "\n- KALIBRASI KETAT JENJANG SD / PAKET A: Gunakan bahasa, kosakata, dan tingkat kognitif yang sesuai usia SD/Paket A! Untuk Bahasa Indonesia wajib berbasis teks bacaan singkat, kata sifat/imbuhan, sinonim-antonim, majas, ide pokok, kalimat efektif, atau EYD V; untuk Matematika wajib operasi hitung/bilangan/bangun/soal cerita konkret (DILARANG keras menyisipkan aljabar SMA/kuadrat)."
+        } else {
+            ""
+        };
+        format!(
+            "{context_block}\n### ATURAN MUTLAK ANTI-HALUSINASI BUTIR SOAL ({subject_name} • {grade_level}):\n\
+            - DILARANG KERAS SOAL META-GENERIK: Jangan pernah membuat soal abstrak kosong seperti \"Konsep fundamental yang menjadi inti bahasan materi...\", \"Ciri utama penguasaan kompetensi...\", \"Tindakan awal permasalahan kontekstual mengenai...\", atau \"Penerapan etika/kolaborasi saat mempelajari...\".\n\
+            - WAJIB MENGUJI MATERI NYATA: Setiap butir soal HARUS menyajikan stimulus konkret (kutipan paragraf/kalimat, data, kasus, perhitungan, atau konsep spesifik {subject_name}) yang langsung menguji kompetensi topik.\n\
+            - DILARANG MENYALIN METADATA UI: Jangan menulis label teknis seperti `(Bagian 1/4)`, `Cakupan: SAS / PAS`, rentang tanggal periodik, atau `Materi: ... — Sumatif...` di dalam teks soal atau opsi A-D.{elementary_guard}"
+        )
+    }
+}
+
+/// Menyelamatkan objek soal JSON yang utuh apabila respons LLM terpotong di akhir array `"questions"`.
+pub fn recover_questions_array_objects(sanitized_json: &str) -> Vec<serde_json::Value> {
+    let Some(q_key_pos) = sanitized_json.find("\"questions\"") else {
+        return Vec::new();
+    };
+    let after_key = &sanitized_json[q_key_pos + "\"questions\"".len()..];
+    let Some(arr_start_rel) = after_key.find('[') else {
+        return Vec::new();
+    };
+    let slice = &after_key[arr_start_rel + 1..];
+
+    let mut out = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut depth: i32 = 0;
+    let mut obj_start: Option<usize> = None;
+
+    for (idx, ch) in slice.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => {
+                if depth == 0 {
+                    obj_start = Some(idx);
+                }
+                depth += 1;
+            }
+            '}' => {
+                if depth > 0 {
+                    depth -= 1;
+                    if depth == 0 {
+                        if let Some(start) = obj_start.take() {
+                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&slice[start..=idx]) {
+                                out.push(val);
+                            }
+                        }
+                    }
+                }
+            }
+            ']' if depth == 0 => break,
+            _ => {}
+        }
+    }
+    out
+}
+
+fn recover_json_string_field(sanitized_json: &str, key: &str) -> Option<String> {
+    let pattern = format!("\"{key}\"");
+    let pos = sanitized_json.find(&pattern)?;
+    let after_key = &sanitized_json[pos + pattern.len()..];
+    let colon_pos = after_key.find(':')?;
+    let after_colon = after_key[colon_pos + 1..].trim_start();
+    if !after_colon.starts_with('"') {
+        return None;
+    }
+    let rest = &after_colon[1..];
+    let mut escaped = false;
+    let mut raw = String::new();
+    for ch in rest.chars() {
+        if escaped {
+            match ch {
+                'n' => raw.push('\n'),
+                't' => raw.push('\t'),
+                'r' => raw.push('\r'),
+                other => raw.push(other),
+            }
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            return Some(raw.trim().to_string()).filter(|s| !s.is_empty());
+        } else {
+            raw.push(ch);
+        }
+    }
+    None
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. INFOGRAPHIC GENERATION DTOs & FUNCTION
 // ─────────────────────────────────────────────────────────────────────────────
@@ -406,37 +674,78 @@ pub fn is_english_subject(subject: &str) -> bool {
     lower.contains("inggris") || lower.contains("english")
 }
 
-/// Normalisasi kata tidak baku / halusinasi ejaan khas LLM tanpa merusak kontras contoh soal PUEBI.
+/// Normalisasi kata tidak baku, sisa merek lama, token LaTeX mentah, & halusinasi ejaan khas LLM
+/// tanpa merusak kontras contoh soal PUEBI.
 pub fn normalize_ai_indonesian_typos(raw: &str) -> String {
-    raw.replace("Produkturnya", "Produktivitasnya")
-        .replace("produkturnya", "produktivitasnya")
-        .replace("Produktifitasnya", "Produktivitasnya")
-        .replace("produktifitasnya", "produktivitasnya")
-        .replace("Produktifitas", "Produktivitas")
-        .replace("produktifitas", "produktivitas")
-        .replace("Memprodukkan", "Memproduksi")
-        .replace("memprodukkan", "memproduksi")
-        .replace("Produkkan", "Produksi")
-        .replace("produkkan", "produksi")
-        .replace("Komarasi", "Kolaborasi")
-        .replace("komarasi", "kolaborasi")
-        .replace("Mengklafisikasikan", "Mengklasifikasikan")
-        .replace("mengklafisikasikan", "mengklasifikasikan")
-        .replace("Efektifitas", "Efektivitas")
-        .replace("efektifitas", "efektivitas")
-        .replace("Kwalitas", "Kualitas")
-        .replace("kwalitas", "kualitas")
-        .replace("Sistim", "Sistem")
-        .replace("sistim", "sistem")
+    const REPLACEMENTS: &[(&str, &str)] = &[
+        ("Produkturnya", "Produktivitasnya"),
+        ("produkturnya", "produktivitasnya"),
+        ("Produktifitasnya", "Produktivitasnya"),
+        ("produktifitasnya", "produktivitasnya"),
+        ("Produktifitas", "Produktivitas"),
+        ("produktifitas", "produktivitas"),
+        ("Memprodukkan", "Memproduksi"),
+        ("memprodukkan", "memproduksi"),
+        ("Produkkan", "Produksi"),
+        ("produkkan", "produksi"),
+        ("Komarasi", "Kolaborasi"),
+        ("komarasi", "kolaborasi"),
+        ("Mengklafisikasikan", "Mengklasifikasikan"),
+        ("mengklafisikasikan", "mengklasifikasikan"),
+        ("Efektifitas", "Efektivitas"),
+        ("efektifitas", "efektivitas"),
+        ("Kwalitas", "Kualitas"),
+        ("kwalitas", "kualitas"),
+        ("Sistim", "Sistem"),
+        ("sistim", "sistem"),
+        ("CAPAI PEMBELAJARAN", "CAPAIAN PEMBELAJARAN"),
+        ("Capai Pembelajaran", "Capaian Pembelajaran"),
+        ("capai pembelajaran", "capaian pembelajaran"),
+        ("ASSESMEN", "ASESMEN"),
+        ("Assesmen", "Asesmen"),
+        ("assesmen", "asesmen"),
+        ("SKELETASI SKEMA PEMBELAJARAN", "KERANGKA SKEMA PEMBELAJARAN"),
+        ("Skeletasi Skema Pembelajaran", "Kerangka Skema Pembelajaran"),
+        ("Skeletasi", "Kerangka"),
+        ("skeletasi", "kerangka"),
+        ("Gurunya:", "Guru:"),
+        ("gurunya:", "guru:"),
+        ("Alat Rumpun Nilai", "Alat Bantu Nilai Tempat"),
+        ("alat rumpun nilai", "alat bantu nilai tempat"),
+        ("Kartu rumpun nilai", "Kartu nilai tempat"),
+        ("kartu rumpun nilai", "kartu nilai tempat"),
+        ("Rumpun Nilai", "Nilai Tempat"),
+        ("rumpun nilai", "nilai tempat"),
+        ("rangkuman nilai", "tabel nilai tempat"),
+        ("LMS SchoolOS", "LMS Akselerasi Edu"),
+        ("lms schoolos", "LMS Akselerasi Edu"),
+        ("SchoolOS (Akselerasi Edu)", "Akselerasi Edu"),
+        ("\\ldots", "..."),
+        ("\\dots", "..."),
+    ];
+
+    let mut out = REPLACEMENTS
+        .iter()
+        .fold(raw.to_string(), |acc, (bad, good)| acc.replace(bad, good));
+
+    // Pastikan emoji 📚 yang langsung menempel ke `**Sumber:` atau `Sumber:` tetap memiliki spasi pemisah
+    if out.contains("📚**") {
+        out = out.replace("📚**", "📚 **");
+    }
+    if out.contains("📚Sumber:") {
+        out = out.replace("📚Sumber:", "📚 Sumber:");
+    }
+    out
 }
 
-/// Guardrail ketat kaidah PUEBI / EYD Edisi V & anti-halusinasi logika untuk AI Bahasa Indonesia / soal.
+/// Guardrail ketat kaidah PUEBI / EYD Edisi V, Kurikulum Merdeka, & anti-halusinasi logika untuk AI.
 pub fn build_indonesian_puebi_and_logic_guardrail(for_assessment: bool) -> &'static str {
     if for_assessment {
-        r#"### GUARDRAIL KETAT KAIDAH PUEBI / EYD V & ANTI-HALUSINASI LOGIKA SOAL:
-1. PEMBUKTIAN LOGIKA INTERNAL (WAJIB SEBELUM MENENTUKAN KUNCI):
-   - Selesaikan perhitungan matematis, analisis ilmiah, atau penelaahan kaidah PUEBI secara langkah demi langkah dan tuliskan buktinya dengan jelas di field "explanation".
-   - Cocokkan "correct_key" / "is_correct" / "accepted_answers" agar 100% KONSISTEN dengan hasil pembuktian di "explanation".
+        r#"### GUARDRAIL KETAT KAIDAH PUEBI / EYD V, KURIKULUM MERDEKA & ANTI-HALUSINASI LOGIKA:
+1. PEMBUKTIAN LOGIKA & KOHERENSI FAKTA SOAL CERITA (WAJIB SEBELUM MENENTUKAN KUNCI):
+   - Selesaikan perhitungan matematis, analisis ilmiah, atau penelaahan kaidah PUEBI secara langkah demi langkah dan tuliskan buktinya dengan jelas di pembahasan/"explanation".
+   - Cocokkan "correct_key" / "is_correct" / "accepted_answers" agar 100% KONSISTEN dengan hasil pembuktian.
+   - KOHERENSI SOAL CERITA: Kata kerja & objek pada kalimat tanya WAJIB 100% sesuai fakta narasi soal. Jika cerita menyebut "memanen 5.200 kg pagi dan 3.150 kg sore" tanpa proses pengemasan, tanyakan "Berapa total kg yang dipanen?" — DILARANG mengarang kata kerja baru yang tidak ada di teks (seperti "yang dipaketkan").
    - DILARANG membuat premis soal yang saling berkontradiksi, angka yang menghasilkan jawaban tidak ada di opsi A-D, atau opsi kembar/sinonim yang sama-sama benar.
    - Untuk PG (MULTIPLE_CHOICE): WAJIB TEPAT 1 opsi benar dan 3 pengecoh (distraktor) masuk akal namun terbukti salah secara faktual/kaidah.
 2. KAIDAH BAKU PUEBI / EYD EDISI V & KBBI (DILARANG KERAS MENGARANG ATURAN TATA BAHASA!):
@@ -446,12 +755,19 @@ pub fn build_indonesian_puebi_and_logic_guardrail(for_assessment: bool) -> &'sta
    - Peluluhan K-T-S-P ("meN-" + kata dasar k/t/s/p + vokal) WAJIB luluh ("memengaruhi", "memesona", "menafsirkan", "mengonsumsi", "menerjemahkan", "menyukseskan"), KECUALI gugus konsonan ("mengkritik", "memproduksi", "memproses").
    - Huruf kapital dipakai untuk nama diri/geografi/bulan/hari/jabatan diikuti nama/sapaan ("Bapak, Ibu, Saudara, Anda"); nama jenis seperti "gula jawa", "pisang ambon", "kacang bogor" tetap huruf kecil.
    - Tanda baca: koma wajib sebelum konjungsi pertentangan intrakalimat ("melainkan", "sedangkan", "tetapi"), di belakang penghubung antarkalimat ("Oleh karena itu,", "Namun,"), serta sebelum "dan/atau" pada rincian >= 3 unsur; DILARANG koma sebelum "bahwa/agar/supaya/karena" jika anak kalimat setelah induk; DILARANG titik dua (":") tepat setelah kata kerja transitif/kopula ("adalah:", "meliputi:") di kalimat formal.
-   - Kosakata baku KBBI: gunakan "aktivitas", "analisis", "apotek", "atlet", "diagnosis", "efektivitas", "hakikat", "hipotesis", "izin", "jadwal", "karier", "kualitas", "konkret", "kreativitas", "metode", "nasihat", "objek", "praktik", "produksi", "produktivitas", "risiko", "sekadar", "sistem", "subjek", "teknik", "mengubah", "memengaruhi".
-   - Khusus soal tata bahasa/PUEBI: JANGAN pernah membuat soal ambigu dengan 2 jawaban benar atau mengklaim kaidah PUEBI palsu!"#
+   - Kosakata baku KBBI: gunakan "aktivitas", "analisis", "apotek", "asesmen", "atlet", "capaian pembelajaran", "diagnosis", "efektivitas", "hakikat", "hipotesis", "izin", "jadwal", "karier", "kerangka", "kualitas", "konkret", "kreativitas", "metode", "nasihat", "nilai tempat", "objek", "praktik", "produksi", "produktivitas", "risiko", "sekadar", "sistem", "subjek", "teknik", "mengubah", "memengaruhi".
+   - DILARANG mengarang istilah/typo AI seperti "Capai Pembelajaran", "CP Capai", "Assesmen", "Skeletasi", "Gurunya:", "rumpun nilai", "rangkuman nilai", atau "produkkan".
+   - Khusus soal tata bahasa/PUEBI: JANGAN pernah membuat soal ambigu dengan 2 jawaban benar atau mengklaim kaidah PUEBI palsu!
+3. KONSISTENSI KURIKULUM MERDEKA, IDENTITAS SISTEM, BATAS KKTP & FORMAT PDF BERSIH:
+   - DILARANG mencampur istilah Kurikulum 2013 (K-13): JANGAN menulis "Kompetensi Dasar (KD)", "KD Inti", "KD-4", "KI/KD", atau "KKM (Kriteria Ketuntasan Minimal)" di dalam dokumen Kurikulum Merdeka. Gunakan secara konsisten: "Capaian Pembelajaran (CP)", "Tujuan Pembelajaran (TP)", "Alur Tujuan Pembelajaran (ATP)", dan "KKTP (Kriteria Ketercapaian Tujuan Pembelajaran)".
+   - IDENTITAS SISTEM RESMI: Seluruh dokumen & sumber belajar platform ini merujuk ke "LMS Akselerasi Edu". DILARANG KERAS menulis nama lama "SchoolOS" atau "LMS SchoolOS".
+   - BATAS NILAI KETUNTASAN TANPA CELAH (CLOSED INTERVAL): Jika menetapkan ambang ketuntasan (misal 70 atau 75), WAJIB pakai tanda pertidaksamaan tegas tanpa celah: "Skor ≥ 70 (70 ke atas): CP Tercapai / Tuntas KKTP" dan "Skor < 70 (di bawah 70): Perlu Intervensi / EWS Remedial". JANGAN menulis "di atas 70" dan "di bawah 70" secara ambigu!
+   - FORMAT MARKDOWN & PDF BERSIH: DILARANG menulis tag HTML mentah seperti `<br>` atau `<br/>` di dalam sel tabel Markdown maupun paragraf (tuliskan butir dalam satu sel dengan penomoran ringkas `1) ...; 2) ...`). DILARANG menulis sintaks LaTeX mentah seperti `\dots`, `\ldots`, atau pembungkus `$...$` / `$$...$$` untuk aritmetika biasa—gunakan simbol Unicode bersih dan utuh (`...`, `< , > , =`, `≥`, `≤`, `×`, `÷`, contoh: `4.899 ... 4.989` dan `2.345 + 4.567 = ...`, serta tulis rangkaian simbol perbandingan `<, >, atau =` secara utuh tanpa terputus). Selalu beri 1 spasi sesudah emoji (`📚 **Sumber:** ...`)."#
     } else {
-        r#"### GUARDRAIL KAIDAH PUEBI / EYD EDISI V & KBBI BAKU:
-- Patuhi 100% pedoman EYD Edisi V & KBBI (jangan pernah mengarang aturan tata bahasa): bedakan kata depan "di/ke/dari" (terpisah: "di rumah") vs imbuhan "di-/ke-" (serangkai: "ditulis"); pisahkan partikel "pun" kecuali 12 kata hubung padu; terapkan peluluhan K-T-S-P ("memengaruhi", "memesona", "menerjemahkan", "mengonsumsi", bukan "mempengaruhi/mempesona"); gunakan kosakata baku ("aktivitas", "analisis", "efektivitas", "produktivitas", "produksi", "praktik", "risiko", "sistem", "kualitas", "teknik", "objek", "metode", "izin", "nasihat", "jadwal", "sekadar", "mengubah").
-- Jangan menulis typo AI seperti "produkkan", "komarasi", "efektifitas", "produktifitas", atau "mengklafisikasikan"."#
+        r#"### GUARDRAIL KAIDAH PUEBI / EYD EDISI V, KURIKULUM MERDEKA & FORMAT BERSIH:
+- Patuhi 100% pedoman EYD Edisi V & KBBI (jangan mengarang aturan tata bahasa): bedakan kata depan "di/ke/dari" (terpisah) vs imbuhan "di-/ke-" (serangkai); pisahkan partikel "pun" kecuali 12 kata hubung padu; terapkan peluluhan K-T-S-P ("memengaruhi", "memesona", "menerjemahkan", "mengonsumsi"); gunakan kosakata baku ("aktivitas", "analisis", "asesmen", "efektivitas", "produktivitas", "produksi", "praktik", "risiko", "sistem", "kualitas", "teknik", "objek", "metode", "izin", "nasihat", "jadwal", "sekadar", "mengubah").
+- Jangan menulis typo/istilah palsu seperti "produkkan", "komarasi", "efektifitas", "produktifitas", "mengklafisikasikan", "Capai Pembelajaran", "Assesmen", "Skeletasi", "Gurunya:", "rumpun nilai", atau "rangkuman nilai".
+- Gunakan istilah Kurikulum Merdeka (CP, TP, ATP, KKTP; JANGAN campur KD atau KKM), merek resmi "LMS Akselerasi Edu" (bukan "SchoolOS"), batas nilai tegas (`≥` vs `<`), serta simbol matematika Unicode bersih tanpa tag HTML `<br>` atau kode LaTeX mentah (`\dots`, `$...$`)."#
     }
 }
 
@@ -1586,13 +1902,15 @@ fn build_visual_diagram_prompt_instructions(is_english: bool, include_images: bo
     if is_english {
         r#"
 ACCURATE FLUX AI EDUCATIONAL IMAGE REQUIREMENT:
-- ONLY on MULTIPLE_CHOICE or ESSAY items (20-35% of them) that genuinely benefit from observing real-world scenes, anatomy, geography landforms, laboratory apparatus, or historical scenes, include `"image_prompt"` with a clear, concrete 1-sentence English visual scene description (e.g. "Clean scientific textbook illustration showing the cross-section anatomy of a human heart, light background, no text labels").
+- ONLY on MULTIPLE_CHOICE or ESSAY items (at most 1-2 items per quiz) that genuinely require observing a concrete physical object, anatomy specimen, landform, laboratory apparatus, or clean unlabeled scene, include `"image_prompt"` with a specific 1-sentence English visual description ending with `"clean educational illustration, absolutely zero text, no words, no letters, no watermark"`.
+- If the question is purely about grammar, reading comprehension passages, vocabulary, or mental arithmetic, OMIT `"image_prompt"` completely (do NOT attach decorative book covers or scenes with text).
 - STRICTLY FORBIDDEN on MATCHING, ORDERING, FILL_BLANK, and CROSSWORD: keep interactive games 100% text-based and NEVER include `"image_prompt"` or image-selection prompts on them.
 - STRICTLY FORBIDDEN to write `'FLUX AI'`, `'AI generasi'`, `'represented descriptively'`, `'Gambar visual FLUX AI'`, Wikipedia queries, SVG tags, or `[Diagram: ...]` inside any question or template text."#
     } else {
         r#"
 ATURAN SOAL BERGAMBAR EDUKASI AKURAT:
-- HANYA pada 20-35% soal MULTIPLE_CHOICE atau ESSAY yang benar-benar relevan dengan pengamatan objek nyata, anatomi, fenomena alam, sejarah/budaya, geografi, atau alat praktikum, sertakan properti `"image_prompt"` berbahasa Inggris bebas teks (contoh: "Clean scientific textbook illustration showing a cross-section of a plant cell, light background, no text labels").
+- HANYA pada maksimal 1-2 butir soal MULTIPLE_CHOICE atau ESSAY yang benar-benar menguji pengamatan objek konkret nyata (anatomi, bagian tumbuhan/hewan, peristiwa alam, alat praktikum, rambu, peta buta), sertakan properti `"image_prompt"` berbahasa Inggris yang WAJIB diakhiri kalimat `"clean educational illustration, absolutely zero text, no words, no letters, no watermark"`.
+- JIKA soal menguji bacaan/paragraf Bahasa Indonesia, kaidah EYD V, kosakata, atau perhitungan angka tanpa kebutuhan observasi gambar nyata, JANGAN sertakan `"image_prompt"` (biarkan tanpa gambar agar tidak muncul ilustrasi sampul acak bertulisan judul!).
 - DILARANG KERAS menyertakan `"image_prompt"` ataupun menyuruh siswa "memilih gambar" pada soal game interaktif (MATCHING, ORDERING, FILL_BLANK, CROSSWORD) — game interaktif wajib 100% teks materi!
 - DILARANG KERAS menuliskan kata `'FLUX AI'`, `'AI generasi'`, `'dipresentasikan secara deskriptif'`, `'Gambar visual'`, tag `[Diagram: ...]`, SVG acak, atau Wikipedia di dalam `question_text` maupun `template`!"#
     }
@@ -1608,10 +1926,20 @@ pub async fn generate_assignment(
     num_essay: usize,
     difficulty: &str,
     include_images: bool,
+    material_context: Option<&str>,
 ) -> Result<GeneratedAssignmentDto, ApplicationError> {
+    let (clean_topic_owned, scope_notes) = extract_clean_assessment_topic(topic);
+    let topic = clean_topic_owned.as_str();
     let is_english = is_english_subject(subject_name);
     let visual_instructions = build_visual_diagram_prompt_instructions(is_english, include_images);
     let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
+    let substantive_rules = build_substantive_assessment_rules(
+        subject_name,
+        grade_level,
+        material_context,
+        scope_notes.as_deref(),
+        is_english,
+    );
     let fmt_upper = assignment_format.unwrap_or("STRUCTURED_QUESTIONS").to_uppercase();
     let is_homework = fmt_upper == "HOMEWORK_PR";
     let is_pure_game = fmt_upper == "INTERACTIVE_GAMES";
@@ -1868,6 +2196,7 @@ CONTOH FORMAT WAJIB UNTUK 4 TIPE GAME INTERAKTIF:
 Create a complete English student assignment package for subject: "{subject_name}", topic: "{topic}", grade level: "{grade_level}", difficulty: "{difficulty}" (Batch ID: {now_ts}).
 
 {subject_guideline}
+{substantive_rules}
 
 STRUCTURE AND QUESTION COUNT RULES:
 {slot_instructions}
@@ -1923,6 +2252,7 @@ STRICT REQUIREMENTS:
 Buatkan paket penugasan siswa terstruktur untuk mata pelajaran: "{subject_name}", topik: "{topic}", jenjang: "{grade_level}", tingkat kesulitan: "{difficulty}" (Batch ID: {now_ts}).
 
 {subject_guideline}
+{substantive_rules}
 
 {puebi_logic_guard}
 
@@ -1986,48 +2316,6 @@ PENTING & WAJIB:
         "You are an expert educational assessor creating logically verified Indonesian Kurikulum Merdeka student assignments strictly compliant with PUEBI / EYD V and KBBI grammar rules in valid JSON."
     };
 
-    let messages = vec![
-        ChatMessage {
-            role: "system",
-            content: system_prompt,
-        },
-        ChatMessage {
-            role: "user",
-            content: &prompt,
-        },
-    ];
-
-    let raw = match call_nvidia_nim(messages, 0.25, 4200).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("call_nvidia_nim failed for assignment: {e}. Utilizing pedagogical fallback.");
-            let mut dto = fallback_generate_assignment(
-                topic,
-                grade_level,
-                subject_name,
-                assignment_format,
-                effective_num_mcq,
-                effective_num_essay,
-                difficulty,
-                include_images,
-            );
-            if include_images {
-                ensure_assignment_visual_guarantee(
-                    pool,
-                    &mut dto.questions,
-                    subject_name,
-                    topic,
-                    grade_level,
-                    is_english,
-                )
-                .await;
-            }
-            return Ok(dto);
-        }
-    };
-    let cleaned = extract_clean_json(&raw);
-    let sanitized = sanitize_json_control_chars(cleaned);
-
     #[derive(Deserialize)]
     struct RawAssignmentResponse {
         title: Option<serde_json::Value>,
@@ -2041,79 +2329,140 @@ PENTING & WAJIB:
         questions: Vec<serde_json::Value>,
     }
 
-    let parsed: RawAssignmentResponse = match serde_json::from_str(&sanitized) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("Failed to parse AI Assignment JSON ({e}). Utilizing pedagogical fallback.");
-            let mut dto = fallback_generate_assignment(
-                topic,
-                grade_level,
-                subject_name,
-                assignment_format,
-                effective_num_mcq,
-                effective_num_essay,
-                difficulty,
-                include_images,
-            );
-            if include_images {
-                ensure_assignment_visual_guarantee(
-                    pool,
-                    &mut dto.questions,
-                    subject_name,
-                    topic,
-                    grade_level,
-                    is_english,
-                )
-                .await;
+    let mut parsed_title: Option<String> = None;
+    let mut parsed_instructions: Option<String> = None;
+    let mut parsed_assignment_type: Option<String> = None;
+    let mut parsed_rubric: Option<String> = None;
+    let mut tasks_vec: Vec<String> = Vec::new();
+    let mut raw_question_values: Vec<serde_json::Value> = Vec::new();
+    let mut last_ai_error: Option<String> = None;
+
+    for attempt in 0..=2usize {
+        let attempt_prompt = if attempt == 0 {
+            prompt.clone()
+        } else {
+            let need_now = total_questions.saturating_sub(raw_question_values.len()).max(1);
+            let existing_preview: Vec<String> = raw_question_values
+                .iter()
+                .filter_map(|v| v.get("question_text").or_else(|| v.get("text")).and_then(|s| s.as_str()))
+                .map(|s| s.chars().take(90).collect::<String>())
+                .take(8)
+                .collect();
+            let avoid_section = if existing_preview.is_empty() {
+                String::new()
+            } else {
+                format!("\nJANGAN MENGULANG butir soal yang sudah ada:\n- {}", existing_preview.join("\n- "))
+            };
+            format!(
+                "{prompt}\n\nPERINGATAN RETRY/PELENGKAP (Pass {attempt}): Pastikan menghasilkan TEPAT {need_now} butir soal valid BARU dalam format JSON yang persis mengikuti skema (tanpa teks pengantar dan tanpa pemotongan JSON).{avoid_section}"
+            )
+        };
+
+        let messages = vec![
+            ChatMessage {
+                role: "system",
+                content: system_prompt,
+            },
+            ChatMessage {
+                role: "user",
+                content: &attempt_prompt,
+            },
+        ];
+
+        let raw = match call_nvidia_nim(messages, if attempt == 0 { 0.25 } else { 0.32 }, 6000).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("call_nvidia_nim attempt {attempt} failed for assignment '{topic}': {e}");
+                last_ai_error = Some(format!("{e:?}"));
+                continue;
             }
-            return Ok(dto);
+        };
+        let cleaned = extract_clean_json(&raw);
+        let sanitized = sanitize_json_control_chars(cleaned);
+
+        match serde_json::from_str::<RawAssignmentResponse>(&sanitized) {
+            Ok(p) => {
+                if parsed_title.is_none() {
+                    parsed_title = p.title.map(|v| json_value_to_string(&v)).filter(|s| !s.is_empty());
+                }
+                if parsed_instructions.is_none() {
+                    parsed_instructions = p.instructions.map(|v| json_value_to_string(&v)).filter(|s| !s.is_empty());
+                }
+                if parsed_assignment_type.is_none() {
+                    parsed_assignment_type = p.assignment_type;
+                }
+                if parsed_rubric.is_none() {
+                    parsed_rubric = p.rubric.map(|v| json_value_to_string(&v)).filter(|s| !s.is_empty());
+                }
+                if tasks_vec.is_empty() {
+                    tasks_vec = match p.tasks {
+                        Some(serde_json::Value::Array(arr)) => arr.into_iter().map(|v| json_value_to_string(&v)).collect(),
+                        Some(serde_json::Value::String(s)) => vec![s],
+                        _ => Vec::new(),
+                    };
+                }
+                raw_question_values.extend(p.questions);
+            }
+            Err(e) => {
+                tracing::warn!("Assignment JSON parse failed on attempt {attempt} ({e}); attempting partial object recovery.");
+                if parsed_title.is_none() {
+                    parsed_title = recover_json_string_field(&sanitized, "title");
+                }
+                if parsed_instructions.is_none() {
+                    parsed_instructions = recover_json_string_field(&sanitized, "instructions");
+                }
+                if parsed_rubric.is_none() {
+                    parsed_rubric = recover_json_string_field(&sanitized, "rubric");
+                }
+                let recovered = recover_questions_array_objects(&sanitized);
+                if recovered.is_empty() {
+                    last_ai_error = Some(format!("JSON parse error: {e}"));
+                } else {
+                    raw_question_values.extend(recovered);
+                }
+            }
         }
-    };
+
+        if raw_question_values.len() >= total_questions {
+            break;
+        }
+    }
+
+    if raw_question_values.is_empty() && tasks_vec.is_empty() {
+        tracing::error!("AI failed to generate valid assignment items for '{topic}': {:?}", last_ai_error);
+        return Err(ApplicationError::Internal(format!(
+            "Layanan AI gagal menyusun butir tugas valid untuk topik '{topic}'. Silakan coba kembali beberapa saat lagi (sistem menolak menyisipkan soal template generik agar mutu penugasan terjaga)."
+        )));
+    }
 
     let mut diagrams_attached = 0usize;
 
-    let title_str = parsed
-        .title
-        .map(|v| json_value_to_string(&v))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            if is_english {
-                format!("English Assignment: {topic}")
-            } else {
-                format!("Tugas Siswa: {topic}")
-            }
-        });
-    let instructions_str = parsed
-        .instructions
-        .map(|v| json_value_to_string(&v))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            if is_english {
-                "Complete each task and question below carefully and thoughtfully in English.".to_string()
-            } else {
-                "Kerjakan penugasan berikut dengan seksama dan teliti.".to_string()
-            }
-        });
-    let rubric_str = parsed.rubric.map(|v| json_value_to_string(&v)).filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            if is_english {
-                "Grading Rubric: 0 - 100 scale based on English comprehension, grammatical accuracy, and completeness.".to_string()
-            } else {
-                "Rubrik Penilaian: Skala Skor 0 - 100 berdasarkan ketepatan konsep dan kelengkapan analisis.".to_string()
-            }
-        });
-
-    let tasks_vec: Vec<String> = match parsed.tasks {
-        Some(serde_json::Value::Array(arr)) => {
-            arr.into_iter().map(|v| json_value_to_string(&v)).collect()
+    let title_str = parsed_title.unwrap_or_else(|| {
+        if is_english {
+            format!("English Assignment: {topic}")
+        } else {
+            format!("Tugas Siswa: {topic}")
         }
-        Some(serde_json::Value::String(s)) => vec![s],
-        _ => Vec::new(),
-    };
+    });
+    let instructions_str = parsed_instructions.unwrap_or_else(|| {
+        if is_english {
+            "Complete each task and question below carefully and thoughtfully in English.".to_string()
+        } else {
+            "Kerjakan penugasan berikut dengan seksama dan teliti.".to_string()
+        }
+    });
+    let rubric_str = parsed_rubric.unwrap_or_else(|| {
+        if is_english {
+            "Grading Rubric: 0 - 100 scale based on English comprehension, grammatical accuracy, and completeness.".to_string()
+        } else {
+            "Rubrik Penilaian: Skala Skor 0 - 100 berdasarkan ketepatan konsep dan kelengkapan analisis.".to_string()
+        }
+    });
 
     let mut questions: Vec<AssignmentQuestionDto> = Vec::new();
+    let mut seen_stems: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for (idx, q_val) in parsed.questions.into_iter().enumerate() {
+    for (idx, q_val) in raw_question_values.into_iter().enumerate() {
         let q_id = q_val
             .get("id")
             .and_then(|v| v.as_str())
@@ -2253,11 +2602,38 @@ PENTING & WAJIB:
         } else {
             None
         };
-        let clean_q_text = if img.is_some() {
+        let clean_q_text_base = if img.is_some() {
             strip_leaked_diagram_bracket_tag(&strip_leaked_meta_notes(&q_text))
         } else {
             strip_leaked_diagram_bracket_tag(&strip_orphaned_visual_lead(&q_text))
         };
+        let clean_q_text = if is_english {
+            clean_q_text_base
+        } else {
+            normalize_ai_indonesian_typos(&clean_q_text_base)
+        };
+        let normalized_choices: Vec<CbtQuestionChoiceDto> = choices
+            .into_iter()
+            .map(|mut c| {
+                if !is_english {
+                    c.choice_text = normalize_ai_indonesian_typos(&c.choice_text);
+                }
+                c
+            })
+            .collect();
+        let clean_explanation = if is_english {
+            explanation
+        } else {
+            normalize_ai_indonesian_typos(&explanation)
+        };
+
+        if is_hallucinated_meta_question(&clean_q_text, &normalized_choices) {
+            continue;
+        }
+        let stem_key: String = clean_q_text.trim().to_lowercase().chars().take(120).collect();
+        if !seen_stems.insert(stem_key) {
+            continue;
+        }
 
         questions.push(AssignmentQuestionDto {
             id: q_id,
@@ -2265,18 +2641,26 @@ PENTING & WAJIB:
             question_type,
             points,
             image_url: img,
-            choices,
+            choices: normalized_choices,
             interaction_config: raw_interaction,
-            explanation,
+            explanation: clean_explanation,
         });
     }
 
-    // Fallback if questions array was empty but tasks existed
+    // Fallback if questions array was empty but real substantive tasks existed
     if questions.is_empty() && !tasks_vec.is_empty() {
         for (idx, task_str) in tasks_vec.iter().enumerate() {
+            let task_clean = if is_english {
+                task_str.clone()
+            } else {
+                normalize_ai_indonesian_typos(task_str)
+            };
+            if is_hallucinated_meta_question(&task_clean, &[]) {
+                continue;
+            }
             questions.push(AssignmentQuestionDto {
                 id: format!("asg-task-{}", idx + 1),
-                question_text: task_str.clone(),
+                question_text: task_clean,
                 question_type: "ESSAY".to_string(),
                 points: 20,
                 image_url: None,
@@ -2287,7 +2671,7 @@ PENTING & WAJIB:
         }
     }
 
-    // ── Enforce Exact Counts & Keep Interactive Game Questions ──
+    // ── Keep ONLY Verified Substantive Questions (Zero Boilerplate Padding) ──
     if !is_homework {
         let mut final_mcqs: Vec<AssignmentQuestionDto> = Vec::new();
         let mut final_games: Vec<AssignmentQuestionDto> = Vec::new();
@@ -2295,7 +2679,7 @@ PENTING & WAJIB:
 
         for q in questions {
             let qt = q.question_type.as_str();
-            if qt == "MULTIPLE_CHOICE" && !q.choices.is_empty() {
+            if qt == "MULTIPLE_CHOICE" && q.choices.len() >= 2 {
                 final_mcqs.push(q);
             } else if matches!(qt, "MATCHING" | "ORDERING" | "FILL_BLANK" | "CROSSWORD")
                 && q.interaction_config
@@ -2312,83 +2696,9 @@ PENTING & WAJIB:
             }
         }
 
-        if is_pure_game || is_game_mixed {
-            if !final_games.iter().any(|g| g.question_type == "MATCHING") {
-                final_games.push(build_fallback_matching_question(topic, subject_name, now_ts));
-            }
-            if !final_games.iter().any(|g| g.question_type == "ORDERING") {
-                final_games.push(build_fallback_ordering_question(topic, subject_name, now_ts));
-            }
-            if !final_games.iter().any(|g| g.question_type == "FILL_BLANK") {
-                final_games.push(build_fallback_fill_blank_question(topic, subject_name, now_ts));
-            }
-            if !final_games.iter().any(|g| g.question_type == "CROSSWORD") {
-                final_games.push(build_fallback_crossword_question(topic, subject_name, now_ts));
-            }
-        }
-
         if is_pure_game {
             questions = final_games;
         } else {
-            // Pad missing MCQs if AI returned fewer than requested
-            if final_mcqs.len() < effective_num_mcq {
-                let needed = effective_num_mcq - final_mcqs.len();
-                let pad_templates = generate_pedagogical_question_templates(
-                    subject_name,
-                    topic,
-                    grade_level,
-                    difficulty,
-                    effective_num_mcq,
-                );
-                let start_idx = final_mcqs.len();
-                for offset in 0..needed {
-                    let tpl = &pad_templates[(start_idx + offset) % pad_templates.len()];
-                    let idx = final_mcqs.len() + 1;
-                    let choices = tpl
-                        .1
-                        .iter()
-                        .enumerate()
-                        .map(|(c_idx, text)| CbtQuestionChoiceDto {
-                            choice_text: text.clone(),
-                            is_correct: c_idx == tpl.2,
-                        })
-                        .collect();
-                    final_mcqs.push(AssignmentQuestionDto {
-                        id: format!("asg-mcq-pad-{idx}-{now_ts}"),
-                        question_text: tpl.0.clone(),
-                        question_type: "MULTIPLE_CHOICE".to_string(),
-                        points: 10,
-                        image_url: None,
-                        choices,
-                        interaction_config: None,
-                        explanation: tpl.3.clone(),
-                    });
-                }
-            }
-
-            // Pad missing Essays if AI returned fewer than requested (always 0 for game formats)
-            while final_essays.len() < effective_num_essay {
-                let idx = final_essays.len() + 1;
-                final_essays.push(AssignmentQuestionDto {
-                    id: format!("asg-essay-pad-{idx}-{now_ts}"),
-                    question_text: if is_english {
-                        format!("Explain your understanding and practical examples of '{topic}' in {subject_name} ({grade_level}) (Part {idx}):")
-                    } else {
-                        format!("Jelaskan secara mendalam analisis dan penerapan konsep {topic} dalam konteks nyata (Aspek Evaluasi {idx}):")
-                    },
-                    question_type: "ESSAY".to_string(),
-                    points: 20,
-                    image_url: None,
-                    choices: Vec::new(),
-                    interaction_config: None,
-                    explanation: if is_english {
-                        format!("Rubric: Full credit is awarded for accurate English explanations of {topic}, clear supporting examples, and coherent reasoning.")
-                    } else {
-                        format!("Rubrik: Skor maksimal jika siswa mampu menjabarkan konsep {topic} disertai contoh konkret dan argumentasi logis yang runtut.")
-                    },
-                });
-            }
-
             final_mcqs.truncate(effective_num_mcq);
             final_essays.truncate(effective_num_essay);
 
@@ -2397,28 +2707,13 @@ PENTING & WAJIB:
             questions.extend(final_essays);
         }
     } else {
-        while questions.len() < effective_num_essay {
-            let idx = questions.len() + 1;
-            questions.push(AssignmentQuestionDto {
-                id: format!("asg-hw-pad-{idx}-{now_ts}"),
-                question_text: if is_english {
-                    format!("Independent Task {idx}: Observe real-life examples and write a structured report in English about '{topic}' for {subject_name}.")
-                } else {
-                    format!("Tugas Mandiri {idx}: Lakukan pengamatan dan susun laporan terstruktur mengenai {topic} sesuai panduan modul {subject_name}.")
-                },
-                question_type: "ESSAY".to_string(),
-                points: (100 / (effective_num_essay.max(1) as i32)).max(10),
-                image_url: None,
-                choices: Vec::new(),
-                interaction_config: None,
-                explanation: if is_english {
-                    format!("Rubric: Assessment is based on completeness, original analysis, and accurate English usage in {subject_name}.")
-                } else {
-                    format!("Rubrik: Penilaian berbasis kelengkapan laporan, orisinalitas analisis, dan ketepatan kaidah {subject_name}.")
-                },
-            });
-        }
         questions.truncate(effective_num_essay);
+    }
+
+    if questions.is_empty() {
+        return Err(ApplicationError::Internal(format!(
+            "AI gagal menghasilkan butir tugas yang valid untuk topik '{topic}'. Silakan coba ulangi beberapa saat lagi."
+        )));
     }
 
     if include_images {
@@ -2436,7 +2731,7 @@ PENTING & WAJIB:
     Ok(GeneratedAssignmentDto {
         title: title_str,
         instructions: instructions_str,
-        assignment_type: parsed.assignment_type.unwrap_or_else(|| {
+        assignment_type: parsed_assignment_type.unwrap_or_else(|| {
             if is_homework {
                 "HOMEWORK_PR".to_string()
             } else {
@@ -2450,59 +2745,17 @@ PENTING & WAJIB:
 }
 
 async fn ensure_assignment_visual_guarantee(
-    pool: &sqlx::PgPool,
-    questions: &mut Vec<AssignmentQuestionDto>,
-    subject_name: &str,
-    topic: &str,
-    grade_level: &str,
-    is_english: bool,
+    _pool: &sqlx::PgPool,
+    questions: &mut [AssignmentQuestionDto],
+    _subject_name: &str,
+    _topic: &str,
+    _grade_level: &str,
+    _is_english: bool,
 ) {
-    if questions.is_empty() || questions.iter().any(|q| q.image_url.is_some()) {
-        return;
-    }
-
-    let (v_text, v_choices_raw, v_correct_idx, v_expl, v_spec) =
-        crate::infrastructure::visual_diagram::build_verified_visual_mcq(subject_name, topic, is_english);
-    let Some(v_url) = crate::infrastructure::visual_diagram::resolve_visual_diagram_url(
-        pool,
-        Some(&v_spec),
-        subject_name,
-        grade_level,
-    )
-    .await
-    else {
-        return;
-    };
-
-    if let Some(mcq) = questions
-        .iter_mut()
-        .find(|q| q.question_type == "MULTIPLE_CHOICE")
-    {
-        mcq.question_text = v_text;
-        mcq.choices = v_choices_raw
-            .into_iter()
-            .enumerate()
-            .map(|(i, text)| CbtQuestionChoiceDto {
-                choice_text: text,
-                is_correct: i == v_correct_idx,
-            })
-            .collect();
-        mcq.explanation = v_expl;
-        mcq.image_url = Some(v_url);
-        return;
-    }
-
-    if let Some(first_q) = questions.first_mut() {
-        first_q.image_url = Some(v_url);
-        if first_q.question_type == "ESSAY" {
-            let prefix = if is_english {
-                "Observe the visual diagram above carefully to support your analysis.\n\n"
-            } else {
-                "Perhatikan diagram visual di atas dengan cermat sebagai stimulus analisis Anda.\n\n"
-            };
-            if !first_q.question_text.contains("diagram") {
-                first_q.question_text = format!("{prefix}{}", first_q.question_text);
-            }
+    // Strip orphaned visual lead-ins ("Perhatikan gambar di atas...") when no image is attached
+    for q in questions.iter_mut() {
+        if q.image_url.is_none() {
+            q.question_text = strip_orphaned_visual_lead(&q.question_text);
         }
     }
 }
@@ -2537,27 +2790,6 @@ fn extract_question_flux_prompt(q_val: &serde_json::Value) -> Option<String> {
         })
 }
 
-fn derive_flux_prompt_from_question(
-    question_text: &str,
-    subject_name: &str,
-    topic: &str,
-) -> String {
-    let clean_topic = topic.split('|').next().unwrap_or(topic).trim();
-    let short_stem: String = question_text
-        .replace('\n', " ")
-        .trim()
-        .chars()
-        .take(180)
-        .collect();
-    if short_stem.len() >= 12 {
-        format!("{subject_name} concept '{clean_topic}': {short_stem}")
-    } else if clean_topic.len() >= 3 {
-        format!("{subject_name} educational concept: {clean_topic}")
-    } else {
-        subject_name.trim().to_string()
-    }
-}
-
 async fn attach_flux_images_concurrently(
     pool: &sqlx::PgPool,
     questions: &mut Vec<CbtQuestionDto>,
@@ -2581,23 +2813,13 @@ async fn attach_flux_images_concurrently(
             continue;
         }
         if let Some(p) = prompt_by_qid.get(&q.id) {
-            targets.push((idx, p.clone()));
-        }
-    }
-
-    // Guarantee at least 1 context-matched FLUX illustration when include_images=true
-    if targets.is_empty() && !questions.iter().any(|q| q.image_url.is_some()) {
-        let best_idx = questions
-            .iter()
-            .position(|q| q.question_type.as_deref() != Some("SHORT_ANSWER"))
-            .unwrap_or(0);
-        let derived = derive_flux_prompt_from_question(
-            &questions[best_idx].question_text,
-            subject_name,
-            topic,
-        );
-        if derived.trim().len() >= 3 {
-            targets.push((best_idx, derived));
+            // Only generate images for explicit visual prompts on MCQ / ESSAY / TRUE_FALSE_MATRIX
+            if matches!(
+                q.question_type.as_deref(),
+                Some("MULTIPLE_CHOICE" | "ESSAY" | "TRUE_FALSE_MATRIX" | "MULTIPLE_SELECT") | None
+            ) {
+                targets.push((idx, format!("{p}, clean educational illustration, no text, no words, no letters, no watermark")));
+            }
         }
     }
 
@@ -2648,27 +2870,19 @@ async fn attach_flux_images_concurrently(
 }
 
 async fn ensure_quiz_visual_guarantee(
-    pool: &sqlx::PgPool,
-    questions: &mut Vec<CbtQuestionDto>,
-    subject_name: &str,
-    topic: &str,
-    grade_level: &str,
+    _pool: &sqlx::PgPool,
+    questions: &mut [CbtQuestionDto],
+    _subject_name: &str,
+    _topic: &str,
+    _grade_level: &str,
     _is_english: bool,
 ) {
-    if questions.is_empty() || questions.iter().any(|q| q.image_url.is_some()) {
-        return;
+    // Strip orphaned visual lead-ins ("Perhatikan gambar di atas...") when no verified diagram was attached
+    for q in questions.iter_mut() {
+        if q.image_url.is_none() {
+            q.question_text = strip_orphaned_visual_lead(&q.question_text);
+        }
     }
-
-    let empty_prompts = std::collections::HashMap::new();
-    attach_flux_images_concurrently(
-        pool,
-        questions,
-        &empty_prompts,
-        subject_name,
-        topic,
-        grade_level,
-    )
-    .await;
 }
 
 fn normalize_fill_blank_template_tokens(raw_tpl: &str) -> String {
@@ -2886,6 +3100,7 @@ fn is_valid_game_interaction_config(question_type: &str, cfg: &serde_json::Value
     }
 }
 
+#[allow(dead_code)]
 fn build_fallback_matching_question(topic: &str, subject: &str, ts: i64) -> AssignmentQuestionDto {
     if is_english_subject(subject) {
         return AssignmentQuestionDto {
@@ -2926,6 +3141,7 @@ fn build_fallback_matching_question(topic: &str, subject: &str, ts: i64) -> Assi
     }
 }
 
+#[allow(dead_code)]
 fn build_fallback_ordering_question(topic: &str, subject: &str, ts: i64) -> AssignmentQuestionDto {
     if is_english_subject(subject) {
         return AssignmentQuestionDto {
@@ -2966,6 +3182,7 @@ fn build_fallback_ordering_question(topic: &str, subject: &str, ts: i64) -> Assi
     }
 }
 
+#[allow(dead_code)]
 fn build_fallback_fill_blank_question(topic: &str, subject: &str, ts: i64) -> AssignmentQuestionDto {
     if is_english_subject(subject) {
         return AssignmentQuestionDto {
@@ -3000,6 +3217,7 @@ fn build_fallback_fill_blank_question(topic: &str, subject: &str, ts: i64) -> As
     }
 }
 
+#[allow(dead_code)]
 fn build_fallback_crossword_question(topic: &str, subject: &str, ts: i64) -> AssignmentQuestionDto {
     let raw_cfg = if is_english_subject(subject) {
         serde_json::json!({
@@ -3041,6 +3259,7 @@ fn build_fallback_crossword_question(topic: &str, subject: &str, ts: i64) -> Ass
     }
 }
 
+#[allow(dead_code)]
 pub fn generate_pedagogical_question_templates(
     subject: &str,
     topic: &str,
@@ -3364,6 +3583,7 @@ pub fn generate_pedagogical_question_templates(
     result
 }
 
+#[allow(dead_code)]
 pub fn fallback_generate_assignment(
     topic: &str,
     grade_level: &str,
@@ -3546,10 +3766,20 @@ pub async fn generate_cbt_quiz(
     num_essay: usize,
     difficulty: &str,
     include_images: bool,
+    material_context: Option<&str>,
 ) -> Result<GeneratedCbtQuizDto, ApplicationError> {
+    let (clean_topic_owned, scope_notes) = extract_clean_assessment_topic(topic);
+    let topic = clean_topic_owned.as_str();
     let is_english = is_english_subject(subject_name);
     let subject_guideline = build_subject_pedagogical_instructions(subject_name, grade_level);
     let visual_instructions = build_visual_diagram_prompt_instructions(is_english, include_images);
+    let substantive_rules = build_substantive_assessment_rules(
+        subject_name,
+        grade_level,
+        material_context,
+        scope_notes.as_deref(),
+        is_english,
+    );
     let now_ts = chrono::Utc::now().timestamp_millis();
 
     let variatif_list: Vec<String> = question_types
@@ -3713,6 +3943,7 @@ pub async fn generate_cbt_quiz(
 Create EXACTLY {total_questions} DISTINCT, DYNAMIC English questions for {grade_level} subject "{subject_name}" on topic: "{topic}", difficulty: {difficulty} (Batch ID: {now_ts}).
 
 {subject_guideline}
+{substantive_rules}
 
 {composition_instruction}
 {visual_instructions}
@@ -3769,6 +4000,7 @@ Output ONLY pure JSON with no extra text."#
 Buatkan TEPAT {total_questions} butir soal yang BERBEDA, SAHIH SECARA LOGIKA, DINAMIS, dan BERVARIASI untuk jenjang {grade_level} mata pelajaran {subject_name} dengan topik: "{topic}" tingkat kesulitan: {difficulty} (ID Batch: {now_ts}).
 
 {subject_guideline}
+{substantive_rules}
 
 {puebi_logic_guard}
 
@@ -3829,48 +4061,6 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
         "You are a professional Indonesian CBT exam author producing logically verified JSON question banks strictly adhering to PUEBI / EYD V and KBBI grammar rules, with complete step-by-step explanations matching every answer key."
     };
 
-    let messages = vec![
-        ChatMessage {
-            role: "system",
-            content: system_prompt,
-        },
-        ChatMessage {
-            role: "user",
-            content: &prompt,
-        },
-    ];
-
-    let raw = match call_nvidia_nim(messages, 0.25, 4800).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("call_nvidia_nim failed for CBT quiz: {e}. Utilizing pedagogical fallback.");
-            let mut dto = fallback_generate_cbt_quiz(
-                topic,
-                grade_level,
-                subject_name,
-                quiz_format,
-                num_mcq,
-                num_essay,
-                difficulty,
-                include_images,
-            );
-            if include_images {
-                ensure_quiz_visual_guarantee(
-                    pool,
-                    &mut dto.questions,
-                    subject_name,
-                    topic,
-                    grade_level,
-                    is_english,
-                )
-                .await;
-            }
-            return Ok(dto);
-        }
-    };
-    let cleaned = extract_clean_json(&raw);
-    let sanitized = sanitize_json_control_chars(cleaned);
-
     #[derive(Deserialize)]
     struct RawQuizResponse {
         title: Option<serde_json::Value>,
@@ -3879,40 +4069,111 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
         questions: Vec<serde_json::Value>,
     }
 
-    let parsed: RawQuizResponse = match serde_json::from_str(&sanitized) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("Failed to parse AI CBT Quiz JSON ({e}). Utilizing pedagogical fallback.");
-            let mut dto = fallback_generate_cbt_quiz(
-                topic,
-                grade_level,
-                subject_name,
-                quiz_format,
-                num_mcq,
-                num_essay,
-                difficulty,
-                include_images,
-            );
-            if include_images {
-                ensure_quiz_visual_guarantee(
-                    pool,
-                    &mut dto.questions,
-                    subject_name,
-                    topic,
-                    grade_level,
-                    is_english,
-                )
-                .await;
-            }
-            return Ok(dto);
-        }
-    };
-
     let default_pts = (100 / total_questions.max(1) as i32).max(5);
+    let mut parsed_title: Option<String> = None;
+    let mut parsed_desc: Option<String> = None;
+    let mut raw_batches_q_vals: Vec<Vec<serde_json::Value>> = Vec::new();
     let mut questions: Vec<CbtQuestionDto> = Vec::new();
     let mut prompt_by_qid: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut seen_stems: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut last_ai_error: Option<String> = None;
 
-    for (idx, q_val) in parsed.questions.into_iter().enumerate() {
+    for attempt in 0..=2usize {
+        let current_count = questions.len();
+        if current_count >= total_questions && attempt > 0 {
+            break;
+        }
+        let need_now = total_questions.saturating_sub(current_count).max(1);
+        let attempt_prompt = if attempt == 0 {
+            prompt.clone()
+        } else {
+            let need_hint = if !wants_variatif && is_mixed {
+                let cur_mcq = questions
+                    .iter()
+                    .filter(|q| q.question_type.as_deref() != Some("ESSAY"))
+                    .count();
+                let cur_essay = questions
+                    .iter()
+                    .filter(|q| q.question_type.as_deref() == Some("ESSAY"))
+                    .count();
+                let miss_mcq = num_mcq.saturating_sub(cur_mcq);
+                let miss_essay = num_essay.saturating_sub(cur_essay);
+                format!("{miss_mcq} butir MULTIPLE_CHOICE dan {miss_essay} butir ESSAY")
+            } else {
+                format!("{need_now} butir soal BARU")
+            };
+            let existing_preview: Vec<String> = questions
+                .iter()
+                .map(|q| q.question_text.chars().take(90).collect::<String>())
+                .take(10)
+                .collect();
+            let avoid_section = if existing_preview.is_empty() {
+                String::new()
+            } else {
+                format!("\nDILARANG MENGULANG butir soal yang sudah ada:\n- {}", existing_preview.join("\n- "))
+            };
+            format!(
+                "{prompt}\n\nPERINGATAN RETRY/PELENGKAP (Pass {attempt}): Hasilkan TEPAT {need_hint} yang substantif (BUKAN template meta-generik!) dalam JSON valid sesuai skema.{avoid_section}"
+            )
+        };
+
+        let messages = vec![
+            ChatMessage {
+                role: "system",
+                content: system_prompt,
+            },
+            ChatMessage {
+                role: "user",
+                content: &attempt_prompt,
+            },
+        ];
+
+        let raw = match call_nvidia_nim(messages, if attempt == 0 { 0.25 } else { 0.32 }, 6400).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("call_nvidia_nim attempt {attempt} failed for CBT quiz '{topic}': {e}");
+                last_ai_error = Some(format!("{e:?}"));
+                continue;
+            }
+        };
+        let cleaned = extract_clean_json(&raw);
+        let sanitized = sanitize_json_control_chars(cleaned);
+
+        let batch_q_vals = match serde_json::from_str::<RawQuizResponse>(&sanitized) {
+            Ok(p) => {
+                if parsed_title.is_none() {
+                    parsed_title = p.title.map(|v| json_value_to_string(&v)).filter(|s| !s.is_empty());
+                }
+                if parsed_desc.is_none() {
+                    parsed_desc = p.description.map(|v| json_value_to_string(&v)).filter(|s| !s.is_empty());
+                }
+                p.questions
+            }
+            Err(e) => {
+                tracing::warn!("CBT Quiz JSON parse failed on attempt {attempt} ({e}); attempting partial object recovery.");
+                if parsed_title.is_none() {
+                    parsed_title = recover_json_string_field(&sanitized, "title");
+                }
+                if parsed_desc.is_none() {
+                    parsed_desc = recover_json_string_field(&sanitized, "description");
+                }
+                let recovered = recover_questions_array_objects(&sanitized);
+                if recovered.is_empty() {
+                    last_ai_error = Some(format!("JSON parse error: {e}"));
+                }
+                recovered
+            }
+        };
+
+        if batch_q_vals.is_empty() {
+            continue;
+        }
+        raw_batches_q_vals.push(batch_q_vals);
+
+        // Normalize newly fetched batch immediately so count checks reflect valid, non-hallucinated items
+        if let Some(latest_vals) = raw_batches_q_vals.pop() {
+            for q_val in latest_vals {
+                let idx = questions.len();
         let q_text_raw = q_val
             .get("question_text")
             .or_else(|| q_val.get("text"))
@@ -4302,23 +4563,88 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
                 prompt_by_qid.insert(q_id.clone(), vis_prompt);
             }
         }
-        let clean_q_text = strip_leaked_diagram_bracket_tag(&clean_q_text_base);
+        let clean_q_text_base = strip_leaked_diagram_bracket_tag(&clean_q_text_base);
+        let clean_q_text = if is_english {
+            clean_q_text_base
+        } else {
+            normalize_ai_indonesian_typos(&clean_q_text_base)
+        };
+        let normalized_choices: Vec<CbtQuestionChoiceDto> = choices
+            .into_iter()
+            .map(|mut c| {
+                if !is_english {
+                    c.choice_text = normalize_ai_indonesian_typos(&c.choice_text);
+                }
+                c
+            })
+            .collect();
+        let clean_explanation = if is_english {
+            explanation
+        } else {
+            normalize_ai_indonesian_typos(&explanation)
+        };
+
+        if is_hallucinated_meta_question(&clean_q_text, &normalized_choices) {
+            continue;
+        }
+        if !variatif_list.is_empty() && !variatif_list.contains(&question_type.trim().to_uppercase()) {
+            continue;
+        }
+        let stem_key: String = clean_q_text.trim().to_lowercase().chars().take(120).collect();
+        if !seen_stems.insert(stem_key) {
+            continue;
+        }
 
         questions.push(CbtQuestionDto {
             id: q_id,
             question_text: clean_q_text,
             question_type: Some(question_type),
             image_url: None,
-            choices,
+            choices: normalized_choices,
             correct_key,
-            explanation,
+            explanation: clean_explanation,
             bloom_level,
             points,
             interaction_config,
         });
+            }
+        }
+
+        // Check if we already satisfied target quota cleanly
+        let reached_target = if wants_variatif {
+            if let Some(tc) = type_counts {
+                variatif_list.iter().all(|t| {
+                    let want = tc.get(t).copied().unwrap_or(0);
+                    let have = questions
+                        .iter()
+                        .filter(|q| q.question_type.as_deref().unwrap_or("").eq_ignore_ascii_case(t))
+                        .count();
+                    have >= want
+                })
+            } else {
+                questions.len() >= total_questions
+            }
+        } else if is_mixed {
+            let have_mcq = questions.iter().filter(|q| q.question_type.as_deref() != Some("ESSAY")).count();
+            let have_essay = questions.iter().filter(|q| q.question_type.as_deref() == Some("ESSAY")).count();
+            have_mcq >= num_mcq && have_essay >= num_essay
+        } else {
+            questions.len() >= total_questions
+        };
+
+        if reached_target {
+            break;
+        }
     }
 
-    // ── Enforce Exact Allowed Types & Requested Counts for CBT Quiz ──
+    if questions.is_empty() {
+        tracing::error!("AI failed to generate valid CBT questions for '{topic}': {:?}", last_ai_error);
+        return Err(ApplicationError::Internal(format!(
+            "Layanan AI gagal menyusun butir soal valid untuk topik '{topic}'. Silakan coba ulangi beberapa saat lagi (sistem menolak menyisipkan soal template generik agar mutu ujian terjaga)."
+        )));
+    }
+
+    // ── Enforce Exact Allowed Types & Target Caps (Zero Boilerplate Padding) ──
     if !variatif_list.is_empty() {
         questions.retain(|q| {
             let qt = q
@@ -4364,111 +4690,12 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
             }
         }
 
-        if final_mcqs.len() < num_mcq {
-            let needed = num_mcq - final_mcqs.len();
-            let key_labels = ["A", "B", "C", "D"];
-            let pad_templates = generate_pedagogical_question_templates(
-                subject_name,
-                topic,
-                grade_level,
-                difficulty,
-                num_mcq,
-            );
-            let start_idx = final_mcqs.len();
-            for offset in 0..needed {
-                let tpl = &pad_templates[(start_idx + offset) % pad_templates.len()];
-                let idx = final_mcqs.len() + 1;
-                let choices = tpl
-                    .1
-                    .iter()
-                    .enumerate()
-                    .map(|(c_idx, text)| CbtQuestionChoiceDto {
-                        choice_text: text.clone(),
-                        is_correct: c_idx == tpl.2,
-                    })
-                    .collect();
-                final_mcqs.push(CbtQuestionDto {
-                    id: format!("cbt-mcq-pad-{idx}-{now_ts}"),
-                    question_text: tpl.0.clone(),
-                    question_type: Some("MULTIPLE_CHOICE".to_string()),
-                    image_url: None,
-                    choices,
-                    correct_key: key_labels[tpl.2 % 4].to_string(),
-                    explanation: tpl.3.clone(),
-                    bloom_level: "C3".to_string(),
-                    points: default_pts,
-                    interaction_config: None,
-                });
-            }
-        }
-
-        while final_essays.len() < num_essay {
-            let idx = final_essays.len() + 1;
-            final_essays.push(CbtQuestionDto {
-                id: format!("cbt-essay-pad-{idx}-{now_ts}"),
-                question_text: if is_english {
-                    format!("Analyze and write a clear explanation in English showing how '{topic}' ({subject_name}) applies in real-life communication (Essay {idx}):")
-                } else {
-                    format!("Analisis dan uraikan pemahaman Anda mengenai penerapan materi {topic} dalam kehidupan sehari-hari (Soal Uraian {idx}):")
-                },
-                question_type: Some("ESSAY".to_string()),
-                image_url: None,
-                choices: Vec::new(),
-                correct_key: String::new(),
-                explanation: if is_english {
-                    format!("Rubric: Full points awarded for accurate English concepts on {topic}, clear supporting examples, and grammatical accuracy.")
-                } else {
-                    format!("Rubrik: Skor maksimal jika siswa mampu menjabarkan konsep {topic} secara sistematis dengan bukti/contoh logis.")
-                },
-                bloom_level: "C4".to_string(),
-                points: 20,
-                interaction_config: None,
-            });
-        }
-
         final_mcqs.truncate(num_mcq);
         final_essays.truncate(num_essay);
 
         questions = final_mcqs;
         questions.extend(final_essays);
     } else {
-        if questions.len() < total_questions {
-            let needed = total_questions - questions.len();
-            let key_labels = ["A", "B", "C", "D"];
-            let pad_templates = generate_pedagogical_question_templates(
-                subject_name,
-                topic,
-                grade_level,
-                difficulty,
-                total_questions,
-            );
-            let start_idx = questions.len();
-            for offset in 0..needed {
-                let tpl = &pad_templates[(start_idx + offset) % pad_templates.len()];
-                let idx = questions.len() + 1;
-                let choices = tpl
-                    .1
-                    .iter()
-                    .enumerate()
-                    .map(|(c_idx, text)| CbtQuestionChoiceDto {
-                        choice_text: text.clone(),
-                        is_correct: c_idx == tpl.2,
-                    })
-                    .collect();
-                questions.push(CbtQuestionDto {
-                    id: format!("cbt-mcq-pad-{idx}-{now_ts}"),
-                    question_text: tpl.0.clone(),
-                    question_type: Some("MULTIPLE_CHOICE".to_string()),
-                    image_url: None,
-                    choices,
-                    correct_key: key_labels[tpl.2 % 4].to_string(),
-                    explanation: tpl.3.clone(),
-                    bloom_level: "C3".to_string(),
-                    points: default_pts,
-                    interaction_config: None,
-                });
-            }
-        }
         questions.truncate(total_questions);
     }
 
@@ -4484,28 +4711,20 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
         .await;
     }
 
-    let title_str = parsed
-        .title
-        .map(|v| json_value_to_string(&v))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            if is_english {
-                format!("CBT Question Set: {topic}")
-            } else {
-                format!("Paket Soal CBT: {topic}")
-            }
-        });
-    let desc_str = parsed
-        .description
-        .map(|v| json_value_to_string(&v))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            if is_english {
-                format!("CBT assessment with {total_questions} questions on {topic} ({subject_name}).")
-            } else {
-                format!("Ujian CBT {total_questions} butir soal materi {topic} ({subject_name}).")
-            }
-        });
+    let title_str = parsed_title.unwrap_or_else(|| {
+        if is_english {
+            format!("CBT Question Set: {topic}")
+        } else {
+            format!("Paket Soal CBT: {topic}")
+        }
+    });
+    let desc_str = parsed_desc.unwrap_or_else(|| {
+        if is_english {
+            format!("CBT assessment with {} questions on {topic} ({subject_name}).", questions.len())
+        } else {
+            format!("Ujian CBT {} butir soal materi {topic} ({subject_name}).", questions.len())
+        }
+    });
 
     Ok(GeneratedCbtQuizDto {
         title: title_str,
@@ -4514,6 +4733,7 @@ Output HANYA JSON tanpa teks pembuka atau penutup."#
     })
 }
 
+#[allow(dead_code)]
 pub fn fallback_generate_cbt_quiz(
     topic: &str,
     grade_level: &str,
@@ -4878,4 +5098,59 @@ Output HANYA JSON valid."#
         },
         questions: normalized_questions,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_legacy_brand_typos_and_latex_dots() {
+        let input = "NASKAH CAPAI PEMBELAJARAN (CP)\n\
+            4. SKELETASI SKEMA PEMBELAJARAN\n\
+            Gurunya: Siapkan alat rumpun nilai dan LMS SchoolOS.\n\
+            5. ASSESMEN Formatif: 4.899 \\dots 4.989 dan 1.000 \\ldots 2.000\n\
+            📚**Sumber:** Akselerasi Edu";
+        let normalized = normalize_ai_indonesian_typos(input);
+        assert!(normalized.contains("CAPAIAN PEMBELAJARAN (CP)"));
+        assert!(normalized.contains("KERANGKA SKEMA PEMBELAJARAN"));
+        assert!(normalized.contains("Guru: Siapkan alat bantu nilai tempat"));
+        assert!(normalized.contains("LMS Akselerasi Edu"));
+        assert!(normalized.contains("5. ASESMEN Formatif: 4.899 ... 4.989 dan 1.000 ... 2.000"));
+        assert!(normalized.contains("📚 **Sumber:** Akselerasi Edu"));
+        assert!(!normalized.contains("SchoolOS"));
+        assert!(!normalized.contains("\\dots"));
+    }
+
+    #[test]
+    fn cleans_polluted_topic_detects_meta_hallucinations_and_recovers_truncated_json() {
+        let dirty = "Materi: Rangkuman Bahasa Indonesia Kelas 5 Bab 1: Aku yang Unik. — Sumatif Akhir Semester (SAS/PAS) cakupan 6 Bulan Terakhir (25 Mei 2026 - 25 Nov 2026) (Bagian 2/4) | Cakupan: SAS / PAS (6 Bulan)";
+        let (clean, scope) = extract_clean_assessment_topic(dirty);
+        assert_eq!(clean, "Rangkuman Bahasa Indonesia Kelas 5 Bab 1: Aku yang Unik");
+        assert!(scope.as_deref().unwrap_or("").contains("SAS / PAS"));
+        assert!(!clean.contains("Bagian 2/4"));
+        assert!(!clean.contains("Cakupan:"));
+
+        assert!(is_hallucinated_meta_question(
+            "Konsep fundamental yang menjadi inti bahasan materi 'Bab 1' adalah...",
+            &[]
+        ));
+        assert!(is_hallucinated_meta_question(
+            "Ciri utama yang menandai penguasaan kompetensi tingkat Mudah pada materi 'Bab 1'...",
+            &[]
+        ));
+        assert!(!is_hallucinated_meta_question(
+            "Sinonim kata 'unik' dalam kalimat 'Rani memiliki hobi yang unik' adalah...",
+            &[]
+        ));
+
+        let truncated = r#"{"title":"Ujian Bab 1","questions":[{"id":"q1","question_text":"Apa arti imbuhan pe- pada kata penyabar?","question_type":"MULTIPLE_CHOICE"},{"id":"q2","question_text":"Terpotong"#;
+        let recovered = recover_questions_array_objects(truncated);
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].get("id").and_then(|v| v.as_str()), Some("q1"));
+        assert_eq!(
+            recover_json_string_field(truncated, "title").as_deref(),
+            Some("Ujian Bab 1")
+        );
+    }
 }

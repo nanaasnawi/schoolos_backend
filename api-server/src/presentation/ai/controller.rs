@@ -51,6 +51,8 @@ pub struct GenerateAiContentRequest {
     pub period_label: Option<String>,
     #[serde(default)]
     pub source_materials: Option<Vec<String>>,
+    #[serde(default)]
+    pub material_ids: Option<Vec<Uuid>>,
 }
 
 
@@ -242,6 +244,150 @@ async fn generate_image(
     )))
 }
 
+async fn fetch_grounded_material_context_for_generation(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+    subject: &str,
+    clean_topic: &str,
+    material_ids: Option<&[Uuid]>,
+    source_materials: Option<&[String]>,
+    exam_scope: Option<&str>,
+    period_label: Option<&str>,
+) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    if let Some(scope) = exam_scope.map(str::trim).filter(|s| !s.is_empty()) {
+        lines.push(format!("Cakupan Evaluasi: {scope}"));
+    }
+    if let Some(period) = period_label.map(str::trim).filter(|p| !p.is_empty()) {
+        lines.push(format!("Periode Materi: {period}"));
+    }
+
+    let mut mat_rows = if let Some(ids) = material_ids.filter(|v| !v.is_empty()) {
+        sqlx::query(
+            r#"
+            SELECT m.title, COALESCE(m.description, '') AS description
+            FROM learning_materials m
+            WHERE m.tenant_id = $1
+              AND m.deleted_at IS NULL
+              AND m.id = ANY($2)
+            ORDER BY m.updated_at DESC
+            LIMIT 6
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(ids)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    if mat_rows.is_empty() {
+        if let Some(titles) = source_materials.filter(|t| !t.is_empty()) {
+            let clean_titles: Vec<String> = titles
+                .iter()
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .take(8)
+                .collect();
+            if !clean_titles.is_empty() {
+                mat_rows = sqlx::query(
+                    r#"
+                    SELECT m.title, COALESCE(m.description, '') AS description
+                    FROM learning_materials m
+                    WHERE m.tenant_id = $1
+                      AND m.deleted_at IS NULL
+                      AND m.title = ANY($2)
+                    ORDER BY m.updated_at DESC
+                    LIMIT 6
+                    "#,
+                )
+                .bind(tenant_id)
+                .bind(&clean_titles)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
+            }
+        }
+    }
+
+    if mat_rows.is_empty() {
+        let keyword = clean_topic
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() >= 4)
+            .max_by_key(|w| w.len())
+            .unwrap_or(subject);
+        let subj_like = format!("%{}%", subject.trim());
+        let kw_like = format!("%{}%", keyword.trim());
+        mat_rows = sqlx::query(
+            r#"
+            SELECT m.title, COALESCE(m.description, '') AS description
+            FROM learning_materials m
+            LEFT JOIN subjects s ON s.id = m.subject_id
+            WHERE m.tenant_id = $1
+              AND m.deleted_at IS NULL
+              AND m.is_active = true
+              AND (m.title ILIKE $2 OR m.description ILIKE $2 OR s.name ILIKE $3)
+            ORDER BY CASE WHEN m.title ILIKE $2 THEN 0 ELSE 1 END, m.updated_at DESC
+            LIMIT 4
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(&kw_like)
+        .bind(&subj_like)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+    }
+
+    let mut total_excerpt_chars = 0usize;
+    for r in mat_rows {
+        if total_excerpt_chars >= 2000 {
+            break;
+        }
+        let title: String = r.try_get("title").unwrap_or_default();
+        let desc: String = r.try_get("description").unwrap_or_default();
+        let compact_desc: String = desc
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(450)
+            .collect();
+        if !title.trim().is_empty() {
+            let entry = if compact_desc.is_empty() {
+                format!("- Judul Materi: {}", title.trim())
+            } else {
+                total_excerpt_chars += compact_desc.chars().count();
+                format!("- Judul Materi: {} | Ringkasan Konten: {}", title.trim(), compact_desc)
+            };
+            lines.push(entry);
+        }
+    }
+
+    if let Some(titles) = source_materials.filter(|t| !t.is_empty()) {
+        if total_excerpt_chars == 0 {
+            let joined = titles
+                .iter()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .take(10)
+                .collect::<Vec<_>>()
+                .join("; ");
+            if !joined.is_empty() {
+                lines.push(format!("- Topik Materi Terpilih: {joined}"));
+            }
+        }
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
 #[utoipa::path(
     post,
     path = "/api/v1/ai/generate-content",
@@ -340,10 +486,22 @@ async fn generate_content(
             }
 
             let include_images = payload.include_images.unwrap_or(false);
+            let (clean_topic, _extracted_scope) = nvidia_ai::extract_clean_assessment_topic(topic);
+            let material_context = fetch_grounded_material_context_for_generation(
+                &ctx.pool,
+                req_ctx.tenant_id,
+                subject,
+                &clean_topic,
+                payload.material_ids.as_deref(),
+                payload.source_materials.as_deref(),
+                payload.exam_scope.as_deref(),
+                payload.period_label.as_deref(),
+            )
+            .await;
 
             let task = nvidia_ai::generate_assignment(
                 &ctx.pool,
-                topic,
+                &clean_topic,
                 grade,
                 subject,
                 Some(format),
@@ -351,6 +509,7 @@ async fn generate_content(
                 num_essay,
                 diff,
                 include_images,
+                material_context.as_deref(),
             )
             .await
             .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
@@ -403,30 +562,28 @@ async fn generate_content(
                 0
             };
             let include_images = payload.include_images.unwrap_or(false);
-            let enriched_topic = {
-                let mut context_parts: Vec<String> = vec![topic.to_string()];
-                if let Some(scope) = payload.exam_scope.as_deref().filter(|s| !s.trim().is_empty()) {
-                    if !topic.to_lowercase().contains(&scope.trim().to_lowercase()) {
-                        context_parts.push(format!("Cakupan: {}", scope.trim()));
-                    }
-                }
-                if let Some(period) = payload.period_label.as_deref().filter(|p| !p.trim().is_empty()) {
-                    if !topic.to_lowercase().contains(&period.trim().to_lowercase()) {
-                        context_parts.push(format!("Periode: {}", period.trim()));
-                    }
-                }
-                if let Some(mats) = payload.source_materials.as_ref().filter(|m| !m.is_empty()) {
-                    let joined = mats.iter().take(12).map(|m| m.trim()).filter(|m| !m.is_empty()).collect::<Vec<_>>().join("; ");
-                    if !joined.is_empty() && !topic.contains(&joined) {
-                        context_parts.push(format!("Rangkuman Materi: {joined}"));
-                    }
-                }
-                context_parts.join(" | ")
-            };
+            let (clean_topic, extracted_scope) = nvidia_ai::extract_clean_assessment_topic(topic);
+            let effective_scope = payload
+                .exam_scope
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .or(extracted_scope.as_deref());
+            let material_context = fetch_grounded_material_context_for_generation(
+                &ctx.pool,
+                req_ctx.tenant_id,
+                subject,
+                &clean_topic,
+                payload.material_ids.as_deref(),
+                payload.source_materials.as_deref(),
+                effective_scope,
+                payload.period_label.as_deref(),
+            )
+            .await;
 
             let quiz = nvidia_ai::generate_cbt_quiz(
                 &ctx.pool,
-                &enriched_topic,
+                &clean_topic,
                 grade,
                 subject,
                 quiz_format,
@@ -436,6 +593,7 @@ async fn generate_content(
                 num_essay,
                 diff,
                 include_images,
+                material_context.as_deref(),
             )
             .await
             .map_err(|e| ApiError::new(e, &req_ctx.request_id))?;
@@ -993,7 +1151,7 @@ async fn fetch_principal_at_risk_breakdown_context(
         - Siswa Belum Tuntas KKTP Rapor (gradebooks.passed = false, metrik KPI Dashboard): {gradebook_failed} siswa unik\n\
         - Indikator Risiko Nyata Terukur per Metrik (siswa unik, dapat beririsan antar indikator):\n\
           1) Belum Mengumpulkan Tugas Aktif: {unsubmitted_assign} siswa\n\
-          2) Nilai Tugas di Bawah KKM (< 70): {low_assign} siswa\n\
+          2) Nilai Tugas di Bawah KKTP (< 70): {low_assign} siswa\n\
           3) Materi Wajib Belum Dibaca (< halaman 3): {unread_mat} siswa\n\
           4) Skor Kuis/CBT di Bawah 70: {low_quiz} siswa\n\
           5) Catatan Ketidakhadiran (Alfa/Absent): {absent_att} siswa\n\
@@ -1060,6 +1218,11 @@ async fn prepare_tanya_ai_context(
         .and_then(|r| r.try_get::<String, _>("name").ok())
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "Sekolah Anda".to_string());
+
+    let lower_school_name = db_school_name.to_ascii_lowercase();
+    let is_pkbm_institution = lower_school_name.contains("pkbm")
+        || lower_school_name.contains("kesetaraan")
+        || lower_school_name.contains("paket ");
 
     let mut db_headmaster_name = school_meta
         .as_ref()
@@ -1184,14 +1347,26 @@ async fn prepare_tanya_ai_context(
         nvidia_ai::build_indonesian_puebi_and_logic_guardrail(true)
     };
 
+    let institution_context_rule = if is_pkbm_institution {
+        format!(
+            "- KONTEKS LEMBAGA KESETARAAN (PKBM): {db_school_name} adalah lembaga Pendidikan Kesetaraan (PKBM) penyelenggara Kurikulum Merdeka Program Kesetaraan. Apabila menyebut kelas atau fase pada dokumen CP/ATP/RPP/asesmen, WAJIB menuliskan jenjang kesetaraannya secara eksplisit, misalnya \"Paket A (Setara SD • Kelas IV)\", \"Paket B (Setara SMP • Kelas VII-IX)\", atau \"Paket C (Setara SMA • Kelas X-XII)\" serta menyebut \"warga belajar / peserta didik\" (JANGAN menulis \"Kelas IV SD\" polos tanpa keterangan kesetaraan Paket A!)."
+        )
+    } else {
+        format!(
+            "- KONTEKS LEMBAGA: {db_school_name} menjalankan Kurikulum Merdeka. Sesuaikan jenjang kelas/fase dengan satuan pendidikan secara konsisten."
+        )
+    };
+
     let authoritative_db_directive = format!(
         "[KONTEKS OTORITATIF DATABASE REALTIME & ANTI-HALUSINASI]\n\
         - Satuan Pendidikan: {db_school_name}\n\
+        {institution_context_rule}\n\
         - Kepala Sekolah Resmi (Profil Sekolah): {db_headmaster_name}{actor_identity_line}\n\
         - ATURAN IDENTITAS PIMPINAN: Kepala Sekolah resmi {db_school_name} adalah {db_headmaster_name}. JANGAN pernah menyebut operator, staf, atau guru lain (termasuk {actor_user_name}) sebagai Kepala Sekolah apabila bukan {db_headmaster_name}!\n\
         - Tahun Ajaran Aktif Resmi di Database: T.A {db_academic_year} (Semester {sem_label})\n\
         - INSTRUKSI KETAT: Seluruh analisis, rekomendasi, dan jawaban WAJIB merujuk ke Tahun Ajaran resmi aktif di database yaitu T.A {db_academic_year} (Semester {sem_label}). DILARANG MENGGUNAKAN tahun kadaluarsa seperti 2024/2025.\n\
-        - BAHASA, KAIDAH PUEBI/EYD V & FORMAT TABEL: Gunakan ejaan Bahasa Indonesia baku sesuai EYD V / PUEBI & KBBI tanpa typo ('Produktivitas', 'Aktivitas', 'Kolaborasi', 'Efektivitas', 'Produksi', 'memengaruhi', 'mengubah', 'praktik', 'analisis', 'risiko'; JANGAN tulis 'produkkan') dan pastikan setiap sel tabel Markdown terisi lengkap serta rapi agar dapat dicetak ke PDF dengan sempurna.\n\
+        - IDENTITAS PLATFORM & ISTILAH KURIKULUM: Nama resmi sistem/LMS ini adalah **LMS Akselerasi Edu** (DILARANG KERAS menulis `SchoolOS` atau `LMS SchoolOS`). Patuhi Kurikulum Merdeka sepenuhnya: gunakan **CP, TP, ATP, dan KKTP** (DILARANG mencampur istilah K-13 seperti `Kompetensi Dasar (KD)`, `KD-4`, `KD Inti`, atau `KKM`).\n\
+        - BAHASA, KAIDAH PUEBI/EYD V, BATAS NILAI & FORMAT PDF BERSIH: Gunakan ejaan Bahasa Indonesia baku sesuai EYD V / PUEBI & KBBI tanpa typo ('Capaian Pembelajaran', 'Asesmen', 'Kerangka Pembelajaran', 'Nilai Tempat', 'Guru:', 'Produktivitas', 'Aktivitas', 'Kolaborasi', 'Efektivitas', 'Produksi', 'memengaruhi', 'mengubah', 'praktik', 'analisis', 'risiko'; JANGAN menulis 'Capai Pembelajaran', 'CP Capai', 'Assesmen', 'Skeletasi', 'Gurunya:', 'rumpun nilai', 'rangkuman nilai', atau 'produkkan'). Untuk batas KKTP gunakan pertidaksamaan tegas tanpa celah (`≥ 70` vs `< 70`). DILARANG menulis tag `<br>` mentah dalam sel tabel Markdown atau token LaTeX (`\\dots`, `\\ldots`, `$...$`); gunakan simbol Unicode bersih (`...`, `< , > , =`, `≥`, `≤`).\n\
         {puebi_guardrail}\n\
         - KEJUJURAN AKADEMIK & SITASI SUMBER: Jika ragu pada fakta spesifik, katakan terus terang jangan mengarang angka taksiran atau mengarang aturan tata bahasa. Akhiri setiap jawaban edukatif/analitis dengan bagian singkat:\n  📚 **Sumber:** ...\n\
         {sources_block}\n\
@@ -1200,47 +1375,47 @@ async fn prepare_tanya_ai_context(
     );
     let system_prompt = if is_principal {
         format!(
-            "Anda adalah 'AI Analitik Kepala Sekolah' (Executive Academic & Operational Intelligence Advisor) di SchoolOS (Akselerasi Edu). \
+            "Anda adalah 'AI Analitik Kepala Sekolah' (Executive Academic & Operational Intelligence Advisor) di LMS Akselerasi Edu. \
             Peran Anda adalah Asisten Eksekutif Kepala Sekolah / Pimpinan PKBM berstandar Kurikulum Merdeka. \
             Fokus & Kemampuan Utama: \
-            1. Menganalisis data akademik real-time, ketercapaian target KKTP, dan evaluasi hasil belajar warga belajar. \
+            1. Menganalisis data akademik real-time, ketercapaian target KKTP (batas interval tertutup seperti ≥ 70 tuntas vs < 70 perlu intervensi), dan evaluasi hasil belajar peserta didik / warga belajar. \
             2. Memantau keaktifan guru/tutor dalam pengunggahan materi/modul pembelajaran, pembuatan tugas mandiri, serta penyelenggaraan kuis dan asesmen CBT. \
-            3. Memberikan evaluasi teknis supervisi manajerial, deteksi dini siswa butuh intervensi (Early Warning System), serta rekomendasi taktis peningkatan mutu dan stabilitas PKBM. \
-            4. Menyelaraskan seluruh analisis dengan regulasi Permendikbudristek dan prinsip Kurikulum Merdeka. \
-            Gunakan Bahasa Indonesia formal-profesional yang lugas, analitis, taktis, berbasis data riil yang disertakan dalam konteks, terstruktur rapi dengan Markdown, dan tutup dengan baris `📚 **Sumber:**` yang menyebutkan data/periode laporan aktual."
+            3. Memberikan evaluasi teknis supervisi manajerial, deteksi dini siswa butuh intervensi (Early Warning System), serta rekomendasi taktis peningkatan mutu lembaga. \
+            4. Menyelaraskan seluruh dokumen & analisis dengan Kurikulum Merdeka Kemendikdasmen RI tanpa mencampur istilah K-13 (seperti KD atau KKM) serta tanpa menyebut merek lama SchoolOS. \
+            Gunakan Bahasa Indonesia formal-profesional yang lugas, analitis, taktis, berbasis data riil yang disertakan dalam konteks, terstruktur rapi dengan Markdown bersih (tanpa tag HTML `<br>` atau sintaks LaTeX mentah seperti `\\dots` / `$...$`), dan tutup dengan baris `📚 **Sumber:**` yang menyebutkan data/periode laporan aktual."
         )
     } else if is_teacher {
         if is_english {
             format!(
-                "You are 'AI Pedagogical & Teacher Co-Pilot' in SchoolOS (Akselerasi Edu). \
+                "You are 'AI Pedagogical & Teacher Co-Pilot' in LMS Akselerasi Edu. \
                 Subject focus: {subject}, Grade/Class: {grade}. \
-                Because the subject is English ({subject}), respond predominantly in clear, academic, and communicative English (unless the teacher asks for a bilingual explanation), formatted neatly with Markdown, and always end with `📚 **Sources:**`."
+                Because the subject is English ({subject}), respond predominantly in clear, academic, and communicative English (unless the teacher asks for a bilingual explanation), formatted neatly with clean Markdown (no raw `<br>` HTML tags), and always end with `📚 **Sources:**`."
             )
         } else {
             format!(
-                "Anda adalah 'AI Pedagogik & Workstation Guru' (Teacher Pedagogical & Instructional Co-Pilot) di SchoolOS (Akselerasi Edu). \
+                "Anda adalah 'AI Pedagogik & Workstation Guru' (Teacher Pedagogical & Instructional Co-Pilot) di LMS Akselerasi Edu. \
                 Mata Pelajaran fokus: {subject}, Jenjang/Kelas: {grade}. \
-                Anda patuh penuh pada regulasi Kurikulum Merdeka (Kepmendikbudristek & BSKAP No. 032/H/KR/2024 & BSKAP No. 033/H/KR/2024). \
+                Anda patuh penuh pada regulasi Kurikulum Merdeka (Kepmendikbudristek & BSKAP No. 032/H/KR/2024 & BSKAP No. 033/H/KR/2024) tanpa mencampur istilah K-13 (KD/KKM). \
                 Fokus & Kemampuan Utama: \
-                1. Membantu penyusunan Draf Modul Ajar Kurikulum Merdeka yang komprehensif (Tujuan Pembelajaran/TP dari CP & ATP, Pemahaman Bermakna, Pertanyaan Pemantik, Rencana Pembelajaran Berdiferensiasi Konten-Proses-Produk, LKPD, serta Asesmen Formatif & Sumatif). \
-                2. Merancang kisi-kisi dan butir soal HOTS (Higher Order Thinking Skills) untuk kuis dan asesmen CBT (Pilihan Ganda, Pilihan Ganda Kompleks, Menjodohkan, Esai) beserta kunci dan rubrik penilaian. \
-                3. Membantu merumuskan Kriteria Ketercapaian Tujuan Pembelajaran (KKTP) berbasis interval nilai atau rubrik deskriptif untuk tugas siswa. \
-                4. Memberikan saran diferensiasi pembelajaran dan rencana tindak lanjut remidial/pengayaan berdasarkan kondisi siswa nyata di kelas. \
-                Gunakan Bahasa Indonesia edukatif yang profesional, ramah, membimbing tahap demi tahap, solutif, terstruktur rapi dengan Markdown, dan selalu cantumkan `📚 **Sumber:**` di akhir jawaban."
+                1. Membantu penyusunan Draf Modul Ajar Kurikulum Merdeka yang komprehensif (Capaian Pembelajaran/CP, Tujuan Pembelajaran/TP, Alur Tujuan Pembelajaran/ATP, Pemahaman Bermakna, Pertanyaan Pemantik, Rencana Pembelajaran Berdiferensiasi Konten-Proses-Produk, LKPD, serta Asesmen Formatif & Sumatif). \
+                2. Merancang kisi-kisi dan butir soal HOTS (Higher Order Thinking Skills) yang logis serta selaras fakta narasi soal untuk kuis dan asesmen CBT beserta kunci dan rubrik penilaian. \
+                3. Membantu merumuskan Kriteria Ketercapaian Tujuan Pembelajaran (KKTP) berbasis interval nilai tegas (misal `≥ 70` tuntas vs `< 70` perlu intervensi) atau rubrik deskriptif untuk tugas siswa. \
+                4. Memberikan saran diferensiasi pembelajaran dan rencana tindak lanjut remedial/pengayaan berdasarkan kondisi siswa nyata di kelas. \
+                Gunakan Bahasa Indonesia edukatif yang profesional sesuai EYD V/KBBI, ramah, membimbing tahap demi tahap, solutif, terstruktur rapi dengan Markdown bersih (tanpa `<br>`, `\\dots`, atau `$...$` mentah), dan selalu cantumkan `📚 **Sumber:**` di akhir jawaban."
             )
         }
     } else if is_english {
         format!(
-            "You are 'Guru AI' (Smart & Interactive English Learning Assistant) in SchoolOS (Akselerasi Edu). \
+            "You are 'Guru AI' (Smart & Interactive English Learning Assistant) in LMS Akselerasi Edu. \
             Subject focus: {subject}, Grade/Class: {grade}. \
-            Because the subject is English ({subject}), teach and reply in clear, encouraging English suitable for {grade} (provide brief Indonesian glosses only if the student explicitly asks), explain clearly with Markdown examples, and ALWAYS end with `📚 **Sources:**` citing the given references (Teaching Module, SIBI Book, or Kurikulum Merdeka)."
+            Because the subject is English ({subject}), teach and reply in clear, encouraging English suitable for {grade} (provide brief Indonesian glosses only if the student explicitly asks), explain clearly with Markdown examples (without raw `<br>` tags), and ALWAYS end with `📚 **Sources:**` citing the given references (Teaching Module, SIBI Book, or Kurikulum Merdeka)."
         )
     } else {
         format!(
-            "Anda adalah 'Guru AI' (Asisten Belajar Pintar & Interaktif Kurikulum Merdeka) di SchoolOS (Akselerasi Edu). \
+            "Anda adalah 'Guru AI' (Asisten Belajar Pintar & Interaktif Kurikulum Merdeka) di LMS Akselerasi Edu. \
             Mata Pelajaran fokus: {subject}, Jenjang/Kelas: {grade}. \
-            Tugas Anda: Membantu siswa dan guru menjawab pertanyaan, menjelaskan materi pelajaran dengan jelas, ramah, membimbing tahap demi tahap, memberikan rumus dan contoh relevan jika diperlukan, serta memotivasi belajar. \
-            Gunakan Bahasa Indonesia yang baik, komunikatif, rapi dalam format Markdown, serta WAJIB menyertakan `📚 **Sumber:**` di bagian paling akhir jawaban berdasarkan referensi yang diberikan (Buku SIBI, Modul Ajar/Materi Guru, atau Kurikulum Merdeka)."
+            Tugas Anda: Membantu siswa dan guru menjawab pertanyaan, menjelaskan materi pelajaran dengan jelas, ramah, membimbing tahap demi tahap, memberikan rumus dan contoh relevan dengan simbol Unicode yang rapi (tanpa tag `<br>` atau LaTeX `\\dots` mentah), serta memotivasi belajar. \
+            Gunakan Bahasa Indonesia baku sesuai EYD V, komunikatif, rapi dalam format Markdown, serta WAJIB menyertakan `📚 **Sumber:**` di bagian paling akhir jawaban berdasarkan referensi yang diberikan (Buku SIBI, Modul Ajar/Materi Guru, atau Kurikulum Merdeka)."
         )
     };
 

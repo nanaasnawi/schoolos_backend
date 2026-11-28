@@ -759,10 +759,14 @@ impl crate::people::infrastructure::repository_traits::StaffQueryRepository for 
                 .push_bind(search)
                 .push(" || '%' OR job_title ILIKE '%' || ")
                 .push_bind(search)
+                .push(" || '%' OR COALESCE(nuptk, '') ILIKE '%' || ")
+                .push_bind(search)
                 .push(" || '%')");
             qb.push(cond)
                 .push_bind(search)
                 .push(" || '%' OR job_title ILIKE '%' || ")
+                .push_bind(search)
+                .push(" || '%' OR COALESCE(nuptk, '') ILIKE '%' || ")
                 .push_bind(search)
                 .push(" || '%')");
         }

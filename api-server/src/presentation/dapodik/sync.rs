@@ -381,6 +381,31 @@ fn truncate_str(val: &str, max_len: usize) -> String {
     val.trim().chars().take(max_len).collect()
 }
 
+fn normalize_gtk_lookup_keys(name: &str) -> (String, String) {
+    let exact = name.trim().to_lowercase();
+    let base = exact
+        .split(',')
+        .next()
+        .unwrap_or(&exact)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (exact, base)
+}
+
+fn clean_gtk_identifier(val: Option<&str>, ignore_prefix: Option<&str>) -> Option<String> {
+    let trimmed = val?.trim();
+    if trimmed.is_empty() || trimmed == "-" {
+        return None;
+    }
+    if let Some(prefix) = ignore_prefix {
+        if trimmed.starts_with(prefix) {
+            return None;
+        }
+    }
+    Some(trimmed.to_string())
+}
+
 fn parse_dapodik_bool(val: Option<&serde_json::Value>) -> Option<bool> {
     match val {
         Some(serde_json::Value::Bool(b)) => Some(*b),
@@ -1775,15 +1800,18 @@ pub async fn pull_dapodik_records(
     let mut teacher_by_nip: HashMap<String, Uuid> = HashMap::new();
     let mut teacher_by_nuptk: HashMap<String, Uuid> = HashMap::new();
     let mut teacher_by_name: HashMap<String, Uuid> = HashMap::new();
+    let mut teacher_by_lower_name: HashMap<String, Uuid> = HashMap::new();
     let mut teacher_by_email: HashMap<String, Uuid> = HashMap::new();
     let mut teacher_by_ptk_id: HashMap<String, Uuid> = HashMap::new();
     for t in teacher_rows {
-        if let Some(n) = t.nip {
+        if let Some(n) = clean_gtk_identifier(t.nip.as_deref(), None) {
             teacher_by_nip.insert(n, t.id);
         }
-        if let Some(nup) = t.nuptk {
+        if let Some(nup) = clean_gtk_identifier(t.nuptk.as_deref(), None) {
             teacher_by_nuptk.insert(nup, t.id);
         }
+        let (lower_name, _) = normalize_gtk_lookup_keys(&t.full_name);
+        teacher_by_lower_name.insert(lower_name, t.id);
         teacher_by_name.insert(t.full_name, t.id);
     }
 
@@ -1804,17 +1832,38 @@ pub async fn pull_dapodik_records(
         }
     }
 
-    let staff_rows = sqlx::query!(
-        "SELECT id, full_name FROM staff WHERE tenant_id = $1",
-        ctx.tenant_id
+    let staff_rows = sqlx::query(
+        "SELECT id, full_name, nuptk, nip, user_id FROM staff WHERE tenant_id = $1 AND deleted_at IS NULL",
     )
+    .bind(ctx.tenant_id)
     .fetch_all(&mut *tx)
     .await
     .unwrap_or_default();
-    let mut staff_by_name: HashMap<String, Uuid> = staff_rows
-        .into_iter()
-        .map(|r| (r.full_name, r.id))
-        .collect();
+    let mut staff_by_nuptk: HashMap<String, Uuid> = HashMap::new();
+    let mut staff_by_nip: HashMap<String, Uuid> = HashMap::new();
+    let mut staff_by_user_id: HashMap<Uuid, Uuid> = HashMap::new();
+    let mut staff_by_lower_name: HashMap<String, Uuid> = HashMap::new();
+    let mut staff_by_base_name: HashMap<String, Uuid> = HashMap::new();
+    for r in staff_rows {
+        let sid: Uuid = sqlx::Row::get(&r, "id");
+        let full_name: String = sqlx::Row::get(&r, "full_name");
+        let nuptk_val: Option<String> = sqlx::Row::try_get(&r, "nuptk").ok().flatten();
+        let nip_val: Option<String> = sqlx::Row::try_get(&r, "nip").ok().flatten();
+        let user_id_val: Option<Uuid> = sqlx::Row::try_get(&r, "user_id").ok().flatten();
+
+        if let Some(nup) = clean_gtk_identifier(nuptk_val.as_deref(), None) {
+            staff_by_nuptk.insert(nup, sid);
+        }
+        if let Some(n) = clean_gtk_identifier(nip_val.as_deref(), Some("TENDIK-")) {
+            staff_by_nip.insert(n, sid);
+        }
+        if let Some(uid) = user_id_val {
+            staff_by_user_id.insert(uid, sid);
+        }
+        let (exact_lower, base_lower) = normalize_gtk_lookup_keys(&full_name);
+        staff_by_lower_name.insert(exact_lower, sid);
+        staff_by_base_name.entry(base_lower).or_insert(sid);
+    }
 
     let student_rows = sqlx::query!(
         "SELECT id, nisn, nik, full_name FROM students WHERE tenant_id = $1",
@@ -2207,15 +2256,29 @@ pub async fn pull_dapodik_records(
 
             let new_id = Uuid::now_v7();
 
+            let (nama_lower, nama_base) = normalize_gtk_lookup_keys(&nama);
+
             if is_tendik {
                 let job_title = jenis_ptk_raw.clone().unwrap_or_else(|| match ptk_kind {
                     PtkKind::KepalaSekolah => "Kepala Sekolah".to_string(),
                     _ => "Tendik".to_string(),
                 });
-                let existing_staff = staff_by_name.get(&nama_upper).copied();
+                let clean_nuptk = clean_gtk_identifier(nuptk.as_deref(), None);
+                let clean_nip = clean_gtk_identifier(nip.as_deref(), Some("TENDIK-"));
+                let existing_staff = clean_nuptk
+                    .as_deref()
+                    .and_then(|n| staff_by_nuptk.get(n).copied())
+                    .or_else(|| {
+                        clean_nip
+                            .as_deref()
+                            .and_then(|n| staff_by_nip.get(n).copied())
+                    })
+                    .or_else(|| staff_by_user_id.get(&actual_user_id).copied())
+                    .or_else(|| staff_by_lower_name.get(&nama_lower).copied())
+                    .or_else(|| staff_by_base_name.get(&nama_base).copied());
 
                 if let Some(sid) = existing_staff {
-                    let staff_update = sqlx::query("UPDATE staff SET user_id = COALESCE(staff.user_id, $1), job_title = $2, jk = $3, tempat_lahir = $4, tanggal_lahir = $5, agama = $6, updated_at = $7, jenis_ptk = COALESCE($9, staff.jenis_ptk), status_kepegawaian = COALESCE($10, staff.status_kepegawaian), nip = COALESCE($11, staff.nip), nuptk = COALESCE($12, staff.nuptk) WHERE id = $8")
+                    let staff_update = sqlx::query("UPDATE staff SET user_id = COALESCE(staff.user_id, $1), job_title = $2, jk = $3, tempat_lahir = $4, tanggal_lahir = $5, agama = $6, updated_at = $7, jenis_ptk = COALESCE($9, staff.jenis_ptk), status_kepegawaian = COALESCE($10, staff.status_kepegawaian), nip = COALESCE($11, staff.nip), nuptk = COALESCE($12, staff.nuptk), deleted_at = NULL, is_active = true WHERE id = $8")
                         .bind(actual_user_id)
                         .bind(truncate_str(&job_title, 255))
                         .bind(gtk.jenis_kelamin.as_deref().map(|s| truncate_str(s, 20)))
@@ -2227,7 +2290,7 @@ pub async fn pull_dapodik_records(
                         .bind(&jenis_ptk_raw)
                         .bind(&status_kepegawaian_raw)
                         .bind(&nip)
-                        .bind(&nuptk)
+                        .bind(&clean_nuptk)
                         .execute(&mut *tx)
                         .await;
 
@@ -2238,6 +2301,16 @@ pub async fn pull_dapodik_records(
                         tracing::warn!("Failed to update staff {}: {}", nama, e);
                         continue;
                     }
+
+                    if let Some(ref nup) = clean_nuptk {
+                        staff_by_nuptk.insert(nup.clone(), sid);
+                    }
+                    if let Some(ref n) = clean_nip {
+                        staff_by_nip.insert(n.clone(), sid);
+                    }
+                    staff_by_user_id.insert(actual_user_id, sid);
+                    staff_by_lower_name.insert(nama_lower.clone(), sid);
+                    staff_by_base_name.entry(nama_base.clone()).or_insert(sid);
                 } else {
                     let staff_insert = sqlx::query(
                         r#"
@@ -2258,7 +2331,7 @@ pub async fn pull_dapodik_records(
                     .bind(&jenis_ptk_raw)
                     .bind(&status_kepegawaian_raw)
                     .bind(&nip)
-                    .bind(&nuptk)
+                    .bind(&clean_nuptk)
                     .execute(&mut *tx)
                     .await;
 
@@ -2270,7 +2343,15 @@ pub async fn pull_dapodik_records(
                         continue;
                     }
 
-                    staff_by_name.insert(nama_upper.clone(), new_id);
+                    if let Some(ref nup) = clean_nuptk {
+                        staff_by_nuptk.insert(nup.clone(), new_id);
+                    }
+                    if let Some(ref n) = clean_nip {
+                        staff_by_nip.insert(n.clone(), new_id);
+                    }
+                    staff_by_user_id.insert(actual_user_id, new_id);
+                    staff_by_lower_name.insert(nama_lower.clone(), new_id);
+                    staff_by_base_name.entry(nama_base.clone()).or_insert(new_id);
                 }
 
                 let nip_str = nip.clone().unwrap_or_else(|| "-".to_string());
@@ -2298,15 +2379,18 @@ pub async fn pull_dapodik_records(
                 });
             } else {
                 let teacher_subject = mapel_val.clone();
-                let existing_teacher = if let Some(ref n) = nip {
-                    teacher_by_nip.get(n).copied()
-                } else if let Some(ref nup) = nuptk {
-                    teacher_by_nuptk.get(nup).copied()
-                } else if let Some(tid) = teacher_by_email.get(&email.to_lowercase()).copied() {
-                    Some(tid)
-                } else {
-                    None
-                };
+                let clean_nip = clean_gtk_identifier(nip.as_deref(), None);
+                let clean_nuptk = clean_gtk_identifier(nuptk.as_deref(), None);
+                let existing_teacher = clean_nip
+                    .as_deref()
+                    .and_then(|n| teacher_by_nip.get(n).copied())
+                    .or_else(|| {
+                        clean_nuptk
+                            .as_deref()
+                            .and_then(|nup| teacher_by_nuptk.get(nup).copied())
+                    })
+                    .or_else(|| teacher_by_email.get(&email.to_lowercase()).copied())
+                    .or_else(|| teacher_by_lower_name.get(&nama_lower).copied());
 
                 if let Some(tid) = existing_teacher {
                     let teacher_update = sqlx::query(

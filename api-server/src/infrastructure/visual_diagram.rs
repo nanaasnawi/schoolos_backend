@@ -1015,9 +1015,20 @@ pub fn build_verified_visual_mcq(
         );
     }
 
+    let clean_topic = topic
+        .split('|')
+        .next()
+        .unwrap_or(topic)
+        .split(" — ")
+        .next()
+        .unwrap_or(topic)
+        .trim()
+        .trim_start_matches("Materi:")
+        .trim();
+
     let spec = json!({
         "type": "bar_chart",
-        "title": format!("Grafik Pengamatan: {topic}"),
+        "title": format!("Grafik Pengamatan: {clean_topic}"),
         "x_label": "Kelompok Pengamatan",
         "y_label": "Nilai / Skor",
         "bars": [
@@ -1028,7 +1039,7 @@ pub fn build_verified_visual_mcq(
         ]
     });
     (
-        format!("Perhatikan grafik batang hasil pengamatan tentang '{topic}' di atas! Pada tahap manakah nilai tertinggi tercatat beserta angkanya?"),
+        format!("Perhatikan grafik batang hasil pengamatan tentang '{clean_topic}' di atas! Pada tahap manakah nilai tertinggi tercatat beserta angkanya?"),
         [
             "Tahap A dengan nilai 15".to_string(),
             "Tahap B dengan nilai 30".to_string(),
