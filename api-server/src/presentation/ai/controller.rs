@@ -746,6 +746,120 @@ struct PreparedTanyaAiContext {
     fallback_model: String,
 }
 
+fn extract_meaningful_topic_keywords(question: &str) -> Vec<String> {
+    const STOPWORDS: &[&str] = &[
+        "bantu", "saya", "anda", "kami", "kita", "tolong", "buat", "buatkan", "membuat", "susun",
+        "susunkan", "rancang", "rancangan", "draf", "draft", "modul", "ajar", "rpp", "kurikulum",
+        "merdeka", "lengkap", "dengan", "untuk", "pada", "dalam", "yang", "dari", "atau", "dan",
+        "serta", "tentang", "mengenai", "materi", "topik", "mata", "pelajaran", "mapel", "kelas",
+        "jenjang", "paket", "setara", "semester", "ganjil", "genap", "tahun", "ajaran", "durasi",
+        "menit", "sesi", "bagaimana", "cara", "berikan", "jelaskan", "analisis", "evaluasi",
+        "capaian", "pembelajaran", "tujuan", "alur", "pemahaman", "bermakna", "pertanyaan",
+        "pemantik", "kegiatan", "berdiferensiasi", "konten", "proses", "produk", "asesmen",
+        "formatif", "sumatif", "rubrik", "kktp", "soal", "kuis", "ujian", "hots", "siswa",
+        "peserta", "didik", "warga", "belajar", "guru", "tutor", "pkbm", "sekolah", "workstation",
+    ];
+    let mut keywords: Vec<String> = Vec::new();
+    for raw in question.split(|c: char| !c.is_alphanumeric() && c != '-') {
+        let lower = raw.trim().to_ascii_lowercase();
+        if lower.len() < 4 || STOPWORDS.contains(&lower.as_str()) {
+            continue;
+        }
+        if !keywords.contains(&lower) {
+            keywords.push(lower);
+            if keywords.len() >= 3 {
+                break;
+            }
+        }
+    }
+    keywords
+}
+
+fn infer_effective_subject_from_question(question: &str, fallback_subject: &str) -> String {
+    let lower_q = question.to_ascii_lowercase();
+    let lower_fallback = fallback_subject.to_ascii_lowercase();
+
+    let bah_indo_hits = [
+        "teks fiksi", "unsur intrinsik", "tokoh", "penokohan", "plot", "latar cerita",
+        "puisi", "pantun", "cerpen", "paragraf", "kalimat efektif", "imbuhan", "puebi", "eyd",
+    ]
+    .iter()
+    .any(|kw| lower_q.contains(kw));
+    if bah_indo_hits && !lower_fallback.contains("indonesia") {
+        return "Bahasa Indonesia".to_string();
+    }
+
+    let math_hits = [
+        "bilangan bulat", "pecahan", "penjumlahan", "pengurangan", "perkalian", "pembagian",
+        "bangun datar", "bangun ruang", "geometri", "aljabar", "trigonometri", "matematika",
+    ]
+    .iter()
+    .any(|kw| lower_q.contains(kw));
+    if math_hits && !lower_fallback.contains("matematika") {
+        return "Matematika".to_string();
+    }
+
+    let ipa_hits = [
+        "fotosintesis", "ekosistem", "rantai makanan", "energi", "perubahan wujud", "sel tumbuhan",
+    ]
+    .iter()
+    .any(|kw| lower_q.contains(kw));
+    if ipa_hits && !lower_fallback.contains("ipa") && !lower_fallback.contains("biologi") {
+        return "IPAS / IPA".to_string();
+    }
+
+    fallback_subject.to_string()
+}
+
+fn book_grade_band_compatible(book_title: &str, grade: &str, question: &str) -> bool {
+    let target = format!("{grade} {question}").to_ascii_lowercase();
+    let title_lower = book_title.to_ascii_lowercase();
+
+    let is_elementary_target = target.contains("paket a")
+        || target.contains("setara sd")
+        || target.contains("fase a")
+        || target.contains("fase b")
+        || target.contains("fase c")
+        || target.contains("kelas i")
+        || target.contains("kelas 1")
+        || target.contains("kelas 2")
+        || target.contains("kelas 3")
+        || target.contains("kelas 4")
+        || target.contains("kelas iv")
+        || target.contains("kelas 5")
+        || target.contains("kelas v")
+        || target.contains("kelas 6")
+        || target.contains("kelas vi")
+        || target.contains(" sd");
+
+    if is_elementary_target {
+        let higher_grade_markers = [
+            "kelas vii", "kelas viii", "kelas ix", "kelas x", "kelas xi", "kelas xii",
+            "kelas 7", "kelas 8", "kelas 9", "kelas 10", "kelas 11", "kelas 12",
+            "fase d", "fase e", "fase f", " smp", " sma", " smk",
+        ];
+        if higher_grade_markers.iter().any(|m| title_lower.contains(m)) {
+            return false;
+        }
+    }
+
+    let is_junior_target = target.contains("paket b")
+        || target.contains("setara smp")
+        || target.contains("fase d")
+        || target.contains(" smp");
+    if is_junior_target {
+        let senior_markers = [
+            "kelas x", "kelas xi", "kelas xii", "kelas 10", "kelas 11", "kelas 12",
+            "fase e", "fase f", " sma", " smk",
+        ];
+        if senior_markers.iter().any(|m| title_lower.contains(m)) {
+            return false;
+        }
+    }
+
+    true
+}
+
 async fn fetch_grounded_curriculum_sources(
     pool: &sqlx::PgPool,
     tenant_id: Uuid,
@@ -754,43 +868,64 @@ async fn fetch_grounded_curriculum_sources(
     grade: &str,
 ) -> Vec<String> {
     let mut sources: Vec<String> = Vec::new();
-    let keyword_term = question
-        .split_whitespace()
-        .find(|w| w.len() >= 4 && !w.starts_with('['))
-        .unwrap_or(subject);
-    let subject_like = format!("%{}%", subject.trim());
-    let keyword_like = format!("%{}%", keyword_term.trim());
+    let effective_subject = infer_effective_subject_from_question(question, subject);
+    let keywords = extract_meaningful_topic_keywords(question);
+    let primary_keyword = keywords.first().cloned().unwrap_or_default();
+    let subject_root = effective_subject
+        .split('(')
+        .next()
+        .unwrap_or(&effective_subject)
+        .trim();
+    let is_generic_subject = subject_root.is_empty()
+        || subject_root.eq_ignore_ascii_case("umum")
+        || subject_root.to_ascii_lowercase().contains("workstation");
 
-    // 1. Real SIBI / Digital Library Books matching subject or question keyword
-    if let Ok(book_rows) = sqlx::query(
-        r#"
-        SELECT lb.title,
-               COALESCE(lb.publisher, 'SIBI Kemdikdasmen') AS publisher,
-               lb.total_pages,
-               COALESCE(s.name, '') AS subject_name
-        FROM library_books lb
-        LEFT JOIN subjects s ON s.id = lb.subject_id
-        WHERE (lb.title ILIKE $1 OR s.name ILIKE $1 OR lb.title ILIKE $2)
-        ORDER BY CASE WHEN lb.title ILIKE $2 THEN 0 ELSE 1 END, lb.created_at DESC
-        LIMIT 3
-        "#,
-    )
-    .bind(&subject_like)
-    .bind(&keyword_like)
-    .fetch_all(pool)
-    .await
-    {
-        for r in book_rows {
-            let title: String = r.try_get("title").unwrap_or_default();
-            let publisher: String = r.try_get("publisher").unwrap_or_else(|_| "SIBI Kemdikdasmen".to_string());
-            let total_pages: i32 = r.try_get("total_pages").unwrap_or(0);
-            let subj: String = r.try_get("subject_name").unwrap_or_default();
-            if !title.is_empty() {
-                sources.push(format!(
-                    "Buku SIBI \"{title}\" ({publisher}{}{})",
-                    if subj.is_empty() { String::new() } else { format!(", Mapel {subj}") },
-                    if total_pages > 0 { format!(", {total_pages} hal.") } else { String::new() }
-                ));
+    let subject_like = if is_generic_subject {
+        "__NO_GENERIC_SUBJECT_MATCH__".to_string()
+    } else {
+        format!("%{}%", subject_root)
+    };
+    let keyword_like = if primary_keyword.is_empty() {
+        "__NO_KEYWORD_MATCH__".to_string()
+    } else {
+        format!("%{}%", primary_keyword)
+    };
+
+    // 1. Real SIBI / Digital Library Books matching effective subject or topic keyword AND compatible grade band
+    if !is_generic_subject || !primary_keyword.is_empty() {
+        if let Ok(book_rows) = sqlx::query(
+            r#"
+            SELECT lb.title,
+                   COALESCE(lb.publisher, 'SIBI Kemdikdasmen') AS publisher,
+                   lb.total_pages,
+                   COALESCE(s.name, '') AS subject_name
+            FROM library_books lb
+            LEFT JOIN subjects s ON s.id = lb.subject_id
+            WHERE (lb.title ILIKE $1 OR s.name ILIKE $1 OR lb.title ILIKE $2)
+            ORDER BY CASE WHEN lb.title ILIKE $2 THEN 0 ELSE 1 END, lb.created_at DESC
+            LIMIT 8
+            "#,
+        )
+        .bind(&subject_like)
+        .bind(&keyword_like)
+        .fetch_all(pool)
+        .await
+        {
+            for r in book_rows {
+                let title: String = r.try_get("title").unwrap_or_default();
+                let publisher: String = r.try_get("publisher").unwrap_or_else(|_| "SIBI Kemdikdasmen".to_string());
+                let total_pages: i32 = r.try_get("total_pages").unwrap_or(0);
+                let subj: String = r.try_get("subject_name").unwrap_or_default();
+                if !title.is_empty() && book_grade_band_compatible(&title, grade, question) {
+                    sources.push(format!(
+                        "Buku SIBI \"{title}\" ({publisher}{}{})",
+                        if subj.is_empty() { String::new() } else { format!(", Mapel {subj}") },
+                        if total_pages > 0 { format!(", {total_pages} hal.") } else { String::new() }
+                    ));
+                    if sources.len() >= 3 {
+                        break;
+                    }
+                }
             }
         }
     }
@@ -1317,7 +1452,10 @@ async fn prepare_tanya_ai_context(
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "Pengguna".to_string());
 
-    let subject = payload.subject_name.as_deref().unwrap_or("Umum").to_string();
+    let subject = infer_effective_subject_from_question(
+        &question,
+        payload.subject_name.as_deref().unwrap_or("Umum"),
+    );
     let grade = payload.grade_level.as_deref().unwrap_or("Siswa").to_string();
 
     // Trust ONLY authenticated actor roles (never client-supplied grade_level/subject_name) for privileged school analytics
@@ -1370,8 +1508,8 @@ async fn prepare_tanya_ai_context(
             .join("\n");
         format!(
             "Daftar Referensi Otoritatif dari Database Sekolah/SIBI:\n{joined}\n\
-            WAJIB: Sertakan bagian penutup di paling akhir jawaban berupa baris:\n\
-            📚 **Sumber:** <sebutkan sumber paling relevan dari daftar di atas atau acuan Kurikulum Merdeka {subject} {grade}; DILARANG mengarang nomor halaman atau nama guru yang tidak ada di daftar>."
+            WAJIB: Periksa kesesuaian setiap referensi di atas terhadap Mata Pelajaran dan Jenjang/Fase topik yang dibahas! JANGAN mengutip Buku SIBI yang berbeda mapel atau berbeda jenjang (misalnya buku Matematika SMA Kelas X untuk materi Bahasa Indonesia / Paket A SD). Sertakan bagian penutup di paling akhir jawaban berupa baris:\n\
+            📚 **Sumber:** <sebutkan hanya sumber yang benar-benar cocok mapel & jenjangnya dari daftar di atas, atau acuan resmi Kurikulum Merdeka BSKAP; DILARANG mengarang nomor halaman atau nama guru yang tidak ada di daftar>."
         )
     };
 
